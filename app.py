@@ -134,22 +134,44 @@ async def run_ai_batch_processing(df_to_tag, model_choice):
 # ==========================================
 def process_uploads(claims, returned, orders):
     
-    # --- Бронебойная читалка файлов ---
+   # --- СВЕРХ-БРОНЕБОЙНАЯ ЧИТАЛКА ФАЙЛОВ ---
     def safe_read(file_obj):
-        file_obj.seek(0)
+        # 1. Пробуем как нормальный Excel
         try:
-            # 1. Пробуем как нормальный Excel
+            file_obj.seek(0)
             return pd.read_excel(file_obj)
         except Exception:
-            # 2. Если внутри не Excel, пробуем как стандартный CSV
-            file_obj.seek(0)
-            try:
-                return pd.read_csv(file_obj, sep=';', encoding='utf-8')
-            except Exception:
-                # 3. Если кодировка слетела (классика WB), применяем windows-1251
-                file_obj.seek(0)
-                return pd.read_csv(file_obj, sep=';', encoding='windows-1251')
+            pass
 
+        # 2. Пробуем как стандартный CSV (UTF-8)
+        try:
+            file_obj.seek(0)
+            return pd.read_csv(file_obj, sep=';', encoding='utf-8')
+        except Exception:
+            pass
+
+        # 3. Пробуем как CSV (Windows-1251, русская)
+        try:
+            file_obj.seek(0)
+            return pd.read_csv(file_obj, sep=';', encoding='windows-1251')
+        except Exception:
+            pass
+            
+        # 4. Пробуем как CSV (UTF-16, часто бывает у WB с разделителем-табуляцией)
+        try:
+            file_obj.seek(0)
+            return pd.read_csv(file_obj, sep='\t', encoding='utf-16')
+        except Exception:
+            pass
+
+        # 5. Последний шанс: читаем с игнорированием битых символов
+        try:
+            file_obj.seek(0)
+            return pd.read_csv(file_obj, sep=';', encoding='utf-8', encoding_errors='ignore', on_bad_lines='skip')
+        except Exception as e:
+            st.error(f"⚠️ Файл {file_obj.name} безнадежно сломан. WB отдал нечитаемый формат. Ошибка: {e}")
+            return pd.DataFrame() # Возвращаем пустую таблицу, чтобы не сломать все приложение
+            
     # Склейка Claims
     df_c = pd.concat([safe_read(f) for f in claims], ignore_index=True).drop_duplicates()
     df_final = df_c
