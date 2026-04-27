@@ -134,43 +134,39 @@ async def run_ai_batch_processing(df_to_tag, model_choice):
 # ==========================================
 def process_uploads(claims, returned, orders):
     
-   # --- СВЕРХ-БРОНЕБОЙНАЯ ЧИТАЛКА ФАЙЛОВ ---
+  # --- УМНАЯ ЧИТАЛКА ФАЙЛОВ (WB + Litestat) ---
     def safe_read(file_obj):
-        # 1. Пробуем как нормальный Excel
-        try:
-            file_obj.seek(0)
-            return pd.read_excel(file_obj)
-        except Exception:
-            pass
+        name = file_obj.name.lower()
+        file_obj.seek(0)
+        
+        # 1. Если это Excel (как у Litestat)
+        if name.endswith('.xlsx') or name.endswith('.xls'):
+            try:
+                engine = 'openpyxl' if name.endswith('.xlsx') else 'xlrd'
+                return pd.read_excel(file_obj, engine=engine)
+            except Exception:
+                # Иногда сервисы отдают HTML-таблицу под видом Excel
+                try:
+                    file_obj.seek(0)
+                    return pd.read_html(file_obj)[0]
+                except Exception:
+                    pass
 
-        # 2. Пробуем как стандартный CSV (UTF-8)
-        try:
-            file_obj.seek(0)
-            return pd.read_csv(file_obj, sep=';', encoding='utf-8')
-        except Exception:
-            pass
-
-        # 3. Пробуем как CSV (Windows-1251, русская)
-        try:
-            file_obj.seek(0)
-            return pd.read_csv(file_obj, sep=';', encoding='windows-1251')
-        except Exception:
-            pass
-            
-        # 4. Пробуем как CSV (UTF-16, часто бывает у WB с разделителем-табуляцией)
-        try:
-            file_obj.seek(0)
-            return pd.read_csv(file_obj, sep='\t', encoding='utf-16')
-        except Exception:
-            pass
-
-        # 5. Последний шанс: читаем с игнорированием битых символов
-        try:
-            file_obj.seek(0)
-            return pd.read_csv(file_obj, sep=';', encoding='utf-8', encoding_errors='ignore', on_bad_lines='skip')
-        except Exception as e:
-            st.error(f"⚠️ Файл {file_obj.name} безнадежно сломан. WB отдал нечитаемый формат. Ошибка: {e}")
-            return pd.DataFrame() # Возвращаем пустую таблицу, чтобы не сломать все приложение
+        # 2. Если это текстовый файл (CSV) или Excel оказался "обманкой"
+        encodings = ['utf-8', 'windows-1251', 'utf-16']
+        separators = [';', ',', '\t']
+        
+        for enc in encodings:
+            for sep in separators:
+                try:
+                    file_obj.seek(0)
+                    # engine='python' защищает от ошибки "C error: Buffer overflow"
+                    return pd.read_csv(file_obj, sep=sep, encoding=enc, engine='python', on_bad_lines='skip')
+                except Exception:
+                    continue
+                    
+        st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}. Проверьте его структуру.")
+        return pd.DataFrame()
             
     # Склейка Claims
     df_c = pd.concat([safe_read(f) for f in claims], ignore_index=True).drop_duplicates()
