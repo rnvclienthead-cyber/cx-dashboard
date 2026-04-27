@@ -133,36 +133,46 @@ async def run_ai_batch_processing(df_to_tag, model_choice):
 # 4. ОБРАБОТКА ФАЙЛОВ
 # ==========================================
 def process_uploads(claims, returned, orders):
-    df_c = pd.concat([pd.read_excel(f) for f in claims], ignore_index=True).drop_duplicates()
+    
+    # --- Бронебойная читалка файлов ---
+    def safe_read(file_obj):
+        file_obj.seek(0)
+        try:
+            # 1. Пробуем как нормальный Excel
+            return pd.read_excel(file_obj)
+        except Exception:
+            # 2. Если внутри не Excel, пробуем как стандартный CSV
+            file_obj.seek(0)
+            try:
+                return pd.read_csv(file_obj, sep=';', encoding='utf-8')
+            except Exception:
+                # 3. Если кодировка слетела (классика WB), применяем windows-1251
+                file_obj.seek(0)
+                return pd.read_csv(file_obj, sep=';', encoding='windows-1251')
+
+    # Склейка Claims
+    df_c = pd.concat([safe_read(f) for f in claims], ignore_index=True).drop_duplicates()
     df_final = df_c
     
+    # Склейка Склада
     if returned:
-        df_r = pd.concat([pd.read_excel(f) for f in returned], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
+        df_r = pd.concat([safe_read(f) for f in returned], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
         sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
         df_c['nm_id_clean'] = df_c['nm_id'].astype(str).str.replace(r'\.0$', '', regex=True)
         df_final = pd.merge(df_c, df_r, on='srid', how='left')
         df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nm_id_clean'].map(sku_map))
 
+    # Склейка Заказов (Litestat)
     df_ord_agg = pd.DataFrame()
     if orders:
-        all_o = []
-        for f in orders:
-            file_name = f.name.lower()
-            if file_name.endswith('.csv'):
-                try:
-                    all_o.append(pd.read_csv(f, sep=';'))
-                except:
-                    f.seek(0)
-                    all_o.append(pd.read_csv(f, sep=';', encoding='windows-1251'))
-            else:
-                all_o.append(pd.read_excel(f, sheet_name=0))
-        
+        all_o = [safe_read(f) for f in orders]
         df_o = pd.concat(all_o, ignore_index=True)
         sku_col = next((c for c in df_o.columns if 'артикул' in c.lower()), None)
         if sku_col and "Итого заказано, шт." in df_o.columns:
             df_ord_agg = df_o.groupby(sku_col)["Итого заказано, шт."].sum().reset_index()
             df_ord_agg.columns = ['Артикул', 'Заказы шт.']
 
+    # Финальная сборка
     res_df = pd.DataFrame()
     res_df['Дата'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
     res_df['Артикул'] = df_final.get('supplierArticle', 'Без артикула')
