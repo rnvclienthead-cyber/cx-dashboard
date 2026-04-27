@@ -135,6 +135,7 @@ async def run_ai_batch_processing(df_to_tag, model_choice):
 def process_uploads(claims, returned, orders):
     df_c = pd.concat([pd.read_excel(f) for f in claims], ignore_index=True).drop_duplicates()
     df_final = df_c
+    
     if returned:
         df_r = pd.concat([pd.read_excel(f) for f in returned], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
         sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
@@ -142,23 +143,20 @@ def process_uploads(claims, returned, orders):
         df_final = pd.merge(df_c, df_r, on='srid', how='left')
         df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nm_id_clean'].map(sku_map))
 
-   df_ord_agg = pd.DataFrame()
+    df_ord_agg = pd.DataFrame()
     if orders:
         all_o = []
         for f in orders:
             file_name = f.name.lower()
             if file_name.endswith('.csv'):
                 try:
-                    # Пробуем прочитать как стандартный CSV WB (разделитель точка с запятой)
                     all_o.append(pd.read_csv(f, sep=';'))
                 except:
-                    # Если ошибка кодировки (WB часто отдает в windows-1251)
-                    f.seek(0) # Возвращаем курсор в начало файла
+                    f.seek(0)
                     all_o.append(pd.read_csv(f, sep=';', encoding='windows-1251'))
             else:
-                # Если это обычный Excel
                 all_o.append(pd.read_excel(f, sheet_name=0))
-                
+        
         df_o = pd.concat(all_o, ignore_index=True)
         sku_col = next((c for c in df_o.columns if 'артикул' in c.lower()), None)
         if sku_col and "Итого заказано, шт." in df_o.columns:
@@ -170,12 +168,15 @@ def process_uploads(claims, returned, orders):
     res_df['Артикул'] = df_final.get('supplierArticle', 'Без артикула')
     res_df['Текст_Клиента'] = df_final.get('user_comment', '')
     res_df['SRID'] = df_final.get('srid', '')
+    
     for i in range(1, 14): res_df[f"Кат {i}"] = ""
     res_df['Обоснование'] = ""
     res_df['Корректировка'] = ""
+    
     for col in df_final.columns:
         if col not in ['dt', 'supplierArticle', 'user_comment', 'srid', 'nm_id_clean'] and not col.endswith('_drop'):
             res_df[COLUMN_NAMES_RU.get(col, col)] = df_final[col]
+            
     return res_df, df_ord_agg
 
 # ==========================================
