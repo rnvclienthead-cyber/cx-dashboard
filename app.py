@@ -142,9 +142,24 @@ def process_uploads(claims, returned, orders):
         df_final = pd.merge(df_c, df_r, on='srid', how='left')
         df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nm_id_clean'].map(sku_map))
 
-    df_ord_agg = pd.DataFrame()
+   df_ord_agg = pd.DataFrame()
     if orders:
-        df_o = pd.concat([pd.read_excel(f, sheet_name=0) for f in orders], ignore_index=True)
+        all_o = []
+        for f in orders:
+            file_name = f.name.lower()
+            if file_name.endswith('.csv'):
+                try:
+                    # Пробуем прочитать как стандартный CSV WB (разделитель точка с запятой)
+                    all_o.append(pd.read_csv(f, sep=';'))
+                except:
+                    # Если ошибка кодировки (WB часто отдает в windows-1251)
+                    f.seek(0) # Возвращаем курсор в начало файла
+                    all_o.append(pd.read_csv(f, sep=';', encoding='windows-1251'))
+            else:
+                # Если это обычный Excel
+                all_o.append(pd.read_excel(f, sheet_name=0))
+                
+        df_o = pd.concat(all_o, ignore_index=True)
         sku_col = next((c for c in df_o.columns if 'артикул' in c.lower()), None)
         if sku_col and "Итого заказано, шт." in df_o.columns:
             df_ord_agg = df_o.groupby(sku_col)["Итого заказано, шт."].sum().reset_index()
