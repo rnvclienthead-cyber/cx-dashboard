@@ -6,14 +6,15 @@ import json
 import re
 import pandas as pd
 import plotly.express as px
-import io
 from datetime import datetime
 from google.oauth2.service_account import Credentials
+import io
 
-# ==========================================
-# 1. ИНИЦИАЛИЗАЦИЯ И SECRETS
-# ==========================================
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
+
+# Инициализация ключей для сброса загрузчиков после успешной обработки
+if 'claims_key' not in st.session_state: st.session_state.claims_key = 0
+if 'litestat_key' not in st.session_state: st.session_state.litestat_key = 0
 
 try:
     YANDEX_API_KEY = st.secrets["YANDEX_API_KEY"]
@@ -23,7 +24,7 @@ try:
     SPREADSHEET_ID_INVOICES = st.secrets["SPREADSHEET_ID_INVOICES"]
     GOOGLE_CREDS = dict(st.secrets["gcp_service_account"])
 except Exception as e:
-    st.error("❌ Ошибка конфигурации Secrets!")
+    st.error(f"❌ Ошибка в Secrets: {e}")
     st.stop()
 
 CATEGORIES = {
@@ -43,19 +44,53 @@ COLUMN_NAMES_RU = {
     'nmId': 'Артикул WB', 'incomeID': 'Номер поставки'
 }
 
+# CSS Стили (включая зум фото на 30% при наведении)
 st.markdown("""
 <style>
-    .img-zoom { width: 60px; height: 60px; object-fit: cover; border-radius: 5px; transition: transform 0.2s ease-in-out; cursor: pointer; }
-    .img-zoom:hover { transform: scale(9.0); z-index: 999; position: relative; box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
+    .img-zoom { width: 60px; height: 60px; object-fit: cover; border-radius: 5px; transition: transform 0.2s ease-in-out; cursor: zoom-in; }
+    .img-zoom:hover { transform: scale(1.3); z-index: 999; position: relative; box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
     .custom-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px; }
     .custom-table th, .custom-table td { border: 1px solid #e0e0e0; padding: 10px; vertical-align: top; }
     .report-card { background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #4CAF50; margin-bottom: 15px; }
+    .review-card { background: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; border-left: 4px solid #2563eb; }
+    .client-text { background: #f9fafb; padding: 12px; border-radius: 6px; font-size: 14px; color: #4b5563; margin-bottom: 10px; }
+    .ai-reason { font-size: 13px; color: #059669; margin-top: 10px; font-style: italic; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. БАЗА ДАННЫХ, ПАМЯТЬ И ИИ
+# 2. ВСЕЯДНАЯ ЧИТАЛКА И БАЗА ДАННЫХ
 # ==========================================
+def safe_read(file_obj):
+    bytes_data = file_obj.getvalue()
+    name = file_obj.name.lower()
+    
+    if name.endswith('.xlsx') or name.endswith('.xls'):
+        try:
+            engine = 'calamine' if name.endswith('.xlsx') else 'xlrd'
+            return pd.read_excel(io.BytesIO(bytes_data), engine=engine)
+        except Exception:
+            try:
+                return pd.read_excel(io.BytesIO(bytes_data), engine='openpyxl')
+            except Exception:
+                try:
+                    return pd.read_html(io.BytesIO(bytes_data))[0]
+                except Exception: pass
+
+    encodings = ['utf-8-sig', 'utf-8', 'windows-1251', 'utf-16']
+    separators = [';', '\t', ',']
+    
+    for enc in encodings:
+        for sep in separators:
+            try:
+                text_data = bytes_data.decode(enc)
+                df = pd.read_csv(io.StringIO(text_data), sep=sep, engine='python', on_bad_lines='skip')
+                if len(df.columns) > 1: return df
+            except Exception: continue
+            
+    st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}. Формат не распознан.")
+    return pd.DataFrame()
+
 @st.cache_resource
 def get_gspread_client():
     scopes = ['https://www.googleapis.com/auth/spreadsheets']
@@ -71,103 +106,11 @@ def load_ai_memory():
     except: pass
     return "Опыта пока нет."
 
-async def fetch_ai_tags(session, batch, memory, model="yandex"):
-    content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
-    system_prompt = f"""Ты эксперт контроля качества. Размети отзывы по категориям: {list(CATEGORIES.values())}.
-    ПРАВИЛО КАТЕГОРИИ 12: Если клиент хвалит, но есть мелкий дефект (или рейтинг 4-5) - СТРОГО Категория 12.
-    ОПЫТ ОШИБОК: {memory}
-    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "..."}}]}}"""
-
-    if model == "yandex":
-        url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
-        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
-        payload = {
-            "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
-            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
-            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
-        }
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status == 200:
-                    res = await resp.json()
-                    text = res['result']['alternatives'][0]['message']['text']
-                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-        except: return []
-
-    elif model == "grok":
-        url = "https://api.x.ai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "grok-beta",
-            "temperature": 0.1,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
-        }
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status == 200:
-                    res = await resp.json()
-                    text = res['choices'][0]['message']['content']
-                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-        except: return []
-
-async def run_ai_batch_processing(df_to_tag, model_choice):
-    memory = load_ai_memory()
-    results = []
-    async with aiohttp.ClientSession() as session:
-        batch = []
-        for idx, row in df_to_tag.iterrows():
-            batch.append({"id": idx, "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
-            if len(batch) >= 10:
-                res = await fetch_ai_tags(session, batch, memory, model_choice)
-                results.extend(res)
-                batch = []
-        if batch:
-            res = await fetch_ai_tags(session, batch, memory, model_choice)
-            results.extend(res)
-    return results
-
 # ==========================================
-# 3. ВСЕЯДНАЯ ЧИТАЛКА И ОБРАБОТКА ДАННЫХ
+# 3. ОБРАБОТКА ДАННЫХ
 # ==========================================
-def safe_read(file_obj):
-    bytes_data = file_obj.getvalue()
-    name = file_obj.name.lower()
-    
-    # 1. Excel (Используем бронебойный calamine)
-    if name.endswith('.xlsx') or name.endswith('.xls'):
-        try:
-            # calamine игнорирует ошибки форматирования (ширину колонок и т.д.)
-            engine = 'calamine' if name.endswith('.xlsx') else 'xlrd'
-            return pd.read_excel(io.BytesIO(bytes_data), engine=engine)
-        except Exception:
-            try:
-                # Запасной план: пробуем старым openpyxl
-                return pd.read_excel(io.BytesIO(bytes_data), engine='openpyxl')
-            except Exception:
-                try:
-                    return pd.read_html(io.BytesIO(bytes_data))[0]
-                except Exception: pass
-
-    # 2. Текст / CSV
-    encodings = ['utf-8-sig', 'utf-8', 'windows-1251', 'utf-16']
-    separators = [';', '\t', ',']
-    
-    for enc in encodings:
-        for sep in separators:
-            try:
-                text_data = bytes_data.decode(enc)
-                df = pd.read_csv(io.StringIO(text_data), sep=sep, engine='python', on_bad_lines='skip')
-                if len(df.columns) > 1:
-                    return df
-            except Exception:
-                continue
-    
-    st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}. Формат не распознан.")
-    return pd.DataFrame()
-    
 def process_claims_and_returns(claims_files, returned_files):
     report = []
-    # 1. Читаем Претензии
     raw_claims = pd.concat([safe_read(f) for f in claims_files], ignore_index=True)
     df_c = raw_claims.drop_duplicates(subset=['srid']) if 'srid' in raw_claims.columns else raw_claims.drop_duplicates()
     
@@ -176,7 +119,6 @@ def process_claims_and_returns(claims_files, returned_files):
         report.append(f"🧹 Удалено локальных дублей: {len(raw_claims) - len(df_c)} шт.")
 
     df_final = df_c
-    # 2. Читаем Возвраты (Склад)
     if returned_files:
         df_r = pd.concat([safe_read(f) for f in returned_files], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
         sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
@@ -185,19 +127,19 @@ def process_claims_and_returns(claims_files, returned_files):
         df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nm_id_clean'].map(sku_map))
         report.append(f"📦 Склад: Успешно привязаны артикулы для {df_final['supplierArticle'].notna().sum()} заявок.")
 
-    # 3. Форматирование
     res_df = pd.DataFrame()
     res_df['Дата'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
     res_df['Артикул'] = df_final.get('supplierArticle', 'Без артикула')
     res_df['Текст_Клиента'] = df_final.get('user_comment', '')
     res_df['SRID'] = df_final.get('srid', '')
+    res_df['Источник заявки'] = df_final.get('claim_type', '')
     
     for i in range(1, 14): res_df[f"Кат {i}"] = ""
     res_df['Обоснование'] = ""
     res_df['Корректировка'] = ""
     
     for col in df_final.columns:
-        if col not in ['dt', 'supplierArticle', 'user_comment', 'srid', 'nm_id_clean'] and not col.endswith('_drop'):
+        if col not in ['dt', 'supplierArticle', 'user_comment', 'srid', 'claim_type', 'nm_id_clean'] and not col.endswith('_drop'):
             res_df[COLUMN_NAMES_RU.get(col, col)] = df_final[col]
             
     return res_df, report
@@ -214,19 +156,12 @@ def process_litestat(litestat_files):
     report.append(f"📥 Litestat: Успешно прочитано {len(df_o)} сырых строк.")
     
     sku_col = next((c for c in df_o.columns if 'артикул' in str(c).lower()), None)
-    
-    # --- УМНЫЙ ПОИСК СТОЛБЦА СУММЫ ---
-    # Сначала жестко ищем приоритетный столбец "Итого заказано"
     qty_col = next((c for c in df_o.columns if 'итого заказано' in str(c).lower()), None)
-    # Если его нет, тогда берем любой похожий ("Заказано", "Количество")
     if not qty_col:
         qty_col = next((c for c in df_o.columns if any(kw in str(c).lower() for kw in ['заказано', 'количество', 'кол-во'])), None)
     
     if sku_col and qty_col:
-        # Очистка данных
         df_o[qty_col] = pd.to_numeric(df_o[qty_col].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce').fillna(0)
-        
-        # ФИЛЬТР: Убираем строки 'Итого', 'Всего' и пустые артикулы
         df_o = df_o[df_o[sku_col].notna()]
         df_o = df_o[~df_o[sku_col].astype(str).str.lower().str.contains('итого|всего|total', na=False)]
         
@@ -234,97 +169,146 @@ def process_litestat(litestat_files):
         df_ord_agg.columns = ['Артикул', 'Заказы шт.']
         
         total_sum = df_ord_agg['Заказы шт.'].sum()
-        # Добавил вывод названия столбца в отчет, чтобы вы всегда видели, что именно он считает
-        report.append(f"✅ Агрегировано по столбцу **'{qty_col}'**. Общая сумма: **{int(total_sum)} шт.**")
+        report.append(f"✅ Агрегировано по столбцу **'{qty_col}'**. Общая сумма заказов: **{int(total_sum)} шт.**")
         return df_ord_agg, report
     else:
         cols_preview = ", ".join([str(c) for c in df_o.columns[:10]])
         report.append(f"❌ Ошибка: Нужные колонки не найдены. Вижу: [{cols_preview}...]")
         return pd.DataFrame(), report
+        
+# ==========================================
+# 4. ИИ ДВИЖОК
+# ==========================================
+async def fetch_ai_analysis(session, batch, memory, model="yandex", is_check=False):
+    content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
+    
+    if not is_check:
+        system = f"Ты эксперт качества. Размети отзывы по категориям: {list(CATEGORIES.values())}. ПРАВИЛО 12: Если есть жалоба, но рейтинг 4-5 = Кат 12. ОПЫТ: {memory}. ОТВЕТЬ JSON: {{\"results\":[{{\"id\":\"...\",\"tags\":[\"Категория\"],\"reasoning\":\"...\"}}]}}"
+    else:
+        system = "Ты контролер. Проверь теги ИИ. Исправь явные ошибки в классификации брака. ОТВЕТЬ СТРОГО JSON: {\"results\":[{\"id\":\"...\",\"tags\":[\"Категория\"],\"reasoning\":\"...\"}]}"
+
+    if model == "yandex":
+        url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
+        payload = {
+            "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
+            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
+            "messages": [{"role": "system", "text": system}, {"role": "user", "text": content}]
+        }
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    text = res['result']['alternatives'][0]['message']['text']
+                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
+        except: return []
+
+    elif model == "grok":
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "grok-beta",
+            "temperature": 0.1,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}]
+        }
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    text = res['choices'][0]['message']['content']
+                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
+        except: return []
+    return []
+
+async def run_ai_batch_processing(df_to_tag, model_choice, use_crosscheck=False):
+    memory = load_ai_memory()
+    results = []
+    async with aiohttp.ClientSession() as session:
+        batch = []
+        for idx, row in df_to_tag.iterrows():
+            batch.append({"id": idx, "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
+            if len(batch) >= 10:
+                res = await fetch_ai_analysis(session, batch, memory, model_choice)
+                if use_crosscheck and res:
+                    res = await fetch_ai_analysis(session, res, memory, model="grok", is_check=True)
+                results.extend(res)
+                batch = []
+        if batch:
+            res = await fetch_ai_analysis(session, batch, memory, model_choice)
+            if use_crosscheck and res:
+                res = await fetch_ai_analysis(session, res, memory, model="grok", is_check=True)
+            results.extend(res)
+    return results
 
 # ==========================================
-# 4. ИНТЕРФЕЙС И НАВИГАЦИЯ
+# 5. ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
-page = st.sidebar.radio("Навигация", ["📊 Дашборд Аналитики", "🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "🧠 Обучение ИИ"])
+page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Ручная проверка", "📊 Дашборд"])
 
 if page == "🤖 Робот-Загрузчик":
-    st.title("🤖 Робот-Загрузчик Данных")
+    st.title("🤖 Робот-Загрузчик")
     
-    # --- БЛОК 1: ПРЕТЕНЗИИ И ВОЗВРАТЫ ---
-    st.markdown("### 1. Обработка Претензий и Склада")
-    c1, c2 = st.columns(2)
-    f_claims = c1.file_uploader("📂 Загрузите Претензии (Claims)", accept_multiple_files=True, key="claims")
-    f_returned = c2.file_uploader("📂 Загрузите Склад (Returned)", accept_multiple_files=True, key="returns")
-    
-    if st.button("🚀 Синхронизировать Претензии", type="primary"):
-        if f_claims:
-            with st.spinner("Склеиваем данные и проверяем дубликаты..."):
-                final_tab, report_log = process_claims_and_returns(f_claims, f_returned)
-                
-                # Подключение к Google и проверка дублей
-                client = get_gspread_client()
-                ws_ret = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-                
-                # Получаем существующие SRID
-                existing_data = ws_ret.get_all_records(expected_headers=final_tab.columns.tolist())
-                existing_srids = set([str(row.get('SRID', '')) for row in existing_data if row.get('SRID')])
-                
-                report_log.append(f"☁️ Найдено в Google Таблице: {len(existing_data)} записей.")
-                
-                # Фильтрация новых данных по SRID
-                new_data = final_tab[~final_tab['SRID'].astype(str).isin(existing_srids)]
-                duplicates_gs = len(final_tab) - len(new_data)
-                
-                if duplicates_gs > 0:
-                    report_log.append(f"🛡️ Отсеяно дублей (уже есть в Google): {duplicates_gs} шт.")
-                
-                report_log.append(f"✅ К добавлению в таблицу: **{len(new_data)} новых строк**.")
-
-                if not new_data.empty:
-                    if not existing_data: # Если таблица пустая
-                        ws_ret.update('A1', [new_data.columns.tolist()])
-                    start_row = len(ws_ret.get_all_values()) + 1
-                    ws_ret.update(f'A{start_row}', new_data.fillna('').values.tolist())
-                    st.success("Данные успешно добавлены в Google Sheets!")
-                else:
-                    st.info("Новых уникальных заявок не найдено. Таблица не обновлялась.")
-                
-                st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
-        else:
-            st.warning("Загрузите хотя бы файл претензий!")
-
-    st.divider()
-
-   # --- БЛОК 2: LITESTAT ---
-    st.markdown("### 2. Загрузка Заказов (Litestat)")
-    f_litestat = st.file_uploader("📂 Загрузите отчет Litestat", accept_multiple_files=True, key="litestat")
-    
-    if st.button("📊 Обновить данные по Заказам"):
-        if f_litestat:
-            with st.spinner("Анализируем заказы..."):
-                orders_tab, report_log = process_litestat(f_litestat)
-                
-                if not orders_tab.empty:
+    with st.expander("1. Претензии и Склад", expanded=True):
+        c1, c2 = st.columns(2)
+        f_claims = c1.file_uploader("📂 Загрузите Претензии", accept_multiple_files=True, key=f"cl_{st.session_state.claims_key}")
+        f_returned = c2.file_uploader("📂 Загрузите Склад", accept_multiple_files=True)
+        
+        if st.button("🚀 Синхронизировать Претензии", type="primary"):
+            if f_claims:
+                with st.spinner("Склеиваем данные и проверяем дубликаты..."):
+                    final_tab, report_log = process_claims_and_returns(f_claims, f_returned)
                     client = get_gspread_client()
-                    ws_ord = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Заказы")
+                    ws_ret = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
                     
-                    # ПОЛНАЯ ОЧИСТКА ПЕРЕД ЗАПИСЬЮ
-                    ws_ord.clear() 
+                    existing_data = ws_ret.get_all_records(expected_headers=final_tab.columns.tolist())
+                    existing_srids = set([str(row.get('SRID', '')) for row in existing_data if row.get('SRID')])
+                    report_log.append(f"☁️ Найдено в Google Таблице: {len(existing_data)} записей.")
                     
-                    ws_ord.update('A1', [orders_tab.columns.tolist()] + orders_tab.values.tolist())
-                    st.success(f"Данные обновлены! Сумма в Google Таблице: {int(orders_tab['Заказы шт.'].sum())}")
-                    
-                st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
-        else:
-            st.warning("Загрузите файл Litestat!")
+                    new_data = final_tab[~final_tab['SRID'].astype(str).isin(existing_srids)]
+                    duplicates_gs = len(final_tab) - len(new_data)
+                    if duplicates_gs > 0: report_log.append(f"🛡️ Отсеяно дублей (уже есть в Google): {duplicates_gs} шт.")
+                    report_log.append(f"✅ К добавлению: **{len(new_data)} новых строк**.")
 
+                    if not new_data.empty:
+                        if not existing_data: ws_ret.update('A1', [new_data.columns.tolist()])
+                        ws_ret.update(f'A{len(ws_ret.get_all_values()) + 1}', new_data.fillna('').values.tolist())
+                        st.success("Данные успешно добавлены!")
+                    else: st.info("Новых уникальных заявок не найдено.")
+                    
+                    st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
+                    st.session_state.claims_key += 1
+            else: st.warning("Загрузите файл претензий!")
+
+    with st.expander("2. Litestat (Заказы)"):
+        f_litestat = st.file_uploader("📂 Отчет Litestat", accept_multiple_files=True, key=f"ls_{st.session_state.litestat_key}")
+        if st.button("📊 Обновить данные по Заказам"):
+            if f_litestat:
+                with st.spinner("Анализируем заказы..."):
+                    orders_tab, report_log = process_litestat(f_litestat)
+                    if not orders_tab.empty:
+                        client = get_gspread_client()
+                        ws_ord = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Заказы")
+                        ws_ord.clear()
+                        ws_ord.update('A1', [orders_tab.columns.tolist()] + orders_tab.values.tolist())
+                        st.success(f"Обновлено! Сумма: {int(orders_tab['Заказы шт.'].sum())}")
+                    st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
+                    st.session_state.litestat_key += 1
+            else: st.warning("Загрузите файл Litestat!")
+
+# ==========================================
+# 6. РУЧНАЯ МОДЕРАЦИЯ
+# ==========================================
+        
 elif page == "🔬 ИИ Тегирование":
     st.title("🔬 ИИ Тегирование")
-    model_choice = st.radio("Нейросеть:", ["YandexGPT (yandex)", "Grok (grok)"])
+    col1, col2 = st.columns(2)
+    batch_size = col1.slider("Размер пачки (строк за раз)", 5, 50, 10)
+    use_crosscheck = col2.checkbox("Включить перекрестную проверку (Grok)")
+    model_choice = st.radio("Базовая нейросеть:", ["YandexGPT (yandex)", "Grok (grok)"])
     model_key = "yandex" if "Yandex" in model_choice else "grok"
 
     if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ"):
-        with st.spinner(f"Работаем..."):
+        with st.spinner("Работаем..."):
             client = get_gspread_client()
             ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
             df = pd.DataFrame(ws.get_all_records())
@@ -332,39 +316,92 @@ elif page == "🔬 ИИ Тегирование":
             unprocessed = df[df['Обоснование'] == '']
             if unprocessed.empty: st.success("Всё уже размечено!")
             else:
-                st.warning(f"Найдено {len(unprocessed)} заявок. Ждите...")
+                st.warning(f"Найдено заявок без тегов: {len(unprocessed)}. Ждите...")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                results = loop.run_until_complete(run_ai_batch_processing(unprocessed, model_key))
                 
-                for res in results:
-                    row_idx = int(res['id']) + 2
-                    for tag in res.get('tags', []):
-                        cat_num = tag.split(':')[0].replace('Категория ', '')
-                        try:
-                            col_letter = chr(ord('E') - 1 + int(cat_num))
-                            ws.update(f'{col_letter}{row_idx}', [['V']])
-                        except: pass
-                    ws.update(f'R{row_idx}', [[res.get('reasoning', '')]]) 
-                st.success(f"✅ Размечено {len(results)} строк!")
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for i in range(0, len(unprocessed), batch_size):
+                    chunk = unprocessed.iloc[i:i+batch_size]
+                    status_text.text(f"Обработка строк {i} - {i+len(chunk)} из {len(unprocessed)}...")
+                    
+                    results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, use_crosscheck))
+                    
+                    for res in results:
+                        row_idx = int(res['id']) + 2
+                        for tag in res.get('tags', []):
+                            cat_num = tag.split(':')[0].replace('Категория ', '')
+                            try:
+                                col_letter = chr(ord('F') - 1 + int(cat_num))
+                                ws.update(f'{col_letter}{row_idx}', [['V']])
+                            except: pass
+                        ws.update(f'S{row_idx}', [[res.get('reasoning', '')]])
+                    progress_bar.progress(min(1.0, (i + len(chunk)) / len(unprocessed)))
+                st.success("✅ Тегирование завершено!")
 
-elif page == "🧠 Обучение ИИ":
-    st.title("🧠 Обучение ИИ")
-    if st.button("💾 Сохранить правки"):
-        client = get_gspread_client()
-        ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-        ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
-        data = ws.get_all_values()
-        try:
-            corr_idx = data[0].index("Корректировка")
-            new_ex = [[r[2], r[corr_idx]] for r in data[1:] if len(r) > corr_idx and str(r[corr_idx]).strip() != ""]
-            if new_ex:
-                ws_mem.append_rows(new_ex)
-                st.success(f"Добавлено {len(new_ex)} примеров!")
-            else: st.info("Нет новых правок.")
-        except: st.error("Колонка 'Корректировка' не найдена.")
+elif page == "📝 Ручная проверка":
+    st.title("📋 Ручная проверка возвратов")
+    st.markdown("Проверьте теги, поставленные ИИ. Выберите подходящие категории и нажмите «Сохранить».")
 
-elif page == "📊 Дашборд Аналитики":
+    client = get_gspread_client()
+    ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
+    df = pd.DataFrame(ws.get_all_records())
+    
+    if 'Обоснование' in df.columns and 'Корректировка' in df.columns:
+        to_review = df[(df['Обоснование'] != '') & (df['Корректировка'] == '')].head(20)
+    else: to_review = pd.DataFrame()
+
+    if not to_review.empty:
+        cats_list = list(CATEGORIES.values())
+        for idx, row in to_review.iterrows():
+            row_index_gs = idx + 2 
+            with st.container():
+                st.markdown('<div class="review-card">', unsafe_allow_html=True)
+                col_info, col_photos, col_action = st.columns([2, 1.5, 1.5])
+                
+                with col_info:
+                    st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
+                    st.markdown(f"<div class='client-text'>{row.get('Текст_Клиента', 'Нет текста')}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='ai-reason'>🤖 Обоснование ИИ: {row.get('Обоснование', '')}</div>", unsafe_allow_html=True)
+                
+                with col_photos:
+                    photos_raw = str(row.get('Фотографии', ''))
+                    if photos_raw:
+                        photos_html = "".join([f'<img src="{f"https:{l}" if l.startswith("//") else l}" class="img-zoom">' for l in photos_raw.split(';')[:5] if l.strip()])
+                        st.markdown(photos_html, unsafe_allow_html=True) if photos_html else st.write("Нет медиафайлов")
+                
+                with col_action:
+                    selected_cats = []
+                    for cat in cats_list:
+                        if st.checkbox(cat, key=f"cat_{row_index_gs}_{cat}"): selected_cats.append(cat)
+                    
+                    other_text = st.text_input("Другая причина / Комментарий", key=f"other_{row_index_gs}")
+                    if other_text: selected_cats.append(other_text.strip())
+                    
+                    if st.button("💾 Сохранить", key=f"btn_{row_index_gs}", type="primary", use_container_width=True):
+                        final_string = "; ".join(selected_cats)
+                        if not final_string: final_string = "Ок (Подтверждено)"
+                        
+                        headers = ws.row_values(1)
+                        if "Корректировка" in headers:
+                            col_letter = chr(ord('A') + headers.index("Корректировка"))
+                            ws.update(f'{col_letter}{row_index_gs}', [[final_string]])
+                            
+                            ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
+                            ws_mem.append_row([row.get('Текст_Клиента', ''), final_string])
+                            
+                            st.success("Сохранено в базу и память ИИ!")
+                        else: st.error("Колонка 'Корректировка' не найдена.")
+                st.markdown('</div>', unsafe_allow_html=True)
+    else: st.success("🎉 Все новые возвраты проверены!")
+
+# ==========================================
+# 7. ДАШБОРД
+# ==========================================
+
+elif page == "📊 Дашборд":
     st.title("📊 BI Аналитика")
     try:
         client = get_gspread_client()
