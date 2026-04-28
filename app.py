@@ -207,13 +207,20 @@ def process_litestat(litestat_files):
     all_o = [df for df in [safe_read(f) for f in litestat_files] if not df.empty]
     
     if not all_o:
-        report.append("❌ Ошибка: Не удалось прочитать файлы.")
+        report.append("❌ Ошибка: Не удалось прочитать файлы Litestat.")
         return pd.DataFrame(), report
         
     df_o = pd.concat(all_o, ignore_index=True)
+    report.append(f"📥 Litestat: Успешно прочитано {len(df_o)} сырых строк.")
     
     sku_col = next((c for c in df_o.columns if 'артикул' in str(c).lower()), None)
-    qty_col = next((c for c in df_o.columns if any(kw in str(c).lower() for kw in ['заказано', 'количество', 'кол-во'])), None)
+    
+    # --- УМНЫЙ ПОИСК СТОЛБЦА СУММЫ ---
+    # Сначала жестко ищем приоритетный столбец "Итого заказано"
+    qty_col = next((c for c in df_o.columns if 'итого заказано' in str(c).lower()), None)
+    # Если его нет, тогда берем любой похожий ("Заказано", "Количество")
+    if not qty_col:
+        qty_col = next((c for c in df_o.columns if any(kw in str(c).lower() for kw in ['заказано', 'количество', 'кол-во'])), None)
     
     if sku_col and qty_col:
         # Очистка данных
@@ -227,10 +234,12 @@ def process_litestat(litestat_files):
         df_ord_agg.columns = ['Артикул', 'Заказы шт.']
         
         total_sum = df_ord_agg['Заказы шт.'].sum()
-        report.append(f"✅ Успешно агрегировано. Общая сумма заказов: **{int(total_sum)} шт.**")
+        # Добавил вывод названия столбца в отчет, чтобы вы всегда видели, что именно он считает
+        report.append(f"✅ Агрегировано по столбцу **'{qty_col}'**. Общая сумма: **{int(total_sum)} шт.**")
         return df_ord_agg, report
     else:
-        report.append("❌ Ошибка: Колонки не найдены.")
+        cols_preview = ", ".join([str(c) for c in df_o.columns[:10]])
+        report.append(f"❌ Ошибка: Нужные колонки не найдены. Вижу: [{cols_preview}...]")
         return pd.DataFrame(), report
 
 # ==========================================
