@@ -401,7 +401,10 @@ elif page == "🔬 ИИ Тегирование":
             if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                log_container = st.container() # Контейнер для вывода логов
+                log_container = st.container()
+                
+                # Создаем "переводчик" текста ИИ обратно в номера колонок
+                reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
                 
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -414,41 +417,51 @@ elif page == "🔬 ИИ Тегирование":
                         
                         results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, mode="tagging"))
                         
-                        # ВЫВОДИМ ОТВЕТ ИИ НА ЭКРАН (чтобы понять, не пустой ли он)
+                        # Вывод сырого ответа без системных багов
                         with log_container:
                             with st.expander(f"Сырой ответ ИИ (Пачка {i} - {i+len(chunk)})"):
-                                st.json(results) if results else st.error("❌ ИИ ВЕРНУЛ ПУСТОТУ! (Сбой API или кривой ответ)")
+                                if results:
+                                    st.json(results)
+                                else:
+                                    st.error("❌ ИИ ВЕРНУЛ ПУСТОТУ! (Таймаут API)")
 
                         for res in results:
-                            # 1. Ловим системную ошибку от Яндекса/Grok
                             if "error" in res:
                                 log_container.error(f"🛑 ОТКАЗ СЕРВЕРА: {res['error']}")
                                 continue
                                 
-                            # 2. БЕЗОПАСНО ИЩЕМ ID (даже если ИИ написал его криво)
                             res_id = res.get('id') or res.get('ID') or res.get('Id')
                             if res_id is None:
-                                log_container.warning(f"⚠️ ИИ вернул ответ, но забыл указать номер строки. Пропуск: {res}")
                                 continue
                                 
-                            # Проверяем, что ID - это точно число
                             try:
                                 row_idx = int(res_id) + 2 
                             except ValueError:
-                                log_container.warning(f"⚠️ ИИ прислал вместо цифры текст: '{res_id}'. Пропускаем.")
                                 continue
                             
-                            # 3. Запись тегов в Google Таблицу
+                            # УМНАЯ ЗАПИСЬ ТЕГОВ (Перевод текста в колонку)
                             for tag in res.get('tags', []):
-                                import re
-                                cat_num_match = re.search(r'\d+', tag)
-                                if cat_num_match:
-                                    cat_num = cat_num_match.group()
+                                cat_num = None
+                                clean_tag = str(tag).strip().lower()
+                                
+                                # 1. Ищем точное совпадение по тексту
+                                if clean_tag in reverse_cats:
+                                    cat_num = reverse_cats[clean_tag]
+                                else:
+                                    # 2. Запасной вариант: если ИИ всё же прислал цифру
+                                    import re
+                                    num_match = re.search(r'\d+', str(tag))
+                                    if num_match:
+                                        cat_num = int(num_match.group())
+                                        
+                                if cat_num:
                                     target_header = f"кат {cat_num}"
                                     if target_header in header_map_clean:
                                         ws.update(f"{header_map_clean[target_header]}{row_idx}", [['1']])
+                                    else:
+                                        log_container.warning(f"Не нашел колонку '{target_header}' в таблице!")
                             
-                            # 4. Запись обоснования
+                            # Запись обоснования
                             if "обоснование" in header_map_clean:
                                 ws.update(f"{header_map_clean['обоснование']}{row_idx}", [[res.get('reasoning', '')]])
                                 
@@ -457,9 +470,7 @@ elif page == "🔬 ИИ Тегирование":
                     st.success("✅ Тегирование завершено! Проверьте Google Таблицу.")
                 except Exception as e:
                     st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН ИЗ-ЗА ОШИБКИ: {e}")
-        else:
-            st.success("🎉 Все строки уже размечены!")
-
+                    
     with t2:
         st.subheader("Глубокая проверка (Аудит от Grok)")
         st.info("В разработке: Здесь появится аудит размеченных строк после успешного завершения первичного тегирования.")
