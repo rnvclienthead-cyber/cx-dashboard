@@ -500,7 +500,7 @@ elif page == "📝 Модерация":
 
 elif page == "🧠 Обучение ИИ":
     st.title("🧠 База знаний ИИ (Умный импорт)")
-    st.markdown("Загрузите файл с проверенными отзывами. Робот понимает старый формат (одна колонка тегов) и новый формат (13 колонок). **Новые корректировки всегда заменяют старые!**")
+    st.markdown("Загрузите файл с проверенными отзывами. Робот понимает старый формат (одна колонка тегов) и новый формат (Кат 1, Кат 2...). **Новые корректировки всегда заменяют старые!**")
 
     f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
 
@@ -510,8 +510,12 @@ elif page == "🧠 Обучение ИИ":
                 df_import = safe_read(f_import)
                 
                 if not df_import.empty:
-                    # 1. Ищем колонки с текстом (берем все варианты)
-                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in ['текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'user_comment']]
+                    import re
+                    
+                    # 1. Расширенный поиск колонок с текстом (теперь понимает и подчеркивания)
+                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in [
+                        'текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment'
+                    ]]
                     
                     # 2. Ищем колонку ручной корректировки (ПРИОРИТЕТ №1)
                     corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
@@ -519,14 +523,17 @@ elif page == "🧠 Обучение ИИ":
                     # 3. Ищем старую колонку тегов
                     tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
                     
+                    # 4. Ищем колонки категорий (понимает и "Кат 1", и просто "1")
+                    cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
+                    
                     if not text_cols:
-                        st.error("❌ Ошибка: В файле не найдены колонки с текстом отзыва (Текст отзыва, Достоинства, Недостатки).")
+                        st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
+                        st.write("Вижу такие колонки в вашем файле:", list(df_import.columns))
                     else:
                         new_memory_dict = {}
                         
                         # Собираем данные из загруженного файла
                         for idx, row in df_import.iterrows():
-                            # Склеиваем текст отзыва
                             parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() != 'nan' and str(row[tc]).strip()]
                             combined_text = " ".join(parts)
                             
@@ -534,22 +541,19 @@ elif page == "🧠 Обучение ИИ":
                             
                             final_tags = ""
                             
-                            # ЛОГИКА 1: Высший приоритет — ручная корректировка
+                            # ЛОГИКА 1: Высший приоритет — ручная корректировка (комментарий)
                             if corr_col and pd.notna(row[corr_col]) and str(row[corr_col]).strip().lower() != 'nan' and str(row[corr_col]).strip():
                                 final_tags = str(row[corr_col]).strip()
                                 
-                            # ЛОГИКА 2: Ищем галочки/единички по 13 столбцам
-                            elif any(str(c).isdigit() for c in df_import.columns): 
+                            # ЛОГИКА 2: Ищем единички по 13 столбцам (Кат 1, Кат 2...)
+                            elif cat_columns: 
                                 found_cats = []
-                                for c in df_import.columns:
-                                    # Проверяем, является ли заголовок цифрой от 1 до 13
-                                    import re
+                                for c in cat_columns:
                                     num_match = re.search(r'\d+', str(c))
                                     if num_match:
                                         cat_id = int(num_match.group())
                                         if cat_id in CATEGORIES:
                                             val = str(row[c]).strip().lower()
-                                            # Если в ячейке стоит 1, v, +, да - засчитываем тег
                                             if val in ['1', '1.0', 'v', '+', 'да', 'true']:
                                                 found_cats.append(CATEGORIES[cat_id])
                                 if found_cats:
@@ -563,7 +567,7 @@ elif page == "🧠 Обучение ИИ":
                                 if found_cats:
                                     final_tags = "; ".join(found_cats)
                                     
-                            # Записываем в словарь (если в файле несколько одинаковых отзывов, нижний затрет верхний)
+                            # Записываем в словарь
                             if final_tags:
                                 new_memory_dict[combined_text] = final_tags
 
@@ -579,22 +583,18 @@ elif page == "🧠 Обучение ИИ":
                                     ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="2")
                                     ws_mem.append_row(["Контент", "Правильные теги"])
 
-                                # Скачиваем текущую память ИИ
                                 existing_records = ws_mem.get_all_records()
                                 combined_memory = {str(r.get('Контент', '')).strip(): str(r.get('Правильные теги', '')).strip() for r in existing_records if str(r.get('Контент', '')).strip()}
                                 
-                                # МАГИЯ ПЕРЕЗАПИСИ: Накладываем новые знания поверх старых.
-                                # Если текст совпадает, старый тег стирается, и записывается новый, более актуальный.
+                                # Новые знания затирают старые
                                 combined_memory.update(new_memory_dict)
                                 
-                                # Готовим финальную чистую таблицу без дубликатов
                                 final_upload = [["Контент", "Правильные теги"]] + [[k, v] for k, v in combined_memory.items()]
                                 
-                                # Полностью очищаем лист и заливаем идеальную базу
                                 ws_mem.clear()
                                 ws_mem.update('A1', final_upload)
                                 
-                                st.success(f"✅ База знаний успешно обновлена! ИИ выучил новые данные и перезаписал устаревшие. Всего в памяти: {len(combined_memory)-1} уникальных примеров.")
+                                st.success(f"✅ База знаний успешно обновлена! ИИ выучил новые данные. Всего в памяти: {len(combined_memory)-1} уникальных примеров.")
                                 st.balloons()
                             except Exception as e:
                                 st.error(f"❌ Ошибка записи в Google Таблицу: {e}")
