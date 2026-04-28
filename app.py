@@ -409,7 +409,7 @@ if page == "🤖 Робот-Загрузчик":
             else: st.warning("Загрузите файл Litestat!")
 
 # ==========================================
-# 6. РУЧНАЯ МОДЕРАЦИЯ
+# 6. РУЧНАЯ МОДЕРАЦИЯ И ТЕГИРОВАНИЕ
 # ==========================================
 
 elif page == "🔬 ИИ Тегирование":
@@ -418,21 +418,32 @@ elif page == "🔬 ИИ Тегирование":
     client = get_gspread_client()
     ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
     headers = ws.row_values(1)
-    # Приводим все заголовки к нижнему регистру и убираем пробелы для надежного поиска
+    
     header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
     header_map_original = {str(name).strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
     
     df = pd.DataFrame(ws.get_all_records())
     
+    # Создаем виртуальные колонки, чтобы код не падал, если вы забыли их добавить
+    if 'Аудит' not in df.columns: df['Аудит'] = ''
+    if 'Комментарий' not in df.columns: df['Комментарий'] = ''
+    
     with st.expander("🛠 Рентген таблицы (Проверьте, видит ли робот ваши колонки)"):
         st.write("Робот нашел следующие колонки в Google Таблице:", header_map_original)
+        
+    # Умный фильтр: проверяет, есть ли хотя бы один тег в строке
+    def has_tags(row):
+        return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
+    
+    df['has_any_tag'] = df.apply(has_tags, axis=1)
     
     t1, t2 = st.tabs(["1️⃣ Первичная разметка", "2️⃣ Перекрестная проверка (Grok)"])
     
     with t1:
-        st.subheader("Разметка новых заявок")
-        # Ищем колонку обоснования, даже если она называется чуть иначе
-        unprocessed = df[df.get('Обоснование', '') == '']
+        st.subheader("Разметка новых заявок (Только ID)")
+        
+        # Берем строки, где вообще нет тегов
+        unprocessed = df[~df['has_any_tag']]
         
         if not unprocessed.empty:
             total_rows = len(unprocessed)
@@ -450,15 +461,12 @@ elif page == "🔬 ИИ Тегирование":
             
             st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
             
-        if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
+            if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 log_container = st.container()
                 
-                reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
-                
-                # Записываем старт в Системный Журнал
-                add_system_log("Запуск тегирования", "INFO", f"Найдено строк: {total_rows}. Размер пачки: {batch_size}. Нейросеть: {model_key}")
+                add_system_log("Запуск тегирования", "INFO", f"Строк: {total_rows}. Нейросеть: {model_key}")
                 
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -493,29 +501,20 @@ elif page == "🔬 ИИ Тегирование":
                             if not clean_id: continue
                             row_idx = int(clean_id) + 2 
                             
-                            for tag in res.get('tags', []):
-                                cat_num = None
-                                clean_tag = str(tag).strip().lower()
-                                
-                                if clean_tag in reverse_cats: cat_num = reverse_cats[clean_tag]
-                                else:
-                                    num_match = re.search(r'\d+', clean_tag)
-                                    if num_match: cat_num = int(num_match.group())
-                                
-                                if cat_num:
+                            # Пишем только цифры (тегов)
+                            cats_array = res.get('category_ids', []) or res.get('tags', [])
+                            for cat_val in cats_array:
+                                cat_num_match = re.search(r'\d+', str(cat_val))
+                                if cat_num_match:
+                                    cat_num = int(cat_num_match.group())
                                     target_header = f"кат {cat_num}"
                                     if target_header in header_map_clean:
                                         col_letter = header_map_clean[target_header]
                                         batch_updates.append({'range': f"{col_letter}{row_idx}", 'values': [['1']]})
 
-                            if "обоснование" in header_map_clean:
-                                col_reason = header_map_clean['обоснование']
-                                batch_updates.append({'range': f"{col_reason}{row_idx}", 'values': [[res.get('reasoning', '')]]})
-
                         if batch_updates:
                             ws.batch_update(batch_updates)
                         
-                        # Пишем результат обработки пачки в облако
                         if has_error:
                             add_system_log("Обработка пачки", "WARNING", f"Строки {i} - {i+len(chunk)} обработаны с ошибками API.")
                         else:
@@ -527,11 +526,83 @@ elif page == "🔬 ИИ Тегирование":
                     add_system_log("Финиш тегирования", "SUCCESS", f"Все {total_rows} строк успешно обработаны.")
                 except Exception as e:
                     st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН: {e}")
-                    add_system_log("КРИТИЧЕСКАЯ ОШИБКА", "ERROR", f"Процесс прерван на строке {i}. Ошибка: {str(e)}")
+                    add_system_log("КРИТИЧЕСКАЯ ОШИБКА", "ERROR", f"Процесс прерван. Ошибка: {str(e)}")
+        else:
+            st.success("🎉 Все строки уже имеют первичную разметку!")
                     
     with t2:
         st.subheader("Глубокая проверка (Аудит от Grok)")
-        st.info("В разработке: Здесь появится аудит размеченных строк после успешного завершения первичного тегирования.")
+        st.markdown("Grok прочитает отзыв, посмотрит на уже стоящие теги и решит: всё ОК или есть Ошибка.")
+        
+        # Ищем строки, где теги ЕСТЬ, а Аудита еще НЕТ
+        unprocessed_audit = df[(df['has_any_tag']) & (df['Аудит'].astype(str).str.strip() == '')]
+        
+        if not unprocessed_audit.empty:
+            total_audit_rows = len(unprocessed_audit)
+            batch_size_audit = st.slider("Размер пачки для аудита", 5, 50, 10, key="batch_audit")
+            
+            st.info(f"Найдено строк для проверки: **{total_audit_rows}**")
+
+            if st.button("🕵️‍♂️ ЗАПУСТИТЬ АУДИТ", type="primary"):
+                progress_bar_audit = st.progress(0)
+                status_text_audit = st.empty()
+                log_container_audit = st.container()
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    for i in range(0, total_audit_rows, batch_size_audit):
+                        chunk = unprocessed_audit.iloc[i:i+batch_size_audit]
+                        status_text_audit.text(f"⏳ Аудит: пачка {i} из {total_audit_rows}")
+                        
+                        results = loop.run_until_complete(run_ai_batch_processing(chunk, "grok", mode="crosscheck"))
+                        batch_updates = []
+                        
+                        with log_container_audit:
+                            with st.expander(f"Лог аудита (Строки {i} - {i+len(chunk)})"):
+                                if results: st.json(results)
+
+                        for res in results:
+                            if "error" in res: continue
+                            clean_id = re.sub(r'[^\d]', '', str(res.get('id') or ''))
+                            if not clean_id: continue
+                            row_idx = int(clean_id) + 2 
+                            
+                            audit_status = str(res.get('audit', '')).strip()
+                            comment_text = str(res.get('comment', '')).strip()
+                            cats_array = res.get('category_ids', []) or res.get('tags', [])
+                            
+                            # Запись Аудита и Комментария
+                            if "аудит" in header_map_clean:
+                                batch_updates.append({'range': f"{header_map_clean['аудит']}{row_idx}", 'values': [[audit_status]]})
+                            if "комментарий" in header_map_clean:
+                                batch_updates.append({'range': f"{header_map_clean['комментарий']}{row_idx}", 'values': [[comment_text]]})
+
+                            # Если Grok нашел ошибку и дал новые теги - ПЕРЕЗАПИСЫВАЕМ ИХ
+                            if audit_status.upper() != "ОК" and cats_array:
+                                # 1. Стираем все старые галочки
+                                for c in range(1, 14):
+                                    header = f"кат {c}"
+                                    if header in header_map_clean:
+                                        batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['']]})
+                                # 2. Ставим новые правильные
+                                for cat_val in cats_array:
+                                    cat_num_match = re.search(r'\d+', str(cat_val))
+                                    if cat_num_match:
+                                        cat_num = int(cat_num_match.group())
+                                        header = f"кат {cat_num}"
+                                        if header in header_map_clean:
+                                            batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['1']]})
+
+                        if batch_updates: ws.batch_update(batch_updates)
+                        progress_bar_audit.progress(min(1.0, (i + len(chunk)) / total_audit_rows))
+                        
+                    st.success("✅ Аудит завершен! Ошибки исправлены.")
+                except Exception as e:
+                    st.error(f"🛑 ОШИБКА АУДИТА: {e}")
+        else:
+            st.success("🎉 Все размеченные строки уже проверены аудитором!")
 
 elif page == "📝 Модерация":
     st.title("📋 Модерация (Ручная проверка)")
@@ -541,9 +612,11 @@ elif page == "📝 Модерация":
     ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
     df = pd.DataFrame(ws.get_all_records())
     
-    if 'Обоснование' in df.columns and 'Корректировка' in df.columns:
-        to_review = df[(df['Обоснование'] != '') & (df['Корректировка'] == '')].head(20)
-    else: to_review = pd.DataFrame()
+    # Теперь мы показываем на модерации строки, где есть Аудит, но еще нет вашей ручной Корректировки
+    if 'Аудит' in df.columns and 'Корректировка' in df.columns:
+        to_review = df[(df['Аудит'] != '') & (df['Корректировка'] == '')].head(20)
+    else: 
+        to_review = pd.DataFrame()
 
     if not to_review.empty:
         cats_list = list(CATEGORIES.values())
@@ -556,11 +629,11 @@ elif page == "📝 Модерация":
                 with col_info:
                     st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
                     st.markdown(f"<div class='client-text'>{row.get('Текст_Клиента', 'Нет текста')}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div class='ai-reason'>🤖 Обоснование: {row.get('Обоснование', '')}</div>", unsafe_allow_html=True)
+                    # Выводим Аудит и Комментарий от Grok
+                    st.markdown(f"<div class='ai-reason'>🕵️‍♂️ <b>Аудит:</b> {row.get('Аудит', '')} <br> 📝 <b>Комментарий ИИ:</b> {row.get('Комментарий', '')}</div>", unsafe_allow_html=True)
                 
                 with col_photos:
                     photos_raw = str(row.get('Фотографии', ''))
-                    # Вытаскиваем чистые ссылки (избавляемся от формул и разделителей-точек с запятой)
                     urls = re.findall(r'https?://[^\s"\'\;]+', photos_raw)
                     
                     if urls:
