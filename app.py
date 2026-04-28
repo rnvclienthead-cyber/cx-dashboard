@@ -338,20 +338,31 @@ if page == "🤖 Робот-Загрузчик":
 # 6. РУЧНАЯ МОДЕРАЦИЯ
 # ==========================================
 
+# Вспомогательная функция для динамического поиска колонок
+def get_col_letter(col_idx):
+    if col_idx < 26: return chr(ord('A') + col_idx)
+    return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
+
 elif page == "🔬 ИИ Тегирование":
     st.title("🔬 ИИ Тегирование и Проверка")
     
     client = get_gspread_client()
     ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
     headers = ws.row_values(1)
-    header_map = {name.strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
+    # Приводим все заголовки к нижнему регистру и убираем пробелы для надежного поиска
+    header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
+    header_map_original = {str(name).strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
     
     df = pd.DataFrame(ws.get_all_records())
+    
+    with st.expander("🛠 Рентген таблицы (Проверьте, видит ли робот ваши колонки)"):
+        st.write("Робот нашел следующие колонки в Google Таблице:", header_map_original)
     
     t1, t2 = st.tabs(["1️⃣ Первичная разметка", "2️⃣ Перекрестная проверка (Grok)"])
     
     with t1:
         st.subheader("Разметка новых заявок")
+        # Ищем колонку обоснования, даже если она называется чуть иначе
         unprocessed = df[df.get('Обоснование', '') == '']
         
         if not unprocessed.empty:
@@ -359,90 +370,71 @@ elif page == "🔬 ИИ Тегирование":
             
             col1, col2 = st.columns(2)
             batch_size = col1.slider("Размер пачки", 5, 50, 10, key="batch_tag")
-            model_choice = col2.radio("Модель:", ["YandexGPT Lite (Быстро и дешево)", "YandexGPT Pro (Умнее)", "Grok (Grok-beta)"], key="mod_tag")
+            model_choice = col2.radio("Модель:", ["YandexGPT Lite (Дешево)", "YandexGPT Pro (Умнее)", "Grok (xAI)"], key="mod_tag")
             
-            # Присваиваем правильный ключ для функции
             if "Lite" in model_choice: model_key = "yandex-lite"
             elif "Pro" in model_choice: model_key = "yandex-pro"
             else: model_key = "grok"
 
-            # Динамический расчет (примерные тарифы Яндекса за запрос)
             cost_per_row = 0.08 if model_key == "yandex-lite" else 0.40 if model_key == "yandex-pro" else 0.50
             est_cost = total_rows * cost_per_row
             
             st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
-            st.caption("Баланс: Yandex API Billing можно проверить в консоли Yandex Cloud (раздел Биллинг).")
             
             if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
+                log_container = st.container() # Контейнер для вывода логов
+                
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
                 try:
                     for i in range(0, total_rows, batch_size):
                         chunk = unprocessed.iloc[i:i+batch_size]
-                        
                         progress = int(((i + len(chunk)) / total_rows) * 100)
-                        status_text.text(f"⏳ Прогресс тегирования: {progress}% (строки {i} из {total_rows})")
+                        status_text.text(f"⏳ Прогресс: {progress}% (строки {i} из {total_rows})")
                         
                         results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, mode="tagging"))
                         
+                        # ВЫВОДИМ ОТВЕТ ИИ НА ЭКРАН (чтобы понять, не пустой ли он)
+                        with log_container:
+                            with st.expander(f"Сырой ответ ИИ (Пачка {i} - {i+len(chunk)})"):
+                                st.json(results) if results else st.error("❌ ИИ ВЕРНУЛ ПУСТОТУ! (Сбой API или кривой ответ)")
+
                         for res in results:
-                            # +2 из-за сдвига индексов и заголовка
                             row_idx = int(res['id']) + 2 
                             
-                            # Динамическая запись тегов
+                            # Бронебойная запись тегов (ищем только цифру)
                             for tag in res.get('tags', []):
-                                cat_num = tag.split(':')[0].replace('Категория ', '').strip()
-                                target_header = f"Кат {cat_num}"
-                                if target_header in header_map:
-                                    ws.update(f"{header_map[target_header]}{row_idx}", [['V']])
+                                import re
+                                cat_num_match = re.search(r'\d+', tag)
+                                if cat_num_match:
+                                    cat_num = cat_num_match.group()
+                                    target_header = f"кат {cat_num}" # Ищем в нижнем регистре
+                                    
+                                    if target_header in header_map_clean:
+                                        ws.update(f"{header_map_clean[target_header]}{row_idx}", [['1']]) # Ставим 1, как в вашем скрипте Лилии
+                                    else:
+                                        log_container.warning(f"Не нашел колонку 'Кат {cat_num}' в таблице!")
                             
-                            # Динамическая запись обоснования
-                            if "Обоснование" in header_map:
-                                ws.update(f"{header_map['Обоснование']}{row_idx}", [[res.get('reasoning', '')]])
+                            # Запись обоснования
+                            if "обоснование" in header_map_clean:
+                                ws.update(f"{header_map_clean['обоснование']}{row_idx}", [[res.get('reasoning', '')]])
+                            else:
+                                log_container.warning("Не нашел колонку 'Обоснование' в таблице!")
                                 
                         progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
                     
-                    st.success("✅ Тегирование успешно завершено!")
+                    st.success("✅ Тегирование завершено! Проверьте Google Таблицу.")
                 except Exception as e:
-                    st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН: Ошибка сервера/API: {e}")
+                    st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН ИЗ-ЗА ОШИБКИ: {e}")
         else:
             st.success("🎉 Все строки уже размечены!")
 
     with t2:
         st.subheader("Глубокая проверка (Аудит от Grok)")
-        to_check = df[(df.get('Обоснование', '') != '') & (df.get('Корректировка', '') == '')]
-        
-        if not to_check.empty:
-            total_check = len(to_check)
-            st.info(f"Найдено **{total_check}** размеченных строк, ожидающих проверки.")
-            if st.button("🔎 ЗАПУСТИТЬ АУДИТ"):
-                progress_bar2 = st.progress(0)
-                status_text2 = st.empty()
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                try:
-                    for i in range(0, total_check, 10):
-                        chunk = to_check.iloc[i:i+10]
-                        progress = int(((i + len(chunk)) / total_check) * 100)
-                        status_text2.text(f"⏳ Прогресс аудита: {progress}%")
-                        
-                        results = loop.run_until_complete(run_ai_batch_processing(chunk, "grok", mode="crosscheck"))
-                        
-                        for res in results:
-                            row_idx = int(res['id']) + 2 
-                            if "Обоснование" in header_map:
-                                ws.update(f"{header_map['Обоснование']}{row_idx}", [[res.get('reasoning', '')]])
-                                
-                        progress_bar2.progress(min(1.0, (i + len(chunk)) / total_check))
-                    st.success("✅ Аудит завершен!")
-                except Exception as e:
-                    st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН: Ошибка: {e}")
-        else:
-            st.success("Нет строк для перекрестной проверки.")
+        st.info("В разработке: Здесь появится аудит размеченных строк после успешного завершения первичного тегирования.")
 
 elif page == "📝 Модерация":
     st.title("📋 Модерация (Ручная проверка)")
