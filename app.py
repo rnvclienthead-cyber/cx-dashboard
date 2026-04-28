@@ -274,6 +274,10 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
 # ==========================================
 page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Ручная проверка", "📊 Дашборд"])
 
+def get_col_letter(col_idx):
+    if col_idx < 26: return chr(ord('A') + col_idx)
+    return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
+
 if page == "🤖 Робот-Загрузчик":
     st.title("🤖 Робот-Загрузчик")
     
@@ -327,11 +331,6 @@ if page == "🤖 Робот-Загрузчик":
 # ==========================================
 # 6. РУЧНАЯ МОДЕРАЦИЯ
 # ==========================================
-        
-# Вспомогательная функция для динамического поиска колонок
-def get_col_letter(col_idx):
-    if col_idx < 26: return chr(ord('A') + col_idx)
-    return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
 elif page == "🔬 ИИ Тегирование":
     st.title("🔬 ИИ Тегирование и Проверка")
