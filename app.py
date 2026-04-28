@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 # 1. ИНИЦИАЛИЗАЦИЯ И SECRETS
 # ==========================================
-st.set_page_config(page_title="CX AI Enterprise Dashboard", layout="wide")
+st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
 try:
     YANDEX_API_KEY = st.secrets["YANDEX_API_KEY"]
@@ -22,7 +22,7 @@ try:
     SPREADSHEET_ID_INVOICES = st.secrets["SPREADSHEET_ID_INVOICES"]
     GOOGLE_CREDS = dict(st.secrets["gcp_service_account"])
 except Exception as e:
-    st.error(f"❌ Ошибка конфигурации Secrets: {e}")
+    st.error("❌ Ошибка конфигурации Secrets!")
     st.stop()
 
 CATEGORIES = {
@@ -41,8 +41,6 @@ COLUMN_NAMES_RU = {
     'video_paths': 'Видео', 'price': 'Цена', 'srid': 'ID заказа (SRID)', 'supplierArticle': 'Артикул продавца', 
     'nmId': 'Артикул WB', 'incomeID': 'Номер поставки'
 }
-COLS_CLAIMS = ['claim_type', 'status', 'status_ex', 'nm_id', 'user_comment', 'wb_comment', 'dt', 'imt_name', 'order_dt', 'srid']
-COLS_RETURNED = ['date', 'supplierArticle', 'nmId', 'barcode', 'incomeID', 'supplyID', 'srid']
 
 st.markdown("""
 <style>
@@ -50,11 +48,12 @@ st.markdown("""
     .img-zoom:hover { transform: scale(9.0); z-index: 999; position: relative; box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
     .custom-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px; }
     .custom-table th, .custom-table td { border: 1px solid #e0e0e0; padding: 10px; vertical-align: top; }
+    .report-card { background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #4CAF50; margin-bottom: 15px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. БАЗА ДАННЫХ И ПАМЯТЬ
+# 2. БАЗА ДАННЫХ, ПАМЯТЬ И ИИ
 # ==========================================
 @st.cache_resource
 def get_gspread_client():
@@ -71,9 +70,6 @@ def load_ai_memory():
     except: pass
     return "Опыта пока нет."
 
-# ==========================================
-# 3. ИИ ДВИЖОК (YANDEX + GROK)
-# ==========================================
 async def fetch_ai_tags(session, batch, memory, model="yandex"):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
     system_prompt = f"""Ты эксперт контроля качества. Размети отзывы по категориям: {list(CATEGORIES.values())}.
@@ -130,67 +126,54 @@ async def run_ai_batch_processing(df_to_tag, model_choice):
     return results
 
 # ==========================================
-# 4. ОБРАБОТКА ФАЙЛОВ
+# 3. ВСЕЯДНАЯ ЧИТАЛКА И ОБРАБОТКА ДАННЫХ
 # ==========================================
-def process_uploads(claims, returned, orders):
+def safe_read(file_obj):
+    name = file_obj.name.lower()
+    file_obj.seek(0)
     
-  # --- УМНАЯ ЧИТАЛКА ФАЙЛОВ (WB + Litestat) ---
-    def safe_read(file_obj):
-        name = file_obj.name.lower()
-        file_obj.seek(0)
-        
-        # 1. Если это Excel (как у Litestat)
-        if name.endswith('.xlsx') or name.endswith('.xls'):
+    if name.endswith('.xlsx') or name.endswith('.xls'):
+        try:
+            return pd.read_excel(file_obj, engine='openpyxl' if name.endswith('.xlsx') else 'xlrd')
+        except Exception:
             try:
-                engine = 'openpyxl' if name.endswith('.xlsx') else 'xlrd'
-                return pd.read_excel(file_obj, engine=engine)
-            except Exception:
-                # Иногда сервисы отдают HTML-таблицу под видом Excel
-                try:
-                    file_obj.seek(0)
-                    return pd.read_html(file_obj)[0]
-                except Exception:
-                    pass
+                file_obj.seek(0)
+                return pd.read_html(file_obj)[0]
+            except Exception: pass
 
-        # 2. Если это текстовый файл (CSV) или Excel оказался "обманкой"
-        encodings = ['utf-8', 'windows-1251', 'utf-16']
-        separators = [';', ',', '\t']
-        
-        for enc in encodings:
-            for sep in separators:
-                try:
-                    file_obj.seek(0)
-                    # engine='python' защищает от ошибки "C error: Buffer overflow"
-                    return pd.read_csv(file_obj, sep=sep, encoding=enc, engine='python', on_bad_lines='skip')
-                except Exception:
-                    continue
-                    
-        st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}. Проверьте его структуру.")
-        return pd.DataFrame()
-            
-    # Склейка Claims
-    df_c = pd.concat([safe_read(f) for f in claims], ignore_index=True).drop_duplicates()
-    df_final = df_c
+    encodings = ['utf-8', 'windows-1251', 'utf-16']
+    separators = [';', ',', '\t']
+    for enc in encodings:
+        for sep in separators:
+            try:
+                file_obj.seek(0)
+                return pd.read_csv(file_obj, sep=sep, encoding=enc, engine='python', on_bad_lines='skip')
+            except Exception: continue
     
-    # Склейка Склада
-    if returned:
-        df_r = pd.concat([safe_read(f) for f in returned], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
+    st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}.")
+    return pd.DataFrame()
+
+def process_claims_and_returns(claims_files, returned_files):
+    report = []
+    # 1. Читаем Претензии
+    raw_claims = pd.concat([safe_read(f) for f in claims_files], ignore_index=True)
+    df_c = raw_claims.drop_duplicates(subset=['srid']) if 'srid' in raw_claims.columns else raw_claims.drop_duplicates()
+    
+    report.append(f"📥 Претензии: Загружено {len(raw_claims)} строк.")
+    if len(raw_claims) > len(df_c):
+        report.append(f"🧹 Удалено локальных дублей: {len(raw_claims) - len(df_c)} шт.")
+
+    df_final = df_c
+    # 2. Читаем Возвраты (Склад)
+    if returned_files:
+        df_r = pd.concat([safe_read(f) for f in returned_files], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
         sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
         df_c['nm_id_clean'] = df_c['nm_id'].astype(str).str.replace(r'\.0$', '', regex=True)
         df_final = pd.merge(df_c, df_r, on='srid', how='left')
         df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nm_id_clean'].map(sku_map))
+        report.append(f"📦 Склад: Успешно привязаны артикулы для {df_final['supplierArticle'].notna().sum()} заявок.")
 
-    # Склейка Заказов (Litestat)
-    df_ord_agg = pd.DataFrame()
-    if orders:
-        all_o = [safe_read(f) for f in orders]
-        df_o = pd.concat(all_o, ignore_index=True)
-        sku_col = next((c for c in df_o.columns if 'артикул' in c.lower()), None)
-        if sku_col and "Итого заказано, шт." in df_o.columns:
-            df_ord_agg = df_o.groupby(sku_col)["Итого заказано, шт."].sum().reset_index()
-            df_ord_agg.columns = ['Артикул', 'Заказы шт.']
-
-    # Финальная сборка
+    # 3. Форматирование
     res_df = pd.DataFrame()
     res_df['Дата'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
     res_df['Артикул'] = df_final.get('supplierArticle', 'Без артикула')
@@ -205,76 +188,128 @@ def process_uploads(claims, returned, orders):
         if col not in ['dt', 'supplierArticle', 'user_comment', 'srid', 'nm_id_clean'] and not col.endswith('_drop'):
             res_df[COLUMN_NAMES_RU.get(col, col)] = df_final[col]
             
-    return res_df, df_ord_agg
+    return res_df, report
+
+def process_litestat(litestat_files):
+    report = []
+    all_o = [safe_read(f) for f in litestat_files]
+    df_o = pd.concat(all_o, ignore_index=True)
+    report.append(f"📥 Litestat: Загружено {len(df_o)} сырых строк.")
+    
+    sku_col = next((c for c in df_o.columns if 'артикул' in c.lower()), None)
+    qty_col = next((c for c in df_o.columns if 'заказано' in c.lower()), None)
+    
+    if sku_col and qty_col:
+        df_ord_agg = df_o.groupby(sku_col)[qty_col].sum().reset_index()
+        df_ord_agg.columns = ['Артикул', 'Заказы шт.']
+        report.append(f"✅ Успешно агрегировано по {len(df_ord_agg)} уникальным артикулам.")
+        return df_ord_agg, report
+    else:
+        report.append("❌ Ошибка: В файле Litestat не найдены колонки 'Артикул' и/или количество.")
+        return pd.DataFrame(), report
 
 # ==========================================
-# 5. ИНТЕРФЕЙС
+# 4. ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
 page = st.sidebar.radio("Навигация", ["📊 Дашборд Аналитики", "🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "🧠 Обучение ИИ"])
 
 if page == "🤖 Робот-Загрузчик":
-    st.title("🤖 Робот-Загрузчик")
-    c1, c2, c3 = st.columns(3)
-    f_claims = c1.file_uploader("Претензии", accept_multiple_files=True)
-    f_returned = c2.file_uploader("Склад", accept_multiple_files=True)
-    f_litestat = c3.file_uploader("Заказы", accept_multiple_files=True)
+    st.title("🤖 Робот-Загрузчик Данных")
     
-    if st.button("🚀 Объединить и загрузить"):
+    # --- БЛОК 1: ПРЕТЕНЗИИ И ВОЗВРАТЫ ---
+    st.markdown("### 1. Обработка Претензий и Склада")
+    c1, c2 = st.columns(2)
+    f_claims = c1.file_uploader("📂 Загрузите Претензии (Claims)", accept_multiple_files=True, key="claims")
+    f_returned = c2.file_uploader("📂 Загрузите Склад (Returned)", accept_multiple_files=True, key="returns")
+    
+    if st.button("🚀 Синхронизировать Претензии", type="primary"):
         if f_claims:
-            with st.spinner("Склеиваем..."):
-                final_tab, orders_tab = process_uploads(f_claims, f_returned, f_litestat)
+            with st.spinner("Склеиваем данные и проверяем дубликаты..."):
+                final_tab, report_log = process_claims_and_returns(f_claims, f_returned)
+                
+                # Подключение к Google и проверка дублей
                 client = get_gspread_client()
                 ws_ret = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-                if not ws_ret.get_all_values() or str(ws_ret.acell('A1').value).strip() != 'Дата':
-                    ws_ret.update('A1', [final_tab.columns.tolist()])
-                ws_ret.update(f'A{len(ws_ret.get_all_values()) + 1}', final_tab.fillna('').values.tolist())
+                
+                # Получаем существующие SRID
+                existing_data = ws_ret.get_all_records(expected_headers=final_tab.columns.tolist())
+                existing_srids = set([str(row.get('SRID', '')) for row in existing_data if row.get('SRID')])
+                
+                report_log.append(f"☁️ Найдено в Google Таблице: {len(existing_data)} записей.")
+                
+                # Фильтрация новых данных по SRID
+                new_data = final_tab[~final_tab['SRID'].astype(str).isin(existing_srids)]
+                duplicates_gs = len(final_tab) - len(new_data)
+                
+                if duplicates_gs > 0:
+                    report_log.append(f"🛡️ Отсеяно дублей (уже есть в Google): {duplicates_gs} шт.")
+                
+                report_log.append(f"✅ К добавлению в таблицу: **{len(new_data)} новых строк**.")
+
+                if not new_data.empty:
+                    if not existing_data: # Если таблица пустая
+                        ws_ret.update('A1', [new_data.columns.tolist()])
+                    start_row = len(ws_ret.get_all_values()) + 1
+                    ws_ret.update(f'A{start_row}', new_data.fillna('').values.tolist())
+                    st.success("Данные успешно добавлены в Google Sheets!")
+                else:
+                    st.info("Новых уникальных заявок не найдено. Таблица не обновлялась.")
+                
+                st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
+        else:
+            st.warning("Загрузите хотя бы файл претензий!")
+
+    st.divider()
+
+    # --- БЛОК 2: LITESTAT ---
+    st.markdown("### 2. Загрузка Заказов (Litestat)")
+    f_litestat = st.file_uploader("📂 Загрузите отчет Litestat", accept_multiple_files=True, key="litestat")
+    
+    if st.button("📊 Обновить данные по Заказам"):
+        if f_litestat:
+            with st.spinner("Анализируем заказы..."):
+                orders_tab, report_log = process_litestat(f_litestat)
+                
                 if not orders_tab.empty:
+                    client = get_gspread_client()
                     ws_ord = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Заказы")
-                    ws_ord.clear()
+                    ws_ord.clear() # Литстат перезаписывает лист для актуальной аналитики
                     ws_ord.update('A1', [orders_tab.columns.tolist()] + orders_tab.values.tolist())
-                st.success("✅ Данные загружены в Google Sheets!")
-        else: st.warning("Загрузите файлы претензий!")
+                    st.success("Данные по заказам обновлены в Google Sheets!")
+                    
+                st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
+        else:
+            st.warning("Загрузите файл Litestat!")
 
 elif page == "🔬 ИИ Тегирование":
-    st.title("🔬 ИИ Тегирование (Запуск нейросетей)")
-    st.info("Скрипт найдет в Google Таблице все заявки, где еще нет тегов (пустые колонки 'Кат 1-13'), и разметит их.")
-    
-    model_choice = st.radio("Выберите нейросеть для анализа:", ["YandexGPT (yandex)", "Grok (grok)"])
+    st.title("🔬 ИИ Тегирование")
+    model_choice = st.radio("Нейросеть:", ["YandexGPT (yandex)", "Grok (grok)"])
     model_key = "yandex" if "Yandex" in model_choice else "grok"
 
     if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ"):
-        with st.spinner(f"Получаю данные из Google Таблицы..."):
+        with st.spinner(f"Работаем..."):
             client = get_gspread_client()
             ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
             df = pd.DataFrame(ws.get_all_records())
             
-            # Ищем строки, где нет обоснования (значит ИИ их еще не трогал)
             unprocessed = df[df['Обоснование'] == '']
-            if unprocessed.empty:
-                st.success("Все заявки уже размечены!")
+            if unprocessed.empty: st.success("Всё уже размечено!")
             else:
-                st.warning(f"Найдено заявок без тегов: {len(unprocessed)}. Запускаем ИИ...")
-                
-                # Запуск ИИ
+                st.warning(f"Найдено {len(unprocessed)} заявок. Ждите...")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 results = loop.run_until_complete(run_ai_batch_processing(unprocessed, model_key))
                 
-                # Обновляем таблицу (пишем теги обратно)
                 for res in results:
-                    row_idx = int(res['id']) + 2 # +2 из-за заголовка и 0-индексации
-                    # Ставим "V" в нужные категории
+                    row_idx = int(res['id']) + 2
                     for tag in res.get('tags', []):
                         cat_num = tag.split(':')[0].replace('Категория ', '')
                         try:
-                            # Ищем номер колонки (Кат 1 это D, Кат 2 это E и тд, нужно посчитать)
-                            col_letter = chr(ord('E') - 1 + int(cat_num)) # Примерный расчет
+                            col_letter = chr(ord('E') - 1 + int(cat_num))
                             ws.update(f'{col_letter}{row_idx}', [['V']])
                         except: pass
-                    # Записываем обоснование
                     ws.update(f'R{row_idx}', [[res.get('reasoning', '')]]) 
-
-                st.success(f"✅ Успешно размечено {len(results)} строк! Посмотрите в таблицу.")
+                st.success(f"✅ Размечено {len(results)} строк!")
 
 elif page == "🧠 Обучение ИИ":
     st.title("🧠 Обучение ИИ")
@@ -324,4 +359,4 @@ elif page == "📊 Дашборд Аналитики":
                 photos = "".join([f'<img src="{l if l.startswith("http") else "https:"+l}" class="img-zoom">' for l in str(r.get('Фотографии','')).split(';')[:3] if l])
                 html += f"<tr><td>{r.get('Дата','')}</td><td>{r.get('Артикул','')}</td><td>{r.get('Текст_Клиента','')}</td><td>{photos}</td></tr>"
             st.markdown(html + '</table>', unsafe_allow_html=True)
-    except: st.warning("Загрузите файлы через Робота!")
+    except Exception as e: st.warning(f"Загрузите файлы через Робота! ({e})")
