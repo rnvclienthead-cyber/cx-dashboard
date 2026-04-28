@@ -406,26 +406,37 @@ elif page == "🔬 ИИ Тегирование":
                                 st.json(results) if results else st.error("❌ ИИ ВЕРНУЛ ПУСТОТУ! (Сбой API или кривой ответ)")
 
                         for res in results:
-                            row_idx = int(res['id']) + 2 
+                            # 1. Ловим системную ошибку от Яндекса/Grok
+                            if "error" in res:
+                                log_container.error(f"🛑 ОТКАЗ СЕРВЕРА: {res['error']}")
+                                continue
+                                
+                            # 2. БЕЗОПАСНО ИЩЕМ ID (даже если ИИ написал его криво)
+                            res_id = res.get('id') or res.get('ID') or res.get('Id')
+                            if res_id is None:
+                                log_container.warning(f"⚠️ ИИ вернул ответ, но забыл указать номер строки. Пропуск: {res}")
+                                continue
+                                
+                            # Проверяем, что ID - это точно число
+                            try:
+                                row_idx = int(res_id) + 2 
+                            except ValueError:
+                                log_container.warning(f"⚠️ ИИ прислал вместо цифры текст: '{res_id}'. Пропускаем.")
+                                continue
                             
-                            # Бронебойная запись тегов (ищем только цифру)
+                            # 3. Запись тегов в Google Таблицу
                             for tag in res.get('tags', []):
                                 import re
                                 cat_num_match = re.search(r'\d+', tag)
                                 if cat_num_match:
                                     cat_num = cat_num_match.group()
-                                    target_header = f"кат {cat_num}" # Ищем в нижнем регистре
-                                    
+                                    target_header = f"кат {cat_num}"
                                     if target_header in header_map_clean:
-                                        ws.update(f"{header_map_clean[target_header]}{row_idx}", [['1']]) # Ставим 1, как в вашем скрипте Лилии
-                                    else:
-                                        log_container.warning(f"Не нашел колонку 'Кат {cat_num}' в таблице!")
+                                        ws.update(f"{header_map_clean[target_header]}{row_idx}", [['1']])
                             
-                            # Запись обоснования
+                            # 4. Запись обоснования
                             if "обоснование" in header_map_clean:
                                 ws.update(f"{header_map_clean['обоснование']}{row_idx}", [[res.get('reasoning', '')]])
-                            else:
-                                log_container.warning("Не нашел колонку 'Обоснование' в таблице!")
                                 
                         progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
                     
