@@ -186,30 +186,30 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
     ОПЫТ ОШИБОК: {memory}
     ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "..."}}]}}"""
 
-    # Логика Yandex
     if "yandex" in model:
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
-        
-        # Определяем, какую версию дергать: Lite или Pro
         yandex_model_name = "yandexgpt-lite" if model == "yandex-lite" else "yandexgpt"
-        
-        # Вот здесь скобки теперь закрыты и добавлены messages:
         payload = {
             "modelUri": f"gpt://{FOLDER_ID}/{yandex_model_name}/latest",
             "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
             "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
         }
-        
         try:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
                 if resp.status == 200:
                     res = await resp.json()
                     text = res['result']['alternatives'][0]['message']['text']
-                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-        except: return []
+                    try:
+                        return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
+                    except json.JSONDecodeError:
+                        return [{"error": f"Сбой JSON от Яндекса: {text}"}]
+                else:
+                    error_text = await resp.text()
+                    return [{"error": f"Ошибка API Яндекса (Статус {resp.status}): {error_text}"}]
+        except Exception as e:
+            return [{"error": f"Системная ошибка Яндекса: {str(e)}"}]
 
-    # Логика Grok
     elif model == "grok":
         url = "https://api.x.ai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
@@ -219,14 +219,21 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
             "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
         }
         try:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
                 if resp.status == 200:
                     res = await resp.json()
                     text = res['choices'][0]['message']['content']
-                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-        except: return []
+                    try:
+                        return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
+                    except json.JSONDecodeError:
+                        return [{"error": f"Сбой JSON от Grok: {text}"}]
+                else:
+                    error_text = await resp.text()
+                    return [{"error": f"Ошибка API Grok (Статус {resp.status}): {error_text}"}]
+        except Exception as e:
+            return [{"error": f"Системная ошибка Grok: {str(e)}"}]
     return []
-
+    
 async def fetch_ai_crosscheck(session, batch, memory):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
     system_prompt = f"""Ты строгий аудитор. Проверь теги, которые уже поставила первая нейросеть. 
