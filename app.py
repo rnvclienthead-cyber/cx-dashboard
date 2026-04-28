@@ -194,9 +194,20 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
         # Определяем, какую версию дергать: Lite или Pro
         yandex_model_name = "yandexgpt-lite" if model == "yandex-lite" else "yandexgpt"
         
+        # Вот здесь скобки теперь закрыты и добавлены messages:
         payload = {
             "modelUri": f"gpt://{FOLDER_ID}/{yandex_model_name}/latest",
             "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
+            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
+        }
+        
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    text = res['result']['alternatives'][0]['message']['text']
+                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
+        except: return []
 
     # Логика Grok
     elif model == "grok":
