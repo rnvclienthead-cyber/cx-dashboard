@@ -133,31 +133,36 @@ def safe_read(file_obj):
     bytes_data = file_obj.getvalue()
     name = file_obj.name.lower()
     
-    st.warning(f"🕵️ ОТЛАДКА ФАЙЛА: {name}")
-    
-    # 1. Заглядываем внутрь файла (показываем первые 300 символов)
-    try:
-        raw_text = bytes_data[:300].decode('utf-8', errors='ignore')
-        st.code(f"Что физически находится внутри файла:\n{raw_text}")
-    except:
-        st.code("Файл чисто бинарный, прочитать текст не удалось.")
+    # 1. Excel (Используем бронебойный calamine)
+    if name.endswith('.xlsx') or name.endswith('.xls'):
+        try:
+            # calamine игнорирует ошибки форматирования (ширину колонок и т.д.)
+            engine = 'calamine' if name.endswith('.xlsx') else 'xlrd'
+            return pd.read_excel(io.BytesIO(bytes_data), engine=engine)
+        except Exception:
+            try:
+                # Запасной план: пробуем старым openpyxl
+                return pd.read_excel(io.BytesIO(bytes_data), engine='openpyxl')
+            except Exception:
+                try:
+                    return pd.read_html(io.BytesIO(bytes_data))[0]
+                except Exception: pass
 
-    # 2. Пытаемся открыть как Excel и ловим точную ошибку
-    try:
-        df = pd.read_excel(io.BytesIO(bytes_data))
-        st.success("✅ Успешно прочитано как Excel!")
-        return df
-    except Exception as e:
-        st.error(f"❌ Ошибка при чтении Excel: {type(e).__name__} — {e}")
-        
-    # 3. Пытаемся открыть как CSV и ловим ошибку
-    try:
-        df = pd.read_csv(io.BytesIO(bytes_data), sep=';', encoding='utf-8')
-        st.success("✅ Успешно прочитано как CSV!")
-        return df
-    except Exception as e:
-        st.error(f"❌ Ошибка при чтении CSV: {type(e).__name__} — {e}")
-        
+    # 2. Текст / CSV
+    encodings = ['utf-8-sig', 'utf-8', 'windows-1251', 'utf-16']
+    separators = [';', '\t', ',']
+    
+    for enc in encodings:
+        for sep in separators:
+            try:
+                text_data = bytes_data.decode(enc)
+                df = pd.read_csv(io.StringIO(text_data), sep=sep, engine='python', on_bad_lines='skip')
+                if len(df.columns) > 1:
+                    return df
+            except Exception:
+                continue
+    
+    st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}. Формат не распознан.")
     return pd.DataFrame()
     
 def process_claims_and_returns(claims_files, returned_files):
