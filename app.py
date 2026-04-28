@@ -563,109 +563,135 @@ elif page == "📝 Модерация":
 # ==========================================
 
 elif page == "🧠 Обучение ИИ":
-    st.title("🧠 База знаний ИИ (Умный импорт)")
-    st.markdown("Загрузите файл с проверенными отзывами. Робот понимает старый формат (одна колонка тегов) и новый формат (Кат 1, Кат 2...). **Новые корректировки всегда заменяют старые!**")
+    st.title("🧠 База знаний ИИ и Дообучение")
+    
+    client = get_gspread_client()
+    sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
+    try:
+        ws_mem = sheet.worksheet("Память_ИИ")
+    except:
+        ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="4")
+        ws_mem.update('A1:D1', [["Контент", "Правильные теги", "Последняя выгрузка:", "0"]])
 
-    f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
+    # --- ЛОГИКА СЧЕТЧИКА И УВЕДОМЛЕНИЙ ---
+    records = ws_mem.get_all_records()
+    current_count = len(records)
+    
+    # Читаем, сколько было строк при последней генерации JSONL
+    last_export_str = ws_mem.acell('D1').value
+    last_export_count = int(last_export_str) if str(last_export_str).isdigit() else 0
+    
+    new_examples = current_count - last_export_count
 
-    if st.button("📥 Загрузить и обновить память", type="primary"):
-        if f_import:
-            with st.spinner("Анализируем структуру файла и разрешаем конфликты..."):
-                df_import = safe_read(f_import)
-                
-                if not df_import.empty:
-                    import re
+    # Красивое уведомление
+    if new_examples >= 50:
+        st.error(f"🚨 **Внимание! Накопилось новых примеров: {new_examples}.**\nПора выгрузить JSONL и обновить модель в Яндекс DataSphere, чтобы ИИ стал еще умнее.")
+    elif new_examples > 0:
+        st.info(f"Новых корректировок с момента последней выгрузки: **{new_examples} / 50**")
+    else:
+        st.success("Модель актуальна. Новых корректировок пока нет.")
+
+    # --- ВКЛАДКИ ---
+    t_import, t_export = st.tabs(["📥 Импорт новых знаний", "📤 Выгрузка JSONL (Дообучение)"])
+
+    with t_export:
+        st.subheader("Генерация датасета для Яндекса")
+        st.markdown("Эта кнопка соберет всю вашу базу из Google Таблицы и упакует её в формат `.jsonl`, который требует Yandex DataSphere для дообучения модели.")
+        
+        # Собираем JSONL на лету
+        jsonl_lines = []
+        for r in records:
+            content = str(r.get('Контент', '')).strip()
+            tags = str(r.get('Правильные теги', '')).strip()
+            if content and tags:
+                # Классический формат "запрос-ответ" для Яндекса
+                line = {
+                    "request": f"Размети отзыв по категориям брака.\nТекст: {content}",
+                    "response": tags
+                }
+                jsonl_lines.append(json.dumps(line, ensure_ascii=False))
+        
+        final_jsonl = "\n".join(jsonl_lines)
+        
+        st.download_button(
+            label="💾 Скачать dataset.jsonl",
+            data=final_jsonl,
+            file_name=f"yandex_dataset_{datetime.now().strftime('%d_%m')}.jsonl",
+            mime="application/jsonl",
+            type="primary"
+        )
+        
+        st.markdown("---")
+        if st.button("✅ Я скачал файл и запустил дообучение (Сбросить счетчик)"):
+            ws_mem.update('D1', [[current_count]])
+            st.success("Счетчик успешно сброшен! Ждем окончания обучения в Яндексе.")
+            st.rerun()
+
+    with t_import:
+        st.markdown("Загрузите файл с проверенными отзывами. Робот понимает старый формат (одна колонка тегов) и новый (Кат 1, Кат 2...). **Новые корректировки всегда заменяют старые!**")
+        f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
+
+        if st.button("📥 Загрузить и обновить память"):
+            if f_import:
+                with st.spinner("Анализируем структуру файла..."):
+                    df_import = safe_read(f_import)
                     
-                    # 1. Расширенный поиск колонок с текстом (теперь понимает и подчеркивания)
-                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in [
-                        'текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment'
-                    ]]
-                    
-                    # 2. Ищем колонку ручной корректировки (ПРИОРИТЕТ №1)
-                    corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
-                    
-                    # 3. Ищем старую колонку тегов
-                    tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
-                    
-                    # 4. Ищем колонки категорий (понимает и "Кат 1", и просто "1")
-                    cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
-                    
-                    if not text_cols:
-                        st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
-                        st.write("Вижу такие колонки в вашем файле:", list(df_import.columns))
-                    else:
-                        new_memory_dict = {}
+                    if not df_import.empty:
+                        import re
+                        text_cols = [c for c in df_import.columns if str(c).lower().strip() in [
+                            'текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment'
+                        ]]
+                        corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
+                        tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
+                        cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
                         
-                        # Собираем данные из загруженного файла
-                        for idx, row in df_import.iterrows():
-                            parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() != 'nan' and str(row[tc]).strip()]
-                            combined_text = " ".join(parts)
-                            
-                            if not combined_text: continue
-                            
-                            final_tags = ""
-                            
-                            # ЛОГИКА 1: Высший приоритет — ручная корректировка (комментарий)
-                            if corr_col and pd.notna(row[corr_col]) and str(row[corr_col]).strip().lower() != 'nan' and str(row[corr_col]).strip():
-                                final_tags = str(row[corr_col]).strip()
+                        if not text_cols:
+                            st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
+                        else:
+                            new_memory_dict = {}
+                            for idx, row in df_import.iterrows():
+                                parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() != 'nan' and str(row[tc]).strip()]
+                                combined_text = " ".join(parts)
+                                if not combined_text: continue
                                 
-                            # ЛОГИКА 2: Ищем единички по 13 столбцам (Кат 1, Кат 2...)
-                            elif cat_columns: 
-                                found_cats = []
-                                for c in cat_columns:
-                                    num_match = re.search(r'\d+', str(c))
-                                    if num_match:
-                                        cat_id = int(num_match.group())
-                                        if cat_id in CATEGORIES:
-                                            val = str(row[c]).strip().lower()
-                                            if val in ['1', '1.0', 'v', '+', 'да', 'true']:
-                                                found_cats.append(CATEGORIES[cat_id])
-                                if found_cats:
-                                    final_tags = "; ".join(found_cats)
-                                    
-                            # ЛОГИКА 3: Старый формат ("Какой тег")
-                            elif tag_col and pd.notna(row[tag_col]):
-                                raw_tags = str(row[tag_col])
-                                nums = re.findall(r'\d+', raw_tags)
-                                found_cats = [CATEGORIES[int(n)] for n in nums if int(n) in CATEGORIES]
-                                if found_cats:
-                                    final_tags = "; ".join(found_cats)
-                                    
-                            # Записываем в словарь
-                            if final_tags:
-                                new_memory_dict[combined_text] = final_tags
+                                final_tags = ""
+                                if corr_col and pd.notna(row[corr_col]) and str(row[corr_col]).strip().lower() != 'nan' and str(row[corr_col]).strip():
+                                    final_tags = str(row[corr_col]).strip()
+                                elif cat_columns: 
+                                    found_cats = []
+                                    for c in cat_columns:
+                                        num_match = re.search(r'\d+', str(c))
+                                        if num_match:
+                                            cat_id = int(num_match.group())
+                                            if cat_id in CATEGORIES:
+                                                val = str(row[c]).strip().lower()
+                                                if val in ['1', '1.0', 'v', '+', 'да', 'true']:
+                                                    found_cats.append(CATEGORIES[cat_id])
+                                    if found_cats: final_tags = "; ".join(found_cats)
+                                elif tag_col and pd.notna(row[tag_col]):
+                                    raw_tags = str(row[tag_col])
+                                    nums = re.findall(r'\d+', raw_tags)
+                                    found_cats = [CATEGORIES[int(n)] for n in nums if int(n) in CATEGORIES]
+                                    if found_cats: final_tags = "; ".join(found_cats)
+                                        
+                                if final_tags: new_memory_dict[combined_text] = final_tags
 
-                        # Загрузка и разрешение конфликтов в Google Sheets
-                        if new_memory_dict:
-                            try:
-                                client = get_gspread_client()
-                                sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
-                                
-                                try:
-                                    ws_mem = sheet.worksheet("Память_ИИ")
-                                except:
-                                    ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="2")
-                                    ws_mem.append_row(["Контент", "Правильные теги"])
-
-                                existing_records = ws_mem.get_all_records()
-                                combined_memory = {str(r.get('Контент', '')).strip(): str(r.get('Правильные теги', '')).strip() for r in existing_records if str(r.get('Контент', '')).strip()}
-                                
-                                # Новые знания затирают старые
+                            if new_memory_dict:
+                                combined_memory = {str(r.get('Контент', '')).strip(): str(r.get('Правильные теги', '')).strip() for r in records if str(r.get('Контент', '')).strip()}
                                 combined_memory.update(new_memory_dict)
-                                
                                 final_upload = [["Контент", "Правильные теги"]] + [[k, v] for k, v in combined_memory.items()]
                                 
                                 ws_mem.clear()
+                                # Возвращаем наш счетчик в шапку таблицы
+                                final_upload[0].extend(["Последняя выгрузка:", str(last_export_count)])
                                 ws_mem.update('A1', final_upload)
                                 
-                                st.success(f"✅ База знаний успешно обновлена! ИИ выучил новые данные. Всего в памяти: {len(combined_memory)-1} уникальных примеров.")
-                                st.balloons()
-                            except Exception as e:
-                                st.error(f"❌ Ошибка записи в Google Таблицу: {e}")
-                        else:
-                            st.warning("⚠️ Не найдено валидных тегов или корректировок в загруженном файле.")
-        else:
-            st.warning("Пожалуйста, загрузите файл.")
+                                st.success(f"✅ База обновлена! ИИ выучил {len(new_memory_dict)} новых примеров.")
+                                st.rerun()
+                            else:
+                                st.warning("⚠️ Валидных тегов не найдено.")
+            else:
+                st.warning("Пожалуйста, загрузите файл.")
             
 elif page == "📊 Дашборд":
     st.title("📊 BI Аналитика")
