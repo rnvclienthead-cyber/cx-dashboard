@@ -96,15 +96,13 @@ def get_gspread_client():
     scopes = ['https://www.googleapis.com/auth/spreadsheets']
     return gspread.authorize(Credentials.from_service_account_info(GOOGLE_CREDS, scopes=scopes))
 
-def load_ai_memory():
+def get_memory_records():
     try:
         client = get_gspread_client()
         sheet = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
-        records = sheet.get_all_records()
-        if records:
-            return "\n".join([f"Текст: {r['Контент']} -> Правильный тег: {r['Правильные теги']}" for r in records])
-    except: pass
-    return "Опыта пока нет."
+        return sheet.get_all_records()
+    except:
+        return []
 
 def add_system_log(action, status, details=""):
     try:
@@ -192,33 +190,62 @@ def process_litestat(litestat_files):
         return pd.DataFrame(), report
         
 # ==========================================
-# 4. ИИ ДВИЖОК (РАЗДЕЛЬНЫЙ)
+# 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG)
 # ==========================================
-async def fetch_ai_tags(session, batch, memory, model="yandex"):
-    content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
+
+# Умный парсер ответов ИИ
+def parse_ai_response(text):
+    try:
+        clean_text = re.sub(r'```json|```', '', text).strip()
+        parsed = json.loads(clean_text)
+        if isinstance(parsed, dict): return parsed.get('results', [])
+        elif isinstance(parsed, list): return parsed
+        else: return [{"error": f"Неожиданный формат: {type(parsed)}"}]
+    except json.JSONDecodeError:
+        return [{"error": f"Сбой формата JSON: {text}"}]
+
+# Встроенный мини-поисковик (находит 10 похожих отзывов)
+def find_similar_examples(target_text, memory_records, top_n=10):
+    if not memory_records: return "Опыта пока нет."
+    
+    import re
+    target_words = set(re.findall(r'\b\w{3,}\b', target_text.lower()))
+    if not target_words: return "Опыта пока нет."
+
+    scored = []
+    for r in memory_records:
+        mem_text = str(r.get('Контент', '')).lower()
+        mem_words = set(re.findall(r'\b\w{3,}\b', mem_text))
+        if not mem_words: continue
+        
+        score = len(target_words.intersection(mem_words))
+        if score > 0:
+            scored.append((score, f"Текст: {r.get('Контент')} -> Тег: {r.get('Правильные теги')}"))
+    
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_matches = [x[1] for x in scored[:top_n]]
+    
+    if best_matches:
+        return "\n".join(best_matches)
+    return "Прямых совпадений в опыте не найдено. Действуй по инструкции."
+
+# Первичное тегирование (Yandex / Grok)
+async def fetch_ai_tags(session, batch, memory_records, model="yandex"):
+    content_lines = []
+    combined_target_text = ""
+    for i in batch:
+        content_lines.append(f"ID {i['id']}: {i['text']}")
+        combined_target_text += i['text'] + " "
+    content = "\n".join(content_lines)
+    
+    relevant_memory = find_similar_examples(combined_target_text, memory_records, top_n=10)
+
     system_prompt = f"""Ты эксперт контроля качества. Размети отзывы по категориям: {list(CATEGORIES.values())}.
     ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект (или рейтинг 4-5) - СТРОГО Категория 12.
-    ОПЫТ ОШИБОК: {memory}
+    ВОТ ПРИМЕРЫ ПОХОЖИХ СИТУАЦИЙ ИЗ БАЗЫ:
+    {relevant_memory}
     ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "..."}}]}}"""
 
-    # Умный расшифровщик ответов ИИ (понимает и словари, и списки)
-    def parse_ai_response(text):
-        try:
-            clean_text = re.sub(r'```json|```', '', text).strip()
-            parsed = json.loads(clean_text)
-            
-            # Если ИИ послушный и вернул словарь {"results": [...]}
-            if isinstance(parsed, dict):
-                return parsed.get('results', [])
-            # Если ИИ срезал углы и вернул список напрямую [...]
-            elif isinstance(parsed, list):
-                return parsed
-            else:
-                return [{"error": f"Неожиданный формат ответа от ИИ: {type(parsed)}"}]
-        except json.JSONDecodeError:
-            return [{"error": f"Сбой формата JSON: {text}"}]
-
-    # Логика Yandex
     if "yandex" in model:
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
@@ -232,15 +259,10 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
             async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
                 if resp.status == 200:
                     res = await resp.json()
-                    text = res['result']['alternatives'][0]['message']['text']
-                    return parse_ai_response(text) # Вызываем умный парсер
-                else:
-                    error_text = await resp.text()
-                    return [{"error": f"Ошибка API Яндекса (Статус {resp.status}): {error_text}"}]
-        except Exception as e:
-            return [{"error": f"Системная ошибка Яндекса: {str(e)}"}]
+                    return parse_ai_response(res['result']['alternatives'][0]['message']['text'])
+                else: return [{"error": f"Ошибка Яндекса ({resp.status}): {await resp.text()}"}]
+        except Exception as e: return [{"error": f"Системная ошибка Яндекса: {str(e)}"}]
 
-    # Логика Grok
     elif model == "grok":
         url = "https://api.x.ai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
@@ -253,21 +275,26 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
             async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
                 if resp.status == 200:
                     res = await resp.json()
-                    text = res['choices'][0]['message']['content']
-                    return parse_ai_response(text) # Вызываем умный парсер
-                else:
-                    error_text = await resp.text()
-                    return [{"error": f"Ошибка API Grok (Статус {resp.status}): {error_text}"}]
-        except Exception as e:
-            return [{"error": f"Системная ошибка Grok: {str(e)}"}]
-            
+                    return parse_ai_response(res['choices'][0]['message']['content'])
+                else: return [{"error": f"Ошибка Grok ({resp.status}): {await resp.text()}"}]
+        except Exception as e: return [{"error": f"Системная ошибка Grok: {str(e)}"}]
     return []
+
+# Перекрестная проверка (Аудит от Grok)
+async def fetch_ai_crosscheck(session, batch, memory_records):
+    content_lines = []
+    combined_target_text = ""
+    for i in batch:
+        content_lines.append(f"ID {i['id']}: {i['text']}")
+        combined_target_text += i['text'] + " "
+    content = "\n".join(content_lines)
     
-async def fetch_ai_crosscheck(session, batch, memory):
-    content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
-    system_prompt = f"""Ты строгий аудитор. Проверь теги, которые уже поставила первая нейросеть. 
-    Учитывай наш опыт: {memory}.
-    Если есть логическая ошибка (например, тег 'Производственный дефект', а суть в 'не подошел цвет'), исправь на правильную категорию.
+    relevant_memory = find_similar_examples(combined_target_text, memory_records, top_n=10)
+
+    system_prompt = f"""Ты строгий аудитор. Проверь теги первой нейросети. 
+    ВОТ ПРИМЕРЫ ПРАВИЛЬНЫХ РЕШЕНИЙ ДЛЯ ПОХОЖИХ СИТУАЦИЙ:
+    {relevant_memory}
+    Если есть логическая ошибка (например, тег 'Производственный дефект', а суть в 'не подошел цвет'), исправь на правильную.
     ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "Исправлено: ..."}}]}}"""
     
     url = "https://api.x.ai/v1/chat/completions"
@@ -278,35 +305,34 @@ async def fetch_ai_crosscheck(session, batch, memory):
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
     }
     try:
-        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
             if resp.status == 200:
                 res = await resp.json()
-                text = res['choices'][0]['message']['content']
-                return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-    except: return []
+                return parse_ai_response(res['choices'][0]['message']['content'])
+            else: return [{"error": f"Ошибка API Grok ({resp.status}): {await resp.text()}"}]
+    except Exception as e: return [{"error": f"Системная ошибка Grok: {str(e)}"}]
 
+# Оркестратор партий
 async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
-    memory = load_ai_memory()
+    memory_records = get_memory_records() # Качаем базу 1 раз
     results = []
     async with aiohttp.ClientSession() as session:
         batch = []
         for idx, row in df_to_tag.iterrows():
             if mode == "tagging":
-                batch.append({"id": idx, "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
+                batch.append({"id": f"REF_{idx}", "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
             else:
-                # В режиме проверки передаем еще и старое обоснование
-                batch.append({"id": idx, "text": f"Текст: {row.get('Текст_Клиента','')}. Обоснование ИИ 1: {row.get('Обоснование','')}"})
+                batch.append({"id": f"REF_{idx}", "text": f"Текст: {row.get('Текст_Клиента','')}. Обоснование ИИ 1: {row.get('Обоснование','')}"})
                 
             if len(batch) >= 10:
-                if mode == "tagging": res = await fetch_ai_tags(session, batch, memory, model_choice)
-                else: res = await fetch_ai_crosscheck(session, batch, memory)
-                
+                if mode == "tagging": res = await fetch_ai_tags(session, batch, memory_records, model_choice)
+                else: res = await fetch_ai_crosscheck(session, batch, memory_records)
                 if res: results.extend(res)
                 batch = []
                 
         if batch:
-            if mode == "tagging": res = await fetch_ai_tags(session, batch, memory, model_choice)
-            else: res = await fetch_ai_crosscheck(session, batch, memory)
+            if mode == "tagging": res = await fetch_ai_tags(session, batch, memory_records, model_choice)
+            else: res = await fetch_ai_crosscheck(session, batch, memory_records)
             if res: results.extend(res)
             
     return results
@@ -563,139 +589,87 @@ elif page == "📝 Модерация":
 # ==========================================
 
 elif page == "🧠 Обучение ИИ":
-    st.title("🧠 База знаний ИИ и Дообучение")
-    
-    client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
-    try:
-        ws_mem = sheet.worksheet("Память_ИИ")
-    except:
-        ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="4")
-        ws_mem.update('A1:D1', [["Контент", "Правильные теги", "Последняя выгрузка:", "0"]])
+    st.title("🧠 База знаний ИИ (Умный импорт)")
+    st.markdown("Загрузите файл с проверенными отзывами. Робот всё поймет, расшифрует теги и загрузит в свою память. **Новые корректировки всегда заменяют старые!**")
 
-    # --- ЛОГИКА СЧЕТЧИКА И УВЕДОМЛЕНИЙ ---
-    records = ws_mem.get_all_records()
-    current_count = len(records)
-    
-   # Читаем счетчик, а если столбца D еще нет — просто ставим 0
-    try:
-        last_export_str = ws_mem.acell('D1').value
-    except Exception:
-        last_export_str = "0"
-        
-    last_export_count = int(last_export_str) if str(last_export_str).isdigit() else 0
-    
-    new_examples = current_count - last_export_count
+    f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
 
-    # Красивое уведомление
-    if new_examples >= 50:
-        st.error(f"🚨 **Внимание! Накопилось новых примеров: {new_examples}.**\nПора выгрузить JSONL и обновить модель в Яндекс DataSphere, чтобы ИИ стал еще умнее.")
-    elif new_examples > 0:
-        st.info(f"Новых корректировок с момента последней выгрузки: **{new_examples} / 50**")
-    else:
-        st.success("Модель актуальна. Новых корректировок пока нет.")
-
-    # --- ВКЛАДКИ ---
-    t_import, t_export = st.tabs(["📥 Импорт новых знаний", "📤 Выгрузка JSONL (Дообучение)"])
-
-    with t_export:
-        st.subheader("Генерация датасета для Яндекса")
-        st.markdown("Эта кнопка соберет всю вашу базу из Google Таблицы и упакует её в формат `.jsonl`, который требует Yandex DataSphere для дообучения модели.")
-        
-        # Собираем JSONL на лету
-        jsonl_lines = []
-        for r in records:
-            content = str(r.get('Контент', '')).strip()
-            tags = str(r.get('Правильные теги', '')).strip()
-            if content and tags:
-                # Классический формат "запрос-ответ" для Яндекса
-                line = {
-                    "request": f"Размети отзыв по категориям брака.\nТекст: {content}",
-                    "response": tags
-                }
-                jsonl_lines.append(json.dumps(line, ensure_ascii=False))
-        
-        final_jsonl = "\n".join(jsonl_lines)
-        
-        st.download_button(
-            label="💾 Скачать dataset.jsonl",
-            data=final_jsonl,
-            file_name=f"yandex_dataset_{datetime.now().strftime('%d_%m')}.jsonl",
-            mime="application/jsonl",
-            type="primary"
-        )
-        
-        st.markdown("---")
-        if st.button("✅ Я скачал файл и запустил дообучение (Сбросить счетчик)"):
-            ws_mem.update('D1', [[current_count]])
-            st.success("Счетчик успешно сброшен! Ждем окончания обучения в Яндексе.")
-            st.rerun()
-
-    with t_import:
-        st.markdown("Загрузите файл с проверенными отзывами. Робот понимает старый формат (одна колонка тегов) и новый (Кат 1, Кат 2...). **Новые корректировки всегда заменяют старые!**")
-        f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
-
-        if st.button("📥 Загрузить и обновить память"):
-            if f_import:
-                with st.spinner("Анализируем структуру файла..."):
-                    df_import = safe_read(f_import)
+    if st.button("📥 Загрузить и обновить память", type="primary"):
+        if f_import:
+            with st.spinner("Анализируем структуру файла и разрешаем конфликты..."):
+                df_import = safe_read(f_import)
+                
+                if not df_import.empty:
+                    import re
+                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in [
+                        'текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment'
+                    ]]
+                    corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
+                    tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
+                    cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
                     
-                    if not df_import.empty:
-                        import re
-                        text_cols = [c for c in df_import.columns if str(c).lower().strip() in [
-                            'текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment'
-                        ]]
-                        corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
-                        tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
-                        cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
-                        
-                        if not text_cols:
-                            st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
-                        else:
-                            new_memory_dict = {}
-                            for idx, row in df_import.iterrows():
-                                parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() != 'nan' and str(row[tc]).strip()]
-                                combined_text = " ".join(parts)
-                                if not combined_text: continue
-                                
-                                final_tags = ""
-                                if corr_col and pd.notna(row[corr_col]) and str(row[corr_col]).strip().lower() != 'nan' and str(row[corr_col]).strip():
-                                    final_tags = str(row[corr_col]).strip()
-                                elif cat_columns: 
-                                    found_cats = []
-                                    for c in cat_columns:
-                                        num_match = re.search(r'\d+', str(c))
-                                        if num_match:
-                                            cat_id = int(num_match.group())
-                                            if cat_id in CATEGORIES:
-                                                val = str(row[c]).strip().lower()
-                                                if val in ['1', '1.0', 'v', '+', 'да', 'true']:
-                                                    found_cats.append(CATEGORIES[cat_id])
-                                    if found_cats: final_tags = "; ".join(found_cats)
-                                elif tag_col and pd.notna(row[tag_col]):
-                                    raw_tags = str(row[tag_col])
-                                    nums = re.findall(r'\d+', raw_tags)
-                                    found_cats = [CATEGORIES[int(n)] for n in nums if int(n) in CATEGORIES]
-                                    if found_cats: final_tags = "; ".join(found_cats)
-                                        
-                                if final_tags: new_memory_dict[combined_text] = final_tags
+                    if not text_cols:
+                        st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
+                    else:
+                        new_memory_dict = {}
+                        for idx, row in df_import.iterrows():
+                            parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() != 'nan' and str(row[tc]).strip()]
+                            combined_text = " ".join(parts)
+                            
+                            if not combined_text: continue
+                            
+                            final_tags = ""
+                            if corr_col and pd.notna(row[corr_col]) and str(row[corr_col]).strip().lower() != 'nan' and str(row[corr_col]).strip():
+                                final_tags = str(row[corr_col]).strip()
+                            elif cat_columns: 
+                                found_cats = []
+                                for c in cat_columns:
+                                    num_match = re.search(r'\d+', str(c))
+                                    if num_match:
+                                        cat_id = int(num_match.group())
+                                        if cat_id in CATEGORIES:
+                                            val = str(row[c]).strip().lower()
+                                            if val in ['1', '1.0', 'v', '+', 'да', 'true']:
+                                                found_cats.append(CATEGORIES[cat_id])
+                                if found_cats:
+                                    final_tags = "; ".join(found_cats)
+                            elif tag_col and pd.notna(row[tag_col]):
+                                raw_tags = str(row[tag_col])
+                                nums = re.findall(r'\d+', raw_tags)
+                                found_cats = [CATEGORIES[int(n)] for n in nums if int(n) in CATEGORIES]
+                                if found_cats:
+                                    final_tags = "; ".join(found_cats)
+                                    
+                            if final_tags:
+                                new_memory_dict[combined_text] = final_tags
 
-                            if new_memory_dict:
-                                combined_memory = {str(r.get('Контент', '')).strip(): str(r.get('Правильные теги', '')).strip() for r in records if str(r.get('Контент', '')).strip()}
+                        if new_memory_dict:
+                            try:
+                                client = get_gspread_client()
+                                sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
+                                try:
+                                    ws_mem = sheet.worksheet("Память_ИИ")
+                                except:
+                                    ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="2")
+                                    ws_mem.append_row(["Контент", "Правильные теги"])
+
+                                existing_records = ws_mem.get_all_records()
+                                combined_memory = {str(r.get('Контент', '')).strip(): str(r.get('Правильные теги', '')).strip() for r in existing_records if str(r.get('Контент', '')).strip()}
+                                
                                 combined_memory.update(new_memory_dict)
                                 final_upload = [["Контент", "Правильные теги"]] + [[k, v] for k, v in combined_memory.items()]
                                 
                                 ws_mem.clear()
-                                # Возвращаем наш счетчик в шапку таблицы
-                                final_upload[0].extend(["Последняя выгрузка:", str(last_export_count)])
                                 ws_mem.update('A1', final_upload)
                                 
-                                st.success(f"✅ База обновлена! ИИ выучил {len(new_memory_dict)} новых примеров.")
-                                st.rerun()
-                            else:
-                                st.warning("⚠️ Валидных тегов не найдено.")
-            else:
-                st.warning("Пожалуйста, загрузите файл.")
+                                st.success(f"✅ База знаний успешно обновлена! ИИ выучил новые данные. Всего в памяти: {len(combined_memory)-1} уникальных примеров.")
+                                st.balloons()
+                            except Exception as e:
+                                st.error(f"❌ Ошибка записи в Google Таблицу: {e}")
+                        else:
+                            st.warning("⚠️ Не найдено валидных тегов или корректировок в файле.")
+        else:
+            st.warning("Пожалуйста, загрузите файл.")
             
 elif page == "📊 Дашборд":
     st.title("📊 BI Аналитика")
