@@ -186,6 +186,24 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
     ОПЫТ ОШИБОК: {memory}
     ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "..."}}]}}"""
 
+    # Умный расшифровщик ответов ИИ (понимает и словари, и списки)
+    def parse_ai_response(text):
+        try:
+            clean_text = re.sub(r'```json|```', '', text).strip()
+            parsed = json.loads(clean_text)
+            
+            # Если ИИ послушный и вернул словарь {"results": [...]}
+            if isinstance(parsed, dict):
+                return parsed.get('results', [])
+            # Если ИИ срезал углы и вернул список напрямую [...]
+            elif isinstance(parsed, list):
+                return parsed
+            else:
+                return [{"error": f"Неожиданный формат ответа от ИИ: {type(parsed)}"}]
+        except json.JSONDecodeError:
+            return [{"error": f"Сбой формата JSON: {text}"}]
+
+    # Логика Yandex
     if "yandex" in model:
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
@@ -200,16 +218,14 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
                 if resp.status == 200:
                     res = await resp.json()
                     text = res['result']['alternatives'][0]['message']['text']
-                    try:
-                        return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-                    except json.JSONDecodeError:
-                        return [{"error": f"Сбой JSON от Яндекса: {text}"}]
+                    return parse_ai_response(text) # Вызываем умный парсер
                 else:
                     error_text = await resp.text()
                     return [{"error": f"Ошибка API Яндекса (Статус {resp.status}): {error_text}"}]
         except Exception as e:
             return [{"error": f"Системная ошибка Яндекса: {str(e)}"}]
 
+    # Логика Grok
     elif model == "grok":
         url = "https://api.x.ai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
@@ -223,15 +239,13 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
                 if resp.status == 200:
                     res = await resp.json()
                     text = res['choices'][0]['message']['content']
-                    try:
-                        return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-                    except json.JSONDecodeError:
-                        return [{"error": f"Сбой JSON от Grok: {text}"}]
+                    return parse_ai_response(text) # Вызываем умный парсер
                 else:
                     error_text = await resp.text()
                     return [{"error": f"Ошибка API Grok (Статус {resp.status}): {error_text}"}]
         except Exception as e:
             return [{"error": f"Системная ошибка Grok: {str(e)}"}]
+            
     return []
     
 async def fetch_ai_crosscheck(session, batch, memory):
