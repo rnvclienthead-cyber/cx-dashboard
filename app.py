@@ -187,21 +187,16 @@ async def fetch_ai_tags(session, batch, memory, model="yandex"):
     ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "..."}}]}}"""
 
     # Логика Yandex
-    if model == "yandex":
+    if "yandex" in model:
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
+        
+        # Определяем, какую версию дергать: Lite или Pro
+        yandex_model_name = "yandexgpt-lite" if model == "yandex-lite" else "yandexgpt"
+        
         payload = {
-            "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
+            "modelUri": f"gpt://{FOLDER_ID}/{yandex_model_name}/latest",
             "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
-            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
-        }
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status == 200:
-                    res = await resp.json()
-                    text = res['result']['alternatives'][0]['message']['text']
-                    return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
-        except: return []
 
     # Логика Grok
     elif model == "grok":
@@ -350,16 +345,23 @@ elif page == "🔬 ИИ Тегирование":
         
         if not unprocessed.empty:
             total_rows = len(unprocessed)
-            est_cost = total_rows * 0.40 # Примерно 40 копеек за запрос к YandexGPT
+            
+            col1, col2 = st.columns(2)
+            batch_size = col1.slider("Размер пачки", 5, 50, 10, key="batch_tag")
+            model_choice = col2.radio("Модель:", ["YandexGPT Lite (Быстро и дешево)", "YandexGPT Pro (Умнее)", "Grok (Grok-beta)"], key="mod_tag")
+            
+            # Присваиваем правильный ключ для функции
+            if "Lite" in model_choice: model_key = "yandex-lite"
+            elif "Pro" in model_choice: model_key = "yandex-pro"
+            else: model_key = "grok"
+
+            # Динамический расчет (примерные тарифы Яндекса за запрос)
+            cost_per_row = 0.08 if model_key == "yandex-lite" else 0.40 if model_key == "yandex-pro" else 0.50
+            est_cost = total_rows * cost_per_row
             
             st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
             st.caption("Баланс: Yandex API Billing можно проверить в консоли Yandex Cloud (раздел Биллинг).")
             
-            col1, col2 = st.columns(2)
-            batch_size = col1.slider("Размер пачки", 5, 50, 10, key="batch_tag")
-            model_choice = col2.radio("Модель:", ["YandexGPT (yandex)", "Grok (grok)"], key="mod_tag")
-            model_key = "yandex" if "Yandex" in model_choice else "grok"
-
             if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
