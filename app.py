@@ -204,32 +204,33 @@ def process_claims_and_returns(claims_files, returned_files):
 
 def process_litestat(litestat_files):
     report = []
-    # Читаем все файлы и отбрасываем пустые (если не прочитались)
     all_o = [df for df in [safe_read(f) for f in litestat_files] if not df.empty]
     
     if not all_o:
-        report.append("❌ Ошибка: Не удалось прочитать ни один файл Litestat.")
+        report.append("❌ Ошибка: Не удалось прочитать файлы.")
         return pd.DataFrame(), report
         
     df_o = pd.concat(all_o, ignore_index=True)
-    report.append(f"📥 Litestat: Успешно прочитано {len(df_o)} сырых строк.")
     
-    # Расширенный поиск колонок (на случай, если Litestat поменял названия)
     sku_col = next((c for c in df_o.columns if 'артикул' in str(c).lower()), None)
     qty_col = next((c for c in df_o.columns if any(kw in str(c).lower() for kw in ['заказано', 'количество', 'кол-во'])), None)
     
     if sku_col and qty_col:
-        # Убираем возможные пробелы и мусор из чисел
+        # Очистка данных
         df_o[qty_col] = pd.to_numeric(df_o[qty_col].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce').fillna(0)
+        
+        # ФИЛЬТР: Убираем строки 'Итого', 'Всего' и пустые артикулы
+        df_o = df_o[df_o[sku_col].notna()]
+        df_o = df_o[~df_o[sku_col].astype(str).str.lower().str.contains('итого|всего|total', na=False)]
         
         df_ord_agg = df_o.groupby(sku_col)[qty_col].sum().reset_index()
         df_ord_agg.columns = ['Артикул', 'Заказы шт.']
-        report.append(f"✅ Успешно агрегировано по {len(df_ord_agg)} уникальным артикулам.")
+        
+        total_sum = df_ord_agg['Заказы шт.'].sum()
+        report.append(f"✅ Успешно агрегировано. Общая сумма заказов: **{int(total_sum)} шт.**")
         return df_ord_agg, report
     else:
-        # Выводим подсказку, какие колонки скрипт вообще увидел
-        cols_preview = ", ".join([str(c) for c in df_o.columns[:5]])
-        report.append(f"❌ Ошибка: В файле не найдены колонки 'Артикул' или 'Заказано'. Вижу такие колонки: [{cols_preview}...]")
+        report.append("❌ Ошибка: Колонки не найдены.")
         return pd.DataFrame(), report
 
 # ==========================================
@@ -285,7 +286,7 @@ if page == "🤖 Робот-Загрузчик":
 
     st.divider()
 
-    # --- БЛОК 2: LITESTAT ---
+   # --- БЛОК 2: LITESTAT ---
     st.markdown("### 2. Загрузка Заказов (Litestat)")
     f_litestat = st.file_uploader("📂 Загрузите отчет Litestat", accept_multiple_files=True, key="litestat")
     
@@ -297,9 +298,12 @@ if page == "🤖 Робот-Загрузчик":
                 if not orders_tab.empty:
                     client = get_gspread_client()
                     ws_ord = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Заказы")
-                    ws_ord.clear() # Литстат перезаписывает лист для актуальной аналитики
+                    
+                    # ПОЛНАЯ ОЧИСТКА ПЕРЕД ЗАПИСЬЮ
+                    ws_ord.clear() 
+                    
                     ws_ord.update('A1', [orders_tab.columns.tolist()] + orders_tab.values.tolist())
-                    st.success("Данные по заказам обновлены в Google Sheets!")
+                    st.success(f"Данные обновлены! Сумма в Google Таблице: {int(orders_tab['Заказы шт.'].sum())}")
                     
                 st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
         else:
