@@ -37,7 +37,7 @@ CATEGORIES = {
 
 COLUMN_NAMES_RU = {
     'claim_type': 'Источник заявки', 'status': 'Решение', 'status_ex': 'Статус товара',
-    'nm_id': 'Артикул WB (Заявка)', 'user_comment': 'Комментарий покупателя', 
+    'nm_id': 'Артикул WB (Заявка)', 'user_comment': 'Комментар покупателя', 
     'wb_comment': 'Ответ покупателю', 'dt': 'Дата заявки', 'imt_name': 'Название товара', 
     'order_dt': 'Дата заказа', 'dt_update': 'Дата рассмотрения', 'photos': 'Фотографии', 
     'video_paths': 'Видео', 'price': 'Цена', 'srid': 'ID заказа (SRID)', 'supplierArticle': 'Артикул продавца', 
@@ -177,23 +177,23 @@ def process_litestat(litestat_files):
         return pd.DataFrame(), report
         
 # ==========================================
-# 4. ИИ ДВИЖОК
+# 4. ИИ ДВИЖОК (РАЗДЕЛЬНЫЙ)
 # ==========================================
-async def fetch_ai_analysis(session, batch, memory, model="yandex", is_check=False):
+async def fetch_ai_tags(session, batch, memory, model="yandex"):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
-    
-    if not is_check:
-        system = f"Ты эксперт качества. Размети отзывы по категориям: {list(CATEGORIES.values())}. ПРАВИЛО 12: Если есть жалоба, но рейтинг 4-5 = Кат 12. ОПЫТ: {memory}. ОТВЕТЬ JSON: {{\"results\":[{{\"id\":\"...\",\"tags\":[\"Категория\"],\"reasoning\":\"...\"}}]}}"
-    else:
-        system = "Ты контролер. Проверь теги ИИ. Исправь явные ошибки в классификации брака. ОТВЕТЬ СТРОГО JSON: {\"results\":[{\"id\":\"...\",\"tags\":[\"Категория\"],\"reasoning\":\"...\"}]}"
+    system_prompt = f"""Ты эксперт контроля качества. Размети отзывы по категориям: {list(CATEGORIES.values())}.
+    ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект (или рейтинг 4-5) - СТРОГО Категория 12.
+    ОПЫТ ОШИБОК: {memory}
+    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "..."}}]}}"""
 
+    # Логика Yandex
     if model == "yandex":
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
         payload = {
             "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
             "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
-            "messages": [{"role": "system", "text": system}, {"role": "user", "text": content}]
+            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
         }
         try:
             async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
@@ -203,13 +203,14 @@ async def fetch_ai_analysis(session, batch, memory, model="yandex", is_check=Fal
                     return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
         except: return []
 
+    # Логика Grok
     elif model == "grok":
         url = "https://api.x.ai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": "grok-beta",
             "temperature": 0.1,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}]
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
         }
         try:
             async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
@@ -220,26 +221,54 @@ async def fetch_ai_analysis(session, batch, memory, model="yandex", is_check=Fal
         except: return []
     return []
 
-async def run_ai_batch_processing(df_to_tag, model_choice, use_crosscheck=False):
+async def fetch_ai_crosscheck(session, batch, memory):
+    content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
+    system_prompt = f"""Ты строгий аудитор. Проверь теги, которые уже поставила первая нейросеть. 
+    Учитывай наш опыт: {memory}.
+    Если есть логическая ошибка (например, тег 'Производственный дефект', а суть в 'не подошел цвет'), исправь на правильную категорию.
+    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "Исправлено: ..."}}]}}"""
+    
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "grok-beta",
+        "temperature": 0.1,
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
+    }
+    try:
+        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+            if resp.status == 200:
+                res = await resp.json()
+                text = res['choices'][0]['message']['content']
+                return json.loads(re.sub(r'```json|```', '', text).strip()).get('results', [])
+    except: return []
+
+async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
     memory = load_ai_memory()
     results = []
     async with aiohttp.ClientSession() as session:
         batch = []
         for idx, row in df_to_tag.iterrows():
-            batch.append({"id": idx, "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
+            if mode == "tagging":
+                batch.append({"id": idx, "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
+            else:
+                # В режиме проверки передаем еще и старое обоснование
+                batch.append({"id": idx, "text": f"Текст: {row.get('Текст_Клиента','')}. Обоснование ИИ 1: {row.get('Обоснование','')}"})
+                
             if len(batch) >= 10:
-                res = await fetch_ai_analysis(session, batch, memory, model_choice)
-                if use_crosscheck and res:
-                    res = await fetch_ai_analysis(session, res, memory, model="grok", is_check=True)
-                results.extend(res)
+                if mode == "tagging": res = await fetch_ai_tags(session, batch, memory, model_choice)
+                else: res = await fetch_ai_crosscheck(session, batch, memory)
+                
+                if res: results.extend(res)
                 batch = []
+                
         if batch:
-            res = await fetch_ai_analysis(session, batch, memory, model_choice)
-            if use_crosscheck and res:
-                res = await fetch_ai_analysis(session, res, memory, model="grok", is_check=True)
-            results.extend(res)
+            if mode == "tagging": res = await fetch_ai_tags(session, batch, memory, model_choice)
+            else: res = await fetch_ai_crosscheck(session, batch, memory)
+            if res: results.extend(res)
+            
     return results
-
+    
 # ==========================================
 # 5. ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
@@ -299,50 +328,112 @@ if page == "🤖 Робот-Загрузчик":
 # 6. РУЧНАЯ МОДЕРАЦИЯ
 # ==========================================
         
-elif page == "🔬 ИИ Тегирование":
-    st.title("🔬 ИИ Тегирование")
-    col1, col2 = st.columns(2)
-    batch_size = col1.slider("Размер пачки (строк за раз)", 5, 50, 10)
-    use_crosscheck = col2.checkbox("Включить перекрестную проверку (Grok)")
-    model_choice = st.radio("Базовая нейросеть:", ["YandexGPT (yandex)", "Grok (grok)"])
-    model_key = "yandex" if "Yandex" in model_choice else "grok"
+# Вспомогательная функция для динамического поиска колонок
+def get_col_letter(col_idx):
+    if col_idx < 26: return chr(ord('A') + col_idx)
+    return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
-    if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ"):
-        with st.spinner("Работаем..."):
-            client = get_gspread_client()
-            ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-            df = pd.DataFrame(ws.get_all_records())
+elif page == "🔬 ИИ Тегирование":
+    st.title("🔬 ИИ Тегирование и Проверка")
+    
+    client = get_gspread_client()
+    ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
+    headers = ws.row_values(1)
+    header_map = {name.strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
+    
+    df = pd.DataFrame(ws.get_all_records())
+    
+    t1, t2 = st.tabs(["1️⃣ Первичная разметка", "2️⃣ Перекрестная проверка (Grok)"])
+    
+    with t1:
+        st.subheader("Разметка новых заявок")
+        unprocessed = df[df.get('Обоснование', '') == '']
+        
+        if not unprocessed.empty:
+            total_rows = len(unprocessed)
+            est_cost = total_rows * 0.40 # Примерно 40 копеек за запрос к YandexGPT
             
-            unprocessed = df[df['Обоснование'] == '']
-            if unprocessed.empty: st.success("Всё уже размечено!")
-            else:
-                st.warning(f"Найдено заявок без тегов: {len(unprocessed)}. Ждите...")
+            st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
+            st.caption("Баланс: Yandex API Billing можно проверить в консоли Yandex Cloud (раздел Биллинг).")
+            
+            col1, col2 = st.columns(2)
+            batch_size = col1.slider("Размер пачки", 5, 50, 10, key="batch_tag")
+            model_choice = col2.radio("Модель:", ["YandexGPT (yandex)", "Grok (grok)"], key="mod_tag")
+            model_key = "yandex" if "Yandex" in model_choice else "grok"
+
+            if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                for i in range(0, len(unprocessed), batch_size):
-                    chunk = unprocessed.iloc[i:i+batch_size]
-                    status_text.text(f"Обработка строк {i} - {i+len(chunk)} из {len(unprocessed)}...")
+                try:
+                    for i in range(0, total_rows, batch_size):
+                        chunk = unprocessed.iloc[i:i+batch_size]
+                        
+                        progress = int(((i + len(chunk)) / total_rows) * 100)
+                        status_text.text(f"⏳ Прогресс тегирования: {progress}% (строки {i} из {total_rows})")
+                        
+                        results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, mode="tagging"))
+                        
+                        for res in results:
+                            # +2 из-за сдвига индексов и заголовка
+                            row_idx = int(res['id']) + 2 
+                            
+                            # Динамическая запись тегов
+                            for tag in res.get('tags', []):
+                                cat_num = tag.split(':')[0].replace('Категория ', '').strip()
+                                target_header = f"Кат {cat_num}"
+                                if target_header in header_map:
+                                    ws.update(f"{header_map[target_header]}{row_idx}", [['V']])
+                            
+                            # Динамическая запись обоснования
+                            if "Обоснование" in header_map:
+                                ws.update(f"{header_map['Обоснование']}{row_idx}", [[res.get('reasoning', '')]])
+                                
+                        progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
                     
-                    results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, use_crosscheck))
-                    
-                    for res in results:
-                        row_idx = int(res['id']) + 2
-                        for tag in res.get('tags', []):
-                            cat_num = tag.split(':')[0].replace('Категория ', '')
-                            try:
-                                col_letter = chr(ord('F') - 1 + int(cat_num))
-                                ws.update(f'{col_letter}{row_idx}', [['V']])
-                            except: pass
-                        ws.update(f'S{row_idx}', [[res.get('reasoning', '')]])
-                    progress_bar.progress(min(1.0, (i + len(chunk)) / len(unprocessed)))
-                st.success("✅ Тегирование завершено!")
+                    st.success("✅ Тегирование успешно завершено!")
+                except Exception as e:
+                    st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН: Ошибка сервера/API: {e}")
+        else:
+            st.success("🎉 Все строки уже размечены!")
 
-elif page == "📝 Ручная проверка":
-    st.title("📋 Ручная проверка возвратов")
+    with t2:
+        st.subheader("Глубокая проверка (Аудит от Grok)")
+        to_check = df[(df.get('Обоснование', '') != '') & (df.get('Корректировка', '') == '')]
+        
+        if not to_check.empty:
+            total_check = len(to_check)
+            st.info(f"Найдено **{total_check}** размеченных строк, ожидающих проверки.")
+            if st.button("🔎 ЗАПУСТИТЬ АУДИТ"):
+                progress_bar2 = st.progress(0)
+                status_text2 = st.empty()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    for i in range(0, total_check, 10):
+                        chunk = to_check.iloc[i:i+10]
+                        progress = int(((i + len(chunk)) / total_check) * 100)
+                        status_text2.text(f"⏳ Прогресс аудита: {progress}%")
+                        
+                        results = loop.run_until_complete(run_ai_batch_processing(chunk, "grok", mode="crosscheck"))
+                        
+                        for res in results:
+                            row_idx = int(res['id']) + 2 
+                            if "Обоснование" in header_map:
+                                ws.update(f"{header_map['Обоснование']}{row_idx}", [[res.get('reasoning', '')]])
+                                
+                        progress_bar2.progress(min(1.0, (i + len(chunk)) / total_check))
+                    st.success("✅ Аудит завершен!")
+                except Exception as e:
+                    st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН: Ошибка: {e}")
+        else:
+            st.success("Нет строк для перекрестной проверки.")
+
+elif page == "📝 Модерация":
+    st.title("📋 Модерация (Ручная проверка)")
     st.markdown("Проверьте теги, поставленные ИИ. Выберите подходящие категории и нажмите «Сохранить».")
 
     client = get_gspread_client()
@@ -364,20 +455,25 @@ elif page == "📝 Ручная проверка":
                 with col_info:
                     st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
                     st.markdown(f"<div class='client-text'>{row.get('Текст_Клиента', 'Нет текста')}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div class='ai-reason'>🤖 Обоснование ИИ: {row.get('Обоснование', '')}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='ai-reason'>🤖 Обоснование: {row.get('Обоснование', '')}</div>", unsafe_allow_html=True)
                 
                 with col_photos:
                     photos_raw = str(row.get('Фотографии', ''))
-                    if photos_raw:
-                        photos_html = "".join([f'<img src="{f"https:{l}" if l.startswith("//") else l}" class="img-zoom">' for l in photos_raw.split(';')[:5] if l.strip()])
-                        st.markdown(photos_html, unsafe_allow_html=True) if photos_html else st.write("Нет медиафайлов")
+                    # Вытаскиваем чистые ссылки (избавляемся от формул и разделителей-точек с запятой)
+                    urls = re.findall(r'https?://[^\s"\'\;]+', photos_raw)
+                    
+                    if urls:
+                        photos_html = "".join([f'<img src="{url}" class="img-zoom">' for url in urls[:5]])
+                        st.markdown(photos_html, unsafe_allow_html=True)
+                    else:
+                        st.write("Нет медиафайлов")
                 
                 with col_action:
                     selected_cats = []
                     for cat in cats_list:
                         if st.checkbox(cat, key=f"cat_{row_index_gs}_{cat}"): selected_cats.append(cat)
                     
-                    other_text = st.text_input("Другая причина / Комментарий", key=f"other_{row_index_gs}")
+                    other_text = st.text_input("Другая причина", key=f"other_{row_index_gs}")
                     if other_text: selected_cats.append(other_text.strip())
                     
                     if st.button("💾 Сохранить", key=f"btn_{row_index_gs}", type="primary", use_container_width=True):
@@ -386,13 +482,14 @@ elif page == "📝 Ручная проверка":
                         
                         headers = ws.row_values(1)
                         if "Корректировка" in headers:
-                            col_letter = chr(ord('A') + headers.index("Корректировка"))
+                            col_letter = get_col_letter(headers.index("Корректировка"))
                             ws.update(f'{col_letter}{row_index_gs}', [[final_string]])
                             
                             ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
                             ws_mem.append_row([row.get('Текст_Клиента', ''), final_string])
                             
-                            st.success("Сохранено в базу и память ИИ!")
+                            st.success("Сохранено в базу!")
+                            st.rerun()
                         else: st.error("Колонка 'Корректировка' не найдена.")
                 st.markdown('</div>', unsafe_allow_html=True)
     else: st.success("🎉 Все новые возвраты проверены!")
