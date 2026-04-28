@@ -5,3 +5,5 @@ plotly
 google-auth
 aiohttp
 openpyxl
+python-calamine
+xlrd
