@@ -577,8 +577,12 @@ elif page == "🧠 Обучение ИИ":
     records = ws_mem.get_all_records()
     current_count = len(records)
     
-    # Читаем, сколько было строк при последней генерации JSONL
-    last_export_str = ws_mem.acell('D1').value
+   # Читаем счетчик, а если столбца D еще нет — просто ставим 0
+    try:
+        last_export_str = ws_mem.acell('D1').value
+    except Exception:
+        last_export_str = "0"
+        
     last_export_count = int(last_export_str) if str(last_export_str).isdigit() else 0
     
     new_examples = current_count - last_export_count
