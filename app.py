@@ -829,15 +829,29 @@ elif page == "📊 Дашборд":
         df = pd.DataFrame(ws_returns.get_all_records())
         
         if not df.empty:
-            # --- ИНТЕГРАЦИЯ ИНВОЙСОВ (Создаем лист, если его нет) ---
+           # --- ИНТЕГРАЦИЯ ИНВОЙСОВ ИЗ ДРУГОЙ ТАБЛИЦЫ ---
             try:
-                ws_inv = sheet.worksheet("инвойсы_шлюз")
-            except gspread.exceptions.WorksheetNotFound:
-                ws_inv = sheet.add_worksheet(title="инвойсы_шлюз", rows="100", cols="5")
-                ws_inv.append_row(["Артикул", "Инвойс", "Номер поставки"])
-                st.info("Лист 'инвойсы_шлюз' автоматически создан. Заполните его данными.")
+                # Берем ID второй таблицы из секретов
+                INVOICE_SHEET_ID = st.secrets["SPREADSHEET_ID_INVOICES"]
+                # Открываем второй файл
+                sheet_inv = client.open_by_key(INVOICE_SHEET_ID)
+                # Укажите здесь точное название вкладки (листа) внутри файла с инвойсами
+                # Обычно это "Лист 1" или "Sheet1", если вы его не переименовывали
+                ws_inv = sheet_inv.worksheet("Лист 1") 
+                df_inv = pd.DataFrame(ws_inv.get_all_records())
                 
-            df_inv = pd.DataFrame(ws_inv.get_all_records())
+                if not df_inv.empty and 'Артикул' in df_inv.columns:
+                    df_inv_unique = df_inv.drop_duplicates(subset=['Артикул'])
+                    if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
+                    if 'Номер поставки' in df.columns: df = df.drop(columns=['Номер поставки'])
+                    
+                    cols_to_merge = ['Артикул']
+                    if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
+                    if 'Номер поставки' in df_inv.columns: cols_to_merge.append('Номер поставки')
+                    df = df.merge(df_inv_unique[cols_to_merge], on='Артикул', how='left')
+                    
+            except Exception as e:
+                st.warning(f"Не удалось подтянуть данные из файла инвойсов: {e}")
             if not df_inv.empty and 'Артикул' in df_inv.columns:
                 df_inv_unique = df_inv.drop_duplicates(subset=['Артикул'])
                 if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
