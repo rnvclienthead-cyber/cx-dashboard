@@ -106,6 +106,21 @@ def load_ai_memory():
     except: pass
     return "Опыта пока нет."
 
+def add_system_log(action, status, details=""):
+    try:
+        client = get_gspread_client()
+        sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
+        try:
+            ws_log = sheet.worksheet("Логи")
+        except:
+            ws_log = sheet.add_worksheet(title="Логи", rows="1000", cols="4")
+            ws_log.append_row(["Дата и Время", "Действие", "Статус", "Детали"])
+
+        now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        ws_log.append_row([now, action, status, details])
+    except Exception as e:
+        print(f"Ошибка записи лога: {e}") # Если лог не запишется, приложение не сломается
+
 # ==========================================
 # 3. ОБРАБОТКА ДАННЫХ
 # ==========================================
@@ -304,7 +319,7 @@ def get_col_letter(col_idx):
     if col_idx < 26: return chr(ord('A') + col_idx)
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
-page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Дашборд"])
+page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Дашборд", "📜 Системный Журнал"])
 
 if page == "🤖 Робот-Загрузчик":
     st.title("🤖 Робот-Загрузчик")
@@ -398,13 +413,15 @@ elif page == "🔬 ИИ Тегирование":
             
             st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
             
-            if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
+        if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 log_container = st.container()
                 
-                # Словарь для перевода текста ИИ в номера категорий
                 reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
+                
+                # Записываем старт в Системный Журнал
+                add_system_log("Запуск тегирования", "INFO", f"Найдено строк: {total_rows}. Размер пачки: {batch_size}. Нейросеть: {model_key}")
                 
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -415,40 +432,36 @@ elif page == "🔬 ИИ Тегирование":
                         progress = int(((i + len(chunk)) / total_rows) * 100)
                         status_text.text(f"⏳ Прогресс: {progress}% (Обработка пачки {i} из {total_rows})")
                         
-                        # Модифицируем чанк, чтобы ИИ видел уникальные метки строк
                         chunk_to_send = chunk.copy()
-                        # Используем префикс REF_, чтобы ИИ не сбивал нумерацию
                         results = loop.run_until_complete(run_ai_batch_processing(chunk_to_send, model_key, mode="tagging"))
                         
-                        # Подготовка данных для пакетного обновления (Batch Update)
-                        # Мы соберем все изменения и отправим одним запросом на всю пачку
                         batch_updates = []
+                        has_error = False
                         
                         with log_container:
                             with st.expander(f"Лог обработки (Строки {i} - {i+len(chunk)})"):
                                 if results: st.json(results)
-                                else: st.error("❌ ИИ вернул пустой ответ")
+                                else: 
+                                    st.error("❌ ИИ вернул пустой ответ")
+                                    has_error = True
 
                         for res in results:
-                            if "error" in res: continue
-                            
-                            # Извлекаем ID и чистим его от префикса REF_
+                            if "error" in res: 
+                                has_error = True
+                                continue
+                                
                             raw_id = str(res.get('id') or res.get('ID') or '')
                             clean_id = re.sub(r'[^\d]', '', raw_id)
                             
                             if not clean_id: continue
-                            row_idx = int(clean_id) + 2 # Глобальный индекс строки в Google Sheets
+                            row_idx = int(clean_id) + 2 
                             
-                            # 1. Обработка категорий
                             for tag in res.get('tags', []):
                                 cat_num = None
                                 clean_tag = str(tag).strip().lower()
                                 
-                                # Ищем соответствие в словаре
-                                if clean_tag in reverse_cats:
-                                    cat_num = reverse_cats[clean_tag]
+                                if clean_tag in reverse_cats: cat_num = reverse_cats[clean_tag]
                                 else:
-                                    # Запасной вариант: поиск цифры в тексте тега
                                     num_match = re.search(r'\d+', clean_tag)
                                     if num_match: cat_num = int(num_match.group())
                                 
@@ -458,20 +471,26 @@ elif page == "🔬 ИИ Тегирование":
                                         col_letter = header_map_clean[target_header]
                                         batch_updates.append({'range': f"{col_letter}{row_idx}", 'values': [['1']]})
 
-                            # 2. Обработка обоснования
                             if "обоснование" in header_map_clean:
                                 col_reason = header_map_clean['обоснование']
                                 batch_updates.append({'range': f"{col_reason}{row_idx}", 'values': [[res.get('reasoning', '')]]})
 
-                        # ОТПРАВКА ВСЕХ ДАННЫХ ПАЧКИ ОДНИМ ЗАПРОСОМ
                         if batch_updates:
                             ws.batch_update(batch_updates)
+                        
+                        # Пишем результат обработки пачки в облако
+                        if has_error:
+                            add_system_log("Обработка пачки", "WARNING", f"Строки {i} - {i+len(chunk)} обработаны с ошибками API.")
+                        else:
+                            add_system_log("Обработка пачки", "SUCCESS", f"Строки {i} - {i+len(chunk)} успешно размечены.")
                         
                         progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
                     
                     st.success("✅ Тегирование успешно завершено! Все данные синхронизированы.")
+                    add_system_log("Финиш тегирования", "SUCCESS", f"Все {total_rows} строк успешно обработаны.")
                 except Exception as e:
                     st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН: {e}")
+                    add_system_log("КРИТИЧЕСКАЯ ОШИБКА", "ERROR", f"Процесс прерван на строке {i}. Ошибка: {str(e)}")
                     
     with t2:
         st.subheader("Глубокая проверка (Аудит от Grok)")
@@ -681,3 +700,36 @@ elif page == "📊 Дашборд":
                 html += f"<tr><td>{r.get('Дата','')}</td><td>{r.get('Артикул','')}</td><td>{r.get('Текст_Клиента','')}</td><td>{photos}</td></tr>"
             st.markdown(html + '</table>', unsafe_allow_html=True)
     except Exception as e: st.warning(f"Загрузите файлы через Робота! ({e})")
+
+# ==========================================
+# 8. СИСТЕМНЫЙ ЖУРНАЛ
+# ==========================================
+
+elif page == "📜 Системный Журнал":
+    st.title("📜 Системный Журнал (Черный ящик)")
+    st.markdown("Здесь сохраняется хронология всех процессов. Если Макбук уснул или пропал интернет, вы всегда сможете посмотреть, на каком моменте остановилась работа.")
+    
+    if st.button("🔄 Обновить журнал"):
+        st.rerun()
+
+    try:
+        client = get_gspread_client()
+        sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
+        ws_log = sheet.worksheet("Логи")
+        records = ws_log.get_all_records()
+        
+        if records:
+            df_logs = pd.DataFrame(records)
+            # Переворачиваем таблицу, чтобы свежие логи были сверху
+            df_logs = df_logs.iloc[::-1].reset_index(drop=True)
+            
+            # Красивая раскраска статусов
+            def color_status(val):
+                color = 'green' if val == 'SUCCESS' else 'red' if val == 'ERROR' else 'orange' if val == 'WARNING' else 'blue'
+                return f'color: {color}; font-weight: bold;'
+                
+            st.dataframe(df_logs.style.applymap(color_status, subset=['Статус']), use_container_width=True, height=600)
+        else:
+            st.info("Журнал пуст. Запустите тегирование, чтобы появились первые записи.")
+    except Exception as e:
+        st.warning("Лист 'Логи' еще не создан. Он появится автоматически при первом запуске тегирования.")
