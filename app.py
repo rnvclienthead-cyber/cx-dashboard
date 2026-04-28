@@ -608,65 +608,93 @@ elif page == "📝 Модерация":
     st.title("📋 Модерация (Ручная проверка)")
     st.markdown("Проверьте теги, поставленные ИИ. Выберите подходящие категории и нажмите «Сохранить».")
 
-    client = get_gspread_client()
-    ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-    df = pd.DataFrame(ws.get_all_records())
-    
-    # Теперь мы показываем на модерации строки, где есть Аудит, но еще нет вашей ручной Корректировки
-    if 'Аудит' in df.columns and 'Корректировка' in df.columns:
-        to_review = df[(df['Аудит'] != '') & (df['Корректировка'] == '')].head(20)
-    else: 
-        to_review = pd.DataFrame()
+    try:
+        client = get_gspread_client()
+        ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
+        
+        # Получаем данные и чистим заголовки от случайных пробелов
+        data = ws.get_all_values()
+        if len(data) > 1:
+            headers = [str(h).strip() for h in data[0]]
+            df = pd.DataFrame(data[1:], columns=headers)
+            
+            # Защита от ошибок: если колонок еще нет в таблице, временно создаем их в памяти
+            if 'Аудит' not in df.columns: df['Аудит'] = ''
+            if 'Комментарий' not in df.columns: df['Комментарий'] = ''
+            if 'Корректировка' not in df.columns: df['Корректировка'] = ''
 
-    if not to_review.empty:
-        cats_list = list(CATEGORIES.values())
-        for idx, row in to_review.iterrows():
-            row_index_gs = idx + 2 
-            with st.container():
-                st.markdown('<div class="review-card">', unsafe_allow_html=True)
-                col_info, col_photos, col_action = st.columns([2, 1.5, 1.5])
-                
-                with col_info:
-                    st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
-                    st.markdown(f"<div class='client-text'>{row.get('Текст_Клиента', 'Нет текста')}</div>", unsafe_allow_html=True)
-                    # Выводим Аудит и Комментарий от Grok
-                    st.markdown(f"<div class='ai-reason'>🕵️‍♂️ <b>Аудит:</b> {row.get('Аудит', '')} <br> 📝 <b>Комментарий ИИ:</b> {row.get('Комментарий', '')}</div>", unsafe_allow_html=True)
-                
-                with col_photos:
-                    photos_raw = str(row.get('Фотографии', ''))
-                    urls = re.findall(r'https?://[^\s"\'\;]+', photos_raw)
-                    
-                    if urls:
-                        photos_html = "".join([f'<img src="{url}" class="img-zoom">' for url in urls[:5]])
-                        st.markdown(photos_html, unsafe_allow_html=True)
-                    else:
-                        st.write("Нет медиафайлов")
-                
-                with col_action:
-                    selected_cats = []
-                    for cat in cats_list:
-                        if st.checkbox(cat, key=f"cat_{row_index_gs}_{cat}"): selected_cats.append(cat)
-                    
-                    other_text = st.text_input("Другая причина", key=f"other_{row_index_gs}")
-                    if other_text: selected_cats.append(other_text.strip())
-                    
-                    if st.button("💾 Сохранить", key=f"btn_{row_index_gs}", type="primary", use_container_width=True):
-                        final_string = "; ".join(selected_cats)
-                        if not final_string: final_string = "Ок (Подтверждено)"
+            # Функция: проверяет, есть ли хотя бы один тег от ИИ
+            def has_tags(row):
+                return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
+            
+            df['has_any_tag'] = df.apply(has_tags, axis=1)
+
+            # УМНЫЙ ФИЛЬТР: Берем те строки, где теги ЕСТЬ, а вашей ручной Корректировки еще НЕТ
+            to_review = df[(df['has_any_tag']) & (df['Корректировка'].astype(str).str.strip() == '')].head(20)
+
+            if not to_review.empty:
+                cats_list = list(CATEGORIES.values())
+                for idx, row in to_review.iterrows():
+                    row_index_gs = idx + 2 
+                    with st.container():
+                        st.markdown('<div class="review-card" style="border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px;">', unsafe_allow_html=True)
+                        col_info, col_photos, col_action = st.columns([2, 1.5, 1.5])
                         
-                        headers = ws.row_values(1)
-                        if "Корректировка" in headers:
-                            col_letter = get_col_letter(headers.index("Корректировка"))
-                            ws.update(f'{col_letter}{row_index_gs}', [[final_string]])
+                        with col_info:
+                            st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
+                            st.markdown(f"<div style='margin-bottom: 10px;'>{row.get('Текст_Клиента', 'Нет текста')}</div>", unsafe_allow_html=True)
                             
-                            ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
-                            ws_mem.append_row([row.get('Текст_Клиента', ''), final_string])
+                            # Выводим данные аудита, только если они есть
+                            audit_text = str(row.get('Аудит', '')).strip()
+                            comment_text = str(row.get('Комментарий', '')).strip()
+                            if audit_text:
+                                st.markdown(f"<div style='background-color: #f0f2f6; padding: 10px; border-radius: 5px;'>🕵️‍♂️ <b>Аудит:</b> {audit_text} <br> 📝 <b>Комментарий ИИ:</b> {comment_text}</div>", unsafe_allow_html=True)
+                        
+                        with col_photos:
+                            photos_raw = str(row.get('Фотографии', ''))
+                            urls = re.findall(r'https?://[^\s"\'\;]+', photos_raw)
                             
-                            st.success("Сохранено в базу!")
-                            st.rerun()
-                        else: st.error("Колонка 'Корректировка' не найдена.")
-                st.markdown('</div>', unsafe_allow_html=True)
-    else: st.success("🎉 Все новые возвраты проверены!")
+                            if urls:
+                                photos_html = "".join([f'<img src="{url}" style="zoom: 30%; margin-right: 5px; border-radius: 4px;">' for url in urls[:5]])
+                                st.markdown(photos_html, unsafe_allow_html=True)
+                            else:
+                                st.write("Нет медиафайлов")
+                        
+                        with col_action:
+                            selected_cats = []
+                            for cat in cats_list:
+                                if st.checkbox(cat, key=f"cat_{row_index_gs}_{cat}"): selected_cats.append(cat)
+                            
+                            other_text = st.text_input("Другая причина", key=f"other_{row_index_gs}")
+                            if other_text: selected_cats.append(other_text.strip())
+                            
+                            if st.button("💾 Сохранить", key=f"btn_{row_index_gs}", type="primary", use_container_width=True):
+                                final_string = "; ".join(selected_cats)
+                                if not final_string: final_string = "Ок (Подтверждено)"
+                                
+                                # Ищем реальные заголовки в таблице для записи
+                                current_headers = ws.row_values(1)
+                                current_headers_clean = [str(h).strip() for h in current_headers]
+                                
+                                if "Корректировка" in current_headers_clean:
+                                    col_letter = get_col_letter(current_headers_clean.index("Корректировка"))
+                                    ws.update(f'{col_letter}{row_index_gs}', [[final_string]])
+                                    
+                                    # Отправляем в память
+                                    ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
+                                    ws_mem.append_row([row.get('Текст_Клиента', ''), final_string])
+                                    
+                                    st.success("Сохранено в базу!")
+                                    st.rerun()
+                                else: 
+                                    st.error("Колонка 'Корректировка' не найдена в Google Таблице. Пожалуйста, создайте её!")
+                        st.markdown('</div>', unsafe_allow_html=True)
+            else: 
+                st.success("🎉 Все размеченные возвраты проверены! (Ждем новых заявок от ИИ)")
+        else:
+            st.warning("Таблица пуста.")
+    except Exception as e:
+        st.error(f"Ошибка загрузки данных модерации: {e}")
 
 # ==========================================
 # 7. АНАЛИТИКА И ДАШБОРД
