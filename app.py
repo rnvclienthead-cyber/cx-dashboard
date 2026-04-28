@@ -110,7 +110,7 @@ def add_system_log(action, status, details=""):
         sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
         try:
             ws_log = sheet.worksheet("Логи")
-        except:
+        except gspread.exceptions.WorksheetNotFound:
             ws_log = sheet.add_worksheet(title="Логи", rows="1000", cols="4")
             ws_log.append_row(["Дата и Время", "Действие", "Статус", "Детали"])
 
@@ -118,7 +118,8 @@ def add_system_log(action, status, details=""):
         ws_log.append_row([now, action, status, details])
     except Exception as e:
         import streamlit as st
-        st.toast(f"Сбой записи в лог: {e}") # Теперь ошибка хотя бы всплывет на экране
+        # Теперь вы точно увидите, почему лог не пишется!
+        st.error(f"🚨 ОШИБКА ЗАПИСИ ЛОГА В ГУГЛ ТАБЛИЦУ: {e}")
 
 # ==========================================
 # 3. ОБРАБОТКА ДАННЫХ
@@ -484,44 +485,49 @@ elif page == "🔬 ИИ Тегирование":
                         batch_updates = []
                         has_error = False
                         
-                        with log_container:
-                            with st.expander(f"Лог обработки (Строки {i} - {i+len(chunk)})"):
-                                if results: st.json(results)
-                                else: 
-                                    st.error("❌ ИИ вернул пустой ответ")
-                                    has_error = True
+                        # Собираем ID строк, которые ИИ успешно разметил
+                        tagged_row_idxs = set()
 
                         for res in results:
                             if "error" in res: 
                                 has_error = True
                                 continue
                                 
-                            raw_id = str(res.get('id') or res.get('ID') or '')
-                            clean_id = re.sub(r'[^\d]', '', raw_id)
-                            
+                            clean_id = re.sub(r'[^\d]', '', str(res.get('id') or res.get('ID') or ''))
                             if not clean_id: continue
                             row_idx = int(clean_id) + 2 
                             
-                            # Пишем только цифры (тегов)
                             cats_array = res.get('category_ids', []) or res.get('tags', [])
-                            if not cats_array:
-                                cats_array = [12]
-                            for cat_val in cats_array:
-                                cat_num_match = re.search(r'\d+', str(cat_val))
-                                if cat_num_match:
-                                    cat_num = int(cat_num_match.group())
-                                    target_header = f"кат {cat_num}"
-                                    if target_header in header_map_clean:
-                                        col_letter = header_map_clean[target_header]
-                                        batch_updates.append({'range': f"{col_letter}{row_idx}", 'values': [['1']]})
+                            
+                            if cats_array:
+                                tagged_row_idxs.add(row_idx)
+                                for cat_val in cats_array:
+                                    cat_num_match = re.search(r'\d+', str(cat_val))
+                                    if cat_num_match:
+                                        cat_num = int(cat_num_match.group())
+                                        header = f"кат {cat_num}"
+                                        if header in header_map_clean:
+                                            batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['1']]})
 
-                        if batch_updates:
-                            ws.batch_update(batch_updates)
+                        # ПРИНУДИТЕЛЬНАЯ РАЗМЕТКА (100% заполняемость)
+                        skipped_rows = []
+                        for idx, row in chunk.iterrows():
+                            row_idx = idx + 2
+                            if row_idx not in tagged_row_idxs:
+                                skipped_rows.append(str(row_idx))
+                                header = "кат 12" # Принудительно ставим "Не подошло"
+                                if header in header_map_clean:
+                                    batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['1']]})
+
+                        if batch_updates: ws.batch_update(batch_updates)
                         
-                        if has_error:
-                            add_system_log("Обработка пачки", "WARNING", f"Строки {i} - {i+len(chunk)} обработаны с ошибками API.")
-                        else:
-                            add_system_log("Обработка пачки", "SUCCESS", f"Строки {i} - {i+len(chunk)} успешно размечены.")
+                        # Детальный логгинг пачки
+                        log_details = f"Строки {i} - {i+len(chunk)} обработаны."
+                        if skipped_rows:
+                            log_details += f" ИИ пропустил строки: {', '.join(skipped_rows)}. Им принудительно поставлена Кат 12."
+                            
+                        if has_error: add_system_log("Обработка пачки", "WARNING", log_details + " Были ошибки API.")
+                        else: add_system_log("Обработка пачки", "SUCCESS", log_details)
                         
                         progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
                     
@@ -661,15 +667,26 @@ elif page == "📝 Модерация":
                                 st.markdown(f"🕵️‍♂️ **Аудит Grok:** {row.get('Аудит', '')} | 📝 **Коммент:** {row.get('Комментарий', '')}")
                         
                         with col_photos:
-                            photos_raw = str(row.get('Фотографии', ''))
-                            urls = re.findall(r'https?://[^\s"\'\;]+', photos_raw)
+                            # Собираем данные из обеих колонок
+                            photos_raw = str(row.get('Фотографии', '')) + " " + str(row.get('Видео', ''))
+                            
+                            # Умный поиск ссылок (даже если они начинаются с //)
+                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', photos_raw)
+                            
                             if urls:
-                                clean_urls = [u.replace("']", "").replace("'", "") for u in urls[:4]]
-                                # Кликабельные фото с нужным зумом (30%)
-                                photos_html = "".join([f'<a href="{url}" target="_blank"><img src="{url}" style="width: 30%; margin-right: 2%; border-radius: 4px;"></a>' for url in clean_urls])
-                                st.markdown(photos_html, unsafe_allow_html=True)
+                                for u in urls[:5]: # Показываем до 5 медиа
+                                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                    
+                                    # Если это видео
+                                    if '.mp4' in clean_url.lower() or '.mov' in clean_url.lower():
+                                        st.video(clean_url)
+                                        st.markdown(f'<a href="{clean_url}" target="_blank" download>🎥 Скачать видео</a>', unsafe_allow_html=True)
+                                    else:
+                                        # Если это фото
+                                        st.markdown(f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" style="width: 100%; border-radius: 4px; margin-bottom: 5px;"></a>', unsafe_allow_html=True)
                             else:
-                                st.write("Нет фото")
+                                st.write("Нет фото/видео")
                         
                         # Компактный блок кнопок выбора (без выпадающего списка)
                         st.markdown("**Быстрый выбор категорий:**")
@@ -779,15 +796,36 @@ elif page == "🧠 Обучение ИИ":
 # ==========================================
 
 elif page == "📊 Дашборд":
-    st.title("📊 Аналитика и Сводная Матрица")
+    st.title("📊 Аналитика, Инвойсы и Матрица")
     
     try:
         client = get_gspread_client()
-        ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-        df = pd.DataFrame(ws.get_all_records())
+        sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
+        ws_returns = sheet.worksheet("Возвраты")
+        df = pd.DataFrame(ws_returns.get_all_records())
         
         if not df.empty:
-            # Создаем нужные колонки, если их нет
+            # --- ИНТЕГРАЦИЯ ИНВОЙСОВ ---
+            try:
+                ws_inv = sheet.worksheet("инвойсы_шлюз")
+                df_inv = pd.DataFrame(ws_inv.get_all_records())
+                if not df_inv.empty and 'Артикул' in df_inv.columns:
+                    # Подтягиваем Инвойс и Номер поставки по Артикулу
+                    df_inv_unique = df_inv.drop_duplicates(subset=['Артикул'])
+                    
+                    # Переименовываем колонки, если они уже были в возвратах, чтобы не было конфликтов
+                    if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
+                    if 'Номер поставки' in df.columns: df = df.drop(columns=['Номер поставки'])
+                    
+                    cols_to_merge = ['Артикул']
+                    if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
+                    if 'Номер поставки' in df_inv.columns: cols_to_merge.append('Номер поставки')
+                    
+                    df = df.merge(df_inv_unique[cols_to_merge], on='Артикул', how='left')
+            except Exception as e:
+                st.warning(f"Не удалось подтянуть лист 'инвойсы_шлюз': {e}")
+                
+            # Заглушки, если данных об инвойсах нет
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
             if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
 
@@ -795,21 +833,20 @@ elif page == "📊 Дашборд":
                 return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1, 14))
             df['Размечено'] = df.apply(has_tags, axis=1)
             
-            # --- ГЛОБАЛЬНЫЕ ФИЛЬТРЫ ---
+            # --- ФИЛЬТРЫ ---
             st.markdown("### 🔍 Глобальные фильтры")
             f_col1, f_col2 = st.columns(2)
-            inv_list = ['Все'] + sorted([str(x) for x in df['Инвойс'].unique() if str(x).strip()])
-            sku_list = ['Все'] + sorted([str(x) for x in df['Артикул'].unique() if str(x).strip()])
+            inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip()])))
+            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул'] if str(x).strip()])))
             
             selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
             selected_sku = f_col2.selectbox("Артикул:", sku_list)
             
-            # Применяем фильтр к датафрейму
             df_filtered = df.copy()
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
 
-            # --- ОБЩАЯ СТАТИСТИКА ---
+            # --- СТАТИСТИКА ---
             total_rows = len(df_filtered)
             tagged_rows = df_filtered['Размечено'].sum()
             corrected_rows = len(df_filtered[df_filtered.get('Корректировка', '') != ''])
@@ -824,7 +861,7 @@ elif page == "📊 Дашборд":
             c3.metric("Изменено вручную", corrected_rows)
             c4.metric("Точность ИИ", f"{accuracy}%")
             
-            # --- ПОДГОТОВКА ДАННЫХ ДЛЯ МАТРИЦЫ И ГРАФИКА ---
+            # --- СБОР ДАННЫХ ДЛЯ МАТРИЦЫ ---
             matrix_data = []
             for idx, row in df_filtered[df_filtered['Размечено']].iterrows():
                 art = str(row.get('Артикул', 'Без артикула')).strip()
@@ -832,57 +869,39 @@ elif page == "📊 Дашборд":
                 for i in range(1, 14):
                     if str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true']:
                         cat_name = f"{i}. {CATEGORIES.get(i)}"
-                        matrix_data.append({'Артикул': art, 'Причина': cat_name, 'ID_Причины': i, 'Инвойс': row.get('Инвойс')})
+                        matrix_data.append({'Артикул': art, 'Причина': cat_name, 'Инвойс': row.get('Инвойс')})
             
             if matrix_data:
                 df_matrix = pd.DataFrame(matrix_data)
                 
-                # --- ГРАФИК КАТЕГОРИЙ ---
-                st.markdown("### 📊 Распределение по Категориям")
-                cat_counts = df_matrix['Причина'].value_counts().reset_index()
-                cat_counts.columns = ['Категория', 'Количество']
-                # Сортируем по ID (от 1 до 13)
-                cat_counts['ID'] = cat_counts['Категория'].apply(lambda x: int(x.split('.')[0]))
-                cat_counts = cat_counts.sort_values('ID')
-                
-                import plotly.express as px
-                fig = px.bar(cat_counts, x='Количество', y='Категория', orientation='h', text='Количество', color_discrete_sequence=['#4B8BBE'])
-                fig.update_yaxes(autorange="reversed")
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # --- ЦВЕТОВАЯ МАТРИЦА ---
-                st.markdown("### 🧮 Матрица: Артикул — Причина")
-                # Строим сводную таблицу
+                # --- ТЕПЛОВАЯ МАТРИЦА (Plotly Heatmap - без matplotlib!) ---
+                st.markdown("### 🧮 Тепловая Матрица: Артикул — Причина")
                 pivot_df = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                
-                # Сортируем строки матрицы строго от 1 до 13
                 pivot_df['ID'] = [int(x.split('.')[0]) for x in pivot_df.index]
                 pivot_df = pivot_df.sort_values('ID').drop('ID', axis=1)
                 
-                # Применяем приятный синий градиент (от белого к синему)
-                st.dataframe(pivot_df.style.background_gradient(cmap='Blues', axis=None), use_container_width=True)
+                import plotly.express as px
+                fig_matrix = px.imshow(pivot_df, text_auto=True, color_continuous_scale='Blues', aspect="auto")
+                st.plotly_chart(fig_matrix, use_container_width=True)
                 
-                # --- ИНВОЙСЫ ---
+                # --- РЕЙТИНГ ИНВОЙСОВ ---
                 st.markdown("### 📦 Проблемные Инвойсы")
                 inv_counts = df_matrix['Инвойс'].value_counts().reset_index()
-                inv_counts.columns = ['Инвойс', 'Количество проблем']
+                inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
                 st.dataframe(inv_counts.head(10), use_container_width=True)
 
                 # --- ДЕТАЛИЗАЦИЯ (Замена макроса) ---
-                st.markdown("### 🔎 Детализация по пересечению")
-                st.markdown("Выберите артикул и проблему для просмотра истории (фото, тексты, инвойсы).")
-                
+                st.markdown("### 🔎 Детализация пересечения")
                 det_c1, det_c2 = st.columns(2)
                 det_sku = det_c1.selectbox("Артикул для детализации:", sorted(df_matrix['Артикул'].unique()))
                 det_reason = det_c2.selectbox("Проблема:", sorted(df_matrix['Причина'].unique(), key=lambda x: int(x.split('.')[0])))
                 
-                # Фильтруем оригинальный датафрейм
                 reason_id = int(det_reason.split('.')[0])
                 detail_df = df_filtered[(df_filtered['Артикул'] == det_sku) & (df_filtered[f'Кат {reason_id}'].astype(str).str.strip().str.lower().isin(['1','1.0','+','v','да','true']))]
                 
                 if not detail_df.empty:
                     st.success(f"Найдено записей: {len(detail_df)}")
-                    cols_to_show = ['Дата', 'Инвойс', 'Номер поставки', 'Текст_Клиента', 'Аудит', 'Комментарий', 'Фотографии']
+                    cols_to_show = ['Дата', 'Инвойс', 'Номер поставки', 'Текст_Клиента', 'Аудит', 'Комментарий']
                     actual_cols = [c for c in cols_to_show if c in detail_df.columns]
                     st.dataframe(detail_df[actual_cols], use_container_width=True)
                 else:
@@ -894,7 +913,7 @@ elif page == "📊 Дашборд":
             
     except Exception as e:
         st.error(f"Ошибка при загрузке дашборда: {e}")
-
+        
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
 # ==========================================
