@@ -6,6 +6,7 @@ import json
 import re
 import pandas as pd
 import plotly.express as px
+import io
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 
@@ -130,27 +131,35 @@ async def run_ai_batch_processing(df_to_tag, model_choice):
 # ==========================================
 def safe_read(file_obj):
     name = file_obj.name.lower()
-    file_obj.seek(0)
+    # "Снимаем" копию файла в оперативную память (защита от перемотки)
+    bytes_data = file_obj.getvalue() 
     
+    # 1. Пробуем прочитать как нормальный Excel
     if name.endswith('.xlsx') or name.endswith('.xls'):
         try:
-            return pd.read_excel(file_obj, engine='openpyxl' if name.endswith('.xlsx') else 'xlrd')
+            return pd.read_excel(io.BytesIO(bytes_data), engine='openpyxl' if name.endswith('.xlsx') else 'xlrd')
         except Exception:
             try:
-                file_obj.seek(0)
-                return pd.read_html(file_obj)[0]
+                return pd.read_html(io.BytesIO(bytes_data))[0]
             except Exception: pass
 
-    encodings = ['utf-8', 'windows-1251', 'utf-16']
-    separators = [';', ',', '\t']
+    # 2. Пробуем прочитать как CSV/текст
+    encodings = ['utf-8-sig', 'utf-8', 'windows-1251', 'utf-16']
+    separators = [';', '\t', ',']
+    
     for enc in encodings:
         for sep in separators:
             try:
-                file_obj.seek(0)
-                return pd.read_csv(file_obj, sep=sep, encoding=enc, engine='python', on_bad_lines='skip')
-            except Exception: continue
+                # Декодируем байты в текст
+                text_data = bytes_data.decode(enc)
+                df = pd.read_csv(io.StringIO(text_data), sep=sep, engine='python', on_bad_lines='skip')
+                # Важная проверка: если таблица не слиплась в одну колонку, значит разделитель верный
+                if len(df.columns) > 1:
+                    return df
+            except Exception:
+                continue
     
-    st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}.")
+    st.error(f"⚠️ Не удалось прочитать файл {file_obj.name}. Формат не распознан.")
     return pd.DataFrame()
 
 def process_claims_and_returns(claims_files, returned_files):
@@ -192,20 +201,32 @@ def process_claims_and_returns(claims_files, returned_files):
 
 def process_litestat(litestat_files):
     report = []
-    all_o = [safe_read(f) for f in litestat_files]
-    df_o = pd.concat(all_o, ignore_index=True)
-    report.append(f"📥 Litestat: Загружено {len(df_o)} сырых строк.")
+    # Читаем все файлы и отбрасываем пустые (если не прочитались)
+    all_o = [df for df in [safe_read(f) for f in litestat_files] if not df.empty]
     
-    sku_col = next((c for c in df_o.columns if 'артикул' in c.lower()), None)
-    qty_col = next((c for c in df_o.columns if 'заказано' in c.lower()), None)
+    if not all_o:
+        report.append("❌ Ошибка: Не удалось прочитать ни один файл Litestat.")
+        return pd.DataFrame(), report
+        
+    df_o = pd.concat(all_o, ignore_index=True)
+    report.append(f"📥 Litestat: Успешно прочитано {len(df_o)} сырых строк.")
+    
+    # Расширенный поиск колонок (на случай, если Litestat поменял названия)
+    sku_col = next((c for c in df_o.columns if 'артикул' in str(c).lower()), None)
+    qty_col = next((c for c in df_o.columns if any(kw in str(c).lower() for kw in ['заказано', 'количество', 'кол-во'])), None)
     
     if sku_col and qty_col:
+        # Убираем возможные пробелы и мусор из чисел
+        df_o[qty_col] = pd.to_numeric(df_o[qty_col].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce').fillna(0)
+        
         df_ord_agg = df_o.groupby(sku_col)[qty_col].sum().reset_index()
         df_ord_agg.columns = ['Артикул', 'Заказы шт.']
         report.append(f"✅ Успешно агрегировано по {len(df_ord_agg)} уникальным артикулам.")
         return df_ord_agg, report
     else:
-        report.append("❌ Ошибка: В файле Litestat не найдены колонки 'Артикул' и/или количество.")
+        # Выводим подсказку, какие колонки скрипт вообще увидел
+        cols_preview = ", ".join([str(c) for c in df_o.columns[:5]])
+        report.append(f"❌ Ошибка: В файле не найдены колонки 'Артикул' или 'Заказано'. Вижу такие колонки: [{cols_preview}...]")
         return pd.DataFrame(), report
 
 # ==========================================
