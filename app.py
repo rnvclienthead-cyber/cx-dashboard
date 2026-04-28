@@ -117,7 +117,8 @@ def add_system_log(action, status, details=""):
         now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         ws_log.append_row([now, action, status, details])
     except Exception as e:
-        print(f"Ошибка записи лога: {e}") # Если лог не запишется, приложение не сломается
+        import streamlit as st
+        st.toast(f"Сбой записи в лог: {e}") # Теперь ошибка хотя бы всплывет на экране
 
 # ==========================================
 # 3. ОБРАБОТКА ДАННЫХ
@@ -606,103 +607,181 @@ elif page == "🔬 ИИ Тегирование":
 
 elif page == "📝 Модерация":
     st.title("📋 Модерация (Ручная проверка)")
-    st.markdown("Проверьте теги, поставленные ИИ. Выберите подходящие категории и нажмите «Сохранить».")
+    st.markdown("Проверьте теги, поставленные ИИ, и результаты аудита Grok.")
 
     try:
         client = get_gspread_client()
         ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-        
-        # Получаем данные и чистим заголовки от случайных пробелов
         data = ws.get_all_values()
+        
         if len(data) > 1:
             headers = [str(h).strip() for h in data[0]]
             df = pd.DataFrame(data[1:], columns=headers)
             
-            # Защита от ошибок: если колонок еще нет в таблице, временно создаем их в памяти
             if 'Аудит' not in df.columns: df['Аудит'] = ''
             if 'Комментарий' not in df.columns: df['Комментарий'] = ''
             if 'Корректировка' not in df.columns: df['Корректировка'] = ''
 
-            # Функция: проверяет, есть ли хотя бы один тег от ИИ
             def has_tags(row):
                 return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
-            
             df['has_any_tag'] = df.apply(has_tags, axis=1)
 
-            # УМНЫЙ ФИЛЬТР: Берем те строки, где теги ЕСТЬ, а вашей ручной Корректировки еще НЕТ
-            to_review = df[(df['has_any_tag']) & (df['Корректировка'].astype(str).str.strip() == '')].head(20)
+            # ФИЛЬТРЫ ДЛЯ ОТОБРАЖЕНИЯ
+            filter_option = st.radio("Кого проверяем?", ["Все размеченные (без ручной корректировки)", "Только с ОШИБКОЙ от аудитора (Grok)"], horizontal=True)
+            
+            if "ОШИБКОЙ" in filter_option:
+                to_review = df[(df['has_any_tag']) & (df['Корректировка'].astype(str).str.strip() == '') & (df['Аудит'].astype(str).str.upper() == 'ОШИБКА')].head(20)
+            else:
+                to_review = df[(df['has_any_tag']) & (df['Корректировка'].astype(str).str.strip() == '')].head(20)
 
             if not to_review.empty:
                 cats_list = list(CATEGORIES.values())
+                reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
+                header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
+                
                 for idx, row in to_review.iterrows():
                     row_index_gs = idx + 2 
                     with st.container():
-                        st.markdown('<div class="review-card" style="border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px;">', unsafe_allow_html=True)
+                        st.markdown("---") # Просто линия-разделитель вместо рамки
                         col_info, col_photos, col_action = st.columns([2, 1.5, 1.5])
                         
                         with col_info:
                             st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
                             st.markdown(f"<div style='margin-bottom: 10px;'>{row.get('Текст_Клиента', 'Нет текста')}</div>", unsafe_allow_html=True)
                             
-                            # Выводим данные аудита, только если они есть
+                            # Вытаскиваем теги, которые поставил ИИ
+                            current_tags = []
+                            for c in range(1, 14):
+                                if str(row.get(f'Кат {c}', '')).strip().lower() in ['1','1.0','+','v','да','true']:
+                                    current_tags.append(CATEGORIES.get(c, f"Категория {c}"))
+                            tags_str = ", ".join(current_tags) if current_tags else "Нет"
+                            
+                            st.markdown(f"🤖 **Тег ИИ:** {tags_str}")
+                            
                             audit_text = str(row.get('Аудит', '')).strip()
                             comment_text = str(row.get('Комментарий', '')).strip()
                             if audit_text:
-                                st.markdown(f"<div style='background-color: #f0f2f6; padding: 10px; border-radius: 5px;'>🕵️‍♂️ <b>Аудит:</b> {audit_text} <br> 📝 <b>Комментарий ИИ:</b> {comment_text}</div>", unsafe_allow_html=True)
+                                st.markdown(f"🕵️‍♂️ **Аудит Grok:** {audit_text} | 📝 **Коммент:** {comment_text}")
                         
                         with col_photos:
                             photos_raw = str(row.get('Фотографии', ''))
+                            # Ищем ссылки и выводим через встроенный метод st.image для надежности
                             urls = re.findall(r'https?://[^\s"\'\;]+', photos_raw)
-                            
                             if urls:
-                                photos_html = "".join([f'<img src="{url}" style="zoom: 30%; margin-right: 5px; border-radius: 4px;">' for url in urls[:5]])
-                                st.markdown(photos_html, unsafe_allow_html=True)
+                                # Очищаем ссылки от возможных скобок в конце
+                                clean_urls = [u.replace("']", "").replace("'", "") for u in urls[:3]] 
+                                st.image(clean_urls, width=120)
                             else:
-                                st.write("Нет медиафайлов")
+                                st.write("Нет фото")
                         
                         with col_action:
-                            selected_cats = []
-                            for cat in cats_list:
-                                if st.checkbox(cat, key=f"cat_{row_index_gs}_{cat}"): selected_cats.append(cat)
+                            # Выпадающий список с возможностью множественного выбора
+                            selected_cats = st.multiselect("Выберите правильные категории:", options=cats_list, default=current_tags, key=f"ms_{row_index_gs}")
+                            other_text = st.text_input("Другая причина (если нет в списке)", key=f"other_{row_index_gs}")
                             
-                            other_text = st.text_input("Другая причина", key=f"other_{row_index_gs}")
-                            if other_text: selected_cats.append(other_text.strip())
-                            
-                            if st.button("💾 Сохранить", key=f"btn_{row_index_gs}", type="primary", use_container_width=True):
-                                final_string = "; ".join(selected_cats)
-                                if not final_string: final_string = "Ок (Подтверждено)"
+                            if st.button("💾 Сохранить и Перезаписать", key=f"btn_{row_index_gs}", type="primary", use_container_width=True):
+                                final_cats = selected_cats.copy()
+                                if other_text: final_cats.append(other_text.strip())
+                                final_string = "; ".join(final_cats) if final_cats else "Ок (Подтверждено)"
                                 
-                                # Ищем реальные заголовки в таблице для записи
-                                current_headers = ws.row_values(1)
-                                current_headers_clean = [str(h).strip() for h in current_headers]
+                                batch_updates = []
+                                # 1. Стираем старые крестики в таблице
+                                for c in range(1, 14):
+                                    header = f"кат {c}"
+                                    if header in header_map_clean:
+                                        batch_updates.append({'range': f"{header_map_clean[header]}{row_index_gs}", 'values': [['']]})
+                                        
+                                # 2. Ставим новые правильные крестики
+                                for cat_name in final_cats:
+                                    clean_tag = cat_name.strip().lower()
+                                    if clean_tag in reverse_cats:
+                                        cat_num = reverse_cats[clean_tag]
+                                        header = f"кат {cat_num}"
+                                        if header in header_map_clean:
+                                            batch_updates.append({'range': f"{header_map_clean[header]}{row_index_gs}", 'values': [['1']]})
                                 
-                                if "Корректировка" in current_headers_clean:
-                                    col_letter = get_col_letter(current_headers_clean.index("Корректировка"))
-                                    ws.update(f'{col_letter}{row_index_gs}', [[final_string]])
-                                    
-                                    # Отправляем в память
-                                    ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
-                                    ws_mem.append_row([row.get('Текст_Клиента', ''), final_string])
-                                    
-                                    st.success("Сохранено в базу!")
-                                    st.rerun()
-                                else: 
-                                    st.error("Колонка 'Корректировка' не найдена в Google Таблице. Пожалуйста, создайте её!")
-                        st.markdown('</div>', unsafe_allow_html=True)
+                                # 3. Записываем текст в Корректировку
+                                if "корректировка" in header_map_clean:
+                                    batch_updates.append({'range': f"{header_map_clean['корректировка']}{row_index_gs}", 'values': [[final_string]]})
+                                
+                                if batch_updates: ws.batch_update(batch_updates)
+                                
+                                # Отправляем в память ИИ
+                                ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
+                                ws_mem.append_row([row.get('Текст_Клиента', ''), final_string])
+                                
+                                st.success("Перезаписано и сохранено в базу!")
+                                st.rerun()
             else: 
-                st.success("🎉 Все размеченные возвраты проверены! (Ждем новых заявок от ИИ)")
+                st.success("🎉 Очередь на модерацию пуста!")
         else:
             st.warning("Таблица пуста.")
     except Exception as e:
         st.error(f"Ошибка загрузки данных модерации: {e}")
+
+elif page == "🧠 Обучение ИИ":
+    st.title("🧠 База знаний ИИ (Умный импорт)")
+    st.markdown("Загрузите исторический файл с проверенными отзывами. Робот всё поймет, расшифрует теги и загрузит в свою память. Новые корректировки всегда заменяют старые!")
+
+    f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
+
+    if st.button("📥 Загрузить и обновить память", type="primary"):
+        if f_import:
+            with st.spinner("Анализируем структуру файла и разрешаем конфликты..."):
+                df_import = safe_read(f_import)
+                if not df_import.empty:
+                    import re
+                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in ['текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment']]
+                    corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
+                    tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
+                    cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
+                    
+                    if not text_cols: st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
+                    else:
+                        new_memory_dict = {}
+                        for idx, row in df_import.iterrows():
+                            parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() != 'nan' and str(row[tc]).strip()]
+                            combined_text = " ".join(parts)
+                            if not combined_text: continue
+                            
+                            final_tags = ""
+                            if corr_col and pd.notna(row[corr_col]) and str(row[corr_col]).strip().lower() != 'nan' and str(row[corr_col]).strip():
+                                final_tags = str(row[corr_col]).strip()
+                            elif cat_columns: 
+                                found_cats = [CATEGORIES[int(re.search(r'\d+', str(c)).group())] for c in cat_columns if re.search(r'\d+', str(c)) and int(re.search(r'\d+', str(c)).group()) in CATEGORIES and str(row[c]).strip().lower() in ['1', '1.0', 'v', '+', 'да', 'true']]
+                                if found_cats: final_tags = "; ".join(found_cats)
+                            elif tag_col and pd.notna(row[tag_col]):
+                                found_cats = [CATEGORIES[int(n)] for n in re.findall(r'\d+', str(row[tag_col])) if int(n) in CATEGORIES]
+                                if found_cats: final_tags = "; ".join(found_cats)
+                                    
+                            if final_tags: new_memory_dict[combined_text] = final_tags
+
+                        if new_memory_dict:
+                            try:
+                                client = get_gspread_client()
+                                sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
+                                try: ws_mem = sheet.worksheet("Память_ИИ")
+                                except:
+                                    ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="2")
+                                    ws_mem.append_row(["Контент", "Правильные теги"])
+
+                                existing_records = ws_mem.get_all_records()
+                                combined_memory = {str(r.get('Контент', '')).strip(): str(r.get('Правильные теги', '')).strip() for r in existing_records if str(r.get('Контент', '')).strip()}
+                                combined_memory.update(new_memory_dict)
+                                
+                                ws_mem.clear()
+                                ws_mem.update('A1', [["Контент", "Правильные теги"]] + [[k, v] for k, v in combined_memory.items()])
+                                st.success(f"✅ База знаний успешно обновлена! ИИ выучил новые данные. Всего в памяти: {len(combined_memory)} уникальных примеров.")
+                            except Exception as e: st.error(f"❌ Ошибка записи в Google Таблицу: {e}")
+                        else: st.warning("⚠️ Не найдено валидных тегов в файле.")
+        else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
 # 7. АНАЛИТИКА И ДАШБОРД
 # ==========================================
 
 elif page == "📊 Дашборд":
-    st.title("📊 Аналитика и Дашборд")
-    st.markdown("Сводная статистика по возвратам и результатам работы ИИ.")
+    st.title("📊 Аналитика и Сводная Матрица")
     
     try:
         client = get_gspread_client()
@@ -712,52 +791,63 @@ elif page == "📊 Дашборд":
         if not df.empty:
             st.markdown("### 📈 Общая статистика")
             
-            # Считаем размеченные строки (ищем единички в Кат 1 - Кат 13)
             def has_tags(row):
                 return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1, 14))
-            
             df['Размечено'] = df.apply(has_tags, axis=1)
             
             total_rows = len(df)
             tagged_rows = df['Размечено'].sum()
             
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Всего заявок", total_rows)
-            col2.metric("Размечено ИИ", tagged_rows)
-            col3.metric("Осталось разметить", total_rows - tagged_rows)
+            # Считаем точность: (1 - (количество ручных корректировок / общее число размеченных)) * 100
+            corrected_rows = len(df[df.get('Корректировка', '') != ''])
+            accuracy = 0
+            if tagged_rows > 0:
+                accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1)
             
-            st.markdown("### 📊 Топ причин (Категории)")
+            processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
             
-            # Подсчет срабатываний по каждой из 13 категорий
-            cat_counts = {}
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Всего заявок", total_rows)
+            c2.metric("Размечено", f"{tagged_rows} ({processed_percent}%)")
+            c3.metric("Изменено вручную", corrected_rows)
+            c4.metric("Точность ИИ", f"{accuracy}%")
+            
+            st.markdown("### 📊 Распределение по Категориями (По порядку)")
+            
+            cat_counts = []
             for i in range(1, 14):
                 col_name = f'Кат {i}'
                 if col_name in df.columns:
                     count = df[col_name].astype(str).str.strip().str.lower().isin(['1','1.0','+','v','да','true']).sum()
-                    if count > 0:
-                        cat_name = CATEGORIES.get(i, f"Категория {i}")
-                        cat_counts[cat_name] = count
+                    cat_name = f"{i}. {CATEGORIES.get(i, 'Неизвестно')}"
+                    cat_counts.append({"Категория": cat_name, "Количество": count})
             
-            if cat_counts:
-                # Сортируем и строим красивый график
-                df_cats = pd.DataFrame(list(cat_counts.items()), columns=['Причина', 'Количество']).sort_values(by='Количество', ascending=False)
-                st.bar_chart(df_cats.set_index('Причина'))
+            df_cats = pd.DataFrame(cat_counts)
+            # Горизонтальный график (лучше читаются длинные названия)
+            import plotly.express as px
+            fig = px.bar(df_cats, x='Количество', y='Категория', orientation='h', text='Количество')
+            fig.update_yaxes(autorange="reversed") # Чтобы 1 категория была сверху
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("### 🧮 Матрица: Артикул — Причина (Аналог листа 'Анализ')")
+            st.markdown("Сводная таблица распределения дефектов по конкретным товарам.")
+            
+            # Строим сводную таблицу (Pivot)
+            matrix_data = []
+            for idx, row in df[df['Размечено']].iterrows():
+                art = str(row.get('Артикул', 'Без артикула')).strip()
+                if not art: art = 'Без артикула'
+                for i in range(1, 14):
+                    if str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true']:
+                        matrix_data.append({'Артикул': art, 'Причина': CATEGORIES.get(i)})
+            
+            if matrix_data:
+                df_matrix = pd.DataFrame(matrix_data)
+                # Создаем кросс-таблицу: Строки - Причины, Столбцы - Артикулы
+                pivot_df = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
+                st.dataframe(pivot_df, use_container_width=True)
             else:
-                st.info("Пока нет данных для графика. Запустите тегирование.")
-                
-            st.markdown("### 📋 Последние обработанные данные")
-            st.markdown("Здесь отображаются свежие заявки с результатами проверки от Grok.")
-            
-            # Формируем список колонок для вывода, игнорируя те, которых нет
-            display_cols = ['Артикул', 'Текст_Клиента']
-            if 'Аудит' in df.columns: display_cols.append('Аудит')
-            if 'Комментарий' in df.columns: display_cols.append('Комментарий')
-            if 'Корректировка' in df.columns: display_cols.append('Корректировка')
-            
-            actual_cols = [c for c in display_cols if c in df.columns]
-            
-            # Показываем последние 50 записей (перевернув таблицу, чтобы свежие были сверху)
-            st.dataframe(df[actual_cols].tail(50).iloc[::-1], use_container_width=True)
+                st.info("Нет данных для построения матрицы.")
             
         else:
             st.warning("Таблица пуста. Загрузите данные через Робот-Загрузчик.")
