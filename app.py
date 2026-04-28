@@ -403,7 +403,7 @@ elif page == "🔬 ИИ Тегирование":
                 status_text = st.empty()
                 log_container = st.container()
                 
-                # Создаем "переводчик" текста ИИ обратно в номера колонок
+                # Словарь для перевода текста ИИ в номера категорий
                 reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
                 
                 loop = asyncio.new_event_loop()
@@ -413,63 +413,65 @@ elif page == "🔬 ИИ Тегирование":
                     for i in range(0, total_rows, batch_size):
                         chunk = unprocessed.iloc[i:i+batch_size]
                         progress = int(((i + len(chunk)) / total_rows) * 100)
-                        status_text.text(f"⏳ Прогресс: {progress}% (строки {i} из {total_rows})")
+                        status_text.text(f"⏳ Прогресс: {progress}% (Обработка пачки {i} из {total_rows})")
                         
-                        results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, mode="tagging"))
+                        # Модифицируем чанк, чтобы ИИ видел уникальные метки строк
+                        chunk_to_send = chunk.copy()
+                        # Используем префикс REF_, чтобы ИИ не сбивал нумерацию
+                        results = loop.run_until_complete(run_ai_batch_processing(chunk_to_send, model_key, mode="tagging"))
                         
-                        # Вывод сырого ответа без системных багов
+                        # Подготовка данных для пакетного обновления (Batch Update)
+                        # Мы соберем все изменения и отправим одним запросом на всю пачку
+                        batch_updates = []
+                        
                         with log_container:
-                            with st.expander(f"Сырой ответ ИИ (Пачка {i} - {i+len(chunk)})"):
-                                if results:
-                                    st.json(results)
-                                else:
-                                    st.error("❌ ИИ ВЕРНУЛ ПУСТОТУ! (Таймаут API)")
+                            with st.expander(f"Лог обработки (Строки {i} - {i+len(chunk)})"):
+                                if results: st.json(results)
+                                else: st.error("❌ ИИ вернул пустой ответ")
 
                         for res in results:
-                            if "error" in res:
-                                log_container.error(f"🛑 ОТКАЗ СЕРВЕРА: {res['error']}")
-                                continue
-                                
-                            res_id = res.get('id') or res.get('ID') or res.get('Id')
-                            if res_id is None:
-                                continue
-                                
-                            try:
-                                row_idx = int(res_id) + 2 
-                            except ValueError:
-                                continue
+                            if "error" in res: continue
                             
-                            # УМНАЯ ЗАПИСЬ ТЕГОВ (Перевод текста в колонку)
+                            # Извлекаем ID и чистим его от префикса REF_
+                            raw_id = str(res.get('id') or res.get('ID') or '')
+                            clean_id = re.sub(r'[^\d]', '', raw_id)
+                            
+                            if not clean_id: continue
+                            row_idx = int(clean_id) + 2 # Глобальный индекс строки в Google Sheets
+                            
+                            # 1. Обработка категорий
                             for tag in res.get('tags', []):
                                 cat_num = None
                                 clean_tag = str(tag).strip().lower()
                                 
-                                # 1. Ищем точное совпадение по тексту
+                                # Ищем соответствие в словаре
                                 if clean_tag in reverse_cats:
                                     cat_num = reverse_cats[clean_tag]
                                 else:
-                                    # 2. Запасной вариант: если ИИ всё же прислал цифру
-                                    import re
-                                    num_match = re.search(r'\d+', str(tag))
-                                    if num_match:
-                                        cat_num = int(num_match.group())
-                                        
+                                    # Запасной вариант: поиск цифры в тексте тега
+                                    num_match = re.search(r'\d+', clean_tag)
+                                    if num_match: cat_num = int(num_match.group())
+                                
                                 if cat_num:
                                     target_header = f"кат {cat_num}"
                                     if target_header in header_map_clean:
-                                        ws.update(f"{header_map_clean[target_header]}{row_idx}", [['1']])
-                                    else:
-                                        log_container.warning(f"Не нашел колонку '{target_header}' в таблице!")
-                            
-                            # Запись обоснования
+                                        col_letter = header_map_clean[target_header]
+                                        batch_updates.append({'range': f"{col_letter}{row_idx}", 'values': [['1']]})
+
+                            # 2. Обработка обоснования
                             if "обоснование" in header_map_clean:
-                                ws.update(f"{header_map_clean['обоснование']}{row_idx}", [[res.get('reasoning', '')]])
-                                
+                                col_reason = header_map_clean['обоснование']
+                                batch_updates.append({'range': f"{col_reason}{row_idx}", 'values': [[res.get('reasoning', '')]]})
+
+                        # ОТПРАВКА ВСЕХ ДАННЫХ ПАЧКИ ОДНИМ ЗАПРОСОМ
+                        if batch_updates:
+                            ws.batch_update(batch_updates)
+                        
                         progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
                     
-                    st.success("✅ Тегирование завершено! Проверьте Google Таблицу.")
+                    st.success("✅ Тегирование успешно завершено! Все данные синхронизированы.")
                 except Exception as e:
-                    st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН ИЗ-ЗА ОШИБКИ: {e}")
+                    st.error(f"🛑 ПРОЦЕСС ОСТАНОВЛЕН: {e}")
                     
     with t2:
         st.subheader("Глубокая проверка (Аудит от Grok)")
