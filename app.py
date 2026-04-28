@@ -190,7 +190,7 @@ def process_litestat(litestat_files):
         return pd.DataFrame(), report
         
 # ==========================================
-# 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG)
+# 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
 # ==========================================
 
 # Умный парсер ответов ИИ
@@ -229,7 +229,7 @@ def find_similar_examples(target_text, memory_records, top_n=10):
         return "\n".join(best_matches)
     return "Прямых совпадений в опыте не найдено. Действуй по инструкции."
 
-# Первичное тегирование (Yandex / Grok)
+# Первичное тегирование (Только цифры = максимальная экономия)
 async def fetch_ai_tags(session, batch, memory_records, model="yandex"):
     content_lines = []
     combined_target_text = ""
@@ -240,11 +240,14 @@ async def fetch_ai_tags(session, batch, memory_records, model="yandex"):
     
     relevant_memory = find_similar_examples(combined_target_text, memory_records, top_n=10)
 
-    system_prompt = f"""Ты эксперт контроля качества. Размети отзывы по категориям: {list(CATEGORIES.values())}.
-    ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект (или рейтинг 4-5) - СТРОГО Категория 12.
+    system_prompt = f"""Ты эксперт контроля качества. 
+    Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}
+    ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект (рейтинг 4-5) - СТРОГО Категория 12.
     ВОТ ПРИМЕРЫ ПОХОЖИХ СИТУАЦИЙ ИЗ БАЗЫ:
     {relevant_memory}
-    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "..."}}]}}"""
+    
+    ИНСТРУКЦИЯ: Верни ТОЛЬКО массив category_ids (цифры подходящих категорий). Никакого текста!
+    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "category_ids": [1, 5]}}]}}"""
 
     if "yandex" in model:
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
@@ -292,10 +295,15 @@ async def fetch_ai_crosscheck(session, batch, memory_records):
     relevant_memory = find_similar_examples(combined_target_text, memory_records, top_n=10)
 
     system_prompt = f"""Ты строгий аудитор. Проверь теги первой нейросети. 
-    ВОТ ПРИМЕРЫ ПРАВИЛЬНЫХ РЕШЕНИЙ ДЛЯ ПОХОЖИХ СИТУАЦИЙ:
+    Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}
+    ПРИМЕРЫ ПРАВИЛЬНЫХ РЕШЕНИЙ:
     {relevant_memory}
-    Если есть логическая ошибка (например, тег 'Производственный дефект', а суть в 'не подошел цвет'), исправь на правильную.
-    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "tags": ["Категория"], "reasoning": "Исправлено: ..."}}]}}"""
+    
+    ИНСТРУКЦИЯ:
+    1. audit: Если старые теги верны, напиши "ОК". Если ошибка, напиши "ОШИБКА".
+    2. comment: Если нашел ошибку, напиши почему (кратко). Если ОК, оставь пустым.
+    3. category_ids: Массив ПРАВИЛЬНЫХ цифр категорий.
+    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "audit": "ОК", "comment": "", "category_ids": [1]}}]}}"""
     
     url = "https://api.x.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
@@ -322,7 +330,10 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
             if mode == "tagging":
                 batch.append({"id": f"REF_{idx}", "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
             else:
-                batch.append({"id": f"REF_{idx}", "text": f"Текст: {row.get('Текст_Клиента','')}. Обоснование ИИ 1: {row.get('Обоснование','')}"})
+                # Собираем текущие теги, чтобы Grok видел, что проверять
+                current_tags = [str(c) for c in range(1, 14) if str(row.get(f'Кат {c}', '')).strip() in ['1', '1.0', '+', 'v', 'да', 'true']]
+                tags_str = ", ".join(current_tags) if current_tags else "Нет тегов"
+                batch.append({"id": f"REF_{idx}", "text": f"Текст: {row.get('Текст_Клиента','')}. Текущие теги (ID): {tags_str}"})
                 
             if len(batch) >= 10:
                 if mode == "tagging": res = await fetch_ai_tags(session, batch, memory_records, model_choice)
