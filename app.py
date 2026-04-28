@@ -278,7 +278,7 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
 # ==========================================
 # 5. ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
-page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Ручная проверка", "📊 Дашборд"])
+page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Дашборд"])
 
 def get_col_letter(col_idx):
     if col_idx < 26: return chr(ord('A') + col_idx)
@@ -501,6 +501,81 @@ elif page == "📝 Модерация":
 # ==========================================
 # 7. ДАШБОРД
 # ==========================================
+
+elif page == "🧠 Обучение ИИ":
+    st.title("🧠 База знаний ИИ (Умный импорт)")
+    st.markdown("Загрузите старый файл с проверенными отзывами или претензиями. Робот сам склеит текст из разных колонок, расшифрует номера тегов и загрузит их в память нейросети.")
+
+    f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
+
+    if st.button("📥 Обучить нейросеть", type="primary"):
+        if f_import:
+            with st.spinner("Анализируем колонки и склеиваем данные..."):
+                df_import = safe_read(f_import)
+                
+                if not df_import.empty:
+                    # 1. Ищем колонки с текстом (берем все три, если они есть)
+                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in ['текст отзыва', 'достоинства', 'недостатки']]
+                    # Ищем колонку с тегами
+                    tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
+
+                    if not text_cols or not tag_col:
+                        st.error("❌ Ошибка: В файле не найдены колонки 'Текст отзыва / Достоинства / Недостатки' или 'Какой тег'.")
+                        st.write("Найденные колонки:", list(df_import.columns))
+                    else:
+                        memory_data = []
+                        
+                        # 2. Сборка данных
+                        for idx, row in df_import.iterrows():
+                            # Клеим текст из 3 колонок, игнорируя пустоты (NaN)
+                            parts = []
+                            for tc in text_cols:
+                                val = str(row[tc])
+                                if val and val.lower() != 'nan' and val.strip():
+                                    parts.append(val.strip())
+                            combined_text = " ".join(parts)
+
+                            # Разбираем кривые теги ("1; 3", "2 4" и т.д.)
+                            raw_tags = str(row[tag_col])
+                            if raw_tags and raw_tags.lower() != 'nan' and combined_text:
+                                # Регулярное выражение вытаскивает все числа из строки
+                                import re
+                                nums = re.findall(r'\d+', raw_tags)
+                                
+                                mapped_tags = []
+                                for num in nums:
+                                    cat_id = int(num)
+                                    if cat_id in CATEGORIES:
+                                        mapped_tags.append(CATEGORIES[cat_id])
+
+                                if mapped_tags:
+                                    # Склеиваем расшифрованные категории через точку с запятой
+                                    final_tags_str = "; ".join(mapped_tags)
+                                    memory_data.append([combined_text, final_tags_str])
+
+                        # 3. Загрузка в Google Sheets
+                        if memory_data:
+                            try:
+                                client = get_gspread_client()
+                                sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
+                                
+                                # Проверяем, есть ли лист, если нет - создаем
+                                try:
+                                    ws_mem = sheet.worksheet("Память_ИИ")
+                                except gspread.exceptions.WorksheetNotFound:
+                                    ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="2")
+                                    ws_mem.append_row(["Контент", "Правильные теги"])
+
+                                # Заливаем все собранные данные разом
+                                ws_mem.append_rows(memory_data)
+                                st.success(f"✅ ИИ успешно изучил {len(memory_data)} новых примеров!")
+                                st.balloons()
+                            except Exception as e:
+                                st.error(f"❌ Ошибка записи в Google Таблицу: {e}")
+                        else:
+                            st.warning("⚠️ Не найдено валидных строк для импорта (возможно, колонка тегов пустая).")
+        else:
+            st.warning("Пожалуйста, загрузите файл.")
 
 elif page == "📊 Дашборд":
     st.title("📊 BI Аналитика")
