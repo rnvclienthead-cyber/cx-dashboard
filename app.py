@@ -782,13 +782,26 @@ elif page == "🧠 Обучение ИИ":
 # 7. АНАЛИТИКА И ДАШБОРД
 # ==========================================
 
+# ==========================================
+# 7. АНАЛИТИКА И ДАШБОРД
+# ==========================================
+
 elif page == "📊 Дашборд":
-    st.title("📊 Аналитика и Интерактивная Матрица")
+    st.title("📊 Аналитика, Инвойсы и Сводная Матрица")
+    
+    st.markdown("""
+    <style>
+    .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
+    .detail-text { font-size: 16px; margin-bottom: 10px; color: #111; line-height: 1.5; white-space: pre-wrap;}
+    .media-zoom-small { width: 15%; height: 80px; object-fit: cover; border-radius: 4px; margin-right: 1.5%; transition: transform 0.2s; cursor: pointer; vertical-align: top;}
+    .media-zoom-small:hover { transform: scale(3.5); z-index: 999; position: relative; }
+    </style>
+    """, unsafe_allow_html=True)
 
     # Функция детализации (всплывающее окно)
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
-        st.subheader(f"📦 {sku} | 🛠 {reason_name}")
+        st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
         
         # Фильтруем данные именно для этого пересечения
         details = filtered_df[
@@ -798,9 +811,9 @@ elif page == "📊 Дашборд":
         
         if not details.empty:
             for _, r in details.iterrows():
-                with st.container(border=True):
-                    # Порядок: Текст клиента (первым), инвойс, поставка, медиа
-                    st.write(f"💬 **Текст клиента:** {r.get('Текст_Клиента', '---')}")
+                with st.container():
+                    st.markdown('<div class="detail-card">', unsafe_allow_html=True)
+                    st.write(f"💬 **Текст клиента:**\n{r.get('Текст_Клиента', '---')}")
                     
                     c1, c2 = st.columns([2, 1])
                     with c1:
@@ -811,11 +824,17 @@ elif page == "📊 Дашборд":
                     with c2:
                         m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
                         m_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                        for mu in m_urls[:2]:
-                            m_clean = mu.replace("']", "").replace("'", "")
-                            if m_clean.startswith("//"): m_clean = "https:" + m_clean
-                            if '.mp4' in m_clean.lower(): st.write("🎥 Видео в табл.")
-                            else: st.image(m_clean, width=100)
+                        if m_urls:
+                            media_html = ""
+                            for mu in m_urls[:3]:
+                                m_clean = mu.replace("']", "").replace("'", "")
+                                if m_clean.startswith("//"): m_clean = "https:" + m_clean
+                                if '.mp4' in m_clean.lower() or '.mov' in m_clean.lower(): 
+                                    media_html += f'<video src="{m_clean}" class="media-zoom-small" controls muted></video>'
+                                else: 
+                                    media_html += f'<a href="{m_clean}" target="_blank"><img src="{m_clean}" class="media-zoom-small"></a>'
+                            st.markdown(media_html, unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.write("Нет данных по этому пересечению.")
 
@@ -824,72 +843,117 @@ elif page == "📊 Дашборд":
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
         df = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
         
-        # --- ПОДТЯГИВАЕМ ИНВОЙСЫ (Слияние по Номеру поставки) ---
+        # ЗАЩИТА АПИ: Переименовываем supplyID в Номер поставки на лету
+        if 'supplyID' in df.columns and 'Номер поставки' not in df.columns:
+            df.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+        
+        # --- ПОДТЯГИВАЕМ ИНВОЙСЫ ---
         try:
-            inv_id = st.secrets["SPREADSHEET_ID_INVOICES"]
-            sheet_inv = client.open_by_key(inv_id)
-            # Берем Лист 1, колонки A (Поставка) и B (Инвойс)
-            df_inv = pd.DataFrame(sheet_inv.get_worksheet(0).get_all_records())
-            
-            if not df_inv.empty:
-                # Очищаем заголовки для надежности
-                df_inv.columns = [str(c).strip() for c in df_inv.columns]
-                # Оставляем только нужные пары
-                df_inv = df_inv[['Номер поставки', 'Инвойс']].drop_duplicates(subset=['Номер поставки'])
+            inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
+            if inv_id:
+                sheet_inv = client.open_by_key(inv_id)
+                df_inv = pd.DataFrame(sheet_inv.get_worksheet(0).get_all_records())
                 
-                # Удаляем старый столбец Инвойс из возвратов, если он там был пустым
-                if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
+                # То же самое делаем для листа инвойсов
+                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns:
+                    df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                 
-                # Объединяем! Теперь ключ — Номер поставки
-                df = df.merge(df_inv, on='Номер поставки', how='left')
+                if not df_inv.empty and 'Номер поставки' in df_inv.columns:
+                    df_inv.columns = [str(c).strip() for c in df_inv.columns]
+                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
+                    
+                    if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
+                    
+                    cols_to_merge = ['Номер поставки']
+                    if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
+                    
+                    df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
+            else:
+                st.warning("ID таблицы инвойсов не найден в секретах.")
         except Exception as e:
             st.warning(f"Данные инвойсов не подтянуты: {e}")
 
         if not df.empty:
-            # Статистика
+            if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
+            if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
+
             def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
             df['Размечено'] = df.apply(has_tags, axis=1)
             
-            st.markdown("### 🧮 Матрица дефектов (Нажмите на ячейку для деталей)")
+            st.markdown("### 🔍 Глобальные фильтры")
+            f_col1, f_col2 = st.columns(2)
+            inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip()])))
+            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул'] if str(x).strip()])))
             
-            # Подготовка данных для матрицы
+            selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
+            selected_sku = f_col2.selectbox("Артикул:", sku_list)
+            
+            df_filtered = df.copy()
+            if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
+            if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
+
+            total_rows = len(df_filtered)
+            tagged_rows = df_filtered['Размечено'].sum()
+            corrected_rows = len(df_filtered[df_filtered.get('Корректировка', '') != ''])
+            
+            accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
+            processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
+            
+            st.markdown("### 📈 Общая статистика")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Всего заявок", total_rows)
+            c2.metric("Размечено", f"{tagged_rows} ({processed_percent}%)")
+            c3.metric("Изменено вручную", corrected_rows)
+            c4.metric("Точность ИИ", f"{accuracy}%")
+            
             matrix_list = []
             for i in range(1, 14):
                 cat_col = f'Кат {i}'
-                if cat_col in df.columns:
-                    temp = df[df[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
+                if cat_col in df_filtered.columns:
+                    temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
                     for _, r in temp.iterrows():
-                        matrix_list.append({'Артикул': r['Артикул'], 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i})
+                        art = str(r.get('Артикул', 'Без артикула')).strip() or 'Без артикула'
+                        matrix_list.append({'Артикул': art, 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i, 'Инвойс': r.get('Инвойс')})
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                # Сортировка по ID категорий
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
-                # Отрисовка интерактивной тепловой карты
-                import plotly.express as px
-                fig = px.imshow(pivot, text_auto=True, color_continuous_scale='Blues', aspect="auto")
+                st.markdown("### 🧮 Интерактивная Матрица (Нажмите на ячейку)")
+                st.info("💡 Кликните на любую цифру в таблице ниже, чтобы открыть детализацию по конкретному артикулу и причине.")
                 
-                # Включаем выбор (клик)
-                selected = st.plotly_chart(fig, on_select="rerun", use_container_width=True)
+                # КЛИКАБЕЛЬНАЯ ТАБЛИЦА С ГРАДИЕНТОМ (Нативное решение Streamlit)
+                event = st.dataframe(
+                    pivot.style.background_gradient(cmap='Blues', axis=None),
+                    on_select="rerun",
+                    selection_mode="single-cell",
+                    use_container_width=True
+                )
                 
-                # Если нажали на ячейку — открываем диалог
-                if selected and selected.get("selection", {}).get("points"):
-                    point = selected["selection"]["points"][0]
-                    sku_clicked = point["x"]
-                    reason_clicked = point["y"]
-                    reason_id_clicked = int(reason_clicked.split('.')[0])
+                # Обработка клика по ячейке
+                if event and "selection" in event and event["selection"]["rows"] and event["selection"]["columns"]:
+                    row_idx = event["selection"]["rows"][0]
+                    col_val = event["selection"]["columns"][0]
                     
-                    show_matrix_details(sku_clicked, reason_clicked, df, reason_id_clicked)
+                    selected_reason = pivot.index[row_idx]
+                    
+                    # Streamlit возвращает либо имя колонки (строку), либо её индекс
+                    if isinstance(col_val, int):
+                        selected_sku = pivot.columns[col_val]
+                    else:
+                        selected_sku = col_val
+                        
+                    reason_id_clicked = int(selected_reason.split('.')[0])
+                    
+                    # Мгновенно открываем всплывающее окно
+                    show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
 
-                # Блок Инвойсов
-                st.markdown("### 📦 Анализ Инвойсов")
-                if 'Инвойс' in df.columns:
-                    inv_stats = df[df['Размечено']]['Инвойс'].value_counts().reset_index()
-                    inv_stats.columns = ['Инвойс', 'Кол-во проблем']
-                    st.dataframe(inv_stats, use_container_width=True)
+                st.markdown("### 📦 Проблемные Инвойсы")
+                inv_counts = df_matrix['Инвойс'].value_counts().reset_index()
+                inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
+                st.dataframe(inv_counts.head(10), use_container_width=True)
 
             else:
                 st.info("Данных для матрицы пока нет.")
