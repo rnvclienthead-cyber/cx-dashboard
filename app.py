@@ -924,9 +924,16 @@ elif page == "📊 Дашборд":
                 st.markdown("### 🧮 Интерактивная Матрица (Нажмите на ячейку)")
                 st.info("💡 Кликните на любую цифру в таблице ниже, чтобы открыть детализацию по конкретному артикулу и причине.")
                 
-                # КЛИКАБЕЛЬНАЯ ТАБЛИЦА С ГРАДИЕНТОМ (Нативное решение Streamlit)
+               # ЗАЩИТА: Пытаемся раскрасить матрицу, если установлен matplotlib
+                try:
+                    styled_matrix = pivot.style.background_gradient(cmap='Blues', axis=None)
+                except ImportError:
+                    styled_matrix = pivot
+                    st.warning("💡 Подсказка: Установите библиотеку `matplotlib` (команда pip install matplotlib), чтобы включить красивую тепловую заливку матрицы.")
+
+                # КЛИКАБЕЛЬНАЯ ТАБЛИЦА (Нативное решение Streamlit)
                 event = st.dataframe(
-                    pivot.style.background_gradient(cmap='Blues', axis=None),
+                    styled_matrix,
                     on_select="rerun",
                     selection_mode="single-cell",
                     use_container_width=True
