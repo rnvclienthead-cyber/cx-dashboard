@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Финальный фикс матрицы)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Режим отладки клика)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -1006,11 +1006,11 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
-        if st.button("Закрыть детализацию"):
+        if st.button("Закрыть"):
             st.session_state.show_detail_trigger = None
             st.rerun()
 
-    # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
+    # Проверка триггера окна
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
@@ -1035,11 +1035,9 @@ elif page == "📊 Отчет производства":
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
                     df_inv.columns = [str(c).strip() for c in df_inv.columns]
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
-                    
                     if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
                     cols_to_merge = ['Номер поставки']
                     if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
-                    
                     df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
         except Exception as e:
             st.warning(f"Данные инвойсов не подтянуты: {e}")
@@ -1090,9 +1088,6 @@ elif page == "📊 Отчет производства":
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
-            # =========================================================
-            # БЛОК 1: ТЕПЛОВАЯ МАТРИЦА
-            # =========================================================
             st.markdown("---")
             st.markdown("### 🧮 Тепловая Матрица дефектов")
             
@@ -1118,18 +1113,28 @@ elif page == "📊 Отчет производства":
                 fig.update_xaxes(tickangle=-90)
                 fig.update_layout(coloraxis_showscale=False, height=max(400, len(pivot)*35 + 100), margin=dict(l=0,r=0,b=100,t=20))
                 
-                # Заменили use_container_width на width="stretch" по требованию логов
-                event = st.plotly_chart(fig, on_select="rerun", selection_mode="points", width="stretch")
+                event = st.plotly_chart(
+                    fig, 
+                    on_select="rerun", 
+                    selection_mode="points", 
+                    use_container_width=True,
+                    key="heatmap_matrix"
+                )
                 
-                # --- ИДЕАЛЬНЫЙ БЕЗОТКАЗНЫЙ ПЕРЕХВАТЧИК ---
+                # ===============================================
+                # 🛠 БЛОК РЕНТГЕНА (ОТЛАДКА КЛИКА)
+                # ===============================================
+                st.warning("👇 **ТЕХНИЧЕСКИЙ БЛОК:** Сделай клик по любому цветному квадрату на графике выше. Если цифры ниже не меняются, значит Streamlit не поддерживает клики по Heatmap.")
+                st.write("**Сырые данные от Streamlit при клике:**")
+                st.json(event)
+                # ===============================================
+
                 try:
                     points = []
-                    # Парсим объект
                     if hasattr(event, "selection"):
                         sel = event.selection
                         if isinstance(sel, dict) and "points" in sel:
                             points = sel["points"]
-                    # Парсим словарь (если версия Streamlit отдала dict)
                     elif isinstance(event, dict) and "selection" in event:
                         points = event["selection"].get("points", [])
 
@@ -1141,7 +1146,6 @@ elif page == "📊 Отчет производства":
                         if sku and full_reason:
                             reason_id_clicked = int(full_reason.split('.')[0])
                             
-                            # Записываем в сессию и перезагружаем
                             st.session_state.show_detail_trigger = {
                                 'sku': sku,
                                 'reason': full_reason,
@@ -1150,14 +1154,11 @@ elif page == "📊 Отчет производства":
                             }
                             st.rerun()
                 except Exception as e:
-                    st.error(f"Системная ошибка обработки клика: {e}")
+                    pass
 
             else:
                 st.info("Данных для матрицы пока нет.")
 
-            # =========================================================
-            # БЛОК 2: ПРОБЛЕМНЫЕ ИНВОЙСЫ
-            # =========================================================
             st.markdown("---")
             st.markdown("### 📦 Проблемные Инвойсы")
             
@@ -1165,8 +1166,7 @@ elif page == "📊 Отчет производства":
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                # Также исправили ширину для таблицы
-                st.dataframe(inv_counts.head(10), width="stretch")
+                st.dataframe(inv_counts.head(10), use_container_width=True)
             else:
                 st.info("Данных для инвойсов пока нет.")
 
