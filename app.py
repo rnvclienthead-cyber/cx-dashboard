@@ -883,9 +883,11 @@ elif page == "🧠 Обучение ИИ":
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
-    # ПРЕДОХРАНИТЕЛИ (добавьте эти 2 строки сразу после титула)
-    if 'matrix_key' not in st.session_state: st.session_state.matrix_key = 0
-    if 'last_processed_click' not in st.session_state: st.session_state.last_processed_click = None
+    # --- ПРЕДОХРАНИТЕЛИ НОВОГО ТИПА ---
+    if 'matrix_key' not in st.session_state: 
+        st.session_state.matrix_key = 0
+    if 'ignore_id' not in st.session_state: 
+        st.session_state.ignore_id = None
     
     st.markdown("""
     <style>
@@ -992,11 +994,13 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
-        # --- КНОПКА ЗАКРЫТИЯ (Выровнена верно) ---
+        # --- КНОПКА ЗАКРЫТИЯ С БЛОКИРОВКОЙ ПОВТОРА ---
         if st.button("Закрыть детализацию"):
+            # Запоминаем, что именно этот клик мы больше не хотим видеть
+            st.session_state.ignore_id = f"{sku}_{reason_name}" 
             st.session_state.show_detail_trigger = None
-            st.session_state.last_processed_click = None # Сброс памяти
-            st.session_state.matrix_key += 1            # Сброс графика
+            # Принудительно перерисовываем график
+            st.session_state.matrix_key += 1
             st.rerun()
 
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
@@ -1133,7 +1137,7 @@ elif page == "📊 Отчет производства":
                     key=f"prod_matrix_{st.session_state.get('matrix_key', 0)}"
                 )
                 
-                # --- УМНЫЙ ПЕРЕХВАТЧИК ---
+                # --- ЛОГИЧЕСКИЙ ЗАМОК ---
                 try:
                     if event and hasattr(event, "selection"):
                         sel = event.selection
@@ -1144,16 +1148,17 @@ elif page == "📊 Отчет производства":
                             sku_clicked = clicked_point.get('Артикул_Метка')
                             reason_clicked = clicked_point.get('Причина_Метка')
                             
-                            # Уникальный ID клика
-                            current_click_id = f"{sku_clicked}_{reason_clicked}"
+                            current_id = f"{sku_clicked}_{reason_clicked}"
 
-                            # Срабатывает только если клик новый и окно еще не открыто
-                            if not st.session_state.get('show_detail_trigger') and current_click_id != st.session_state.last_processed_click:
+                            # ЕСЛИ КЛИК НОВЫЙ (не совпадает с просмотренным)
+                            if current_id != st.session_state.ignore_id:
+                                # Сбрасываем игнор, так как пошел новый клик
+                                st.session_state.ignore_id = None 
+                                
                                 clean_sku = sku_clicked.split(' [')[0]
                                 clean_reason = reason_clicked.split(' [')[0]
                                 reason_id_clicked = int(clean_reason.split('.')[0])
                                 
-                                st.session_state.last_processed_click = current_click_id
                                 st.session_state.show_detail_trigger = {
                                     'sku': clean_sku,
                                     'reason': clean_reason,
