@@ -9,6 +9,8 @@ import plotly.express as px
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 import io
+import zipfile
+import urllib.request
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
@@ -358,7 +360,7 @@ def get_col_letter(col_idx):
     if col_idx < 26: return chr(ord('A') + col_idx)
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
-page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Дашборд", "📜 Системный Журнал"])
+page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Отчет производства", "📜 Системный Журнал"])
 
 if page == "🤖 Робот-Загрузчик":
     st.title("🤖 Робот-Загрузчик")
@@ -833,11 +835,11 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. АНАЛИТИКА, ИНВОЙСЫ И МАТРИЦА
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Аналитика и Матрица)
 # ==========================================
 
-elif page == "📊 Дашборд":
-    st.title("📊 Аналитика, Инвойсы и Сводная Матрица")
+elif page == "📊 Отчет производства":
+    st.title("📊 Отчет производства")
     
     st.markdown("""
     <style>
@@ -845,17 +847,45 @@ elif page == "📊 Дашборд":
     [data-testid="stDataFrame"] { font-size: 11px !important; }
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     
-    /* Стили как в Модерации: фото по горизонтали, 140px */
+    /* Стили: фото по горизонтали, без рамок при зуме */
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
-    .photo-zoom { width: 140px; height: 140px; object-fit: cover; border-radius: 8px; transition: transform 0.3s ease; cursor: pointer; }
-    .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
+    .photo-zoom { 
+        width: 140px; height: 140px; object-fit: cover; border-radius: 8px; 
+        transition: transform 0.3s ease; cursor: pointer; 
+        border: none !important; outline: none !important; background: transparent !important;
+    }
+    .photo-zoom:hover { 
+        transform: scale(4); z-index: 9999; position: relative; 
+        box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
+        border: none !important; outline: none !important;
+    }
+    
+    /* Кнопки видео-ссылок */
+    .video-link-btn {
+        display: inline-block; padding: 8px 14px; background-color: #2563eb; 
+        color: white !important; border-radius: 6px; text-decoration: none; 
+        font-weight: bold; font-size: 13px; transition: background-color 0.2s;
+    }
+    .video-link-btn:hover { background-color: #1d4ed8; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Динамичное модальное окно для видео
-    @st.dialog("Просмотр видео")
-    def play_video_modal(url):
-        st.video(url)
+    # Функция генерации ZIP-архива в памяти
+    def create_images_zip(urls):
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for i, url in enumerate(urls):
+                try:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=3) as response:
+                        img_data = response.read()
+                        ext = ".jpg"
+                        if ".png" in url.lower(): ext = ".png"
+                        elif ".jpeg" in url.lower(): ext = ".jpeg"
+                        zip_file.writestr(f"photo_{i+1}{ext}", img_data)
+                except Exception:
+                    pass # Пропускаем битые ссылки
+        return zip_buffer.getvalue()
 
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
@@ -867,46 +897,81 @@ elif page == "📊 Дашборд":
         ]
         
         if not details.empty:
+            # Сбор ВСЕХ фото для общей кнопки скачивания
+            all_photos = []
+            for _, r in details.iterrows():
+                m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                for u in urls:
+                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                    if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
+                        all_photos.append(clean_url)
+            
+            if all_photos:
+                # Генерируем архив всех фото
+                with st.spinner("Формирование архива фото..."):
+                    zip_all = create_images_zip(all_photos)
+                st.download_button(
+                    label=f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", 
+                    data=zip_all, 
+                    file_name=f"{sku}_{reason_id}_ALL.zip", 
+                    mime="application/zip", 
+                    type="primary"
+                )
+            st.markdown("---")
+            
             for _, r in details.iterrows():
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
                     
                     c1, media_col = st.columns([1.2, 1])
                     
+                    # Разбираем медиа конкретного обращения
+                    m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                    row_photos = []
+                    videos = []
+                    for u in urls:
+                        clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                        if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                        if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
+                            videos.append(clean_url)
+                        else:
+                            row_photos.append(clean_url)
+
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Текст_Клиента', '---')}")
                         st.write(f"📅 **Дата:** {r.get('Дата', '---')}")
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
-                        st.write(f"🕵️ **Аудит:** {r.get('Аудит', '---')} | **Коммент:** {r.get('Комментарий', '---')}")
+                        
+                        # Индивидуальная кнопка скачивания фото
+                        if row_photos:
+                            zip_row = create_images_zip(row_photos)
+                            st.download_button(
+                                label="📥 Скачать фото", 
+                                data=zip_row, 
+                                file_name=f"order_{r.get('Инвойс', 'photos')}.zip", 
+                                mime="application/zip", 
+                                key=f"dl_row_{r.name}"
+                            )
                     
                     with media_col:
-                        m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
-                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                        
-                        if urls:
-                            videos = []
+                        if row_photos or videos:
                             images_html = '<div class="media-row">'
-                            
-                            for u in urls[:6]: 
-                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                
-                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
-                                    videos.append(clean_url)
-                                else:
-                                    images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
-                                    
+                            for clean_url in row_photos[:6]:
+                                images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
                             images_html += '</div>'
                             st.markdown(images_html, unsafe_allow_html=True)
                             
+                            # ВИДЕО: Открывается в новой вкладке браузера
                             if videos:
-                                v_cols = st.columns(len(videos))
+                                v_html = '<div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">'
                                 for v_idx, v_url in enumerate(videos):
-                                    with v_cols[v_idx]:
-                                        # Используем нативную кнопку и модальное окно, как в модерации
-                                        if st.button("🎥 Видео", key=f"dash_vid_{r.name}_{v_idx}"):
-                                            play_video_modal(v_url)
-                                            
+                                    v_html += f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Смотреть видео {v_idx+1}</a>'
+                                v_html += '</div>'
+                                st.markdown(v_html, unsafe_allow_html=True)
+                                
                     st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.write("Нет данных по этому пересечению.")
@@ -988,11 +1053,9 @@ elif page == "📊 Дашборд":
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
-                # Добавляем "ОБЩЕЕ КОЛ-ВО"
                 total_col = pivot.sum(axis=1)
                 pivot.insert(0, 'ОБЩЕЕ КОЛ-ВО', total_col)
                 
-                # Динамическая высота убирает скролл
                 dynamic_height = len(pivot) * 28 + 45
                 
                 st.markdown("### 🧮 Интерактивная Матрица (Нажмите на ячейку)")
@@ -1000,7 +1063,7 @@ elif page == "📊 Дашборд":
                 
                 styled_pivot = pivot.style.background_gradient(
                     cmap='Blues', 
-                    subset=pivot.columns[1:] # Градиент только для артикулов
+                    subset=pivot.columns[1:] 
                 )
                 
                 event = st.dataframe(
@@ -1030,7 +1093,7 @@ elif page == "📊 Дашборд":
             else:
                 st.info("Данных для матрицы пока нет.")
     except Exception as e:
-        st.error(f"Ошибка Дашборда: {e}")
+        st.error(f"Ошибка Отчета: {e}")
         
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
