@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Идеальная растянутая матрица с центрированием)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Идеальная нативная матрица: 2 символа + Full Width)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,12 +884,10 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Убираем старый кривой zoom. Просто используем компактный шрифт */
-    [data-testid="stDataFrame"] { 
-        font-size: 11px !important; 
-    }
+    /* Делаем шрифт компактным, чтобы таблица была аккуратной */
+    [data-testid="stDataFrame"] { font-size: 12px !important; }
     
-    /* Увеличиваем размер текста во всплывающих подсказках */
+    /* Увеличиваем размер текста во всплывающих подсказках (как ты просил ранее) */
     [data-testid="stTooltipContent"] { font-size: 16px !important; }
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
@@ -1097,7 +1095,7 @@ elif page == "📊 Отчет производства":
 
             st.markdown("---")
             st.markdown("### 🧮 Транспонированная Матрица")
-            st.info("💡 **Как читать:** Слева — причины. Сверху — артикулы. Наведите курсор на столбец, чтобы увидеть полное название. **Кликните на цветную ячейку для детализации!**")
+            st.info("💡 **Как читать:** Слева — причины. Сверху — артикулы (сокращены до 2 букв для компактности). Наведите курсор на заголовок, чтобы увидеть полное название. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
@@ -1112,35 +1110,38 @@ elif page == "📊 Отчет производства":
                 pivot = pivot.reset_index()
 
                 # ===============================================
-                # 🛠 ГЛАВНАЯ МАГИЯ УРАВНИВАНИЯ СТОЛБЦОВ
-                # Мы обрезаем все артикулы ровно до 6 символов, 
-                # чтобы Стримлит идеально поровну распределил ширину!
+                # 🛠 СОКРАЩЕНИЕ ДО 2 СИМВОЛОВ С ЗАЩИТОЙ ОТ ДУБЛЕЙ
                 # ===============================================
                 sku_mapping = {}
+                used_shorts = {}
+                
                 for col in pivot.columns:
                     if col not in ['Причина', 'ИТОГО']:
-                        # Обрезаем до 5 символов и ставим многоточие
-                        short_name = (col[:5] + "…") if len(col) > 6 else col
+                        base_short = col[:2].upper() # Берем первые 2 буквы
                         
-                        # Защита от дублей (если два артикула начинаются одинаково)
-                        orig_short = short_name
-                        counter = 1
-                        while short_name in sku_mapping.values():
-                            short_name = f"{orig_short[:4]}{counter}…"
-                            counter += 1
-                        
+                        # Если такое сокращение уже есть, добавляем невидимые пробелы, 
+                        # чтобы Pandas считал колонки разными
+                        if base_short in used_shorts:
+                            used_shorts[base_short] += 1
+                            short_name = base_short + ("\u200B" * used_shorts[base_short])
+                        else:
+                            used_shorts[base_short] = 0
+                            short_name = base_short
+                            
                         sku_mapping[col] = short_name
                 
-                # Обратный словарь для кликов (короткое имя -> полное имя)
+                # Обратный словарь (Короткое имя -> Полное имя) для работы кликов
                 reverse_sku_mapping = {v: k for k, v in sku_mapping.items()}
                 
-                # Переименовываем столбцы в таблице
+                # Переименовываем столбцы
                 pivot = pivot.rename(columns=sku_mapping)
                 
-                # Настройка визуального отображения колонок
+                # ===============================================
+                # 🛠 НАСТРОЙКА ШИРИНЫ И ПОДСКАЗОК
+                # ===============================================
                 col_config = {
                     'Причина': st.column_config.TextColumn("Причина дефекта", width="medium"), 
-                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width="small")
+                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=40)
                 }
                 
                 gradient_cols = [c for c in pivot.columns if c not in ['Причина', 'ИТОГО']]
@@ -1148,16 +1149,16 @@ elif page == "📊 Отчет производства":
                 for col in gradient_cols:
                     col_config[col] = st.column_config.NumberColumn(
                         col, 
-                        # Подсказка содержит полное оригинальное название
-                        help=f"Артикул: {reverse_sku_mapping[col]}"
+                        width=15, # Сжимаем колонки до МАКСИМУМА (зеленый круг)
+                        help=f"Артикул: {reverse_sku_mapping[col]}" # Полное имя в подсказке
                     )
 
-                # Добавляем центрирование текста и отрисовку четкой сетки (через Pandas Styler)
+                # Центрируем текст цифр и задаем сетку для читаемости
                 styled_pivot = pivot.style\
                     .background_gradient(cmap='Blues', subset=gradient_cols)\
                     .set_properties(**{
-                        'text-align': 'center',       # Центрируем цифры
-                        'border': '1px solid #cbd5e1' # Добавляем серую сетку
+                        'text-align': 'center', 
+                        'border': '1px solid #cbd5e1'
                     }, subset=gradient_cols)\
                     .set_properties(**{
                         'text-align': 'center',
@@ -1170,7 +1171,7 @@ elif page == "📊 Отчет производства":
 
                 dynamic_height = len(pivot) * 35 + 43
                 
-                # width="stretch" теперь работает правильно и идеально ровно заполняет страницу
+                # width="stretch" растягивает таблицу на весь экран (красная рамка)
                 event = st.dataframe(
                     styled_pivot,
                     on_select="rerun",
@@ -1181,14 +1182,14 @@ elif page == "📊 Отчет производства":
                     column_config=col_config
                 )
                 
-                # Нативный перехватчик кликов
+                # Перехватчик кликов
                 if hasattr(event, "selection") and event.selection.get("cells"):
                     selected_cell = event.selection.get("cells")[0]
                     row_idx = selected_cell[0]
                     col_name = selected_cell[1]
                     
                     if col_name not in ['Причина', 'ИТОГО']:
-                        # Восстанавливаем оригинальный артикул из короткого названия
+                        # Восстанавливаем полное имя артикула для корректной фильтрации
                         selected_sku = reverse_sku_mapping.get(col_name, col_name)
                         selected_reason = str(pivot.iloc[row_idx]['Причина']) 
                         reason_id_clicked = int(selected_reason.split('.')[0])
