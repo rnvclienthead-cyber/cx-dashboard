@@ -877,7 +877,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Итоговый: Кэш, Изумруд, Фикс Квот)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Итоговый: Кэш, Изумрудная гамма Teals, Фикс Квот)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -893,7 +893,7 @@ elif page == "📊 Отчет производства":
     }
     .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; }
     .video-link-btn {
-        display: inline-block; padding: 8px 14px; background-color: #10b981; 
+        display: inline-block; padding: 8px 14px; background-color: #14b8a6; 
         color: white !important; border-radius: 6px; text-decoration: none; 
         font-weight: bold; font-size: 13px;
     }
@@ -901,7 +901,7 @@ elif page == "📊 Отчет производства":
     """, unsafe_allow_html=True)
 
     # --- КЭШИРОВАНИЕ (Решает проблему Quota Exceeded) ---
-    @st.cache_data(ttl=300) # Данные обновляются раз в 5 минут
+    @st.cache_data(ttl=300) 
     def get_cached_data(spreadsheet_id):
         client = get_gspread_client()
         sh = client.open_by_key(spreadsheet_id)
@@ -973,10 +973,9 @@ elif page == "📊 Отчет производства":
         
         if st.button("Закрыть и сбросить выбор"):
             st.session_state.show_detail_trigger = None
-            st.session_state.last_click = None # Сбрасываем выбор клика
+            st.session_state.last_click = None 
             st.rerun()
 
-    # Инициализация состояний
     if 'last_click' not in st.session_state: st.session_state.last_click = None
 
     if st.session_state.get('show_detail_trigger'):
@@ -986,7 +985,6 @@ elif page == "📊 Отчет производства":
     try:
         df = get_cached_data(SPREADSHEET_ID_MAIN)
         
-        # Подгрузка инвойсов
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
             if inv_id:
@@ -998,7 +996,7 @@ elif page == "📊 Отчет производства":
         except: pass
 
         if not df.empty:
-            df_filtered = df.copy() # Здесь ваши selectbox фильтры (упрощено для кода)
+            df_filtered = df.copy() 
             
             matrix_list = []
             for i in range(1, 14):
@@ -1017,13 +1015,10 @@ elif page == "📊 Отчет производства":
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул']).fillna(0).astype(int)
                 pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
                 
-                # --- ПОСТРОЧНАЯ НОРМАЛИЗАЦИЯ ДЛЯ ЦВЕТА ---
                 reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
-                # Считаем максимум для каждой ПРИЧИНЫ (строки)
                 row_max = df_melt.groupby('Причина')['Дефекты'].transform('max')
-                # Нормализуем значение от 0 до 1 для градиента
                 df_melt['Color_Value'] = df_melt['Дефекты'] / row_max.replace(0, 1)
                 
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [Всего: {reason_totals.get(x, 0)}]")
@@ -1040,8 +1035,8 @@ elif page == "📊 Отчет производства":
                 )
                 
                 rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
-                    # Красим по Color_Value (0..1), чтобы максимум в строке всегда был ярким
-                    color=alt.Color('Color_Value:Q', scale=alt.Scale(scheme='emerald'), legend=None),
+                    # ИСПРАВЛЕНО: используем схему 'teals' для изумрудного/мятного цвета
+                    color=alt.Color('Color_Value:Q', scale=alt.Scale(scheme='teals'), legend=None),
                     tooltip=[alt.Tooltip('Артикул:N'), alt.Tooltip('Причина:N'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
                 )
                 
@@ -1053,11 +1048,9 @@ elif page == "📊 Отчет производства":
                 chart = alt.layer(rects, text).properties(height=max(400, len(pivot)*35)).add_params(click_selector)
                 event = st.altair_chart(chart, use_container_width=True, on_select="rerun")
                 
-                # --- ЛОГИКА ОБРАБОТКИ КЛИКА ---
                 if hasattr(event, "selection") and event.selection.get("cell_click"):
                     current_click = event.selection["cell_click"][0]
                     
-                    # Запускаем диалог только если этот клик еще не обрабатывался
                     if current_click != st.session_state.last_click:
                         st.session_state.last_click = current_click
                         st.session_state.show_detail_trigger = {
