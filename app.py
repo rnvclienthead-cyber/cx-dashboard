@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Перевернутая нативная матрица)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Компактная перевернутая матрица)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,8 +884,9 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Компактный шрифт для идеального отображения цифр */
-    [data-testid="stDataFrame"] { font-size: 12px !important; }
+    /* МАКСИМАЛЬНАЯ КОМПАКТНОСТЬ: Уменьшаем шрифт, чтобы строки стали у́же (ниже) */
+    [data-testid="stDataFrame"] { font-size: 10px !important; }
+    
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
@@ -1081,56 +1082,51 @@ elif page == "📊 Отчет производства":
                         })
 
             st.markdown("---")
-            st.markdown("### 🧮 Матрица дефектов")
-            st.info("💡 **Как читать таблицу:** Слева указаны артикулы. Столбцы (1-13) — это категории дефектов. Наведите мышку на цифру столбца, чтобы увидеть название категории. **Кликните на цветную ячейку для детализации!**")
+            st.markdown("### 🧮 Компактная Матрица дефектов")
+            st.info("💡 **Как читать таблицу:** Слева — артикулы. Столбцы (1-13) — категории. Наведите мышку на цифру столбца для подсказки. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 
-                # --- ГЛАВНЫЙ ФОКУС: ПЕРЕВОРАЧИВАЕМ МАТРИЦУ ---
-                # Теперь строки = Артикулы, Столбцы = ID категорий (1, 2, 3...)
                 pivot = pd.crosstab(df_matrix['Артикул'], df_matrix['ID'])
                 
-                # Добавляем "ИТОГО" первым столбцом
                 total_counts = pivot.sum(axis=1)
                 pivot.insert(0, 'ИТОГО', total_counts)
                 
-                # Настройка колонок: делаем их узкими и добавляем подсказки
+                # --- ТОЧЕЧНАЯ НАСТРОЙКА ШИРИНЫ КОЛОНОК ---
                 col_config = {
-                    'ИТОГО': st.column_config.Column(width=60, help="Всего дефектов по этому артикулу")
+                    'ИТОГО': st.column_config.Column(width=45, help="Всего дефектов")
                 }
                 for i in range(1, 14):
                     if i in pivot.columns:
                         col_config[i] = st.column_config.Column(
-                            width=30, # Супер узкая колонка под цифру категории
-                            help=CATEGORIES.get(i, f"Категория {i}") # Подсказка всплывет при наведении
+                            width=25, # Сжимаем колонки до ширины двух символов
+                            help=CATEGORIES.get(i, f"Категория {i}")
                         )
 
-                # Вычисляем высоту на основе количества артикулов
-                dynamic_height = len(pivot) * 35 + 43
+                # Высота рассчитывается исходя из уменьшенного шрифта (~25px на строку)
+                dynamic_height = len(pivot) * 25 + 43
                 
-                # Возвращаемся к родному, 100% рабочему st.dataframe!
+                # Обрати внимание: мы удалили параметр width / use_container_width.
+                # Теперь таблица сожмется ровно по ширине данных!
                 event = st.dataframe(
                     pivot.style.background_gradient(cmap='Blues', subset=pivot.columns[1:]),
                     on_select="rerun",
                     selection_mode="single-cell",
-                    width="stretch",
                     height=dynamic_height,
                     column_config=col_config
                 )
                 
-                # НАДЕЖНЫЙ ПЕРЕХВАТЧИК КЛИКА ИЗ ПРОШЛОГО РАБОЧЕГО ВАРИАНТА
                 if hasattr(event, "selection") and event.selection.get("cells"):
                     selected_cell = event.selection.get("cells")[0]
                     row_idx = selected_cell[0]
                     col_name = selected_cell[1]
                     
                     if col_name != 'ИТОГО':
-                        selected_sku = pivot.index[row_idx] # Теперь индекс - это Артикул
-                        reason_id_clicked = int(col_name) # Имя колонки - это ID категории
+                        selected_sku = pivot.index[row_idx] 
+                        reason_id_clicked = int(col_name) 
                         selected_reason = f"{reason_id_clicked}. {CATEGORIES.get(reason_id_clicked, '')}"
                         
-                        # Моментальное открытие окна
                         show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
 
             else:
