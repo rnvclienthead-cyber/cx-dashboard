@@ -877,7 +877,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Итоговый фикс: Матрица + Инвойсы + Кэш)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Полная изоляция блоков)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -900,7 +900,7 @@ elif page == "📊 Отчет производства":
     </style>
     """, unsafe_allow_html=True)
 
-    # --- КЭШИРОВАНИЕ ДАННЫХ (Защита от 429 Quota Exceeded) ---
+    # --- КЭШИРОВАНИЕ (Защита от Quota Exceeded) ---
     @st.cache_data(ttl=300) 
     def get_cached_returns(spreadsheet_id):
         client = get_gspread_client()
@@ -938,10 +938,10 @@ elif page == "📊 Отчет производства":
                 m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
                 urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                 for u in urls:
-                    clean_u = u.replace("']", "").replace("'", "").replace('"', '')
-                    if clean_u.startswith("//"): clean_u = "https:" + clean_u
-                    if not any(ext in clean_u.lower() for ext in ['.mp4', '.mov', '.avi']):
-                        all_photos.append(clean_u)
+                    cu = u.replace("']", "").replace("'", "").replace('"', '')
+                    if cu.startswith("//"): cu = "https:" + cu
+                    if not any(ext in cu.lower() for ext in ['.mp4', '.mov', '.avi']):
+                        all_photos.append(cu)
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary"):
@@ -974,15 +974,14 @@ elif page == "📊 Отчет производства":
             st.session_state.last_click = None 
             st.rerun()
 
-    # Инициализация состояний
     if 'last_click' not in st.session_state: st.session_state.last_click = None
-
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
     try:
-        df = get_cached_returns(SPREADSHEET_ID_MAIN)
+        # 1. ЗАГРУЗКА ДАННЫХ
+        df_raw = get_cached_returns(SPREADSHEET_ID_MAIN)
         
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
@@ -990,35 +989,43 @@ elif page == "📊 Отчет производства":
                 df_inv = get_cached_inv_list(inv_id)
                 df_inv['Номер поставки'] = df_inv['supplyID'].astype(str) if 'supplyID' in df_inv.columns else ""
                 df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
-                if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
-                df = df.merge(df_inv_unique[['Номер поставки', 'Инвойс']], on='Номер поставки', how='left')
+                if 'Инвойс' in df_raw.columns: df_raw = df_raw.drop(columns=['Инвойс'])
+                df_raw = df_raw.merge(df_inv_unique[['Номер поставки', 'Инвойс']], on='Номер поставки', how='left')
         except: pass
 
-        if not df.empty:
-            df_filtered = df.copy() # Ваши фильтры selectbox тут
+        if not df_raw.empty:
+            if 'Инвойс' not in df_raw.columns: df_raw['Инвойс'] = 'Не указан'
+            df_filtered = df_raw.copy() # Тут фильтры (артикул/инвойс) из селектов
             
-            matrix_list = []
+            # 2. ПОДГОТОВКА СПИСКА ДЕФЕКТОВ (ДЛЯ МАТРИЦЫ И ИНВОЙСОВ)
+            def is_tagged(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
+            df_filtered['Есть_Дефект'] = df_filtered.apply(is_tagged, axis=1)
+
+            # ==========================================
+            # БЛОК 1: ТЕПЛОВАЯ МАТРИЦА
+            # ==========================================
+            st.markdown("### 🧮 Тепловая Матрица (Градиент по строкам)")
+            
+            matrix_data = []
             for i in range(1, 14):
                 cat_col = f'Кат {i}'
-                if cat_col in df_filtered.columns:
-                    temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
-                    for _, r in temp.iterrows():
-                        matrix_list.append({
-                            'Артикул': str(r.get('Артикул', '')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}",
-                            'ID': i,
-                            'Инвойс': r.get('Инвойс', 'Не указан')
-                        })
+                temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
+                for _, r in temp.iterrows():
+                    matrix_data.append({
+                        'Артикул': str(r.get('Артикул', '')).strip(),
+                        'Причина': f"{i}. {CATEGORIES[i]}",
+                        'ID': i
+                    })
 
-            if matrix_list:
-                df_matrix = pd.DataFrame(matrix_list)
-                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул']).fillna(0).astype(int)
+            if matrix_data:
+                df_m = pd.DataFrame(matrix_data)
+                pivot = pd.crosstab(df_m['Причина'], df_m['Артикул']).fillna(0).astype(int)
                 pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
                 
-                # --- ГРАДИЕНТ ПО СТРОКАМ + ИЗУМРУД ---
                 reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
+                # Градиент по строкам (Изумрудный)
                 row_max = df_melt.groupby('Причина')['Дефекты'].transform('max')
                 df_melt['Color_Value'] = df_melt['Дефекты'] / row_max.replace(0, 1)
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [Всего: {reason_totals.get(x, 0)}]")
@@ -1043,7 +1050,6 @@ elif page == "📊 Отчет производства":
 
                 event = st.altair_chart(chart, use_container_width=True, on_select="rerun")
                 
-                # Логика клика
                 if hasattr(event, "selection") and event.selection.get("cell_click"):
                     cur = event.selection["cell_click"][0]
                     if cur != st.session_state.last_click:
@@ -1052,15 +1058,24 @@ elif page == "📊 Отчет производства":
                             'sku': cur['Артикул'], 'reason': cur['Причина'], 'df': df_filtered, 'id': int(cur['ID'])
                         }
                         st.rerun()
-
-                # --- БЛОК ИНВОЙСОВ (ВНУТРИ ЛОГИКИ ДАННЫХ) ---
-                st.markdown("---")
-                st.markdown("### 📦 Проблемные Инвойсы")
-                inv_report = df_matrix.groupby('Инвойс').size().reset_index(name='Кол-во дефектов').sort_values('Кол-во дефектов', ascending=False)
-                st.dataframe(inv_report, use_container_width=True, hide_index=True)
-
             else:
-                st.info("Данных для анализа нет.")
+                st.info("Данных для матрицы не найдено.")
+
+            # ==========================================
+            # БЛОК 2: ПРОБЛЕМНЫЕ ИНВОЙСЫ (Независимый)
+            # ==========================================
+            st.markdown("---")
+            st.markdown("### 📦 Проблемные Инвойсы")
+            
+            # Считаем только строки, где зафиксирован дефект
+            df_defects = df_filtered[df_filtered['Есть_Дефект'] == True]
+            
+            if not df_defects.empty:
+                inv_report = df_defects.groupby('Инвойс').size().reset_index(name='Кол-во дефектов')
+                inv_report = inv_report.sort_values('Кол-во дефектов', ascending=False)
+                st.dataframe(inv_report, use_container_width=True, hide_index=True)
+            else:
+                st.info("В выбранных данных нет инвойсов с дефектами.")
 
     except Exception as e:
         st.error(f"Системная ошибка: {e}")
