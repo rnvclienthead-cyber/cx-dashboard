@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Plotly Heatmap + Логирование)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Финальный фикс матрицы)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -885,7 +885,6 @@ elif page == "📊 Отчет производства":
     st.markdown("""
     <style>
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
-    
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
         width: 140px; height: 140px; object-fit: cover; border-radius: 8px; 
@@ -895,16 +894,12 @@ elif page == "📊 Отчет производства":
     .photo-zoom:hover { 
         transform: scale(4); z-index: 9999; position: relative; 
         box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
-        border: none !important; outline: none !important;
-        border-radius: 2px !important; 
     }
-    
     .video-link-btn {
         display: inline-block; padding: 8px 14px; background-color: #2563eb; 
         color: white !important; border-radius: 6px; text-decoration: none; 
-        font-weight: bold; font-size: 13px; transition: background-color 0.2s;
+        font-weight: bold; font-size: 13px;
     }
-    .video-link-btn:hover { background-color: #1d4ed8; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -924,7 +919,6 @@ elif page == "📊 Отчет производства":
                     pass
         return zip_buffer.getvalue()
 
-    # --- ТО САМОЕ ИДЕАЛЬНОЕ ОКНО ---
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
         st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
@@ -1012,6 +1006,15 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
+        if st.button("Закрыть детализацию"):
+            st.session_state.show_detail_trigger = None
+            st.rerun()
+
+    # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
+    if st.session_state.get('show_detail_trigger'):
+        t = st.session_state.show_detail_trigger
+        show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
+
     try:
         client = get_gspread_client()
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
@@ -1087,6 +1090,9 @@ elif page == "📊 Отчет производства":
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
+            # =========================================================
+            # БЛОК 1: ТЕПЛОВАЯ МАТРИЦА
+            # =========================================================
             st.markdown("---")
             st.markdown("### 🧮 Тепловая Матрица дефектов")
             
@@ -1112,34 +1118,46 @@ elif page == "📊 Отчет производства":
                 fig.update_xaxes(tickangle=-90)
                 fig.update_layout(coloraxis_showscale=False, height=max(400, len(pivot)*35 + 100), margin=dict(l=0,r=0,b=100,t=20))
                 
-                # --- ГЕНЕРАЦИЯ ГРАФИКА ---
-                event = st.plotly_chart(fig, on_select="rerun", selection_mode="points", use_container_width=True)
+                # Заменили use_container_width на width="stretch" по требованию логов
+                event = st.plotly_chart(fig, on_select="rerun", selection_mode="points", width="stretch")
                 
-                # --- БРОНЕБОЙНЫЙ ПЕРЕХВАТЧИК С ЛОГИРОВАНИЕМ ---
+                # --- ИДЕАЛЬНЫЙ БЕЗОТКАЗНЫЙ ПЕРЕХВАТЧИК ---
                 try:
-                    # Проверяем, есть ли данные о клике внутри системного объекта
-                    if hasattr(event, "selection") and hasattr(event.selection, "points") and len(event.selection.points) > 0:
-                        point = event.selection.points[0]
-                        
-                        # Plotly возвращает координаты как 'x' и 'y'
+                    points = []
+                    # Парсим объект
+                    if hasattr(event, "selection"):
+                        sel = event.selection
+                        if isinstance(sel, dict) and "points" in sel:
+                            points = sel["points"]
+                    # Парсим словарь (если версия Streamlit отдала dict)
+                    elif isinstance(event, dict) and "selection" in event:
+                        points = event["selection"].get("points", [])
+
+                    if points and len(points) > 0:
+                        point = points[0]
                         sku = str(point.get("x", ""))
                         full_reason = str(point.get("y", ""))
                         
                         if sku and full_reason:
                             reason_id_clicked = int(full_reason.split('.')[0])
-                            # ВЫЗЫВАЕМ ТО САМОЕ ИДЕАЛЬНОЕ ОКНО
-                            show_matrix_details(sku, full_reason, df_filtered, reason_id_clicked)
                             
+                            # Записываем в сессию и перезагружаем
+                            st.session_state.show_detail_trigger = {
+                                'sku': sku,
+                                'reason': full_reason,
+                                'df': df_filtered,
+                                'id': reason_id_clicked
+                            }
+                            st.rerun()
                 except Exception as e:
-                    # ЕСЛИ ЧТО-ТО ПОШЛО НЕ ТАК - ПИШЕМ КРАСНЫЙ ЛОГ НА ЭКРАН
-                    st.error("🚨 ПРОИЗОШЛА ОШИБКА ПЕРЕХВАТА КЛИКА! Скопируй текст ниже и пришли мне:")
-                    st.write("**Ошибка Python:**", str(e))
-                    st.write("**Тип объекта event:**", type(event))
-                    st.write("**Содержимое event:**", event)
+                    st.error(f"Системная ошибка обработки клика: {e}")
 
             else:
                 st.info("Данных для матрицы пока нет.")
 
+            # =========================================================
+            # БЛОК 2: ПРОБЛЕМНЫЕ ИНВОЙСЫ
+            # =========================================================
             st.markdown("---")
             st.markdown("### 📦 Проблемные Инвойсы")
             
@@ -1147,7 +1165,8 @@ elif page == "📊 Отчет производства":
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                st.dataframe(inv_counts.head(10), use_container_width=True)
+                # Также исправили ширину для таблицы
+                st.dataframe(inv_counts.head(10), width="stretch")
             else:
                 st.info("Данных для инвойсов пока нет.")
 
