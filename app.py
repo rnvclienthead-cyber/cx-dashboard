@@ -50,17 +50,40 @@ COLUMN_NAMES_RU = {
 
 # CSS Стили (включая зум фото на 30% при наведении)
 st.markdown("""
-<style>
-    .img-zoom { width: 60px; height: 60px; object-fit: cover; border-radius: 5px; transition: transform 0.2s ease-in-out; cursor: zoom-in; }
-    .img-zoom:hover { transform: scale(1.3); z-index: 999; position: relative; box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
-    .custom-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px; }
-    .custom-table th, .custom-table td { border: 1px solid #e0e0e0; padding: 10px; vertical-align: top; }
-    .report-card { background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #4CAF50; margin-bottom: 15px; }
-    .review-card { background: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; border-left: 4px solid #2563eb; }
-    .client-text { background: #f9fafb; padding: 12px; border-radius: 6px; font-size: 14px; color: #4b5563; margin-bottom: 10px; }
-    .ai-reason { font-size: 13px; color: #059669; margin-top: 10px; font-style: italic; }
-</style>
-""", unsafe_allow_html=True)
+    <style>
+    [data-testid="stDataFrame"] { font-size: 11px !important; }
+    .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
+    
+    .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
+    
+    /* СБРОС БЕЛЫХ ФОНОВ STREAMLIT */
+    .media-row a { background: transparent !important; background-color: transparent !important; }
+    img.photo-zoom { background-color: transparent !important; }
+    
+    .photo-zoom { 
+        width: 140px; height: 140px; object-fit: cover; border-radius: 8px; 
+        transition: transform 0.3s ease; cursor: pointer; 
+        border: none !important; outline: none !important; 
+        background: transparent !important; 
+    }
+    
+    /* При наведении убираем закругление, чтобы белые углы точно не вылезли, и делаем красивую тень */
+    .photo-zoom:hover { 
+        transform: scale(4); z-index: 9999; position: relative; 
+        box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
+        border: none !important; outline: none !important;
+        border-radius: 2px !important; /* Делаем углы почти острыми при зуме */
+        background: transparent !important;
+    }
+    
+    .video-link-btn {
+        display: inline-block; padding: 8px 14px; background-color: #2563eb; 
+        color: white !important; border-radius: 6px; text-decoration: none; 
+        font-weight: bold; font-size: 13px; transition: background-color 0.2s;
+    }
+    .video-link-btn:hover { background-color: #1d4ed8; }
+    </style>
+    """, unsafe_allow_html=True)
 
 # ==========================================
 # 2. ВСЕЯДНАЯ ЧИТАЛКА И БАЗА ДАННЫХ
