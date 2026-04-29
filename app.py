@@ -877,7 +877,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Профессиональная Аналитика Altair)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Профессиональная Аналитика Altair + Рабочий клик)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -885,7 +885,7 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Оставляем стили только для карточек и видео! Никаких табличных хаков. */
+    /* Оставляем стили только для карточек и видео! */
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
@@ -1093,45 +1093,40 @@ elif page == "📊 Отчет производства":
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 
-                # 1. Строим полную таблицу со всеми нулями (чтобы сетка была ровной)
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул']).fillna(0).astype(int)
                 pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
                 
-                # 2. Считаем ИТОГИ и добавляем их прямо к названиям строк и столбцов!
                 sku_totals = pivot.drop(columns=['ID']).sum(axis=0).to_dict()
                 reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                 
-                # 3. Переводим таблицу в плоский формат, нужный для Altair
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
-                # Присваиваем новые имена с суммами
                 df_melt['Артикул_Метка'] = df_melt['Артикул'].apply(lambda x: f"{x} [{sku_totals.get(x, 0)}]")
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
                 
-                # Текст для ячеек (скрываем нули, чтобы матрица дышала)
                 df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
                 # ===============================================
-                # 🛠 ALTAIR: НАСТОЯЩАЯ ПРОФЕССИОНАЛЬНАЯ ГРАФИКА
+                # 🛠 ALTAIR: ИСПРАВЛЕННЫЙ ТРИГГЕР КЛИКА
                 # ===============================================
                 import altair as alt
                 
-                # Базовый график
+                # Создаем активную зону выбора (selection), чтобы Streamlit мог ее перехватить!
+                click_selector = alt.selection_point(name='click')
+                
                 base = alt.Chart(df_melt).encode(
                     x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=300, orient='bottom')),
                     y=alt.Y('Причина_Метка:N', title=None, sort=alt.EncodingSortField(field='ID', order='ascending'))
                 )
                 
-                # Квадраты матрицы (с белой рамкой для разделения темных цветов)
+                # Привязываем созданный "click_selector" к графику с помощью add_params
                 rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
                     color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None),
-                    tooltip=[alt.Tooltip('Артикул:N'), alt.Tooltip('Причина:N'), alt.Tooltip('Дефекты:Q')]
-                )
+                    tooltip=[alt.Tooltip('Артикул:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
+                ).add_params(click_selector)
                 
-                # Цифры строго по центру
                 text = base.mark_text(baseline='middle', fontSize=11).encode(
                     text='Текст:N',
-                    # Если квадрат темный — делаем текст белым, иначе черным
                     color=alt.condition(
                         alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2),
                         alt.value('white'),
@@ -1139,28 +1134,28 @@ elif page == "📊 Отчет производства":
                     )
                 )
                 
-                # Динамическая высота
                 chart_height = max(400, len(pivot) * 35)
                 final_chart = (rects + text).properties(height=chart_height)
                 
-                # Рендер: use_container_width=True автоматически распределит ширину на 100% экрана!
+                # Рендер графика
                 event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun")
                 
-                # --- НАДЕЖНЫЙ ПЕРЕХВАТЧИК ALTAIR ---
-                if event and event.selection:
-                    for key, val in event.selection.items():
-                        if isinstance(val, list) and len(val) > 0:
-                            clicked_point = val[0]
-                            sku_clicked = clicked_point.get('Артикул_Метка')
-                            reason_clicked = clicked_point.get('Причина_Метка')
+                # --- ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК ALTAIR ---
+                # Теперь мы обращаемся к словарю event.selection и ищем ключ "click"
+                if hasattr(event, "selection") and isinstance(event.selection, dict) and event.selection.get("click"):
+                    click_data = event.selection.get("click")
+                    
+                    if len(click_data) > 0:
+                        clicked_point = click_data[0]
+                        sku_clicked = clicked_point.get('Артикул_Метка')
+                        reason_clicked = clicked_point.get('Причина_Метка')
+                        
+                        if sku_clicked and reason_clicked:
+                            clean_sku = sku_clicked.split(' [')[0]
+                            clean_reason = reason_clicked.split(' [')[0]
+                            reason_id_clicked = int(clean_reason.split('.')[0])
                             
-                            if sku_clicked and reason_clicked:
-                                # Очищаем ИТОГИ в скобках, чтобы достать оригинальные значения для функции
-                                clean_sku = sku_clicked.split(' [')[0]
-                                clean_reason = reason_clicked.split(' [')[0]
-                                reason_id_clicked = int(clean_reason.split('.')[0])
-                                
-                                show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id_clicked)
+                            show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id_clicked)
 
             else:
                 st.info("Данных для матрицы пока нет.")
