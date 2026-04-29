@@ -877,7 +877,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Итоговый: Кэш, Изумрудная гамма Teals, Фикс Квот)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Итоговый фикс: Матрица + Инвойсы + Кэш)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -893,22 +893,22 @@ elif page == "📊 Отчет производства":
     }
     .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; }
     .video-link-btn {
-        display: inline-block; padding: 8px 14px; background-color: #14b8a6; 
+        display: inline-block; padding: 8px 14px; background-color: #0d9488; 
         color: white !important; border-radius: 6px; text-decoration: none; 
         font-weight: bold; font-size: 13px;
     }
     </style>
     """, unsafe_allow_html=True)
 
-    # --- КЭШИРОВАНИЕ (Решает проблему Quota Exceeded) ---
+    # --- КЭШИРОВАНИЕ ДАННЫХ (Защита от 429 Quota Exceeded) ---
     @st.cache_data(ttl=300) 
-    def get_cached_data(spreadsheet_id):
+    def get_cached_returns(spreadsheet_id):
         client = get_gspread_client()
         sh = client.open_by_key(spreadsheet_id)
         return pd.DataFrame(sh.worksheet("Возвраты").get_all_records())
 
     @st.cache_data(ttl=300)
-    def get_cached_invoices(spreadsheet_id):
+    def get_cached_inv_list(spreadsheet_id):
         client = get_gspread_client()
         sh = client.open_by_key(spreadsheet_id)
         return pd.DataFrame(sh.get_worksheet(0).get_all_records())
@@ -920,15 +920,13 @@ elif page == "📊 Отчет производства":
                 try:
                     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req, timeout=3) as response:
-                        img_data = response.read()
-                        zip_file.writestr(f"photo_{i+1}.jpg", img_data)
+                        zip_file.writestr(f"photo_{i+1}.jpg", response.read())
                 except: pass
         return zip_buffer.getvalue()
 
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
         st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
-        
         details = filtered_df[
             (filtered_df['Артикул'] == sku) & 
             (filtered_df[f'Кат {reason_id}'].astype(str).str.strip().isin(['1', '1.0', '+']))
@@ -940,10 +938,10 @@ elif page == "📊 Отчет производства":
                 m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
                 urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                 for u in urls:
-                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                    if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
-                        all_photos.append(clean_url)
+                    clean_u = u.replace("']", "").replace("'", "").replace('"', '')
+                    if clean_u.startswith("//"): clean_u = "https:" + clean_u
+                    if not any(ext in clean_u.lower() for ext in ['.mp4', '.mov', '.avi']):
+                        all_photos.append(clean_u)
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary"):
@@ -965,17 +963,18 @@ elif page == "📊 Отчет производства":
                         urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                         img_html = '<div class="media-row">'
                         for u in urls:
-                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                            if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov']):
-                                img_html += f'<img src="{clean_url}" class="photo-zoom">'
+                            cu = u.replace("']", "").replace("'", "").replace('"', '')
+                            if not any(ext in cu.lower() for ext in ['.mp4', '.mov']):
+                                img_html += f'<img src="{cu}" class="photo-zoom">'
                         st.markdown(img_html + '</div>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
         
-        if st.button("Закрыть и сбросить выбор"):
+        if st.button("Закрыть"):
             st.session_state.show_detail_trigger = None
             st.session_state.last_click = None 
             st.rerun()
 
+    # Инициализация состояний
     if 'last_click' not in st.session_state: st.session_state.last_click = None
 
     if st.session_state.get('show_detail_trigger'):
@@ -983,12 +982,12 @@ elif page == "📊 Отчет производства":
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
     try:
-        df = get_cached_data(SPREADSHEET_ID_MAIN)
+        df = get_cached_returns(SPREADSHEET_ID_MAIN)
         
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
             if inv_id:
-                df_inv = get_cached_invoices(inv_id)
+                df_inv = get_cached_inv_list(inv_id)
                 df_inv['Номер поставки'] = df_inv['supplyID'].astype(str) if 'supplyID' in df_inv.columns else ""
                 df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
                 if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
@@ -996,7 +995,7 @@ elif page == "📊 Отчет производства":
         except: pass
 
         if not df.empty:
-            df_filtered = df.copy() 
+            df_filtered = df.copy() # Ваши фильтры selectbox тут
             
             matrix_list = []
             for i in range(1, 14):
@@ -1007,7 +1006,8 @@ elif page == "📊 Отчет производства":
                         matrix_list.append({
                             'Артикул': str(r.get('Артикул', '')).strip(),
                             'Причина': f"{i}. {CATEGORIES[i]}",
-                            'ID': i
+                            'ID': i,
+                            'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
             if matrix_list:
@@ -1015,60 +1015,55 @@ elif page == "📊 Отчет производства":
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул']).fillna(0).astype(int)
                 pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
                 
+                # --- ГРАДИЕНТ ПО СТРОКАМ + ИЗУМРУД ---
                 reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
                 row_max = df_melt.groupby('Причина')['Дефекты'].transform('max')
                 df_melt['Color_Value'] = df_melt['Дефекты'] / row_max.replace(0, 1)
-                
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [Всего: {reason_totals.get(x, 0)}]")
                 df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
-                st.markdown("### 🧮 Изумрудная Матрица (Градиент по строкам)")
-                
                 import altair as alt
                 click_selector = alt.selection_point(name='cell_click', fields=['Артикул', 'Причина', 'ID'])
                 
-                base = alt.Chart(df_melt).encode(
-                    x=alt.X('Артикул:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000)),
-                    y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending'))
-                )
-                
-                rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
-                    # ИСПРАВЛЕНО: используем схему 'teals' для изумрудного/мятного цвета
-                    color=alt.Color('Color_Value:Q', scale=alt.Scale(scheme='teals'), legend=None),
-                    tooltip=[alt.Tooltip('Артикул:N'), alt.Tooltip('Причина:N'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
-                )
-                
-                text = base.mark_text(baseline='middle', fontSize=10).encode(
-                    text='Текст:N',
-                    color=alt.condition(alt.datum.Color_Value > 0.5, alt.value('white'), alt.value('black'))
-                )
-                
-                chart = alt.layer(rects, text).properties(height=max(400, len(pivot)*35)).add_params(click_selector)
+                chart = alt.layer(
+                    alt.Chart(df_melt).mark_rect(stroke='white', strokeWidth=1).encode(
+                        x=alt.X('Артикул:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000)),
+                        y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending')),
+                        color=alt.Color('Color_Value:Q', scale=alt.Scale(scheme='teals'), legend=None),
+                        tooltip=[alt.Tooltip('Артикул:N'), alt.Tooltip('Причина:N'), alt.Tooltip('Дефекты:Q')]
+                    ),
+                    alt.Chart(df_melt).mark_text(baseline='middle', fontSize=10).encode(
+                        x=alt.X('Артикул:N'), y=alt.Y('Причина_Метка:N'),
+                        text='Текст:N',
+                        color=alt.condition(alt.datum.Color_Value > 0.5, alt.value('white'), alt.value('black'))
+                    )
+                ).properties(height=max(400, len(pivot)*35)).add_params(click_selector)
+
                 event = st.altair_chart(chart, use_container_width=True, on_select="rerun")
                 
+                # Логика клика
                 if hasattr(event, "selection") and event.selection.get("cell_click"):
-                    current_click = event.selection["cell_click"][0]
-                    
-                    if current_click != st.session_state.last_click:
-                        st.session_state.last_click = current_click
+                    cur = event.selection["cell_click"][0]
+                    if cur != st.session_state.last_click:
+                        st.session_state.last_click = cur
                         st.session_state.show_detail_trigger = {
-                            'sku': current_click['Артикул'],
-                            'reason': current_click['Причина'],
-                            'df': df_filtered,
-                            'id': int(current_click['ID'])
+                            'sku': cur['Артикул'], 'reason': cur['Причина'], 'df': df_filtered, 'id': int(cur['ID'])
                         }
                         st.rerun()
 
+                # --- БЛОК ИНВОЙСОВ (ВНУТРИ ЛОГИКИ ДАННЫХ) ---
+                st.markdown("---")
+                st.markdown("### 📦 Проблемные Инвойсы")
+                inv_report = df_matrix.groupby('Инвойс').size().reset_index(name='Кол-во дефектов').sort_values('Кол-во дефектов', ascending=False)
+                st.dataframe(inv_report, use_container_width=True, hide_index=True)
+
             else:
-                st.info("Данных пока нет.")
-                
-            st.markdown("### 📦 Проблемные Инвойсы")
-            st.dataframe(df_matrix.groupby('Инвойс').size().reset_index(name='Дефектов').sort_values('Дефектов', ascending=False) if 'Инвойс' in df_matrix else pd.DataFrame(), use_container_width=True)
+                st.info("Данных для анализа нет.")
 
     except Exception as e:
-        st.error(f"Ошибка: {e}")
+        st.error(f"Системная ошибка: {e}")
         
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
