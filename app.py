@@ -877,7 +877,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Полная изоляция блоков)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Финальный фикс кнопок и инвойсов)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -900,7 +900,6 @@ elif page == "📊 Отчет производства":
     </style>
     """, unsafe_allow_html=True)
 
-    # --- КЭШИРОВАНИЕ (Защита от Quota Exceeded) ---
     @st.cache_data(ttl=300) 
     def get_cached_returns(spreadsheet_id):
         client = get_gspread_client()
@@ -948,25 +947,54 @@ elif page == "📊 Отчет производства":
                     with st.spinner("Архивация..."):
                         zip_all = create_images_zip(all_photos)
                         b64 = base64.b64encode(zip_all).decode()
-                        components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}.zip"></a><script>document.getElementById("dl").click();</script>', height=0)
+                        components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a><script>document.getElementById("dl").click();</script>', height=0)
             
             st.markdown("---")
             for _, r in details.iterrows():
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
                     c1, media_col = st.columns([1.2, 1])
+                    
+                    # Заранее собираем ссылки для карточки
+                    m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                    row_photos, videos = [], []
+                    for u in urls:
+                        cu = u.replace("']", "").replace("'", "").replace('"', '')
+                        if cu.startswith("//"): cu = "https:" + cu
+                        if any(ext in cu.lower() for ext in ['.mp4', '.mov', '.avi']):
+                            videos.append(cu)
+                        else:
+                            row_photos.append(cu)
+
                     with c1:
                         st.write(f"💬 **Текст:** {r.get('Текст_Клиента', '---')}")
                         st.write(f"📅 **Дата:** {r.get('Дата', '---')} | 🧾 **Инвойс:** {r.get('Инвойс', '---')}")
+                        
+                        # ВОЗВРАЩЕННАЯ КНОПКА ЛОКАЛЬНОГО СКАЧИВАНИЯ
+                        if row_photos:
+                            if st.button("📥 Скачать фото", key=f"dl_row_{r.name}"):
+                                with st.spinner("Архивация..."):
+                                    zip_row = create_images_zip(row_photos)
+                                    b64 = base64.b64encode(zip_row).decode()
+                                    filename = f"order_{r.get('Инвойс', 'photos')}.zip"
+                                    components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="{filename}"></a><script>document.getElementById("dl").click();</script>', height=0)
+                    
                     with media_col:
-                        m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
-                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                        img_html = '<div class="media-row">'
-                        for u in urls:
-                            cu = u.replace("']", "").replace("'", "").replace('"', '')
-                            if not any(ext in cu.lower() for ext in ['.mp4', '.mov']):
-                                img_html += f'<img src="{cu}" class="photo-zoom">'
-                        st.markdown(img_html + '</div>', unsafe_allow_html=True)
+                        if row_photos or videos:
+                            images_html = '<div class="media-row">'
+                            for clean_url in row_photos[:6]:
+                                images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
+                            images_html += '</div>'
+                            st.markdown(images_html, unsafe_allow_html=True)
+                            
+                            if videos:
+                                v_html = '<div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">'
+                                for v_idx, v_url in enumerate(videos):
+                                    v_html += f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Смотреть видео {v_idx+1}</a>'
+                                v_html += '</div>'
+                                st.markdown(v_html, unsafe_allow_html=True)
+                                
                     st.markdown('</div>', unsafe_allow_html=True)
         
         if st.button("Закрыть"):
@@ -980,7 +1008,6 @@ elif page == "📊 Отчет производства":
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
     try:
-        # 1. ЗАГРУЗКА ДАННЫХ
         df_raw = get_cached_returns(SPREADSHEET_ID_MAIN)
         
         try:
@@ -995,90 +1022,99 @@ elif page == "📊 Отчет производства":
 
         if not df_raw.empty:
             if 'Инвойс' not in df_raw.columns: df_raw['Инвойс'] = 'Не указан'
-            df_filtered = df_raw.copy() # Тут фильтры (артикул/инвойс) из селектов
+            df_filtered = df_raw.copy()
             
-            # 2. ПОДГОТОВКА СПИСКА ДЕФЕКТОВ (ДЛЯ МАТРИЦЫ И ИНВОЙСОВ)
-            def is_tagged(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
-            df_filtered['Есть_Дефект'] = df_filtered.apply(is_tagged, axis=1)
-
-            # ==========================================
-            # БЛОК 1: ТЕПЛОВАЯ МАТРИЦА
-            # ==========================================
-            st.markdown("### 🧮 Тепловая Матрица (Градиент по строкам)")
-            
-            matrix_data = []
+            matrix_list = []
             for i in range(1, 14):
                 cat_col = f'Кат {i}'
-                temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
-                for _, r in temp.iterrows():
-                    matrix_data.append({
-                        'Артикул': str(r.get('Артикул', '')).strip(),
-                        'Причина': f"{i}. {CATEGORIES[i]}",
-                        'ID': i
-                    })
+                if cat_col in df_filtered.columns:
+                    temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
+                    for _, r in temp.iterrows():
+                        matrix_list.append({
+                            'Артикул': str(r.get('Артикул', '')).strip(),
+                            'Причина': f"{i}. {CATEGORIES[i]}",
+                            'ID': i,
+                            'Инвойс': r.get('Инвойс', 'Не указан')
+                        })
 
-            if matrix_data:
-                df_m = pd.DataFrame(matrix_data)
-                pivot = pd.crosstab(df_m['Причина'], df_m['Артикул']).fillna(0).astype(int)
-                pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
-                
-                reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
-                df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
-                
-                # Градиент по строкам (Изумрудный)
-                row_max = df_melt.groupby('Причина')['Дефекты'].transform('max')
-                df_melt['Color_Value'] = df_melt['Дефекты'] / row_max.replace(0, 1)
-                df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [Всего: {reason_totals.get(x, 0)}]")
-                df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
+    # ==========================================
+    # БЛОК: ТЕПЛОВАЯ МАТРИЦА
+    # ==========================================
+    
+    st.markdown("### 🧮 Тепловая Матрица (Изумрудный градиент)")
+    
+    matrix_list = []
+    for i in range(1, 14):
+        cat_col = f'Кат {i}'
+        if cat_col in df_filtered.columns:
+            temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
+            for _, r in temp.iterrows():
+                matrix_list.append({
+                    'Артикул': str(r.get('Артикул', '')).strip(),
+                    'Причина': f"{i}. {CATEGORIES[i]}",
+                    'ID': i
+                })
 
-                import altair as alt
-                click_selector = alt.selection_point(name='cell_click', fields=['Артикул', 'Причина', 'ID'])
-                
-                chart = alt.layer(
-                    alt.Chart(df_melt).mark_rect(stroke='white', strokeWidth=1).encode(
-                        x=alt.X('Артикул:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000)),
-                        y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending')),
-                        color=alt.Color('Color_Value:Q', scale=alt.Scale(scheme='teals'), legend=None),
-                        tooltip=[alt.Tooltip('Артикул:N'), alt.Tooltip('Причина:N'), alt.Tooltip('Дефекты:Q')]
-                    ),
-                    alt.Chart(df_melt).mark_text(baseline='middle', fontSize=10).encode(
-                        x=alt.X('Артикул:N'), y=alt.Y('Причина_Метка:N'),
-                        text='Текст:N',
-                        color=alt.condition(alt.datum.Color_Value > 0.5, alt.value('white'), alt.value('black'))
-                    )
-                ).properties(height=max(400, len(pivot)*35)).add_params(click_selector)
+    if matrix_list:
+        df_m = pd.DataFrame(matrix_list)
+        pivot = pd.crosstab(df_m['Причина'], df_m['Артикул']).fillna(0).astype(int)
+        
+        # СОРТИРОВКА: Извлекаем число в начале строки для правильного порядка 1, 2, 3...
+        pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
+        pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
+        
+        reason_totals = pivot.sum(axis=1).to_dict()
+        df_melt = pivot.reset_index().melt(id_vars=['Причина'], var_name='Артикул', value_name='Дефекты')
+        
+        # Градиент по строкам
+        row_max = df_melt.groupby('Причина')['Дефекты'].transform('max')
+        df_melt['Color_Value'] = df_melt['Дефекты'] / row_max.replace(0, 1)
+        df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [Всего: {reason_totals.get(x, 0)}]")
+        df_melt['ID'] = df_melt['Причина'].apply(lambda x: int(x.split('.')[0]))
+        df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
-                event = st.altair_chart(chart, use_container_width=True, on_select="rerun")
-                
-                if hasattr(event, "selection") and event.selection.get("cell_click"):
-                    cur = event.selection["cell_click"][0]
-                    if cur != st.session_state.last_click:
-                        st.session_state.last_click = cur
-                        st.session_state.show_detail_trigger = {
-                            'sku': cur['Артикул'], 'reason': cur['Причина'], 'df': df_filtered, 'id': int(cur['ID'])
-                        }
-                        st.rerun()
-            else:
-                st.info("Данных для матрицы не найдено.")
+        import altair as alt
+        click_selector = alt.selection_point(name='cell_click', fields=['Артикул', 'Причина', 'ID'])
+        
+        chart = alt.layer(
+            alt.Chart(df_melt).mark_rect(stroke='white', strokeWidth=1).encode(
+                x=alt.X('Артикул:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000)),
+                y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending')),
+                color=alt.Color('Color_Value:Q', scale=alt.Scale(scheme='teals'), legend=None),
+                tooltip=[alt.Tooltip('Артикул:N'), alt.Tooltip('Причина:N'), alt.Tooltip('Дефекты:Q')]
+            ),
+            alt.Chart(df_melt).mark_text(baseline='middle', fontSize=10).encode(
+                x=alt.X('Артикул:N'), y=alt.Y('Причина_Метка:N'),
+                text='Текст:N',
+                color=alt.condition(alt.datum.Color_Value > 0.5, alt.value('white'), alt.value('black'))
+            )
+        ).properties(height=max(400, len(pivot)*35)).add_params(click_selector)
 
-            # ==========================================
-            # БЛОК 2: ПРОБЛЕМНЫЕ ИНВОЙСЫ (Независимый)
-            # ==========================================
-            st.markdown("---")
-            st.markdown("### 📦 Проблемные Инвойсы")
-            
-            # Считаем только строки, где зафиксирован дефект
-            df_defects = df_filtered[df_filtered['Есть_Дефект'] == True]
-            
-            if not df_defects.empty:
-                inv_report = df_defects.groupby('Инвойс').size().reset_index(name='Кол-во дефектов')
-                inv_report = inv_report.sort_values('Кол-во дефектов', ascending=False)
-                st.dataframe(inv_report, use_container_width=True, hide_index=True)
-            else:
-                st.info("В выбранных данных нет инвойсов с дефектами.")
+        event = st.altair_chart(chart, use_container_width=True, on_select="rerun")
+        
+        if hasattr(event, "selection") and event.selection.get("cell_click"):
+            cur = event.selection["cell_click"][0]
+            if cur != st.session_state.last_click:
+                st.session_state.last_click = cur
+                st.session_state.show_detail_trigger = {'sku': cur['Артикул'], 'reason': cur['Причина'], 'df': df_filtered, 'id': int(cur['ID'])}
+                st.rerun()
+    else:
+        st.info("Матрица пуста")
 
-    except Exception as e:
-        st.error(f"Системная ошибка: {e}")
+    # ==========================================
+    # БЛОК: ИНВОЙСЫ
+    # ==========================================
+    st.markdown("---")
+    st.markdown("### 📦 Проблемные Инвойсы")
+    
+    # Считаем инвойсы только для строк с дефектами
+    if not matrix_list:
+        st.info("Нет данных по инвойсам.")
+    else:
+        df_inv_report = pd.DataFrame(matrix_list)
+        inv_counts = df_inv_report['Инвойс'].value_counts().reset_index()
+        inv_counts.columns = ['Инвойс / Поставка', 'Кол-во дефектов']
+        st.dataframe(inv_counts.head(15), use_container_width=True, hide_index=True)
         
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
