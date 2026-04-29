@@ -883,11 +883,9 @@ elif page == "🧠 Обучение ИИ":
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
-    # --- ПРЕДОХРАНИТЕЛИ НОВОГО ТИПА ---
-    if 'matrix_key' not in st.session_state: 
+    # 1. ГАРАНТИРОВАННЫЙ СБРОС
+    if 'matrix_key' not in st.session_state:
         st.session_state.matrix_key = 0
-    if 'ignore_id' not in st.session_state: 
-        st.session_state.ignore_id = None
     
     st.markdown("""
     <style>
@@ -995,12 +993,8 @@ elif page == "📊 Отчет производства":
             st.write("Нет данных по этому пересечению.")
 
         # --- КНОПКА ЗАКРЫТИЯ С БЛОКИРОВКОЙ ПОВТОРА ---
-        if st.button("Закрыть детализацию"):
-            # Запоминаем, что именно этот клик мы больше не хотим видеть
-            st.session_state.ignore_id = f"{sku}_{reason_name}" 
+       if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
-            # Принудительно перерисовываем график
-            st.session_state.matrix_key += 1
             st.rerun()
 
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
@@ -1129,32 +1123,27 @@ elif page == "📊 Отчет производства":
                 
                 final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
                 
-                # Рендер графика с уникальным ключом
+                # 2. РЕНДЕР С ДИНАМИЧЕСКИМ КЛЮЧОМ
                 event = st.altair_chart(
                     final_chart, 
                     use_container_width=True, 
                     on_select="rerun",
-                    key=f"prod_matrix_{st.session_state.get('matrix_key', 0)}"
+                    key=f"prod_matrix_{st.session_state.matrix_key}"
                 )
                 
-                # --- ЛОГИЧЕСКИЙ ЗАМОК ---
+                # 3. АТОМНЫЙ ПЕРЕХВАТЧИК
                 try:
                     if event and hasattr(event, "selection"):
-                        sel = event.selection
-                        click_data = sel.get("cell_click", []) if isinstance(sel, dict) else getattr(sel, "cell_click", [])
-                            
-                        if click_data and len(click_data) > 0:
-                            clicked_point = click_data[0]
+                        sel = event.selection.get("cell_click", [])
+                        
+                        # Если клик обнаружен И окно еще не открыто
+                        if sel and len(sel) > 0 and not st.session_state.get('show_detail_trigger'):
+                            clicked_point = sel[0]
                             sku_clicked = clicked_point.get('Артикул_Метка')
                             reason_clicked = clicked_point.get('Причина_Метка')
                             
-                            current_id = f"{sku_clicked}_{reason_clicked}"
-
-                            # ЕСЛИ КЛИК НОВЫЙ (не совпадает с просмотренным)
-                            if current_id != st.session_state.ignore_id:
-                                # Сбрасываем игнор, так как пошел новый клик
-                                st.session_state.ignore_id = None 
-                                
+                            if sku_clicked and reason_clicked:
+                                # Сохраняем данные для окна
                                 clean_sku = sku_clicked.split(' [')[0]
                                 clean_reason = reason_clicked.split(' [')[0]
                                 reason_id_clicked = int(clean_reason.split('.')[0])
@@ -1165,6 +1154,10 @@ elif page == "📊 Отчет производства":
                                     'df': df_filtered,
                                     'id': reason_id_clicked
                                 }
+                                
+                                # ГЛАВНЫЙ МОМЕНТ: Меняем ключ, чтобы убить старый график с его выбором
+                                st.session_state.matrix_key += 1
+                                # Мгновенный перезапуск для открытия окна
                                 st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка системы перехвата клика: {e}")
