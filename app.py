@@ -6,6 +6,12 @@ import io
 import zipfile
 import urllib.request
 import base64
+import json
+import asyncio
+import aiohttp
+import gspread
+from datetime import datetime
+from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
@@ -869,123 +875,158 @@ elif page == "🧠 Обучение ИИ":
                         else: st.warning("⚠️ Не найдено валидных тегов в файле.")
         else: st.warning("Пожалуйста, загрузите файл.")
 
+# ==========================================
+# 7. ОТЧЕТ ПРОИЗВОДСТВА
+# ==========================================
+
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
-    # Стили
+    # --- 1. СТИЛИ ---
     st.markdown("""<style>
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
-    .media-row { display: flex; flex-wrap: wrap; gap: 10px; }
-    .photo-zoom { width: 120px; height: 120px; object-fit: cover; border-radius: 8px; cursor: pointer; }
-    .video-link-btn { display: inline-block; padding: 8px 14px; background-color: #0d9488; color: white !important; border-radius: 6px; text-decoration: none; font-size: 12px; }
+    .media-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+    .photo-zoom { width: 120px; height: 120px; object-fit: cover; border-radius: 8px; transition: transform 0.3s ease; cursor: pointer; }
+    .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; box-shadow: 0 15px 30px rgba(0,0,0,0.5); }
+    .video-link-btn { display: inline-block; padding: 8px 14px; background-color: #0d9488; color: white !important; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 12px; margin-top: 5px; }
     </style>""", unsafe_allow_html=True)
 
-    # Функции
-    def safe_zip(urls):
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            for i, u in enumerate(urls):
+    # --- 2. ФУНКЦИИ (ZIP, КЭШ, ДИАЛОГ) ---
+    def create_images_zip(urls):
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for i, url in enumerate(urls):
                 try:
-                    url = str(u).strip().replace("']", "").replace("'", "").replace('"', '')
-                    if url.startswith("//"): url = "https:" + url
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        zf.writestr(f"img_{i}.jpg", resp.read())
+                    # Очистка ссылки — критично для работы фото!
+                    clean_u = str(url).strip().replace("']", "").replace("'", "").replace('"', '')
+                    if clean_u.startswith("//"): clean_u = "https:" + clean_u
+                    if not clean_u.startswith("http"): continue
+                    
+                    req = urllib.request.Request(clean_u, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        img_data = response.read()
+                        if img_data: zip_file.writestr(f"photo_{i+1}.jpg", img_data)
                 except: continue
-        return buf.getvalue()
+        return zip_buffer.getvalue()
 
-    @st.cache_data(ttl=300)
-    def load_prod_data(m_id, i_id):
+    @st.cache_data(ttl=300) 
+    def get_full_report_data(main_id, inv_id):
         client = get_gspread_client()
-        res = pd.DataFrame(client.open_by_key(m_id).worksheet("Возвраты").get_all_records())
+        df_r = pd.DataFrame(client.open_by_key(main_id).worksheet("Возвраты").get_all_records())
         try:
-            if i_id:
-                inv = pd.DataFrame(client.open_by_key(i_id).get_worksheet(0).get_all_records())
-                inv['Номер поставки'] = inv['supplyID'].astype(str) if 'supplyID' in inv.columns else ""
-                inv_u = inv.drop_duplicates(subset=['Номер поставки'])
-                if 'Инвойс' in res.columns: res = res.drop(columns=['Инвойс'])
-                res = res.merge(inv_u[['Номер поставки', 'Инвойс']], on='Номер поставки', how='left')
+            if inv_id:
+                df_i = pd.DataFrame(client.open_by_key(inv_id).get_worksheet(0).get_all_records())
+                df_i['Номер поставки'] = df_i['supplyID'].astype(str) if 'supplyID' in df_i.columns else ""
+                df_i_u = df_i.drop_duplicates(subset=['Номер поставки'])
+                if 'Инвойс' in df_r.columns: df_r = df_r.drop(columns=['Инвойс'])
+                df_r = df_r.merge(df_i_u[['Номер поставки', 'Инвойс']], on='Номер поставки', how='left')
         except: pass
-        if 'Инвойс' not in res.columns: res['Инвойс'] = '---'
-        return res
+        if 'Инвойс' not in df_r.columns: df_r['Инвойс'] = 'Не указан'
+        return df_r
 
-    @st.dialog("Детализация", width="large")
-    def show_det(sku, reason_name, df_f, r_id):
-        st.subheader(f"📦 {sku}")
-        col_t = f'Кат {r_id}'
-        rows = df_f[(df_f['Артикул'] == sku) & (df_f[col_t].astype(str).str.strip().isin(['1', '1.0', '+']))]
-        if not rows.empty:
-            for idx, r in rows.iterrows():
+    @st.dialog("Детализация пересечения", width="large")
+    def show_matrix_details(sku, reason_name, filtered_df, reason_id):
+        st.subheader(f"📦 Артикул: {sku}")
+        st.caption(f"🛠 Категория: {reason_name}")
+        target_col = f'Кат {reason_id}'
+        details = filtered_df[(filtered_df['Артикул'] == sku) & (filtered_df[target_col].astype(str).str.strip().isin(['1', '1.0', '+']))]
+        
+        if not details.empty:
+            all_photos = []
+            for _, r in details.iterrows():
+                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(r.get('Фотографии','')) + " " + str(r.get('Видео','')))
+                all_photos.extend([u for u in urls if not any(ext in u.lower() for ext in ['.mp4', '.mov'])])
+            
+            if all_photos:
+                if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary"):
+                    b64 = base64.b64encode(create_images_zip(all_photos)).decode()
+                    components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="photos.zip"></a><script>document.getElementById("dl").click();</script>', height=0)
+
+            st.markdown("---")
+            for idx, r in details.iterrows():
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
-                    st.write(f"💬 {r.get('Текст_Клиента', '---')}")
-                    st.write(f"📅 {r.get('Дата', '---')} | 🧾 {r.get('Инвойс', '---')}")
-                    # Кнопка ZIP
-                    m = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(r.get('Фотографии','')) + " " + str(r.get('Видео','')))
-                    p = [u for u in m if not any(x in u.lower() for x in ['.mp4', '.mov'])]
-                    if p and st.button("📥 Скачать фото", key=f"btn_{idx}"):
-                        b64 = base64.b64encode(safe_zip(p)).decode()
-                        components.html(f'<a id="d" href="data:application/zip;base64,{b64}" download="files.zip"></a><script>document.getElementById("d").click();</script>', height=0)
+                    c1, media_col = st.columns([1.2, 1])
+                    m_raw = str(r.get('Фотографии','')) + " " + str(r.get('Видео',''))
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                    row_p = [u for u in urls if not any(ext in u.lower() for ext in ['.mp4', '.mov'])]
+                    with c1:
+                        st.write(f"💬 **Текст:** {r.get('Текст_Клиента', '---')}")
+                        st.write(f"📅 **Дата:** {r.get('Дата', '---')} | 🧾 **Инвойс:** {r.get('Инвойс', '---')}")
+                        if row_p and st.button("📥 Скачать фото обращения", key=f"dl_row_{idx}"):
+                            b64_r = base64.b64encode(create_images_zip(row_p)).decode()
+                            components.html(f'<a id="dl" href="data:application/zip;base64,{b64_r}" download="order_{idx}.zip"></a><script>document.getElementById("dl").click();</script>', height=0)
+                    with media_col:
+                        if row_p:
+                            st.markdown('<div class="media-row">' + "".join([f'<img src="{p}" class="photo-zoom">' for p in row_p[:6]]) + '</div>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
+        
         if st.button("Закрыть"):
             st.session_state.show_detail_trigger = None
             st.rerun()
 
-    # Загрузка и фильтры
-    try:
-        raw = load_prod_data(SPREADSHEET_ID_MAIN, st.secrets.get("SPREADSHEET_ID_INVOICES", ""))
-        c1, c2 = st.columns(2)
-        v_inv = c1.selectbox("Инвойс:", ["Все"] + sorted(raw['Инвойс'].unique().tolist()))
-        v_sku = c2.selectbox("Артикул:", ["Все"] + sorted(raw['Артикул'].unique().tolist()))
+    # --- 3. ЗАГРУЗКА И ФИЛЬТРЫ ---
+    if 'last_click' not in st.session_state: st.session_state.last_click = None
+    if st.session_state.get('show_detail_trigger'):
+        t = st.session_state.show_detail_trigger
+        show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
+
+    df_raw = get_full_report_data(SPREADSHEET_ID_MAIN, SPREADSHEET_ID_INVOICES)
+    
+    c1, c2 = st.columns(2)
+    s_inv = c1.selectbox("Фильтр Инвойс:", ["Все"] + sorted(df_raw['Инвойс'].unique().tolist()))
+    s_sku = c2.selectbox("Фильтр Артикул:", ["Все"] + sorted(df_raw['Артикул'].unique().tolist()))
+    
+    df_f = df_raw.copy()
+    if s_inv != "Все": df_f = df_f[df_f['Инвойс'] == s_inv]
+    if s_sku != "Все": df_f = df_f[df_f['Артикул'] == s_sku]
+
+    # --- 4. МАТРИЦА ---
+    st.markdown("### 🧮 Тепловая Матрица")
+    m_l = []
+    for i in range(1, 14):
+        c_n = f'Кат {i}'
+        if c_n in df_f.columns:
+            rows = df_f[df_f[c_n].astype(str).str.strip().isin(['1', '1.0', '+'])]
+            for _, r in rows.iterrows():
+                m_l.append({'Артикул': str(r.get('Артикул', '')), 'Причина': f"{i}. {CATEGORIES.get(i, i)}", 'ID': i, 'Инвойс': r.get('Инвойс', '---')})
+
+    if m_l:
+        df_m = pd.DataFrame(m_l)
+        pivot = pd.crosstab(df_m['Причина'], df_m['Артикул']).fillna(0).astype(int)
+        pivot['sid'] = [int(str(x).split('.')[0]) for x in pivot.index]
+        pivot = pivot.sort_values('sid').drop(columns=['sid'])
         
-        df_f = raw.copy()
-        if v_inv != "Все": df_f = df_f[df_f['Инвойс'] == v_inv]
-        if v_sku != "Все": df_f = df_f[df_f['Артикул'] == v_sku]
+        df_melt = pivot.reset_index().melt(id_vars=['Причина'], var_name='Артикул', value_name='Дефекты')
+        row_max = df_melt.groupby('Причина')['Дефекты'].transform('max')
+        df_melt['val'] = df_melt['Дефекты'] / row_max.replace(0, 1)
+        df_melt['ID'] = df_melt['Причина'].apply(lambda x: int(str(x).split('.')[0]))
 
-        # Матрица
-        m_l = []
-        for i in range(1, 14):
-            c_n = f'Кат {i}'
-            if c_n in df_f.columns:
-                t = df_f[df_f[c_n].astype(str).str.strip().isin(['1', '1.0', '+'])]
-                for _, r in t.iterrows():
-                    m_l.append({'Артикул': str(r.get('Артикул', '')), 'Причина': f"{i}. {CATEGORIES.get(i, i)}", 'ID': i, 'Инвойс': r.get('Инвойс', '---')})
+        sel = alt.selection_point(name='cell', fields=['Артикул', 'Причина', 'ID'])
+        chart = alt.layer(
+            alt.Chart(df_melt).mark_rect(stroke='white').encode(
+                x=alt.X('Артикул:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000)),
+                y=alt.Y('Причина:N', title=None, sort=alt.EncodingSortField(field='ID')),
+                color=alt.Color('val:Q', scale=alt.Scale(scheme='teals'), legend=None)
+            ),
+            alt.Chart(df_melt).mark_text(fontSize=10).encode(x='Артикул:N', y='Причина:N', text='Дефекты:N', color=alt.condition(alt.datum.val > 0.5, alt.value('white'), alt.value('black')))
+        ).properties(height=len(pivot)*35).add_params(sel)
 
-        if m_l:
-            df_m = pd.DataFrame(m_l)
-            pivot = pd.crosstab(df_m['Причина'], df_m['Артикул']).fillna(0).astype(int)
-            pivot['sid'] = [int(str(x).split('.')[0]) for x in pivot.index]
-            pivot = pivot.sort_values('sid').drop(columns=['sid'])
-            
-            df_melt = pivot.reset_index().melt(id_vars=['Причина'], var_name='Артикул', value_name='Дефекты')
-            row_m = df_melt.groupby('Причина')['Дефекты'].transform('max')
-            df_melt['val'] = df_melt['Дефекты'] / row_m.replace(0, 1)
-            df_melt['ID'] = df_melt['Причина'].apply(lambda x: int(str(x).split('.')[0]))
+        res = st.altair_chart(chart, use_container_width=True, on_select="rerun")
+        
+        if hasattr(res, "selection") and res.selection.get("cell"):
+            curr = res.selection["cell"][0]
+            if curr != st.session_state.last_click:
+                st.session_state.last_click = curr
+                st.session_state.show_detail_trigger = {'sku': curr['Артикул'], 'reason': curr['Причина'], 'df': df_f, 'id': int(curr['ID'])}
+                st.rerun()
 
-            sel = alt.selection_point(name='cell', fields=['Артикул', 'Причина', 'ID'])
-            chart = alt.layer(
-                alt.Chart(df_melt).mark_rect(stroke='white').encode(
-                    x=alt.X('Артикул:N', title=None, axis=alt.Axis(labelAngle=-90)),
-                    y=alt.Y('Причина:N', title=None, sort=alt.EncodingSortField(field='ID')),
-                    color=alt.Color('val:Q', scale=alt.Scale(scheme='teals'), legend=None)
-                ),
-                alt.Chart(df_melt).mark_text().encode(x='Артикул:N', y='Причина:N', text='Дефекты:N')
-            ).properties(height=len(pivot)*30).add_params(sel)
-
-            res = st.altair_chart(chart, use_container_width=True, on_select="rerun")
-            
-            if hasattr(res, "selection") and res.selection.get("cell"):
-                curr = res.selection["cell"][0]
-                show_det(curr['Артикул'], curr['Причина'], df_f, int(curr['ID']))
-
-            # ИНВОЙСЫ
-            st.markdown("---")
-            st.markdown("### 📦 Проблемные Инвойсы")
-            st.dataframe(df_m['Инвойс'].value_counts().reset_index(), use_container_width=True, hide_index=True)
-        else:
-            st.info("Нет данных")
-    except Exception as e:
-        st.error(f"Ошибка блока: {e}")
+        # --- 5. ИНВОЙСЫ ---
+        st.markdown("---")
+        st.markdown("### 📦 Проблемные Инвойсы")
+        st.dataframe(df_m['Инвойс'].value_counts().reset_index(), use_container_width=True, hide_index=True)
+    else:
+        st.info("Нет данных")
         
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
