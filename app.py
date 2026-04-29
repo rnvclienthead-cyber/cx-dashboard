@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Компактная перевернутая матрица)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Микро-матрица 2.0)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,8 +884,12 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* МАКСИМАЛЬНАЯ КОМПАКТНОСТЬ: Уменьшаем шрифт, чтобы строки стали у́же (ниже) */
-    [data-testid="stDataFrame"] { font-size: 10px !important; }
+    /* ГЛОБАЛЬНОЕ УМЕНЬШЕНИЕ ТАБЛИЦЫ В 2 РАЗА */
+    [data-testid="stDataFrame"] { 
+        zoom: 0.55; /* Сокращает масштаб на 45% (для Chrome, Safari, Edge) */
+        -moz-transform: scale(0.55); /* Для Firefox */
+        -moz-transform-origin: top left;
+    }
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
@@ -1009,6 +1013,14 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
+        if st.button("Закрыть детализацию"):
+            st.session_state.show_detail_trigger = None
+            st.rerun()
+
+    if st.session_state.get('show_detail_trigger'):
+        t = st.session_state.show_detail_trigger
+        show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
+
     try:
         client = get_gspread_client()
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
@@ -1083,7 +1095,7 @@ elif page == "📊 Отчет производства":
 
             st.markdown("---")
             st.markdown("### 🧮 Компактная Матрица дефектов")
-            st.info("💡 **Как читать таблицу:** Слева — артикулы. Столбцы (1-13) — категории. Наведите мышку на цифру столбца для подсказки. **Кликните на цветную ячейку для детализации!**")
+            st.info("💡 **Как читать:** Слева — артикулы. Столбцы (1-13) — категории. Наведите мышку на цифру столбца для подсказки. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
@@ -1093,26 +1105,36 @@ elif page == "📊 Отчет производства":
                 total_counts = pivot.sum(axis=1)
                 pivot.insert(0, 'ИТОГО', total_counts)
                 
-                # --- ТОЧЕЧНАЯ НАСТРОЙКА ШИРИНЫ КОЛОНОК ---
+                # --- ГЛАВНАЯ МАГИЯ СЖАТИЯ ---
+                # Сбрасываем индекс! Теперь "Артикул" - это обычная управляемая колонка
+                pivot = pivot.reset_index()
+                
                 col_config = {
-                    'ИТОГО': st.column_config.Column(width=45, help="Всего дефектов")
+                    # Оставляем width пустым или None, чтобы колонка ужалась точно по самому длинному артикулу
+                    'Артикул': st.column_config.TextColumn("Артикул"),
+                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=40, help="Всего дефектов")
                 }
+                
+                # Зажимаем числовые колонки до минимума
                 for i in range(1, 14):
                     if i in pivot.columns:
-                        col_config[i] = st.column_config.Column(
-                            width=25, # Сжимаем колонки до ширины двух символов
+                        col_config[i] = st.column_config.NumberColumn(
+                            str(i), 
+                            width=20, # Супер узкая ширина
                             help=CATEGORIES.get(i, f"Категория {i}")
                         )
 
-                # Высота рассчитывается исходя из уменьшенного шрифта (~25px на строку)
-                dynamic_height = len(pivot) * 25 + 43
+                # Высота таблицы: с учетом уменьшенного масштаба
+                dynamic_height = len(pivot) * 35 + 43
                 
-                # Обрати внимание: мы удалили параметр width / use_container_width.
-                # Теперь таблица сожмется ровно по ширине данных!
+                # Красим только столбцы с ID (они имеют тип int)
+                gradient_cols = [c for c in pivot.columns if isinstance(c, int)]
+                
                 event = st.dataframe(
-                    pivot.style.background_gradient(cmap='Blues', subset=pivot.columns[1:]),
+                    pivot.style.background_gradient(cmap='Blues', subset=gradient_cols),
                     on_select="rerun",
                     selection_mode="single-cell",
+                    hide_index=True, # Скрываем некрасивые нумерации строк (0, 1, 2...)
                     height=dynamic_height,
                     column_config=col_config
                 )
@@ -1122,8 +1144,9 @@ elif page == "📊 Отчет производства":
                     row_idx = selected_cell[0]
                     col_name = selected_cell[1]
                     
-                    if col_name != 'ИТОГО':
-                        selected_sku = pivot.index[row_idx] 
+                    # Защита: реагируем только на клики по категориям (1-13)
+                    if str(col_name) not in ['Артикул', 'ИТОГО']:
+                        selected_sku = str(pivot.iloc[row_idx]['Артикул']) 
                         reason_id_clicked = int(col_name) 
                         selected_reason = f"{reason_id_clicked}. {CATEGORIES.get(reason_id_clicked, '')}"
                         
@@ -1139,7 +1162,7 @@ elif page == "📊 Отчет производства":
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                st.dataframe(inv_counts.head(10), width="stretch")
+                st.dataframe(inv_counts.head(10))
             else:
                 st.info("Данных для инвойсов пока нет.")
 
