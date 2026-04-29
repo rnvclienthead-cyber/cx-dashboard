@@ -1007,6 +1007,8 @@ elif page == "📊 Отчет производства":
 
         if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
+            # Увеличиваем счетчик ключа, чтобы график Altair перерисовался чистым
+            st.session_state.matrix_key = st.session_state.get('matrix_key', 0) + 1
             st.rerun()
 
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
@@ -1142,7 +1144,12 @@ elif page == "📊 Отчет производства":
                 final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
                 
                 # Вывод графики
-                event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun")
+                event = st.altair_chart(
+                    final_chart, 
+                    use_container_width=True, 
+                    on_select="rerun", 
+                    key=f"prod_matrix_{st.session_state.get('matrix_key', 0)}"
+                )
                 
                 # --- ИДЕАЛЬНЫЙ ПЕРЕХВАТЧИК ---
                 try:
@@ -1154,26 +1161,26 @@ elif page == "📊 Отчет производства":
                         else:
                             click_data = getattr(sel, "cell_click", [])
                             
-                        # Если пользователь реально кликнул по ячейке
+                       # Если пользователь реально кликнул по ячейке
                         if click_data and len(click_data) > 0:
-                            clicked_point = click_data[0]
-                            sku_clicked = clicked_point.get('Артикул_Метка')
-                            reason_clicked = clicked_point.get('Причина_Метка')
-                            
-                            if sku_clicked and reason_clicked:
-                                # Убираем приклеенные итоги (все, что после пробела со скобкой " [")
-                                clean_sku = sku_clicked.split(' [')[0]
-                                clean_reason = reason_clicked.split(' [')[0]
-                                reason_id_clicked = int(clean_reason.split('.')[0])
+                            # ПРОВЕРКА: срабатывает только если окно еще не открыто
+                            if not st.session_state.get('show_detail_trigger'):
+                                clicked_point = click_data[0]
+                                sku_clicked = clicked_point.get('Артикул_Метка')
+                                reason_clicked = clicked_point.get('Причина_Метка')
                                 
-                                # Запускаем окно через состояние (самый надежный метод)
-                                st.session_state.show_detail_trigger = {
-                                    'sku': clean_sku,
-                                    'reason': clean_reason,
-                                    'df': df_filtered,
-                                    'id': reason_id_clicked
-                                }
-                                st.rerun()
+                                if sku_clicked and reason_clicked:
+                                    clean_sku = sku_clicked.split(' [')[0]
+                                    clean_reason = reason_clicked.split(' [')[0]
+                                    reason_id_clicked = int(clean_reason.split('.')[0])
+                                    
+                                    st.session_state.show_detail_trigger = {
+                                        'sku': clean_sku,
+                                        'reason': clean_reason,
+                                        'df': df_filtered,
+                                        'id': reason_id_clicked
+                                    }
+                                    st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка системы перехвата клика: {e}")
 
