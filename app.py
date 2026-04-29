@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Аналитика и Матрица)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Plotly Heatmap)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,9 +884,6 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Уменьшаем шрифт ТОЛЬКО в таблице для максимальной компактности матрицы */
-    [data-testid="stDataFrame"] { font-size: 9px !important; }
-    
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
@@ -899,6 +896,7 @@ elif page == "📊 Отчет производства":
         transform: scale(4); z-index: 9999; position: relative; 
         box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
         border: none !important; outline: none !important;
+        border-radius: 2px !important; /* Убирает белые углы при зуме */
     }
     
     .video-link-btn {
@@ -1090,50 +1088,61 @@ elif page == "📊 Отчет производства":
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
+                # Добавляем "ОБЩЕЕ КОЛ-ВО"
                 total_col = pivot.sum(axis=1)
                 pivot.insert(0, 'ОБЩЕЕ КОЛ-ВО', total_col)
                 
-                # --- ТОНКАЯ НАСТРОЙКА КОЛОНОК МАТРИЦЫ ---
-                col_config = {}
-                for col in pivot.columns:
-                    if col == "ОБЩЕЕ КОЛ-ВО":
-                        col_config[col] = st.column_config.Column(
-                            width=70, 
-                            help="Общее количество дефектов по этой категории"
-                        )
-                    else:
-                        col_config[col] = st.column_config.Column(
-                            width=35, # Узкий столбец ровно под цифру
-                            help=f"Артикул: {col}" # Всплывающая подсказка с полным названием
-                        )
+                st.markdown("### 🧮 Тепловая Матрица дефектов")
+                st.info("💡 **Нажмите на любую цветную ячейку графика**, чтобы открыть детализацию по артикулу и причине.")
                 
-                dynamic_height = len(pivot) * 28 + 45
+                # --- ЛОГИКА PLOTLY HEATMAP ---
+                # Ищем максимум среди артикулов (игнорируя итоги), чтобы общие суммы не "выжигали" градиент
+                if pivot.shape[1] > 1:
+                    max_val_without_total = pivot.iloc[:, 1:].max().max()
+                else:
+                    max_val_without_total = 1
+                if pd.isna(max_val_without_total) or max_val_without_total == 0:
+                    max_val_without_total = 1
+
+                # Динамичный расчет высоты (чем больше категорий, тем выше график)
+                dynamic_height = max(400, len(pivot) * 40 + 150)
                 
-                st.markdown("### 🧮 Интерактивная Матрица")
-                st.info("💡 **Наведите курсор на заголовок колонки**, чтобы увидеть полное название артикула. Кликните на цифру для детализации.")
-                
-                styled_pivot = pivot.style.background_gradient(
-                    cmap='Blues', 
-                    subset=pivot.columns[1:] 
+                fig = px.imshow(
+                    pivot,
+                    text_auto=True,          # Показываем цифры в ячейках
+                    aspect="auto",           # Растягиваем на всю ширину экрана
+                    color_continuous_scale='Blues',
+                    origin='upper',          # Сортировка строк сверху вниз
+                    zmax=max_val_without_total, # Фикс цвета: Итоги будут самыми темными, но не сломают шкалу остальных
+                    labels=dict(x="Артикул", y="Причина", color="Дефекты")
                 )
                 
-                event = st.dataframe(
-                    styled_pivot,
+                fig.update_xaxes(tickangle=-90, side="bottom") # Переворачиваем артикулы вертикально!
+                
+                fig.update_layout(
+                    coloraxis_showscale=False, # Убираем легенду градиента справа, чтобы не съедала место
+                    margin=dict(l=0, r=0, t=10, b=120), # Отступ снизу для длинных артикулов
+                    height=dynamic_height
+                )
+                
+                # Рендерим график с перехватом клика
+                event = st.plotly_chart(
+                    fig,
                     on_select="rerun",
-                    selection_mode="single-cell",
-                    use_container_width=True,
-                    height=dynamic_height,
-                    column_config=col_config # Применяем настройки ширины и подсказок
+                    selection_mode="points",
+                    use_container_width=True
                 )
                 
-                if hasattr(event, "selection") and event.selection.get("cells"):
-                    selected_cell = event.selection.get("cells")[0]
-                    row_idx = selected_cell[0]
-                    col_name = selected_cell[1]
+                # Перехватываем выбранную ячейку
+                if event and hasattr(event, "selection") and event.selection.get("points"):
+                    point = event.selection["points"][0]
+                    col_name = point.get("x")
+                    row_name = point.get("y")
                     
-                    if col_name != 'ОБЩЕЕ КОЛ-ВО':
-                        selected_sku = col_name
-                        selected_reason = pivot.index[row_idx]
+                    # Исключаем клик по "Общему количеству"
+                    if col_name and row_name and col_name != 'ОБЩЕЕ КОЛ-ВО':
+                        selected_sku = str(col_name)
+                        selected_reason = str(row_name)
                         reason_id_clicked = int(selected_reason.split('.')[0])
                         show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
 
