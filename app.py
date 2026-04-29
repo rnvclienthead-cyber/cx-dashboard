@@ -56,24 +56,40 @@ st.markdown("""
     
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     
-    /* СБРОС БЕЛЫХ ФОНОВ STREAMLIT */
-    .media-row a { background: transparent !important; background-color: transparent !important; }
-    img.photo-zoom { background-color: transparent !important; }
-    
-    .photo-zoom { 
-        width: 140px; height: 140px; object-fit: cover; border-radius: 8px; 
-        transition: transform 0.3s ease; cursor: pointer; 
-        border: none !important; outline: none !important; 
+    /* АГРЕССИВНЫЙ СБРОС ВШИТЫХ СТИЛЕЙ СТРИМЛИТА */
+    .media-row a { 
         background: transparent !important; 
+        padding: 0 !important; 
+        margin: 0 !important; 
+        border: none !important;
+        display: inline-flex; /* Убивает скрытые переносы и отступы ссылок */
     }
     
-    /* При наведении убираем закругление, чтобы белые углы точно не вылезли, и делаем красивую тень */
+    .photo-zoom { 
+        width: 140px !important; 
+        height: 140px !important; 
+        object-fit: cover !important; 
+        border-radius: 8px !important; 
+        transition: transform 0.3s ease, border-radius 0.3s ease; 
+        cursor: pointer; 
+        
+        /* Убиваем фоны и внутренние отступы (padding), которые давали белую рамку */
+        border: none !important; 
+        outline: none !important; 
+        background: transparent !important; 
+        background-color: transparent !important;
+        padding: 0 !important; 
+        margin: 0 !important;
+    }
+    
     .photo-zoom:hover { 
-        transform: scale(4); z-index: 9999; position: relative; 
-        box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
-        border: none !important; outline: none !important;
-        border-radius: 2px !important; /* Делаем углы почти острыми при зуме */
-        background: transparent !important;
+        transform: scale(4); 
+        z-index: 9999; 
+        position: relative; 
+        
+        /* Полностью убираем закругления при зуме — картинка станет ровным прямоугольником */
+        border-radius: 0px !important; 
+        box-shadow: 0 20px 50px rgba(0,0,0,0.8) !important; 
     }
     
     .video-link-btn {
