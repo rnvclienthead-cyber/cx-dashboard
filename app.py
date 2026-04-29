@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Матрица через Scatter-хак)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Перевернутая нативная матрица)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,6 +884,8 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
+    /* Компактный шрифт для идеального отображения цифр */
+    [data-testid="stDataFrame"] { font-size: 12px !important; }
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
@@ -894,14 +896,12 @@ elif page == "📊 Отчет производства":
     .photo-zoom:hover { 
         transform: scale(4); z-index: 9999; position: relative; 
         box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
-        border-radius: 2px !important;
     }
     .video-link-btn {
         display: inline-block; padding: 8px 14px; background-color: #2563eb; 
         color: white !important; border-radius: 6px; text-decoration: none; 
-        font-weight: bold; font-size: 13px; transition: background-color 0.2s;
+        font-weight: bold; font-size: 13px;
     }
-    .video-link-btn:hover { background-color: #1d4ed8; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1008,15 +1008,6 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
-        if st.button("Закрыть детализацию"):
-            st.session_state.show_detail_trigger = None
-            st.rerun()
-
-    # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
-    if st.session_state.get('show_detail_trigger'):
-        t = st.session_state.show_detail_trigger
-        show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
-
     try:
         client = get_gspread_client()
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
@@ -1037,11 +1028,9 @@ elif page == "📊 Отчет производства":
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
                     df_inv.columns = [str(c).strip() for c in df_inv.columns]
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
-                    
                     if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
                     cols_to_merge = ['Номер поставки']
                     if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
-                    
                     df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
         except Exception as e:
             st.warning(f"Данные инвойсов не подтянуты: {e}")
@@ -1087,100 +1076,66 @@ elif page == "📊 Отчет производства":
                     for _, r in temp.iterrows():
                         matrix_list.append({
                             'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}",
                             'ID': i,
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
             st.markdown("---")
-            st.markdown("### 🧮 Тепловая Матрица дефектов")
+            st.markdown("### 🧮 Матрица дефектов")
+            st.info("💡 **Как читать таблицу:** Слева указаны артикулы. Столбцы (1-13) — это категории дефектов. Наведите мышку на цифру столбца, чтобы увидеть название категории. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
-                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
-                pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
+                # --- ГЛАВНЫЙ ФОКУС: ПЕРЕВОРАЧИВАЕМ МАТРИЦУ ---
+                # Теперь строки = Артикулы, Столбцы = ID категорий (1, 2, 3...)
+                pivot = pd.crosstab(df_matrix['Артикул'], df_matrix['ID'])
+                
+                # Добавляем "ИТОГО" первым столбцом
                 total_counts = pivot.sum(axis=1)
-                display_index = [f"{idx} [Всего: {total_counts[idx]}]" for idx in pivot.index]
+                pivot.insert(0, 'ИТОГО', total_counts)
                 
-                pivot_display = pivot.copy()
-                pivot_display.index = display_index
+                # Настройка колонок: делаем их узкими и добавляем подсказки
+                col_config = {
+                    'ИТОГО': st.column_config.Column(width=60, help="Всего дефектов по этому артикулу")
+                }
+                for i in range(1, 14):
+                    if i in pivot.columns:
+                        col_config[i] = st.column_config.Column(
+                            width=30, # Супер узкая колонка под цифру категории
+                            help=CATEGORIES.get(i, f"Категория {i}") # Подсказка всплывет при наведении
+                        )
 
-                # --- ХАКЕРСКИЙ ОБХОД ОГРАНИЧЕНИЙ STREAMLIT ---
-                # Превращаем таблицу в список координат
-                pivot_reset = pivot_display.reset_index().rename(columns={'index': 'Причина'})
-                df_melt = pivot_reset.melt(id_vars='Причина', var_name='Артикул', value_name='Дефекты')
+                # Вычисляем высоту на основе количества артикулов
+                dynamic_height = len(pivot) * 35 + 43
                 
-                # Показываем текст (цифры) только там, где есть дефекты, чтобы не мусорить нулями
-                df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
-
-                # Используем SCATTER (точечный график), так как Streamlit ловит с него клики 100%
-                fig = px.scatter(
-                    df_melt,
-                    x="Артикул",
-                    y="Причина",
-                    color="Дефекты",
-                    color_continuous_scale='Blues',
-                    text="Текст"
-                )
-
-                # Маскируем точки под квадратные ячейки таблицы
-                fig.update_traces(
-                    marker=dict(symbol='square', size=28, line=dict(width=1, color='#e2e8f0')),
-                    textfont=dict(color='black', size=11, family="Arial"),
-                    textposition='middle center',
-                    hoverinfo='skip'
-                )
-
-                dynamic_height = max(400, len(pivot)*35 + 100)
-
-                # Настраиваем оси, чтобы выглядело в точности как матрица
-                fig.update_xaxes(tickangle=-90, type='category', side='bottom')
-                fig.update_yaxes(autorange="reversed", type='category') # Строки сверху вниз
-                fig.update_layout(
-                    coloraxis_showscale=False,
+                # Возвращаемся к родному, 100% рабочему st.dataframe!
+                event = st.dataframe(
+                    pivot.style.background_gradient(cmap='Blues', subset=pivot.columns[1:]),
+                    on_select="rerun",
+                    selection_mode="single-cell",
+                    width="stretch",
                     height=dynamic_height,
-                    margin=dict(l=0, r=0, b=100, t=20),
-                    plot_bgcolor='rgba(0,0,0,0)' # Убираем задний фон графика
+                    column_config=col_config
                 )
                 
-                event = st.plotly_chart(fig, on_select="rerun", selection_mode="points", width="stretch")
-                
-                # --- ТЕПЕРЬ ПЕРЕХВАТЧИК СРАБОТАЕТ ГАРАНТИРОВАННО ---
-                try:
-                    points = []
-                    if hasattr(event, "selection"):
-                        sel = event.selection
-                        if isinstance(sel, dict) and "points" in sel:
-                            points = sel["points"]
-                    elif isinstance(event, dict) and "selection" in event:
-                        points = event["selection"].get("points", [])
-
-                    if points and len(points) > 0:
-                        point = points[0]
-                        sku = str(point.get("x", ""))
-                        full_reason = str(point.get("y", ""))
+                # НАДЕЖНЫЙ ПЕРЕХВАТЧИК КЛИКА ИЗ ПРОШЛОГО РАБОЧЕГО ВАРИАНТА
+                if hasattr(event, "selection") and event.selection.get("cells"):
+                    selected_cell = event.selection.get("cells")[0]
+                    row_idx = selected_cell[0]
+                    col_name = selected_cell[1]
+                    
+                    if col_name != 'ИТОГО':
+                        selected_sku = pivot.index[row_idx] # Теперь индекс - это Артикул
+                        reason_id_clicked = int(col_name) # Имя колонки - это ID категории
+                        selected_reason = f"{reason_id_clicked}. {CATEGORIES.get(reason_id_clicked, '')}"
                         
-                        if sku and full_reason:
-                            reason_id_clicked = int(full_reason.split('.')[0])
-                            
-                            st.session_state.show_detail_trigger = {
-                                'sku': sku,
-                                'reason': full_reason,
-                                'df': df_filtered,
-                                'id': reason_id_clicked
-                            }
-                            st.rerun()
-                except Exception as e:
-                    st.error(f"Системная ошибка обработки клика: {e}")
+                        # Моментальное открытие окна
+                        show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
 
             else:
                 st.info("Данных для матрицы пока нет.")
 
-            # =========================================================
-            # БЛОК 2: ПРОБЛЕМНЫЕ ИНВОЙСЫ
-            # =========================================================
             st.markdown("---")
             st.markdown("### 📦 Проблемные Инвойсы")
             
