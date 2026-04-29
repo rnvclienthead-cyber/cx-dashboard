@@ -616,38 +616,36 @@ elif page == "🔬 ИИ Тегирование":
 elif page == "📝 Модерация":
     st.title("📋 Модерация (Ручная проверка)")
 
-    # Стили: фото увеличиваются в 5 раз (до 75%), видео статично
+    # Стили: фото по горизонтали, увеличены на 40% (фиксировано 140px)
     st.markdown("""
     <style>
+    .media-row {
+        display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px;
+    }
     .photo-zoom {
-        width: 15%; /* Увеличено в 2.5 раза от прошлого */
+        width: 140px; /* Увеличено на 40% */
+        height: 140px;
+        object-fit: cover;
         border-radius: 8px;
-        margin-right: 10px;
         transition: transform 0.3s ease;
         cursor: pointer;
     }
     .photo-zoom:hover {
-        transform: scale(5); /* Зум в 5 раз */
+        transform: scale(4); 
         z-index: 9999;
         position: relative;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.5);
     }
-    .video-thumb {
-        width: 15%;
-        height: 100px;
-        background: #000;
-        border-radius: 8px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        cursor: pointer;
-        border: 2px solid #4B8BBE;
+    .ai-tags-box {
+        background-color: #f0fdf4; padding: 10px 14px; border-radius: 6px; 
+        font-size: 14px; color: #166534; margin-bottom: 15px; font-weight: 500;
+        border-left: 4px solid #22c55e;
     }
     </style>
     """, unsafe_allow_html=True)
 
-    # Функция для открытия видео в модальном окне
-    @st.dialog("Просмотр видео", width="large")
+    # Модальное окно без width="large" - динамичный размер под экран
+    @st.dialog("Просмотр видео")
     def play_video_modal(url):
         st.video(url)
 
@@ -660,29 +658,73 @@ elif page == "📝 Модерация":
             headers = [str(h).strip() for h in data[0]]
             df = pd.DataFrame(data[1:], columns=headers)
             
-            # Фильтр: есть теги, нет корректировки
+            # Фильтр: есть ли теги вообще
             def has_tags(row):
                 return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
             df['has_any_tag'] = df.apply(has_tags, axis=1)
-            to_review = df[(df['has_any_tag']) & (df.get('Корректировка', '').astype(str).str.strip() == '')].head(15)
-
+            
+            # --- БЛОК ФИЛЬТРАЦИИ ---
+            st.markdown("### 🔍 Фильтр обращений")
+            filter_mode = st.radio(
+                "Показать обращения:", 
+                ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], 
+                horizontal=True
+            )
+            
+            # Базовая выборка: есть теги, НЕТ корректировки
+            base_review = df[(df['has_any_tag']) & (df.get('Корректировка', '').astype(str).str.strip() == '')]
+            
+            # Дополнительный фильтр по ошибкам аудита
+            if filter_mode == "С замечаниями от Аудитора (Кросс-проверка)":
+                if 'Аудит' in base_review.columns:
+                    base_review = base_review[base_review['Аудит'].astype(str).str.upper().str.contains('ОШИБКА')]
+                else:
+                    st.warning("Колонка 'Аудит' отсутствует в таблице!")
+                    
+            to_review = base_review
+            
             if not to_review.empty:
+                # --- БЛОК ПАГИНАЦИИ (Для стабильной загрузки) ---
+                total_items = len(to_review)
+                ITEMS_PER_PAGE = 20
+                total_pages = max(1, (total_items - 1) // ITEMS_PER_PAGE + 1)
+                
+                st.success(f"Найдено обращений в очереди: **{total_items}**")
+                
+                page_num = 1
+                if total_pages > 1:
+                    page_num = st.number_input(f"Страница (от 1 до {total_pages})", min_value=1, max_value=total_pages, value=1)
+                    
+                start_idx = (page_num - 1) * ITEMS_PER_PAGE
+                end_idx = start_idx + ITEMS_PER_PAGE
+                
+                current_page_df = to_review.iloc[start_idx:end_idx]
+                
                 cats_list = list(CATEGORIES.values())
                 reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
                 header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
                 
-                for idx, row in to_review.iterrows():
+                for idx, row in current_page_df.iterrows():
                     row_index_gs = idx + 2 
                     st.markdown("---")
-                    col_info, col_media = st.columns([1.5, 1])
+                    
+                    col_info, col_media = st.columns([1.2, 1])
                     
                     with col_info:
                         st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
                         st.info(row.get('Текст_Клиента', 'Нет текста'))
                         
-                        # Выпадающий список (multiselect) теперь всегда пустой при загрузке
+                        # --- ПОКАЗ ВЫБОРА ИИ ---
+                        ai_selected = []
+                        for i in range(1, 14):
+                            if str(row.get(f'Кат {i}', '')).strip().lower() in ['1', '1.0', '+', 'v', 'да', 'true']:
+                                ai_selected.append(f"{CATEGORIES[i]}")
+                        
+                        ai_text = ", ".join(ai_selected) if ai_selected else "Категории не определены"
+                        st.markdown(f'<div class="ai-tags-box">🤖 <b>Выбор ИИ:</b> {ai_text}</div>', unsafe_allow_html=True)
+                        
                         selected_cats = st.multiselect(
-                            f"Выберите категории для строки {row_index_gs}:", 
+                            "Выберите правильные категории:", 
                             options=cats_list, 
                             default=[], 
                             key=f"ms_{row_index_gs}"
@@ -690,15 +732,26 @@ elif page == "📝 Модерация":
                         
                         if st.button("💾 Сохранить решение", key=f"btn_{row_index_gs}", type="primary"):
                             if selected_cats:
-                                # Логика сохранения (очистка старых и запись новых тегов)
                                 batch_updates = []
+                                # 1. Очищаем старые теги ИИ
                                 for c in range(1, 14):
                                     h = f"кат {c}"
-                                    if h in header_map_clean: batch_updates.append({'range': f"{header_map_clean[h]}{row_index_gs}", 'values': [['']]})
+                                    if h in header_map_clean: 
+                                        batch_updates.append({'range': f"{header_map_clean[h]}{row_index_gs}", 'values': [['']]})
+                                
+                                # 2. Записываем новые теги модератора
                                 for cat_name in selected_cats:
                                     cat_num = reverse_cats.get(cat_name.strip().lower())
-                                    if cat_num: batch_updates.append({'range': f"{header_map_clean[f'кат {cat_num}']}{row_index_gs}", 'values': [['1']]})
+                                    if cat_num: 
+                                        batch_updates.append({'range': f"{header_map_clean[f'кат {cat_num}']}{row_index_gs}", 'values': [['1']]})
                                 
+                                # 3. Пишем в Корректировку для ухода из очереди и обучения ИИ
+                                corr_header = "корректировка"
+                                if corr_header in header_map_clean:
+                                    # Записываем текстом, чтобы скрипт "Обучение ИИ" мог это прочитать
+                                    corr_val = "; ".join(selected_cats)
+                                    batch_updates.append({'range': f"{header_map_clean[corr_header]}{row_index_gs}", 'values': [[corr_val]]})
+                                    
                                 ws.batch_update(batch_updates)
                                 st.success("Сохранено!")
                                 st.rerun()
@@ -707,17 +760,30 @@ elif page == "📝 Модерация":
                         media_raw = str(row.get('Фотографии', '')) + " " + str(row.get('Видео', ''))
                         urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
                         
-                        for u in urls[:4]:
-                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                        if urls:
+                            videos = []
+                            images_html = '<div class="media-row">'
                             
-                            if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
-                                if st.button(f"🎥 Видео", key=f"vid_{row_index_gs}_{clean_url}"):
-                                    play_video_modal(clean_url)
-                            else:
-                                st.markdown(f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>', unsafe_allow_html=True)
+                            for u in urls[:6]: 
+                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                
+                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
+                                    videos.append(clean_url)
+                                else:
+                                    images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
+                                    
+                            images_html += '</div>'
+                            st.markdown(images_html, unsafe_allow_html=True)
+                            
+                            if videos:
+                                v_cols = st.columns(len(videos))
+                                for v_idx, v_url in enumerate(videos):
+                                    with v_cols[v_idx]:
+                                        if st.button("🎥 Видео", key=f"vid_{row_index_gs}_{v_idx}"):
+                                            play_video_modal(v_url)
             else:
-                st.success("🎉 Очередь пуста!")
+                st.success("🎉 Очередь пуста! Все обращения проверены.")
     except Exception as e:
         st.error(f"Ошибка модерации: {e}")
         
