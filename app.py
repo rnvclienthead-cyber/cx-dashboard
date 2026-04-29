@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Масштаб, Рамки и Инвойсы)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Широкая нативная матрица с узкими столбцами)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,26 +884,11 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* 1. Увеличиваем шрифт всех всплывающих подсказок на 30% */
-    [data-testid="stTooltipContent"] {
-        font-size: 17px !important;
-        padding: 10px !important;
-        line-height: 1.4 !important;
-    }
-
-    /* 2. Целевое сжатие ТОЛЬКО для матрицы */
-    div[data-testid="stElementContainer"]:has(#matrix-marker) + div[data-testid="stElementContainer"] [data-testid="stDataFrame"] {
-        zoom: 0.55; 
-        width: 181% !important; /* 100 / 0.55 = 181% - растягивает рамку на весь экран при сжатии */
-        max-width: 181% !important;
-        font-size: 10px !important;
-    }
-
-    /* 3. Возвращаем инвойсам нормальный размер */
-    div[data-testid="stElementContainer"]:has(#invoices-marker) + div[data-testid="stElementContainer"] [data-testid="stDataFrame"] {
-        zoom: 1.0 !important;
-        width: 100% !important;
-    }
+    /* Делаем шрифт в таблице компактным, чтобы строки стали у́же */
+    [data-testid="stDataFrame"] { font-size: 11px !important; }
+    
+    /* Увеличиваем размер текста во всплывающих подсказках (tooltip) */
+    [data-testid="stTooltipContent"] { font-size: 16px !important; }
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
@@ -919,8 +904,9 @@ elif page == "📊 Отчет производства":
     .video-link-btn {
         display: inline-block; padding: 8px 14px; background-color: #2563eb; 
         color: white !important; border-radius: 6px; text-decoration: none; 
-        font-weight: bold; font-size: 13px;
+        font-weight: bold; font-size: 13px; transition: background-color 0.2s;
     }
+    .video-link-btn:hover { background-color: #1d4ed8; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1103,13 +1089,13 @@ elif page == "📊 Отчет производства":
                     for _, r in temp.iterrows():
                         matrix_list.append({
                             'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}", 
+                            'Причина': f"{i}. {CATEGORIES[i]}",
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
             st.markdown("---")
-            st.markdown("### 🧮 Компактная Транспонированная Матрица")
-            st.info("💡 **Как читать:** Слева — категории. Сверху — артикулы. Столбцы сжаты: наведите курсор на заголовок для подсказки. **Кликните на цветную ячейку для детализации!**")
+            st.markdown("### 🧮 Транспонированная Матрица")
+            st.info("💡 **Как читать:** Слева — причины. Сверху — артикулы. Наведите курсор на узкий столбец, чтобы увидеть полное название артикула. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
@@ -1124,34 +1110,38 @@ elif page == "📊 Отчет производства":
                 
                 pivot = pivot.reset_index()
                 
+                # --- ЖЕСТКАЯ НАСТРОЙКА ШИРИНЫ КОЛОНОК ---
                 col_config = {
                     'Причина': st.column_config.TextColumn("Причина дефекта"), 
-                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=45, help="Всего дефектов по категории")
+                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=40)
                 }
                 
+                # Зажимаем все колонки с артикулами до минимума (width=15). 
+                # Стримлит ужмет их ровно настолько, чтобы влезла самая широкая цифра.
                 for col in pivot.columns:
                     if col not in ['Причина', 'ИТОГО']:
                         col_config[col] = st.column_config.NumberColumn(
                             col, 
-                            width=40, 
+                            width=15, 
                             help=f"Артикул: {col}"
                         )
 
+                # Высота таблицы подстраивается под 13 категорий
                 dynamic_height = len(pivot) * 35 + 43
                 gradient_cols = [c for c in pivot.columns if c not in ['Причина', 'ИТОГО']]
                 
-                # СКРЫТЫЙ МАРКЕР МАТРИЦЫ (Для CSS)
-                st.markdown('<div id="matrix-marker"></div>', unsafe_allow_html=True)
-                
+                # width="stretch" - заставляет таблицу растянуться на ширину всей страницы (как в красном прямоугольнике)
                 event = st.dataframe(
                     pivot.style.background_gradient(cmap='Blues', subset=gradient_cols),
                     on_select="rerun",
                     selection_mode="single-cell",
                     hide_index=True, 
                     height=dynamic_height,
+                    width="stretch", 
                     column_config=col_config
                 )
                 
+                # Нативный перехватчик кликов (работает безотказно без CSS zoom)
                 if hasattr(event, "selection") and event.selection.get("cells"):
                     selected_cell = event.selection.get("cells")[0]
                     row_idx = selected_cell[0]
@@ -1174,10 +1164,7 @@ elif page == "📊 Отчет производства":
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                
-                # СКРЫТЫЙ МАРКЕР ИНВОЙСОВ (Для CSS)
-                st.markdown('<div id="invoices-marker"></div>', unsafe_allow_html=True)
-                st.dataframe(inv_counts.head(10))
+                st.dataframe(inv_counts.head(10), width="stretch")
             else:
                 st.info("Данных для инвойсов пока нет.")
 
