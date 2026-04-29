@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Режим отладки клика)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Матрица через Scatter-хак)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -894,12 +894,14 @@ elif page == "📊 Отчет производства":
     .photo-zoom:hover { 
         transform: scale(4); z-index: 9999; position: relative; 
         box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
+        border-radius: 2px !important;
     }
     .video-link-btn {
         display: inline-block; padding: 8px 14px; background-color: #2563eb; 
         color: white !important; border-radius: 6px; text-decoration: none; 
-        font-weight: bold; font-size: 13px;
+        font-weight: bold; font-size: 13px; transition: background-color 0.2s;
     }
+    .video-link-btn:hover { background-color: #1d4ed8; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1006,11 +1008,11 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
-        if st.button("Закрыть"):
+        if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
             st.rerun()
 
-    # Проверка триггера окна
+    # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
@@ -1035,9 +1037,11 @@ elif page == "📊 Отчет производства":
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
                     df_inv.columns = [str(c).strip() for c in df_inv.columns]
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
+                    
                     if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
                     cols_to_merge = ['Номер поставки']
                     if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
+                    
                     df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
         except Exception as e:
             st.warning(f"Данные инвойсов не подтянуты: {e}")
@@ -1103,32 +1107,47 @@ elif page == "📊 Отчет производства":
                 pivot_display = pivot.copy()
                 pivot_display.index = display_index
 
-                fig = px.imshow(
-                    pivot_display,
-                    text_auto=True,
-                    aspect="auto",
-                    color_continuous_scale='Blues',
-                    labels=dict(x="Артикул", y="Причина", color="Дефекты")
-                )
-                fig.update_xaxes(tickangle=-90)
-                fig.update_layout(coloraxis_showscale=False, height=max(400, len(pivot)*35 + 100), margin=dict(l=0,r=0,b=100,t=20))
+                # --- ХАКЕРСКИЙ ОБХОД ОГРАНИЧЕНИЙ STREAMLIT ---
+                # Превращаем таблицу в список координат
+                pivot_reset = pivot_display.reset_index().rename(columns={'index': 'Причина'})
+                df_melt = pivot_reset.melt(id_vars='Причина', var_name='Артикул', value_name='Дефекты')
                 
-                event = st.plotly_chart(
-                    fig, 
-                    on_select="rerun", 
-                    selection_mode="points", 
-                    use_container_width=True,
-                    key="heatmap_matrix"
-                )
-                
-                # ===============================================
-                # 🛠 БЛОК РЕНТГЕНА (ОТЛАДКА КЛИКА)
-                # ===============================================
-                st.warning("👇 **ТЕХНИЧЕСКИЙ БЛОК:** Сделай клик по любому цветному квадрату на графике выше. Если цифры ниже не меняются, значит Streamlit не поддерживает клики по Heatmap.")
-                st.write("**Сырые данные от Streamlit при клике:**")
-                st.json(event)
-                # ===============================================
+                # Показываем текст (цифры) только там, где есть дефекты, чтобы не мусорить нулями
+                df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
+                # Используем SCATTER (точечный график), так как Streamlit ловит с него клики 100%
+                fig = px.scatter(
+                    df_melt,
+                    x="Артикул",
+                    y="Причина",
+                    color="Дефекты",
+                    color_continuous_scale='Blues',
+                    text="Текст"
+                )
+
+                # Маскируем точки под квадратные ячейки таблицы
+                fig.update_traces(
+                    marker=dict(symbol='square', size=28, line=dict(width=1, color='#e2e8f0')),
+                    textfont=dict(color='black', size=11, family="Arial"),
+                    textposition='middle center',
+                    hoverinfo='skip'
+                )
+
+                dynamic_height = max(400, len(pivot)*35 + 100)
+
+                # Настраиваем оси, чтобы выглядело в точности как матрица
+                fig.update_xaxes(tickangle=-90, type='category', side='bottom')
+                fig.update_yaxes(autorange="reversed", type='category') # Строки сверху вниз
+                fig.update_layout(
+                    coloraxis_showscale=False,
+                    height=dynamic_height,
+                    margin=dict(l=0, r=0, b=100, t=20),
+                    plot_bgcolor='rgba(0,0,0,0)' # Убираем задний фон графика
+                )
+                
+                event = st.plotly_chart(fig, on_select="rerun", selection_mode="points", width="stretch")
+                
+                # --- ТЕПЕРЬ ПЕРЕХВАТЧИК СРАБОТАЕТ ГАРАНТИРОВАННО ---
                 try:
                     points = []
                     if hasattr(event, "selection"):
@@ -1154,11 +1173,14 @@ elif page == "📊 Отчет производства":
                             }
                             st.rerun()
                 except Exception as e:
-                    pass
+                    st.error(f"Системная ошибка обработки клика: {e}")
 
             else:
                 st.info("Данных для матрицы пока нет.")
 
+            # =========================================================
+            # БЛОК 2: ПРОБЛЕМНЫЕ ИНВОЙСЫ
+            # =========================================================
             st.markdown("---")
             st.markdown("### 📦 Проблемные Инвойсы")
             
@@ -1166,7 +1188,7 @@ elif page == "📊 Отчет производства":
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                st.dataframe(inv_counts.head(10), use_container_width=True)
+                st.dataframe(inv_counts.head(10), width="stretch")
             else:
                 st.info("Данных для инвойсов пока нет.")
 
