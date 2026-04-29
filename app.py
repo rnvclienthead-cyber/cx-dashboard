@@ -615,30 +615,41 @@ elif page == "🔬 ИИ Тегирование":
 
 elif page == "📝 Модерация":
     st.title("📋 Модерация (Ручная проверка)")
-    st.markdown("Проверьте теги, поставленные ИИ, и результаты аудита Grok.")
 
-    # Единый стиль для фото и видео (Базовый размер 15%, при наведении увеличение)
+    # Стили: фото увеличиваются в 5 раз (до 75%), видео статично
     st.markdown("""
     <style>
-    .media-zoom {
-        width: 15%;
-        height: 120px;
-        object-fit: cover;
-        border-radius: 6px;
-        margin-right: 1.5%;
-        margin-bottom: 10px;
-        transition: transform 0.2s;
+    .photo-zoom {
+        width: 15%; /* Увеличено в 2.5 раза от прошлого */
+        border-radius: 8px;
+        margin-right: 10px;
+        transition: transform 0.3s ease;
         cursor: pointer;
-        vertical-align: top;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }
-    .media-zoom:hover {
-        transform: scale(3.5);
-        z-index: 999;
+    .photo-zoom:hover {
+        transform: scale(5); /* Зум в 5 раз */
+        z-index: 9999;
         position: relative;
+    }
+    .video-thumb {
+        width: 15%;
+        height: 100px;
+        background: #000;
+        border-radius: 8px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        cursor: pointer;
+        border: 2px solid #4B8BBE;
     }
     </style>
     """, unsafe_allow_html=True)
+
+    # Функция для открытия видео в модальном окне
+    @st.dialog("Просмотр видео", width="large")
+    def play_video_modal(url):
+        st.video(url)
 
     try:
         client = get_gspread_client()
@@ -649,20 +660,11 @@ elif page == "📝 Модерация":
             headers = [str(h).strip() for h in data[0]]
             df = pd.DataFrame(data[1:], columns=headers)
             
-            if 'Аудит' not in df.columns: df['Аудит'] = ''
-            if 'Комментарий' not in df.columns: df['Комментарий'] = ''
-            if 'Корректировка' not in df.columns: df['Корректировка'] = ''
-
+            # Фильтр: есть теги, нет корректировки
             def has_tags(row):
                 return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
             df['has_any_tag'] = df.apply(has_tags, axis=1)
-
-            filter_option = st.radio("Кого проверяем?", ["Все размеченные (без ручной корректировки)", "Только с ОШИБКОЙ от аудитора (Grok)"], horizontal=True)
-            
-            if "ОШИБКОЙ" in filter_option:
-                to_review = df[(df['has_any_tag']) & (df['Корректировка'].astype(str).str.strip() == '') & (df['Аудит'].astype(str).str.upper() == 'ОШИБКА')].head(20)
-            else:
-                to_review = df[(df['has_any_tag']) & (df['Корректировка'].astype(str).str.strip() == '')].head(20)
+            to_review = df[(df['has_any_tag']) & (df.get('Корректировка', '').astype(str).str.strip() == '')].head(15)
 
             if not to_review.empty:
                 cats_list = list(CATEGORIES.values())
@@ -671,88 +673,53 @@ elif page == "📝 Модерация":
                 
                 for idx, row in to_review.iterrows():
                     row_index_gs = idx + 2 
-                    with st.container():
-                        st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
-                        col_info, col_photos = st.columns([1.5, 1])
+                    st.markdown("---")
+                    col_info, col_media = st.columns([1.5, 1])
+                    
+                    with col_info:
+                        st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
+                        st.info(row.get('Текст_Клиента', 'Нет текста'))
                         
-                        current_tags = []
-                        for c in range(1, 14):
-                            if str(row.get(f'Кат {c}', '')).strip().lower() in ['1','1.0','+','v','да','true']:
-                                current_tags.append(CATEGORIES.get(c, f"Категория {c}"))
-                        tags_str = "; ".join(current_tags) if current_tags else "Нет"
+                        # Выпадающий список (multiselect) теперь всегда пустой при загрузке
+                        selected_cats = st.multiselect(
+                            f"Выберите категории для строки {row_index_gs}:", 
+                            options=cats_list, 
+                            default=[], 
+                            key=f"ms_{row_index_gs}"
+                        )
                         
-                        with col_info:
-                            st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
-                            st.markdown(f"*{row.get('Текст_Клиента', 'Нет текста')}*")
-                            st.markdown(f"🤖 **Тег ИИ:** {tags_str}")
+                        if st.button("💾 Сохранить решение", key=f"btn_{row_index_gs}", type="primary"):
+                            if selected_cats:
+                                # Логика сохранения (очистка старых и запись новых тегов)
+                                batch_updates = []
+                                for c in range(1, 14):
+                                    h = f"кат {c}"
+                                    if h in header_map_clean: batch_updates.append({'range': f"{header_map_clean[h]}{row_index_gs}", 'values': [['']]})
+                                for cat_name in selected_cats:
+                                    cat_num = reverse_cats.get(cat_name.strip().lower())
+                                    if cat_num: batch_updates.append({'range': f"{header_map_clean[f'кат {cat_num}']}{row_index_gs}", 'values': [['1']]})
+                                
+                                ws.batch_update(batch_updates)
+                                st.success("Сохранено!")
+                                st.rerun()
+
+                    with col_media:
+                        media_raw = str(row.get('Фотографии', '')) + " " + str(row.get('Видео', ''))
+                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
+                        
+                        for u in urls[:4]:
+                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
                             
-                            if str(row.get('Аудит', '')).strip():
-                                st.markdown(f"🕵️‍♂️ **Аудит Grok:** {row.get('Аудит', '')} | 📝 **Коммент:** {row.get('Комментарий', '')}")
-                        
-                        with col_photos:
-                            photos_raw = str(row.get('Фотографии', '')) + " " + str(row.get('Видео', ''))
-                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', photos_raw)
-                            
-                            if urls:
-                                media_html = ""
-                                for u in urls[:5]:
-                                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                    
-                                    # Рендерим видео и фото в одном стиле
-                                    if '.mp4' in clean_url.lower() or '.mov' in clean_url.lower():
-                                        media_html += f'<video src="{clean_url}" class="media-zoom" controls muted loop></video>'
-                                    else:
-                                        media_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="media-zoom"></a>'
-                                st.markdown(media_html, unsafe_allow_html=True)
+                            if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
+                                if st.button(f"🎥 Видео", key=f"vid_{row_index_gs}_{clean_url}"):
+                                    play_video_modal(clean_url)
                             else:
-                                st.write("Нет фото/видео")
-                        
-                        st.markdown("**Быстрый выбор категорий:**")
-                        cat_cols = st.columns(3)
-                        selected_cats = []
-                        for i, cat in enumerate(cats_list):
-                            # value=False убирает предзаполненные галочки
-                            if cat_cols[i % 3].checkbox(cat, value=False, key=f"cat_{row_index_gs}_{i}"):
-                                selected_cats.append(cat)
-                        
-                        col_other, col_btn = st.columns([3, 1])
-                        other_text = col_other.text_input("Другая причина", key=f"other_{row_index_gs}", label_visibility="collapsed", placeholder="Свой вариант...")
-                        if other_text: selected_cats.append(other_text.strip())
-                        
-                        if col_btn.button("💾 Сохранить", key=f"btn_{row_index_gs}", type="primary", use_container_width=True):
-                            final_string = "; ".join(selected_cats) if selected_cats else "Ок (Подтверждено)"
-                            
-                            batch_updates = []
-                            for c in range(1, 14):
-                                header = f"кат {c}"
-                                if header in header_map_clean:
-                                    batch_updates.append({'range': f"{header_map_clean[header]}{row_index_gs}", 'values': [['']]})
-                                    
-                            for cat_name in selected_cats:
-                                clean_tag = cat_name.strip().lower()
-                                if clean_tag in reverse_cats:
-                                    cat_num = reverse_cats[clean_tag]
-                                    header = f"кат {cat_num}"
-                                    if header in header_map_clean:
-                                        batch_updates.append({'range': f"{header_map_clean[header]}{row_index_gs}", 'values': [['1']]})
-                            
-                            if "корректировка" in header_map_clean:
-                                batch_updates.append({'range': f"{header_map_clean['корректировка']}{row_index_gs}", 'values': [[final_string]]})
-                            
-                            if batch_updates: ws.batch_update(batch_updates)
-                            
-                            ws_mem = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Память_ИИ")
-                            ws_mem.append_row([row.get('Текст_Клиента', ''), final_string])
-                            
-                            st.success("Сохранено!")
-                            st.rerun()
-            else: 
-                st.success("🎉 Очередь на модерацию пуста!")
-        else:
-            st.warning("Таблица пуста.")
+                                st.markdown(f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>', unsafe_allow_html=True)
+            else:
+                st.success("🎉 Очередь пуста!")
     except Exception as e:
-        st.error(f"Ошибка загрузки данных модерации: {e}")
+        st.error(f"Ошибка модерации: {e}")
         
 elif page == "🧠 Обучение ИИ":
     st.title("🧠 База знаний ИИ (Умный импорт)")
@@ -816,176 +783,118 @@ elif page == "🧠 Обучение ИИ":
 # ==========================================
 
 elif page == "📊 Дашборд":
-    st.title("📊 Аналитика, Инвойсы и Сводная Матрица")
-    
-    # Стили для детализации
-    st.markdown("""
-    <style>
-    .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
-    .detail-text { font-size: 16px; margin-bottom: 10px; color: #111; line-height: 1.5; white-space: pre-wrap;}
-    .media-zoom-small { width: 15%; height: 80px; object-fit: cover; border-radius: 4px; margin-right: 1.5%; transition: transform 0.2s; cursor: pointer; vertical-align: top;}
-    .media-zoom-small:hover { transform: scale(3.5); z-index: 999; position: relative; }
-    </style>
-    """, unsafe_allow_html=True)
+    st.title("📊 Аналитика и Интерактивная Матрица")
+
+    # Функция детализации (всплывающее окно)
+    @st.dialog("Детализация пересечения", width="large")
+    def show_matrix_details(sku, reason_name, filtered_df, reason_id):
+        st.subheader(f"📦 {sku} | 🛠 {reason_name}")
+        
+        # Фильтруем данные именно для этого пересечения
+        details = filtered_df[
+            (filtered_df['Артикул'] == sku) & 
+            (filtered_df[f'Кат {reason_id}'].astype(str).str.strip().isin(['1', '1.0', '+']))
+        ]
+        
+        if not details.empty:
+            for _, r in details.iterrows():
+                with st.container(border=True):
+                    # Порядок: Текст клиента (первым), инвойс, поставка, медиа
+                    st.write(f"💬 **Текст клиента:** {r.get('Текст_Клиента', '---')}")
+                    
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        st.write(f"📅 **Дата:** {r.get('Дата', '---')}")
+                        st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
+                        st.write(f"🕵️ **Аудит:** {r.get('Аудит', '---')} | **Коммент:** {r.get('Комментарий', '---')}")
+                    
+                    with c2:
+                        m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                        m_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                        for mu in m_urls[:2]:
+                            m_clean = mu.replace("']", "").replace("'", "")
+                            if m_clean.startswith("//"): m_clean = "https:" + m_clean
+                            if '.mp4' in m_clean.lower(): st.write("🎥 Видео в табл.")
+                            else: st.image(m_clean, width=100)
+        else:
+            st.write("Нет данных по этому пересечению.")
 
     try:
         client = get_gspread_client()
-        sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
-        ws_returns = sheet.worksheet("Возвраты")
-        df = pd.DataFrame(ws_returns.get_all_records())
+        sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
+        df = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
         
-        if not df.empty:
-            # --- ИНТЕГРАЦИЯ ИНВОЙСОВ (Железобетонный метод) ---
-            try:
-                INVOICE_SHEET_ID = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
-                if INVOICE_SHEET_ID:
-                    sheet_inv = client.open_by_key(INVOICE_SHEET_ID)
-                    ws_inv = sheet_inv.get_worksheet(0) # Берем самый первый лист (игнорируем название)
-                    df_inv = pd.DataFrame(ws_inv.get_all_records())
-                    
-                    if not df_inv.empty and 'Артикул' in df_inv.columns:
-                        df_inv_unique = df_inv.drop_duplicates(subset=['Артикул'])
-                        if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
-                        if 'Номер поставки' in df.columns: df = df.drop(columns=['Номер поставки'])
-                        
-                        cols_to_merge = ['Артикул']
-                        if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
-                        if 'Номер поставки' in df_inv.columns: cols_to_merge.append('Номер поставки')
-                        
-                        df = df.merge(df_inv_unique[cols_to_merge], on='Артикул', how='left')
-                else:
-                    st.warning("ID таблицы инвойсов не найден в секретах.")
-            except Exception as e:
-                st.error(f"❌ Ошибка загрузки инвойсов: {e}. Проверьте доступы!")
+        # --- ПОДТЯГИВАЕМ ИНВОЙСЫ (Слияние по Номеру поставки) ---
+        try:
+            inv_id = st.secrets["SPREADSHEET_ID_INVOICES"]
+            sheet_inv = client.open_by_key(inv_id)
+            # Берем Лист 1, колонки A (Поставка) и B (Инвойс)
+            df_inv = pd.DataFrame(sheet_inv.get_worksheet(0).get_all_records())
+            
+            if not df_inv.empty:
+                # Очищаем заголовки для надежности
+                df_inv.columns = [str(c).strip() for c in df_inv.columns]
+                # Оставляем только нужные пары
+                df_inv = df_inv[['Номер поставки', 'Инвойс']].drop_duplicates(subset=['Номер поставки'])
                 
-            if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
-            if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
+                # Удаляем старый столбец Инвойс из возвратов, если он там был пустым
+                if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
+                
+                # Объединяем! Теперь ключ — Номер поставки
+                df = df.merge(df_inv, on='Номер поставки', how='left')
+        except Exception as e:
+            st.warning(f"Данные инвойсов не подтянуты: {e}")
 
-            def has_tags(row):
-                return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1, 14))
+        if not df.empty:
+            # Статистика
+            def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
             df['Размечено'] = df.apply(has_tags, axis=1)
             
-            st.markdown("### 🔍 Глобальные фильтры")
-            f_col1, f_col2 = st.columns(2)
-            inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip()])))
-            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул'] if str(x).strip()])))
+            st.markdown("### 🧮 Матрица дефектов (Нажмите на ячейку для деталей)")
             
-            selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
-            selected_sku = f_col2.selectbox("Артикул:", sku_list)
+            # Подготовка данных для матрицы
+            matrix_list = []
+            for i in range(1, 14):
+                cat_col = f'Кат {i}'
+                if cat_col in df.columns:
+                    temp = df[df[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
+                    for _, r in temp.iterrows():
+                        matrix_list.append({'Артикул': r['Артикул'], 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i})
             
-            df_filtered = df.copy()
-            if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
-            if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
-
-            total_rows = len(df_filtered)
-            tagged_rows = df_filtered['Размечено'].sum()
-            corrected_rows = len(df_filtered[df_filtered.get('Корректировка', '') != ''])
-            
-            accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
-            processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
-            
-            st.markdown("### 📈 Общая статистика")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Всего заявок", total_rows)
-            c2.metric("Размечено", f"{tagged_rows} ({processed_percent}%)")
-            c3.metric("Изменено вручную", corrected_rows)
-            c4.metric("Точность ИИ", f"{accuracy}%")
-            
-            matrix_data = []
-            for idx, row in df_filtered[df_filtered['Размечено']].iterrows():
-                art = str(row.get('Артикул', 'Без артикула')).strip()
-                if not art: art = 'Без артикула'
-                for i in range(1, 14):
-                    if str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true']:
-                        cat_name = f"{i}. {CATEGORIES.get(i)}"
-                        matrix_data.append({'Артикул': art, 'Причина': cat_name, 'Инвойс': row.get('Инвойс')})
-            
-            if matrix_data:
-                df_matrix = pd.DataFrame(matrix_data)
+            if matrix_list:
+                df_matrix = pd.DataFrame(matrix_list)
+                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
+                # Сортировка по ID категорий
+                pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
+                pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
-                st.markdown("### 🧮 Тепловая Матрица (Нажмите на ячейку для детализации)")
-                pivot_df = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                pivot_df['ID'] = [int(x.split('.')[0]) for x in pivot_df.index]
-                pivot_df = pivot_df.sort_values('ID').drop('ID', axis=1)
-                
+                # Отрисовка интерактивной тепловой карты
                 import plotly.express as px
-                fig_matrix = px.imshow(pivot_df, text_auto=True, color_continuous_scale='Blues', aspect="auto")
+                fig = px.imshow(pivot, text_auto=True, color_continuous_scale='Blues', aspect="auto")
                 
-                # ЛОВИМ КЛИК ПО МАТРИЦЕ
-                selection = st.plotly_chart(fig_matrix, use_container_width=True, on_select="rerun")
+                # Включаем выбор (клик)
+                selected = st.plotly_chart(fig, on_select="rerun", use_container_width=True)
                 
-                all_skus = sorted(df_matrix['Артикул'].unique())
-                all_reasons = sorted(df_matrix['Причина'].unique(), key=lambda x: int(x.split('.')[0]))
-                
-                # Инициализируем сессию для фильтров
-                if "det_sku" not in st.session_state: st.session_state["det_sku"] = all_skus[0] if all_skus else ""
-                if "det_reason" not in st.session_state: st.session_state["det_reason"] = all_reasons[0] if all_reasons else ""
-                
-                # Если кликнули, меняем значения фильтров в памяти
-                if selection and "selection" in selection and selection["selection"].get("points"):
-                    points = selection["selection"]["points"]
-                    if points:
-                        click_sku = points[0]["x"]
-                        click_reason = points[0]["y"]
-                        if click_sku in all_skus: st.session_state["det_sku"] = click_sku
-                        if click_reason in all_reasons: st.session_state["det_reason"] = click_reason
-
-                st.markdown("### 📦 Проблемные Инвойсы")
-                inv_counts = df_matrix['Инвойс'].value_counts().reset_index()
-                inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                st.dataframe(inv_counts.head(10), use_container_width=True)
-
-                st.markdown("### 🔎 Детализация пересечения")
-                det_c1, det_c2 = st.columns(2)
-                
-                # Селектбоксы берут данные из сессии (обновятся при клике на график)
-                det_sku = det_c1.selectbox("Артикул:", all_skus, key="det_sku")
-                det_reason = det_c2.selectbox("Проблема:", all_reasons, key="det_reason")
-                
-                reason_id = int(det_reason.split('.')[0])
-                detail_df = df_filtered[(df_filtered['Артикул'] == det_sku) & (df_filtered[f'Кат {reason_id}'].astype(str).str.strip().str.lower().isin(['1','1.0','+','v','да','true']))]
-                
-                if not detail_df.empty:
-                    st.success(f"Найдено заявок: {len(detail_df)}")
+                # Если нажали на ячейку — открываем диалог
+                if selected and selected.get("selection", {}).get("points"):
+                    point = selected["selection"]["points"][0]
+                    sku_clicked = point["x"]
+                    reason_clicked = point["y"]
+                    reason_id_clicked = int(reason_clicked.split('.')[0])
                     
-                    for d_idx, d_row in detail_df.iterrows():
-                        st.markdown('<div class="detail-card">', unsafe_allow_html=True)
-                        
-                        # 1. Текст клиента с переносами
-                        client_text = str(d_row.get('Текст_Клиента', ''))
-                        st.markdown(f"<div class='detail-text'><b>Текст клиента:</b><br>{client_text}</div>", unsafe_allow_html=True)
-                        
-                        col_a, col_b = st.columns([1.5, 1])
-                        with col_a:
-                            # 2. Поставка, Инвойс, Дата
-                            st.markdown(f"**Поставка:** {d_row.get('Номер поставки', '---')} | **Инвойс:** {d_row.get('Инвойс', '---')} | **Дата:** {d_row.get('Дата', '---')}")
-                            # 3. Аудит
-                            st.markdown(f"🕵️‍♂️ **Аудит Grok:** {d_row.get('Аудит', '---')} | 📝 **Коммент:** {d_row.get('Комментарий', '---')}")
-                        
-                        with col_b:
-                            # 4. Медиафайлы (в едином стиле с модерацией)
-                            photos_raw = str(d_row.get('Фотографии', '')) + " " + str(d_row.get('Видео', ''))
-                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', photos_raw)
-                            if urls:
-                                media_html = ""
-                                for u in urls[:5]:
-                                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                    if '.mp4' in clean_url.lower() or '.mov' in clean_url.lower():
-                                        media_html += f'<video src="{clean_url}" class="media-zoom-small" controls muted loop></video>'
-                                    else:
-                                        media_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="media-zoom-small"></a>'
-                                st.markdown(media_html, unsafe_allow_html=True)
-                        st.markdown('</div>', unsafe_allow_html=True)
-                else:
-                    st.info("Нет данных по этому пересечению.")
+                    show_matrix_details(sku_clicked, reason_clicked, df, reason_id_clicked)
+
+                # Блок Инвойсов
+                st.markdown("### 📦 Анализ Инвойсов")
+                if 'Инвойс' in df.columns:
+                    inv_stats = df[df['Размечено']]['Инвойс'].value_counts().reset_index()
+                    inv_stats.columns = ['Инвойс', 'Кол-во проблем']
+                    st.dataframe(inv_stats, use_container_width=True)
+
             else:
-                st.info("Нет данных для построения аналитики.")
-        else:
-            st.warning("Таблица пуста.")
-            
+                st.info("Данных для матрицы пока нет.")
     except Exception as e:
-        st.error(f"Ошибка при загрузке дашборда: {e}")
+        st.error(f"Ошибка Дашборда: {e}")
         
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
