@@ -779,17 +779,12 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. АНАЛИТИКА И ДАШБОРД
-# ==========================================
-
-# ==========================================
-# 7. ОБНОВЛЕННАЯ АНАЛИТИКА И ДАШБОРД
+# 7. АНАЛИТИКА, ИНВОЙСЫ И МАТРИЦА (ПОЛНЫЙ КОД)
 # ==========================================
 
 elif page == "📊 Дашборд":
     st.title("📊 Аналитика и Матрица дефектов")
     
-    # Дополнительные стили для компактности матрицы и зума фото
     st.markdown("""
     <style>
     /* Уменьшаем шрифт в таблице для компактности */
@@ -797,18 +792,24 @@ elif page == "📊 Дашборд":
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     
-    /* Стили из блока модерации для детализации */
+    /* Стили фото: +15% к размеру и +10% к зуму */
     .photo-zoom-detail {
-        width: 80px; height: 80px; object-fit: cover;
+        width: 92px; height: 92px; object-fit: cover;
         border-radius: 8px; margin-right: 10px;
         transition: transform 0.3s ease; cursor: pointer;
     }
     .photo-zoom-detail:hover {
-        transform: scale(6); /* Зум для детального просмотра */
+        transform: scale(6.6); 
         z-index: 9999; position: relative;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
     }
     </style>
     """, unsafe_allow_html=True)
+
+    # Модальное окно для видео (на весь экран/большое)
+    @st.dialog("Просмотр видео", width="large")
+    def play_video_full(url):
+        st.video(url)
 
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
@@ -823,50 +824,78 @@ elif page == "📊 Дашборд":
             for _, r in details.iterrows():
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
-                    st.write(f"💬 **Клиент:** {r.get('Текст_Клиента', '---')}")
+                    st.write(f"**Текст клиента:** {r.get('Текст_Клиента', 'Нет текста')}")
                     
-                    c1, c2 = st.columns([1, 1.5])
+                    c1, media_col = st.columns([1, 1.2])
                     with c1:
-                        st.write(f"📅 {r.get('Дата', '---')} | 🧾 {r.get('Инвойс', '---')}")
-                        st.write(f"📦 Поставка: {r.get('Номер поставки', '---')}")
+                        # Чистый вывод без эмодзи и лишних символов
+                        st.write(f"Дата: {r.get('Дата', '')}")
+                        st.write(f"Инвойс: {r.get('Инвойс', 'Не указан')}")
+                        st.write(f"Поставка: {r.get('Номер поставки', '---')}")
                     
-                    with c2:
+                    with media_col:
                         m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
                         m_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                         if m_urls:
-                            for mu in m_urls[:4]:
+                            for mu in m_urls[:5]:
                                 m_clean = mu.replace("']", "").replace("'", "").replace('"', '')
                                 if m_clean.startswith("//"): m_clean = "https:" + m_clean
                                 
+                                # Если видео — рисуем кнопку
                                 if any(ext in m_clean.lower() for ext in ['.mp4', '.mov', '.avi']):
-                                    st.video(m_clean) # Видео отображаем стандартным плеером для удобства
+                                    if st.button(f"▶ Видео", key=f"v_det_{r.name}_{m_clean[:20]}"):
+                                        play_video_full(m_clean)
+                                # Если фото — рисуем с зумом
                                 else:
                                     st.markdown(f'<a href="{m_clean}" target="_blank"><img src="{m_clean}" class="photo-zoom-detail"></a>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- Код загрузки данных (без изменений) ---
     try:
         client = get_gspread_client()
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
         df = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
         
-        # Подтяжка инвойсов (код опущен для краткости, остается твоя логика)
-        # ... (здесь твой код merge инвойсов) ...
+        # ЗАЩИТА АПИ: Переименовываем supplyID в Номер поставки на лету
+        if 'supplyID' in df.columns and 'Номер поставки' not in df.columns:
+            df.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+        
+        # --- БЛОК ИНВОЙСОВ (ВОССТАНОВЛЕН) ---
+        try:
+            inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
+            if inv_id:
+                sheet_inv = client.open_by_key(inv_id)
+                df_inv = pd.DataFrame(sheet_inv.get_worksheet(0).get_all_records())
+                
+                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns:
+                    df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+                
+                if not df_inv.empty and 'Номер поставки' in df_inv.columns:
+                    df_inv.columns = [str(c).strip() for c in df_inv.columns]
+                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
+                    
+                    if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
+                    cols_to_merge = ['Номер поставки']
+                    if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
+                    
+                    df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
+        except Exception as e:
+            st.warning(f"Инвойсы не подтянуты: {e}")
 
         if not df.empty:
-            # Глобальные фильтры
-            st.markdown("### 🔍 Фильтры")
+            if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
+            
+            # Фильтры
             f_col1, f_col2 = st.columns(2)
-            inv_list = ['Все'] + sorted(list(set([str(x) for x in df.get('Инвойс', ['']) if str(x).strip()])))
+            inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip()])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул'] if str(x).strip()])))
-            selected_inv = f_col1.selectbox("Инвойс:", inv_list)
-            selected_sku = f_col2.selectbox("Артикул:", sku_list)
+            selected_inv = f_col1.selectbox("Фильтр по Инвойсу:", inv_list)
+            selected_sku = f_col2.selectbox("Фильтр по Артикулу:", sku_list)
             
             df_filtered = df.copy()
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
 
-            # Матрица
+            # Сбор данных для матрицы
             matrix_list = []
             for i in range(1, 14):
                 cat_col = f'Кат {i}'
@@ -882,21 +911,25 @@ elif page == "📊 Дашборд":
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
+                
+                # Добавляем сортировку по ID категории
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
-                # 1. Добавляем колонку ИТОГО
-                pivot['ОБЩЕЕ КОЛ-ВО'] = pivot.sum(axis=1)
+                # РАБОТА СО СТОЛБЦОМ "ОБЩЕЕ КОЛ-ВО"
+                total_col = pivot.sum(axis=1)
+                # Вставляем на позицию 0 (сразу после индекса)
+                pivot.insert(0, 'ОБЩЕЕ КОЛ-ВО', total_col)
                 
-                # 2. Оптимизация размера: высота ячейки в мелком шрифте ~28px
-                dynamic_height = len(pivot) * 28 + 40
+                # Высота: уменьшенный шрифт (28px на строку + шапка)
+                dynamic_height = len(pivot) * 28 + 45
                 
-                st.markdown("### 🧮 Карта дефектов")
+                st.markdown("### 🧮 Интерактивная Карта дефектов")
                 
-                # Применяем градиент ко всем колонкам, КРОМЕ последней (ОБЩЕЕ КОЛ-ВО)
+                # Градиент только для артикулов (пропускаем "ОБЩЕЕ КОЛ-ВО")
                 styled_pivot = pivot.style.background_gradient(
                     cmap='Blues', 
-                    subset=pivot.columns[:-1] # Исключаем последнюю колонку из раскраски
+                    subset=pivot.columns[1:] 
                 )
                 
                 event = st.dataframe(
@@ -913,7 +946,7 @@ elif page == "📊 Дашборд":
                     row_idx = selected_cell[0]
                     col_name = selected_cell[1]
                     
-                    # Если кликнули не на колонку "ОБЩЕЕ КОЛ-ВО"
+                    # Детализация работает только при клике на Артикул (не на Общее количество)
                     if col_name != 'ОБЩЕЕ КОЛ-ВО':
                         selected_sku = col_name
                         selected_reason = pivot.index[row_idx]
