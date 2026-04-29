@@ -915,11 +915,14 @@ elif page == "📊 Дашборд":
                         art = str(r.get('Артикул', 'Без артикула')).strip() or 'Без артикула'
                         matrix_list.append({'Артикул': art, 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i, 'Инвойс': r.get('Инвойс')})
             
-            if matrix_list:
+           if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
+                
+                # РЕШЕНИЕ 1: Рассчитываем динамическую высоту: ~35px на каждую строку данных + ~43px на шапку
+                dynamic_height = len(pivot) * 35 + 43
                 
                 st.markdown("### 🧮 Интерактивная Матрица (Нажмите на ячейку)")
                 st.info("💡 Кликните на любую цифру в таблице ниже, чтобы открыть детализацию по конкретному артикулу и причине.")
@@ -929,22 +932,18 @@ elif page == "📊 Дашборд":
                     pivot.style.background_gradient(cmap='Blues', axis=None),
                     on_select="rerun",
                     selection_mode="single-cell",
-                    use_container_width=True
+                    use_container_width=True,
+                    height=dynamic_height # Динамическая высота убирает скролл по вертикали
                 )
                 
-                # Обработка клика по ячейке
-                if event and "selection" in event and event["selection"]["rows"] and event["selection"]["columns"]:
-                    row_idx = event["selection"]["rows"][0]
-                    col_val = event["selection"]["columns"][0]
+                # РЕШЕНИЕ 2: Обработка клика по ячейке для новых версий Streamlit
+                if hasattr(event, "selection") and event.selection.get("cells"):
+                    # Структура cells: [[индекс_строки, "имя_столбца"]]
+                    selected_cell = event.selection.get("cells")[0]
+                    row_idx = selected_cell[0]
+                    selected_sku = selected_cell[1]
                     
                     selected_reason = pivot.index[row_idx]
-                    
-                    # Streamlit возвращает либо имя колонки (строку), либо её индекс
-                    if isinstance(col_val, int):
-                        selected_sku = pivot.columns[col_val]
-                    else:
-                        selected_sku = col_val
-                        
                     reason_id_clicked = int(selected_reason.split('.')[0])
                     
                     # Мгновенно открываем всплывающее окно
