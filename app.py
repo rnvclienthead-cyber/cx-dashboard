@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Идеальная нативная матрица: 2 символа + Full Width)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Идеальная Хитмап-Матрица)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,11 +884,11 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Делаем шрифт компактным, чтобы таблица была аккуратной */
-    [data-testid="stDataFrame"] { font-size: 12px !important; }
+    /* Делаем шрифт интерфейса компактным */
+    [data-testid="stDataFrame"] { font-size: 11px !important; }
     
-    /* Увеличиваем размер текста во всплывающих подсказках (как ты просил ранее) */
-    [data-testid="stTooltipContent"] { font-size: 16px !important; }
+    /* Крупные всплывающие подсказки */
+    [data-testid="stTooltipContent"] { font-size: 16px !important; padding: 10px !important; }
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
@@ -1094,8 +1094,8 @@ elif page == "📊 Отчет производства":
                         })
 
             st.markdown("---")
-            st.markdown("### 🧮 Транспонированная Матрица")
-            st.info("💡 **Как читать:** Слева — причины. Сверху — артикулы (сокращены до 2 букв для компактности). Наведите курсор на заголовок, чтобы увидеть полное название. **Кликните на цветную ячейку для детализации!**")
+            st.markdown("### 🧮 Транспонированная Матрица дефектов")
+            st.info("💡 Слева — причины. Сверху — артикулы. **Наведите курсор на букву для подсказки. Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
@@ -1107,71 +1107,56 @@ elif page == "📊 Отчет производства":
                 total_counts = pivot.sum(axis=1)
                 pivot.insert(0, 'ИТОГО', total_counts)
                 
+                # ===============================================
+                # 🛠 ИДЕАЛЬНОЕ РАСПРЕДЕЛЕНИЕ ШИРИНЫ ЧЕРЕЗ ИНДЕКСЫ
+                # ===============================================
+                # Сохраняем оригинальные названия артикулов по порядку
+                original_skus = [col for col in pivot.columns if col not in ['Причина', 'ИТОГО']]
+                
+                # Переименовываем столбцы в простые числа 0, 1, 2...
+                # Это гарантия того, что они абсолютно уникальны, и мы избежим скрытых пробелов
+                rename_map = {sku: i for i, sku in enumerate(original_skus)}
+                pivot = pivot.rename(columns=rename_map)
                 pivot = pivot.reset_index()
 
-                # ===============================================
-                # 🛠 СОКРАЩЕНИЕ ДО 2 СИМВОЛОВ С ЗАЩИТОЙ ОТ ДУБЛЕЙ
-                # ===============================================
-                sku_mapping = {}
-                used_shorts = {}
-                
-                for col in pivot.columns:
-                    if col not in ['Причина', 'ИТОГО']:
-                        base_short = col[:2].upper() # Берем первые 2 буквы
-                        
-                        # Если такое сокращение уже есть, добавляем невидимые пробелы, 
-                        # чтобы Pandas считал колонки разными
-                        if base_short in used_shorts:
-                            used_shorts[base_short] += 1
-                            short_name = base_short + ("\u200B" * used_shorts[base_short])
-                        else:
-                            used_shorts[base_short] = 0
-                            short_name = base_short
-                            
-                        sku_mapping[col] = short_name
-                
-                # Обратный словарь (Короткое имя -> Полное имя) для работы кликов
-                reverse_sku_mapping = {v: k for k, v in sku_mapping.items()}
-                
-                # Переименовываем столбцы
-                pivot = pivot.rename(columns=sku_mapping)
-                
-                # ===============================================
-                # 🛠 НАСТРОЙКА ШИРИНЫ И ПОДСКАЗОК
-                # ===============================================
+                # Настраиваем отображение колонок
                 col_config = {
                     'Причина': st.column_config.TextColumn("Причина дефекта", width="medium"), 
-                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=40)
+                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width="small")
                 }
                 
-                gradient_cols = [c for c in pivot.columns if c not in ['Причина', 'ИТОГО']]
-                
-                for col in gradient_cols:
-                    col_config[col] = st.column_config.NumberColumn(
-                        col, 
-                        width=15, # Сжимаем колонки до МАКСИМУМА (зеленый круг)
-                        help=f"Артикул: {reverse_sku_mapping[col]}" # Полное имя в подсказке
+                # Присваиваем колонкам-цифрам отображение в виде 1 буквы
+                gradient_cols = []
+                for i, sku in enumerate(original_skus):
+                    gradient_cols.append(i)
+                    display_letter = sku[:1].upper() if sku else "?"
+                    col_config[i] = st.column_config.NumberColumn(
+                        label=display_letter, 
+                        help=f"Артикул: {sku}"
                     )
 
-                # Центрируем текст цифр и задаем сетку для читаемости
+                # ===============================================
+                # 🛠 ЦЕНТРИРОВАНИЕ, РАЗМЕР И РАЗДЕЛЕНИЕ ЦВЕТОВ (БЕЛАЯ СЕТКА)
+                # ===============================================
                 styled_pivot = pivot.style\
                     .background_gradient(cmap='Blues', subset=gradient_cols)\
                     .set_properties(**{
-                        'text-align': 'center', 
-                        'border': '1px solid #cbd5e1'
+                        'text-align': 'center',         # Ставим цифры по центру!
+                        'font-size': '10px',            # Уменьшаем цифры, чтобы влезали
+                        'border': '1px solid #ffffff'   # БЕЛАЯ РАМКА! Она отделит темные ячейки друг от друга
                     }, subset=gradient_cols)\
                     .set_properties(**{
                         'text-align': 'center',
                         'font-weight': 'bold',
-                        'border': '1px solid #cbd5e1'
+                        'border': '1px solid #e2e8f0'
                     }, subset=['ИТОГО'])\
                     .set_properties(**{
-                        'border': '1px solid #cbd5e1'
+                        'border': '1px solid #e2e8f0'
                     }, subset=['Причина'])
 
                 dynamic_height = len(pivot) * 35 + 43
                 
-                # width="stretch" растягивает таблицу на весь экран (красная рамка)
+                # width="stretch" теперь равномерно растянет все "однобуквенные" колонки на весь экран!
                 event = st.dataframe(
                     styled_pivot,
                     on_select="rerun",
@@ -1189,8 +1174,8 @@ elif page == "📊 Отчет производства":
                     col_name = selected_cell[1]
                     
                     if col_name not in ['Причина', 'ИТОГО']:
-                        # Восстанавливаем полное имя артикула для корректной фильтрации
-                        selected_sku = reverse_sku_mapping.get(col_name, col_name)
+                        # col_name возвращает цифру (индекс), мы вытаскиваем по ней полное имя
+                        selected_sku = original_skus[int(col_name)]
                         selected_reason = str(pivot.iloc[row_idx]['Причина']) 
                         reason_id_clicked = int(selected_reason.split('.')[0])
                         
