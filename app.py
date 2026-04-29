@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Plotly Heatmap)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Plotly Heatmap Фикс)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -896,7 +896,7 @@ elif page == "📊 Отчет производства":
         transform: scale(4); z-index: 9999; position: relative; 
         box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
         border: none !important; outline: none !important;
-        border-radius: 2px !important; /* Убирает белые углы при зуме */
+        border-radius: 2px !important; 
     }
     
     .video-link-btn {
@@ -1088,44 +1088,41 @@ elif page == "📊 Отчет производства":
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
-                # Добавляем "ОБЩЕЕ КОЛ-ВО"
+                # --- ИЗЯЩНОЕ РЕШЕНИЕ ИТОГОВ ---
+                # 1. Считаем сумму по каждой строке
                 total_col = pivot.sum(axis=1)
-                pivot.insert(0, 'ОБЩЕЕ КОЛ-ВО', total_col)
+                
+                # 2. Добавляем ИТОГО прямо в название строки (оси Y)
+                # Например: "1. Фурнитура" -> "1. Фурнитура [Всего: 15]"
+                new_index = [f"{idx} [Всего: {total_col[idx]}]" for idx in pivot.index]
+                pivot.index = new_index
+                # Теперь отдельная колонка "ОБЩЕЕ КОЛ-ВО" не нужна, и она не портит цвета!
                 
                 st.markdown("### 🧮 Тепловая Матрица дефектов")
                 st.info("💡 **Нажмите на любую цветную ячейку графика**, чтобы открыть детализацию по артикулу и причине.")
                 
-                # --- ЛОГИКА PLOTLY HEATMAP ---
-                # Ищем максимум среди артикулов (игнорируя итоги), чтобы общие суммы не "выжигали" градиент
-                if pivot.shape[1] > 1:
-                    max_val_without_total = pivot.iloc[:, 1:].max().max()
-                else:
-                    max_val_without_total = 1
-                if pd.isna(max_val_without_total) or max_val_without_total == 0:
-                    max_val_without_total = 1
+                max_val = pivot.max().max() if not pivot.empty else 1
+                if pd.isna(max_val) or max_val == 0: max_val = 1
 
-                # Динамичный расчет высоты (чем больше категорий, тем выше график)
                 dynamic_height = max(400, len(pivot) * 40 + 150)
                 
                 fig = px.imshow(
                     pivot,
-                    text_auto=True,          # Показываем цифры в ячейках
-                    aspect="auto",           # Растягиваем на всю ширину экрана
+                    text_auto=True,          
+                    aspect="auto",           
                     color_continuous_scale='Blues',
-                    origin='upper',          # Сортировка строк сверху вниз
-                    zmax=max_val_without_total, # Фикс цвета: Итоги будут самыми темными, но не сломают шкалу остальных
+                    origin='upper',          
+                    zmax=max_val,
                     labels=dict(x="Артикул", y="Причина", color="Дефекты")
                 )
                 
-                fig.update_xaxes(tickangle=-90, side="bottom") # Переворачиваем артикулы вертикально!
-                
+                fig.update_xaxes(tickangle=-90, side="bottom")
                 fig.update_layout(
-                    coloraxis_showscale=False, # Убираем легенду градиента справа, чтобы не съедала место
-                    margin=dict(l=0, r=0, t=10, b=120), # Отступ снизу для длинных артикулов
+                    coloraxis_showscale=False,
+                    margin=dict(l=0, r=0, t=10, b=120),
                     height=dynamic_height
                 )
                 
-                # Рендерим график с перехватом клика
                 event = st.plotly_chart(
                     fig,
                     on_select="rerun",
@@ -1133,16 +1130,17 @@ elif page == "📊 Отчет производства":
                     use_container_width=True
                 )
                 
-                # Перехватываем выбранную ячейку
-                if event and hasattr(event, "selection") and event.selection.get("points"):
-                    point = event.selection["points"][0]
+                # --- ИСПРАВЛЕННЫЙ ПЕРЕХВАТ КЛИКА ---
+                # event возвращается как словарь (dict), поэтому используем "in event" вместо hasattr
+                if isinstance(event, dict) and "selection" in event and event["selection"].get("points"):
+                    point = event["selection"]["points"][0]
                     col_name = point.get("x")
                     row_name = point.get("y")
                     
-                    # Исключаем клик по "Общему количеству"
-                    if col_name and row_name and col_name != 'ОБЩЕЕ КОЛ-ВО':
+                    if col_name and row_name:
                         selected_sku = str(col_name)
                         selected_reason = str(row_name)
+                        # Вытаскиваем правильный ID категории из строки "1. Причина [Всего: 10]"
                         reason_id_clicked = int(selected_reason.split('.')[0])
                         show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
 
