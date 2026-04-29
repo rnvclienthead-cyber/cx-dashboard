@@ -877,7 +877,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Профессиональная Аналитика Altair + Рабочий клик)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Altair Хитмап + Фикс Текста и Кликов)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -885,7 +885,7 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Оставляем стили только для карточек и видео! */
+    /* Оставляем стили только для карточек детализации */
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
@@ -1009,6 +1009,7 @@ elif page == "📊 Отчет производства":
             st.session_state.show_detail_trigger = None
             st.rerun()
 
+    # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
@@ -1088,7 +1089,7 @@ elif page == "📊 Отчет производства":
 
             st.markdown("---")
             st.markdown("### 🧮 Тепловая Матрица Производства")
-            st.info("💡 Идеально вписывается в экран. Итоги выведены в названиях. **Кликните на цветной квадрат для детализации!**")
+            st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
@@ -1107,23 +1108,24 @@ elif page == "📊 Отчет производства":
                 df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
                 # ===============================================
-                # 🛠 ALTAIR: ИСПРАВЛЕННЫЙ ТРИГГЕР КЛИКА
+                # 🛠 ALTAIR: ИСПРАВЛЕННЫЙ ТЕКСТ И РАБОЧИЙ КЛИК
                 # ===============================================
                 import altair as alt
                 
-                # Создаем активную зону выбора (selection), чтобы Streamlit мог ее перехватить!
-                click_selector = alt.selection_point(name='click')
+                # Явно указываем графику, КАКИЕ поля нужно вернуть при клике
+                click_selector = alt.selection_point(name='cell_click', fields=['Артикул_Метка', 'Причина_Метка'])
                 
                 base = alt.Chart(df_melt).encode(
-                    x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=300, orient='bottom')),
-                    y=alt.Y('Причина_Метка:N', title=None, sort=alt.EncodingSortField(field='ID', order='ascending'))
+                    # labelLimit=1000 отключает обрезку длинных названий артикулов
+                    x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000, orient='bottom')),
+                    # labelLimit=1000 отключает обрезку длинных названий причин (категорий)
+                    y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending'))
                 )
                 
-                # Привязываем созданный "click_selector" к графику с помощью add_params
                 rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
                     color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None),
                     tooltip=[alt.Tooltip('Артикул:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
-                ).add_params(click_selector)
+                )
                 
                 text = base.mark_text(baseline='middle', fontSize=11).encode(
                     text='Текст:N',
@@ -1134,28 +1136,50 @@ elif page == "📊 Отчет производства":
                     )
                 )
                 
-                chart_height = max(400, len(pivot) * 35)
-                final_chart = (rects + text).properties(height=chart_height)
+                chart_height = max(400, len(pivot) * 35 + 100) # +100 пикселей, чтобы поместились нижние названия
                 
-                # Рендер графика
+                # Добавляем триггер клика на финальный слоеный график
+                final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
+                
+                # Вывод графики
                 event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun")
                 
-                # --- ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК ALTAIR ---
-                # Теперь мы обращаемся к словарю event.selection и ищем ключ "click"
-                if hasattr(event, "selection") and isinstance(event.selection, dict) and event.selection.get("click"):
-                    click_data = event.selection.get("click")
-                    
-                    if len(click_data) > 0:
-                        clicked_point = click_data[0]
-                        sku_clicked = clicked_point.get('Артикул_Метка')
-                        reason_clicked = clicked_point.get('Причина_Метка')
-                        
-                        if sku_clicked and reason_clicked:
-                            clean_sku = sku_clicked.split(' [')[0]
-                            clean_reason = reason_clicked.split(' [')[0]
-                            reason_id_clicked = int(clean_reason.split('.')[0])
+                # --- ИДЕАЛЬНЫЙ ПЕРЕХВАТЧИК ---
+                try:
+                    if event and hasattr(event, "selection"):
+                        sel = event.selection
+                        # Ищем данные клика
+                        if isinstance(sel, dict) and "cell_click" in sel:
+                            click_data = sel.get("cell_click", [])
+                        else:
+                            click_data = getattr(sel, "cell_click", [])
                             
-                            show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id_clicked)
+                        # Если пользователь реально кликнул по ячейке
+                        if click_data and len(click_data) > 0:
+                            clicked_point = click_data[0]
+                            sku_clicked = clicked_point.get('Артикул_Метка')
+                            reason_clicked = clicked_point.get('Причина_Метка')
+                            
+                            if sku_clicked and reason_clicked:
+                                # Убираем приклеенные итоги (все, что после пробела со скобкой " [")
+                                clean_sku = sku_clicked.split(' [')[0]
+                                clean_reason = reason_clicked.split(' [')[0]
+                                reason_id_clicked = int(clean_reason.split('.')[0])
+                                
+                                # Запускаем окно через состояние (самый надежный метод)
+                                st.session_state.show_detail_trigger = {
+                                    'sku': clean_sku,
+                                    'reason': clean_reason,
+                                    'df': df_filtered,
+                                    'id': reason_id_clicked
+                                }
+                                st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка системы перехвата клика: {e}")
+
+                # Блок для отладки, если вдруг магия не сработает
+                with st.expander("🛠 Техническая отладка (если окно не открывается)"):
+                    st.write("Сырые данные клика от графика:", event)
 
             else:
                 st.info("Данных для матрицы пока нет.")
