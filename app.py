@@ -992,11 +992,10 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
-        # --- КНОПКА ЗАКРЫТИЯ С БЛОКИРОВКОЙ ПОВТОРА ---
        if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
             st.rerun()
-
+           
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
