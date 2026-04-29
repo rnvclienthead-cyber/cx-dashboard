@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Микро-матрица 2.0)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Транспонированная матрица 3.0)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,11 +884,12 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* ГЛОБАЛЬНОЕ УМЕНЬШЕНИЕ ТАБЛИЦЫ В 2 РАЗА */
+    /* Сохраняем отличный компактный размер */
     [data-testid="stDataFrame"] { 
-        zoom: 0.55; /* Сокращает масштаб на 45% (для Chrome, Safari, Edge) */
-        -moz-transform: scale(0.55); /* Для Firefox */
+        zoom: 0.55; 
+        -moz-transform: scale(0.55); 
         -moz-transform-origin: top left;
+        font-size: 10px !important;
     }
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
@@ -1089,66 +1090,72 @@ elif page == "📊 Отчет производства":
                     for _, r in temp.iterrows():
                         matrix_list.append({
                             'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
-                            'ID': i,
+                            'Причина': f"{i}. {CATEGORIES[i]}", # Сохраняем полное название для строк
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
             st.markdown("---")
-            st.markdown("### 🧮 Компактная Матрица дефектов")
-            st.info("💡 **Как читать:** Слева — артикулы. Столбцы (1-13) — категории. Наведите мышку на цифру столбца для подсказки. **Кликните на цветную ячейку для детализации!**")
+            st.markdown("### 🧮 Компактная Транспонированная Матрица")
+            st.info("💡 **Как читать:** Слева — категории дефектов. Сверху — артикулы. Столбцы сжаты: наведите курсор на заголовок, чтобы увидеть полное название артикула. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 
-                pivot = pd.crosstab(df_matrix['Артикул'], df_matrix['ID'])
+                # --- ТРАНСПОНИРУЕМ: Строки = Причины, Столбцы = Артикулы ---
+                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
                 
+                # Сортируем причины по порядку (от 1 до 13)
+                pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
+                pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
+                
+                # ИТОГО по каждой причине
                 total_counts = pivot.sum(axis=1)
                 pivot.insert(0, 'ИТОГО', total_counts)
                 
-                # --- ГЛАВНАЯ МАГИЯ СЖАТИЯ ---
-                # Сбрасываем индекс! Теперь "Артикул" - это обычная управляемая колонка
+                # Сбрасываем индекс: теперь 'Причина' - это обычная колонка (слева)
                 pivot = pivot.reset_index()
                 
+                # --- НАСТРОЙКА КОЛОНОК (Узкие артикулы + Tooltips) ---
                 col_config = {
-                    # Оставляем width пустым или None, чтобы колонка ужалась точно по самому длинному артикулу
-                    'Артикул': st.column_config.TextColumn("Артикул"),
-                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=40, help="Всего дефектов")
+                    'Причина': st.column_config.TextColumn("Причина дефекта"), # Ширина подстроится под текст
+                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=45, help="Всего дефектов по категории")
                 }
                 
-                # Зажимаем числовые колонки до минимума
-                for i in range(1, 14):
-                    if i in pivot.columns:
-                        col_config[i] = st.column_config.NumberColumn(
-                            str(i), 
-                            width=20, # Супер узкая ширина
-                            help=CATEGORIES.get(i, f"Категория {i}")
+                # Жестко зажимаем столбцы артикулов и добавляем всплывающие подсказки (help)
+                for col in pivot.columns:
+                    if col not in ['Причина', 'ИТОГО']:
+                        col_config[col] = st.column_config.NumberColumn(
+                            col, 
+                            width=40, # Делаем колонку узкой (текст обрежется)
+                            help=f"Артикул: {col}" # Всплывающее полное название при наведении
                         )
 
-                # Высота таблицы: с учетом уменьшенного масштаба
+                # Высота таблицы (13 категорий дефектов всегда помещаются на экран)
                 dynamic_height = len(pivot) * 35 + 43
                 
-                # Красим только столбцы с ID (они имеют тип int)
-                gradient_cols = [c for c in pivot.columns if isinstance(c, int)]
+                # Красим все столбцы, кроме Причины и ИТОГО
+                gradient_cols = [c for c in pivot.columns if c not in ['Причина', 'ИТОГО']]
                 
                 event = st.dataframe(
                     pivot.style.background_gradient(cmap='Blues', subset=gradient_cols),
                     on_select="rerun",
                     selection_mode="single-cell",
-                    hide_index=True, # Скрываем некрасивые нумерации строк (0, 1, 2...)
+                    hide_index=True, # Убираем технические цифры 0, 1, 2... слева
                     height=dynamic_height,
                     column_config=col_config
                 )
                 
+                # --- НАШ СТАРЫЙ БЕЗОТКАЗНЫЙ ПЕРЕХВАТЧИК КЛИКОВ ---
                 if hasattr(event, "selection") and event.selection.get("cells"):
                     selected_cell = event.selection.get("cells")[0]
                     row_idx = selected_cell[0]
                     col_name = selected_cell[1]
                     
-                    # Защита: реагируем только на клики по категориям (1-13)
-                    if str(col_name) not in ['Артикул', 'ИТОГО']:
-                        selected_sku = str(pivot.iloc[row_idx]['Артикул']) 
-                        reason_id_clicked = int(col_name) 
-                        selected_reason = f"{reason_id_clicked}. {CATEGORIES.get(reason_id_clicked, '')}"
+                    # Проверяем, что кликнули на ячейку с данными, а не на заголовки
+                    if col_name not in ['Причина', 'ИТОГО']:
+                        selected_sku = str(col_name) # Заголовок столбца - это артикул
+                        selected_reason = str(pivot.iloc[row_idx]['Причина']) # Значение ячейки в колонке "Причина"
+                        reason_id_clicked = int(selected_reason.split('.')[0])
                         
                         show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
 
