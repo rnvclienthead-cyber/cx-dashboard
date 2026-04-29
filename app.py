@@ -884,7 +884,9 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    [data-testid="stDataFrame"] { font-size: 11px !important; }
+    /* Уменьшаем шрифт ТОЛЬКО в таблице для максимальной компактности матрицы */
+    [data-testid="stDataFrame"] { font-size: 9px !important; }
+    
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
@@ -945,12 +947,10 @@ elif page == "📊 Отчет производства":
                         all_photos.append(clean_url)
             
             if all_photos:
-                # Обычная кнопка, которая запускает процесс только по клику
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
                     with st.spinner("Сбор фото и архивация... (Пожалуйста, подождите)"):
                         zip_all = create_images_zip(all_photos)
                         b64 = base64.b64encode(zip_all).decode()
-                        # Скрытый скрипт заставляет браузер скачать файл
                         dl_link = f'''
                         <a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a>
                         <script>document.getElementById("dl").click();</script>
@@ -983,7 +983,6 @@ elif page == "📊 Отчет производства":
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
                         
                         if row_photos:
-                            # Локальная кнопка скачивания
                             if st.button("📥 Скачать фото", key=f"dl_row_{r.name}"):
                                 with st.spinner("Архивация..."):
                                     zip_row = create_images_zip(row_photos)
@@ -1094,10 +1093,24 @@ elif page == "📊 Отчет производства":
                 total_col = pivot.sum(axis=1)
                 pivot.insert(0, 'ОБЩЕЕ КОЛ-ВО', total_col)
                 
+                # --- ТОНКАЯ НАСТРОЙКА КОЛОНОК МАТРИЦЫ ---
+                col_config = {}
+                for col in pivot.columns:
+                    if col == "ОБЩЕЕ КОЛ-ВО":
+                        col_config[col] = st.column_config.Column(
+                            width=70, 
+                            help="Общее количество дефектов по этой категории"
+                        )
+                    else:
+                        col_config[col] = st.column_config.Column(
+                            width=35, # Узкий столбец ровно под цифру
+                            help=f"Артикул: {col}" # Всплывающая подсказка с полным названием
+                        )
+                
                 dynamic_height = len(pivot) * 28 + 45
                 
-                st.markdown("### 🧮 Интерактивная Матрица (Нажмите на ячейку)")
-                st.info("💡 Кликните на любую цифру в таблице ниже, чтобы открыть детализацию по конкретному артикулу и причине.")
+                st.markdown("### 🧮 Интерактивная Матрица")
+                st.info("💡 **Наведите курсор на заголовок колонки**, чтобы увидеть полное название артикула. Кликните на цифру для детализации.")
                 
                 styled_pivot = pivot.style.background_gradient(
                     cmap='Blues', 
@@ -1109,7 +1122,8 @@ elif page == "📊 Отчет производства":
                     on_select="rerun",
                     selection_mode="single-cell",
                     use_container_width=True,
-                    height=dynamic_height
+                    height=dynamic_height,
+                    column_config=col_config # Применяем настройки ширины и подсказок
                 )
                 
                 if hasattr(event, "selection") and event.selection.get("cells"):
