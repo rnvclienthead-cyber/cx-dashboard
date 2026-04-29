@@ -1005,9 +1005,10 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
+        # --- ИСПРАВЛЕННОЕ ЗАКРЫТИЕ ---
         if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
-            # Меняем ключ графика, чтобы сбросить выделение в Altair
+            # Сбрасываем выбор в Altair через смену ключа
             st.session_state.matrix_key = st.session_state.get('matrix_key', 0) + 1
             st.rerun()
 
@@ -1104,23 +1105,18 @@ elif page == "📊 Отчет производства":
                 
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
+                # --- УБРАЛИ ЦИФРЫ У АРТИКУЛОВ ---
                 df_melt['Артикул_Метка'] = df_melt['Артикул'] 
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
                 
                 df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
-                # ===============================================
-                # 🛠 ALTAIR: ИСПРАВЛЕННЫЙ ТЕКСТ И РАБОЧИЙ КЛИК
-                # ===============================================
                 import altair as alt
                 
-                # Явно указываем графику, КАКИЕ поля нужно вернуть при клике
                 click_selector = alt.selection_point(name='cell_click', fields=['Артикул_Метка', 'Причина_Метка'])
                 
                 base = alt.Chart(df_melt).encode(
-                    # labelLimit=1000 отключает обрезку длинных названий артикулов
                     x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000, orient='bottom')),
-                    # labelLimit=1000 отключает обрезку длинных названий причин (категорий)
                     y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending'))
                 )
                 
@@ -1138,12 +1134,11 @@ elif page == "📊 Отчет производства":
                     )
                 )
                 
-                chart_height = max(400, len(pivot) * 35 + 100) # +100 пикселей, чтобы поместились нижние названия
+                chart_height = max(400, len(pivot) * 35 + 100)
                 
-                # Добавляем триггер клика на финальный слоеный график
                 final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
                 
-               # Добавляем динамический ключ key
+                # --- ДИНАМИЧЕСКИЙ КЛЮЧ ДЛЯ СБРОСА ВЫБОРА ---
                 event = st.altair_chart(
                     final_chart, 
                     use_container_width=True, 
@@ -1151,21 +1146,20 @@ elif page == "📊 Отчет производства":
                     key=f"prod_matrix_{st.session_state.get('matrix_key', 0)}"
                 )
                 
-                # --- ИДЕАЛЬНЫЙ ПЕРЕХВАТЧИК ---
+                # --- ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК ---
                 try:
                     if event and hasattr(event, "selection"):
                         sel = event.selection
                         click_data = sel.get("cell_click", []) if isinstance(sel, dict) else getattr(sel, "cell_click", [])
                             
                         if click_data and len(click_data) > 0:
-                            # ПРОВЕРКА: открываем только если окно еще не вызвано
+                            # Проверяем, не открыто ли уже окно, чтобы избежать циклов
                             if not st.session_state.get('show_detail_trigger'):
                                 clicked_point = click_data[0]
                                 sku_clicked = clicked_point.get('Артикул_Метка')
                                 reason_clicked = clicked_point.get('Причина_Метка')
                                 
                                 if sku_clicked and reason_clicked:
-                                    # split все еще безопасен, даже если скобок нет
                                     clean_sku = sku_clicked.split(' [')[0]
                                     clean_reason = reason_clicked.split(' [')[0]
                                     reason_id_clicked = int(clean_reason.split('.')[0])
@@ -1180,7 +1174,6 @@ elif page == "📊 Отчет производства":
                 except Exception as e:
                     st.error(f"Ошибка системы перехвата клика: {e}")
 
-                # Блок для отладки, если вдруг магия не сработает
                 with st.expander("🛠 Техническая отладка (если окно не открывается)"):
                     st.write("Сырые данные клика от графика:", event)
 
