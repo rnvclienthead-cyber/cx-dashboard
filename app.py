@@ -779,183 +779,184 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. АНАЛИТИКА И ДАШБОРД (V4: Бронебойный)
+# 7. АНАЛИТИКА И ДАШБОРД
+# ==========================================
+
+# ==========================================
+# 7. АНАЛИТИКА И ДАШБОРД
 # ==========================================
 
 elif page == "📊 Дашборд":
-    # Стили для новой системы детализации и зума
+    st.title("📊 Аналитика, Инвойсы и Сводная Матрица")
+    
     st.markdown("""
     <style>
-    .detail-card { border: 1px solid #eee; padding: 20px; border-radius: 10px; margin-bottom: 20px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-    .client-text-box { background: #f0f2f6; padding: 15px; border-radius: 8px; border-left: 5px solid #4B8BBE; margin-bottom: 15px; white-space: pre-wrap; font-size: 15px; color: #111; }
-    .media-zoom-small { width: 100px; height: 100px; object-fit: cover; border-radius: 6px; margin-right: 10px; transition: transform 0.2s; cursor: pointer; }
-    .media-zoom-small:hover { transform: scale(4); z-index: 9999; position: relative; }
-    /* Поворот заголовков для компактности (экспериментально) */
-    .stDataFrame div[data-testid="stTable"] th { vertical-align: bottom; text-align: center; }
+    .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
+    .detail-text { font-size: 16px; margin-bottom: 10px; color: #111; line-height: 1.5; white-space: pre-wrap;}
+    .media-zoom-small { width: 15%; height: 80px; object-fit: cover; border-radius: 4px; margin-right: 1.5%; transition: transform 0.2s; cursor: pointer; vertical-align: top;}
+    .media-zoom-small:hover { transform: scale(3.5); z-index: 999; position: relative; }
     </style>
     """, unsafe_allow_html=True)
+
+    # Функция детализации (всплывающее окно)
+    @st.dialog("Детализация пересечения", width="large")
+    def show_matrix_details(sku, reason_name, filtered_df, reason_id):
+        st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
+        
+        # Фильтруем данные именно для этого пересечения
+        details = filtered_df[
+            (filtered_df['Артикул'] == sku) & 
+            (filtered_df[f'Кат {reason_id}'].astype(str).str.strip().isin(['1', '1.0', '+']))
+        ]
+        
+        if not details.empty:
+            for _, r in details.iterrows():
+                with st.container():
+                    st.markdown('<div class="detail-card">', unsafe_allow_html=True)
+                    st.write(f"💬 **Текст клиента:**\n{r.get('Текст_Клиента', '---')}")
+                    
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        st.write(f"📅 **Дата:** {r.get('Дата', '---')}")
+                        st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
+                        st.write(f"🕵️ **Аудит:** {r.get('Аудит', '---')} | **Коммент:** {r.get('Комментарий', '---')}")
+                    
+                    with c2:
+                        m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                        m_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                        if m_urls:
+                            media_html = ""
+                            for mu in m_urls[:3]:
+                                m_clean = mu.replace("']", "").replace("'", "")
+                                if m_clean.startswith("//"): m_clean = "https:" + m_clean
+                                if '.mp4' in m_clean.lower() or '.mov' in m_clean.lower(): 
+                                    media_html += f'<video src="{m_clean}" class="media-zoom-small" controls muted></video>'
+                                else: 
+                                    media_html += f'<a href="{m_clean}" target="_blank"><img src="{m_clean}" class="media-zoom-small"></a>'
+                            st.markdown(media_html, unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.write("Нет данных по этому пересечению.")
 
     try:
         client = get_gspread_client()
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
         df = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
         
-        # --- СШИВКА ИНВОЙСОВ (supplyID) ---
+        # ЗАЩИТА АПИ: Переименовываем supplyID в Номер поставки на лету
+        if 'supplyID' in df.columns and 'Номер поставки' not in df.columns:
+            df.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+        
+        # --- ПОДТЯГИВАЕМ ИНВОЙСЫ ---
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
             if inv_id:
                 sheet_inv = client.open_by_key(inv_id)
-                # Берем первую вкладку
-                ws_inv = sheet_inv.get_worksheet(0)
-                df_inv = pd.DataFrame(ws_inv.get_all_records())
+                df_inv = pd.DataFrame(sheet_inv.get_worksheet(0).get_all_records())
                 
-                # Нормализуем названия ключей
-                if 'supplyID' in df_inv.columns: df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
-                if 'supplyID' in df.columns: df.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+                # То же самое делаем для листа инвойсов
+                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns:
+                    df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                 
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    # Чистим дубликаты в инвойсах перед слиянием
+                    df_inv.columns = [str(c).strip() for c in df_inv.columns]
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
                     
-                    # Если в основной таблице уже был (пустой) столбец Инвойс - убираем его
                     if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
                     
-                    # Соединяем по Номеру поставки
-                    df = df.merge(df_inv_unique[['Номер поставки', 'Инвойс']], on='Номер поставки', how='left')
+                    cols_to_merge = ['Номер поставки']
+                    if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
+                    
+                    df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
+            else:
+                st.warning("ID таблицы инвойсов не найден в секретах.")
         except Exception as e:
-            st.warning(f"⚠️ Проблема со сшивкой инвойсов: {e}")
+            st.warning(f"Данные инвойсов не подтянуты: {e}")
 
         if not df.empty:
-            # Технические заглушки
-            if 'Инвойс' not in df.columns: df['Инвойс'] = '---'
-            if 'Номер поставки' not in df.columns: df['Номер поставки'] = '---'
+            if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
+            if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
 
             def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
             df['Размечено'] = df.apply(has_tags, axis=1)
-
-            # --- РЕЖИМ ДЕТАЛИЗАЦИИ (НОВАЯ ВКЛАДКА) ---
-            q_params = st.query_params
-            if "sku" in q_params and "rid" in q_params:
-                t_sku = q_params["sku"]
-                t_rid = int(q_params["rid"])
-                
-                st.title(f"🔍 Детализация: {t_sku}")
-                st.subheader(f"Категория: {CATEGORIES.get(t_rid)}")
-                
-                # Фильтруем данные для отображения
-                details = df[(df['Артикул'] == t_sku) & (df[f'Кат {t_rid}'].astype(str).str.strip().isin(['1', '1.0', '+']))]
-                
-                if not details.empty:
-                    for i, (_, r) in enumerate(details.iterrows(), 1):
-                        with st.container():
-                            st.markdown('<div class="detail-card">', unsafe_allow_html=True)
-                            
-                            # 1. Текст клиента (ПЕРВЫЙ)
-                            st.markdown(f"**#{i} Сообщение от клиента:**")
-                            st.markdown(f'<div class="client-text-box">{r.get("Текст_Клиента", "---")}</div>', unsafe_allow_html=True)
-                            
-                            c1, c2 = st.columns([2, 1])
-                            with c1:
-                                st.markdown(f"**Дата:** {r.get('Дата', '---')}")
-                                st.markdown(f"**Поставка:** {r.get('Номер поставки', '---')} | **Инвойс:** {r.get('Инвойс', '---')}")
-                                st.markdown(f"**Аудит:** {r.get('Аудит', '---')} | **Комментарий:** {r.get('Комментарий', '---')}")
-                            
-                            with c2:
-                                m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
-                                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                                if urls:
-                                    html = ""
-                                    for u in urls[:5]:
-                                        clean = u.replace("']", "").replace("'", "")
-                                        if clean.startswith("//"): clean = "https:" + clean
-                                        if any(x in clean.lower() for x in ['.mp4', '.mov']):
-                                            html += f'<video src="{clean}" class="media-zoom-small" controls></video>'
-                                        else:
-                                            html += f'<a href="{clean}" target="_blank"><img src="{clean}" class="media-zoom-small"></a>'
-                                    st.markdown(html, unsafe_allow_html=True)
-                            st.markdown('</div>', unsafe_allow_html=True)
-                else:
-                    st.info("Данные не найдены.")
-                st.stop() 
-
-            # --- ОСНОВНОЙ ДАШБОРД ---
-            st.title("📊 Аналитика и Сводная Матрица")
             
-            # Статистика
-            t_rows = len(df)
-            tag_rows = df['Размечено'].sum()
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Всего заявок", t_rows)
-            col2.metric("Размечено ИИ", tag_rows)
-            col3.metric("% Обработки", f"{round((tag_rows/t_rows)*100, 1)}%")
+            st.markdown("### 🔍 Глобальные фильтры")
+            f_col1, f_col2 = st.columns(2)
+            inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip()])))
+            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул'] if str(x).strip()])))
+            
+            selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
+            selected_sku = f_col2.selectbox("Артикул:", sku_list)
+            
+            df_filtered = df.copy()
+            if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
+            if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
 
-            # Подготовка матрицы
+            total_rows = len(df_filtered)
+            tagged_rows = df_filtered['Размечено'].sum()
+            corrected_rows = len(df_filtered[df_filtered.get('Корректировка', '') != ''])
+            
+            accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
+            processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
+            
+            st.markdown("### 📈 Общая статистика")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Всего заявок", total_rows)
+            c2.metric("Размечено", f"{tagged_rows} ({processed_percent}%)")
+            c3.metric("Изменено вручную", corrected_rows)
+            c4.metric("Точность ИИ", f"{accuracy}%")
+            
             matrix_list = []
             for i in range(1, 14):
                 cat_col = f'Кат {i}'
-                if cat_col in df.columns:
-                    temp = df[df[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
+                if cat_col in df_filtered.columns:
+                    temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
                     for _, r in temp.iterrows():
-                        matrix_list.append({'Артикул': str(r['Артикул']), 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i})
+                        art = str(r.get('Артикул', 'Без артикула')).strip() or 'Без артикула'
+                        matrix_list.append({'Артикул': art, 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i, 'Инвойс': r.get('Инвойс')})
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                
-                # Столбец "ВСЕГО" в начало
-                pivot.insert(0, '📊 ВСЕГО', pivot.sum(axis=1))
-                
-                # Сортировка по ID
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
-                st.markdown("### 🧮 Перекрестный анализ")
-                st.info("💡 Кликните на цифру (кроме колонки ВСЕГО) и нажмите синюю кнопку ниже для перехода к деталям.")
+                st.markdown("### 🧮 Интерактивная Матрица (Нажмите на ячейку)")
+                st.info("💡 Кликните на любую цифру в таблице ниже, чтобы открыть детализацию по конкретному артикулу и причине.")
                 
-                # Конфигурация колонок: максимально узкие
-                column_config = {col: st.column_config.NumberColumn(width="small") for col in pivot.columns}
-                column_config["📊 ВСЕГО"] = st.column_config.NumberColumn(width="medium", format="%d")
-
-                # Сама таблица
-                try:
-                    styled_pivot = pivot.style.background_gradient(cmap='Blues', axis=None)
-                except:
-                    styled_pivot = pivot
-
+                # КЛИКАБЕЛЬНАЯ ТАБЛИЦА С ГРАДИЕНТОМ (Нативное решение Streamlit)
                 event = st.dataframe(
-                    styled_pivot,
+                    pivot.style.background_gradient(cmap='Blues', axis=None),
                     on_select="rerun",
                     selection_mode="single-cell",
-                    use_container_width=True,
-                    column_config=column_config
+                    use_container_width=True
                 )
                 
-                # ЛОГИКА ПЕРЕХОДА
-                if event and event.get("selection", {}).get("rows"):
-                    r_idx = event["selection"]["rows"][0]
-                    c_idx = event["selection"]["columns"][0]
+                # Обработка клика по ячейке
+                if event and "selection" in event and event["selection"]["rows"] and event["selection"]["columns"]:
+                    row_idx = event["selection"]["rows"][0]
+                    col_val = event["selection"]["columns"][0]
                     
-                    sel_reason = pivot.index[r_idx]
-                    sel_sku = pivot.columns[c_idx]
+                    selected_reason = pivot.index[row_idx]
                     
-                    if "ВСЕГО" not in sel_sku:
-                        rid = int(sel_reason.split('.')[0])
-                        # Формируем URL для перехода в новую вкладку
-                        nav_url = f"/?sku={sel_sku}&rid={rid}"
+                    # Streamlit возвращает либо имя колонки (строку), либо её индекс
+                    if isinstance(col_val, int):
+                        selected_sku = pivot.columns[col_val]
+                    else:
+                        selected_sku = col_val
                         
-                        st.markdown(f"""
-                            <div style="padding: 20px; background-color: #f0f7ff; border-radius: 10px; border: 1px solid #4B8BBE; text-align: center;">
-                                <p style="font-size: 18px; color: #111;">Выбрано: <b>{sel_sku}</b> по причине <b>{sel_reason}</b></p>
-                                <a href="{nav_url}" target="_blank" style="text-decoration: none;">
-                                    <div style="display: inline-block; background-color: #4B8BBE; color: white; padding: 12px 30px; border-radius: 5px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                                        🚀 ОТКРЫТЬ ДЕТАЛИЗАЦИЮ В НОВОЙ ВКЛАДКЕ
-                                    </div>
-                                </a>
-                            </div>
-                        """, unsafe_allow_html=True)
+                    reason_id_clicked = int(selected_reason.split('.')[0])
+                    
+                    # Мгновенно открываем всплывающее окно
+                    show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
+
+                st.markdown("### 📦 Проблемные Инвойсы")
+                inv_counts = df_matrix['Инвойс'].value_counts().reset_index()
+                inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
+                st.dataframe(inv_counts.head(10), use_container_width=True)
+
             else:
                 st.info("Данных для матрицы пока нет.")
-                
     except Exception as e:
         st.error(f"Ошибка Дашборда: {e}")
         
