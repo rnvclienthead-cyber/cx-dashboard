@@ -11,6 +11,8 @@ from google.oauth2.service_account import Credentials
 import io
 import zipfile
 import urllib.request
+import base64
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
@@ -843,11 +845,9 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Уменьшаем шрифт в таблице для компактности */
     [data-testid="stDataFrame"] { font-size: 11px !important; }
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     
-    /* Стили: фото по горизонтали, без рамок при зуме */
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
         width: 140px; height: 140px; object-fit: cover; border-radius: 8px; 
@@ -860,7 +860,6 @@ elif page == "📊 Отчет производства":
         border: none !important; outline: none !important;
     }
     
-    /* Кнопки видео-ссылок */
     .video-link-btn {
         display: inline-block; padding: 8px 14px; background-color: #2563eb; 
         color: white !important; border-radius: 6px; text-decoration: none; 
@@ -870,7 +869,6 @@ elif page == "📊 Отчет производства":
     </style>
     """, unsafe_allow_html=True)
 
-    # Функция генерации ZIP-архива в памяти
     def create_images_zip(urls):
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -884,7 +882,7 @@ elif page == "📊 Отчет производства":
                         elif ".jpeg" in url.lower(): ext = ".jpeg"
                         zip_file.writestr(f"photo_{i+1}{ext}", img_data)
                 except Exception:
-                    pass # Пропускаем битые ссылки
+                    pass
         return zip_buffer.getvalue()
 
     @st.dialog("Детализация пересечения", width="large")
@@ -897,7 +895,6 @@ elif page == "📊 Отчет производства":
         ]
         
         if not details.empty:
-            # Сбор ВСЕХ фото для общей кнопки скачивания
             all_photos = []
             for _, r in details.iterrows():
                 m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
@@ -909,16 +906,18 @@ elif page == "📊 Отчет производства":
                         all_photos.append(clean_url)
             
             if all_photos:
-                # Генерируем архив всех фото
-                with st.spinner("Формирование архива фото..."):
-                    zip_all = create_images_zip(all_photos)
-                st.download_button(
-                    label=f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", 
-                    data=zip_all, 
-                    file_name=f"{sku}_{reason_id}_ALL.zip", 
-                    mime="application/zip", 
-                    type="primary"
-                )
+                # Обычная кнопка, которая запускает процесс только по клику
+                if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
+                    with st.spinner("Сбор фото и архивация... (Пожалуйста, подождите)"):
+                        zip_all = create_images_zip(all_photos)
+                        b64 = base64.b64encode(zip_all).decode()
+                        # Скрытый скрипт заставляет браузер скачать файл
+                        dl_link = f'''
+                        <a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a>
+                        <script>document.getElementById("dl").click();</script>
+                        '''
+                        components.html(dl_link, width=0, height=0)
+            
             st.markdown("---")
             
             for _, r in details.iterrows():
@@ -927,7 +926,6 @@ elif page == "📊 Отчет производства":
                     
                     c1, media_col = st.columns([1.2, 1])
                     
-                    # Разбираем медиа конкретного обращения
                     m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
                     urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                     row_photos = []
@@ -945,16 +943,18 @@ elif page == "📊 Отчет производства":
                         st.write(f"📅 **Дата:** {r.get('Дата', '---')}")
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
                         
-                        # Индивидуальная кнопка скачивания фото
                         if row_photos:
-                            zip_row = create_images_zip(row_photos)
-                            st.download_button(
-                                label="📥 Скачать фото", 
-                                data=zip_row, 
-                                file_name=f"order_{r.get('Инвойс', 'photos')}.zip", 
-                                mime="application/zip", 
-                                key=f"dl_row_{r.name}"
-                            )
+                            # Локальная кнопка скачивания
+                            if st.button("📥 Скачать фото", key=f"dl_row_{r.name}"):
+                                with st.spinner("Архивация..."):
+                                    zip_row = create_images_zip(row_photos)
+                                    b64 = base64.b64encode(zip_row).decode()
+                                    filename = f"order_{r.get('Инвойс', 'photos')}.zip"
+                                    dl_link = f'''
+                                    <a id="dl" href="data:application/zip;base64,{b64}" download="{filename}"></a>
+                                    <script>document.getElementById("dl").click();</script>
+                                    '''
+                                    components.html(dl_link, width=0, height=0)
                     
                     with media_col:
                         if row_photos or videos:
@@ -964,7 +964,6 @@ elif page == "📊 Отчет производства":
                             images_html += '</div>'
                             st.markdown(images_html, unsafe_allow_html=True)
                             
-                            # ВИДЕО: Открывается в новой вкладке браузера
                             if videos:
                                 v_html = '<div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">'
                                 for v_idx, v_url in enumerate(videos):
