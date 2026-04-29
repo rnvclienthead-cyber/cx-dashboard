@@ -951,7 +951,6 @@ elif page == "📊 Отчет производства":
                         components.html(dl_link, width=0, height=0)
             
             st.markdown("---")
-            
             for _, r in details.iterrows():
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
@@ -980,23 +979,22 @@ elif page == "📊 Отчет производства":
                     with media_col:
                         if row_photos:
                             images_html = '<div class="media-row">'
-                            for clean_url in row_photos[:6]:
-                                images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
+                            for p in row_photos[:6]:
+                                images_html += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
                             st.markdown(images_html + '</div>', unsafe_allow_html=True)
                         if videos:
-                            v_html = '<div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">'
                             for v_idx, v_url in enumerate(videos):
-                                v_html += f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Смотреть видео {v_idx+1}</a>'
-                            st.markdown(v_html + '</div>', unsafe_allow_html=True)
+                                st.markdown(f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Видео {v_idx+1}</a>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.write("Нет данных по этому пересечению.")
 
-       if st.button("Закрыть детализацию"):
+        # Строка 995: Теперь отступ ровно 8 пробелов (на уровне с "if not details.empty")
+        if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
             st.rerun()
            
-    # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
+    # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
