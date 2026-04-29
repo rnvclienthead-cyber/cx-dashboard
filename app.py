@@ -1007,7 +1007,7 @@ elif page == "📊 Отчет производства":
 
         if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
-            # Увеличиваем счетчик ключа, чтобы график Altair перерисовался чистым
+            # Меняем ключ графика, чтобы сбросить выделение в Altair
             st.session_state.matrix_key = st.session_state.get('matrix_key', 0) + 1
             st.rerun()
 
@@ -1104,7 +1104,7 @@ elif page == "📊 Отчет производства":
                 
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
-                df_melt['Артикул_Метка'] = df_melt['Артикул'].apply(lambda x: f"{x} [{sku_totals.get(x, 0)}]")
+                df_melt['Артикул_Метка'] = df_melt['Артикул'] 
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
                 
                 df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
@@ -1143,11 +1143,11 @@ elif page == "📊 Отчет производства":
                 # Добавляем триггер клика на финальный слоеный график
                 final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
                 
-                # Вывод графики
+               # Добавляем динамический ключ key
                 event = st.altair_chart(
                     final_chart, 
                     use_container_width=True, 
-                    on_select="rerun", 
+                    on_select="rerun",
                     key=f"prod_matrix_{st.session_state.get('matrix_key', 0)}"
                 )
                 
@@ -1155,21 +1155,17 @@ elif page == "📊 Отчет производства":
                 try:
                     if event and hasattr(event, "selection"):
                         sel = event.selection
-                        # Ищем данные клика
-                        if isinstance(sel, dict) and "cell_click" in sel:
-                            click_data = sel.get("cell_click", [])
-                        else:
-                            click_data = getattr(sel, "cell_click", [])
+                        click_data = sel.get("cell_click", []) if isinstance(sel, dict) else getattr(sel, "cell_click", [])
                             
-                       # Если пользователь реально кликнул по ячейке
                         if click_data and len(click_data) > 0:
-                            # ПРОВЕРКА: срабатывает только если окно еще не открыто
+                            # ПРОВЕРКА: открываем только если окно еще не вызвано
                             if not st.session_state.get('show_detail_trigger'):
                                 clicked_point = click_data[0]
                                 sku_clicked = clicked_point.get('Артикул_Метка')
                                 reason_clicked = clicked_point.get('Причина_Метка')
                                 
                                 if sku_clicked and reason_clicked:
+                                    # split все еще безопасен, даже если скобок нет
                                     clean_sku = sku_clicked.split(' [')[0]
                                     clean_reason = reason_clicked.split(' [')[0]
                                     reason_id_clicked = int(clean_reason.split('.')[0])
