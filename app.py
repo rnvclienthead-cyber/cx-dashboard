@@ -914,8 +914,8 @@ elif page == "📊 Дашборд":
                     for _, r in temp.iterrows():
                         art = str(r.get('Артикул', 'Без артикула')).strip() or 'Без артикула'
                         matrix_list.append({'Артикул': art, 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i, 'Инвойс': r.get('Инвойс')})
-            
-           if matrix_list:
+                        
+            if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
