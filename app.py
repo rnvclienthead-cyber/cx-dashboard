@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Транспонированная матрица 3.0)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Масштаб, Рамки и Инвойсы)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,12 +884,25 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Сохраняем отличный компактный размер */
-    [data-testid="stDataFrame"] { 
+    /* 1. Увеличиваем шрифт всех всплывающих подсказок на 30% */
+    [data-testid="stTooltipContent"] {
+        font-size: 17px !important;
+        padding: 10px !important;
+        line-height: 1.4 !important;
+    }
+
+    /* 2. Целевое сжатие ТОЛЬКО для матрицы */
+    div[data-testid="stElementContainer"]:has(#matrix-marker) + div[data-testid="stElementContainer"] [data-testid="stDataFrame"] {
         zoom: 0.55; 
-        -moz-transform: scale(0.55); 
-        -moz-transform-origin: top left;
+        width: 181% !important; /* 100 / 0.55 = 181% - растягивает рамку на весь экран при сжатии */
+        max-width: 181% !important;
         font-size: 10px !important;
+    }
+
+    /* 3. Возвращаем инвойсам нормальный размер */
+    div[data-testid="stElementContainer"]:has(#invoices-marker) + div[data-testid="stElementContainer"] [data-testid="stDataFrame"] {
+        zoom: 1.0 !important;
+        width: 100% !important;
     }
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
@@ -1090,71 +1103,63 @@ elif page == "📊 Отчет производства":
                     for _, r in temp.iterrows():
                         matrix_list.append({
                             'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}", # Сохраняем полное название для строк
+                            'Причина': f"{i}. {CATEGORIES[i]}", 
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
             st.markdown("---")
             st.markdown("### 🧮 Компактная Транспонированная Матрица")
-            st.info("💡 **Как читать:** Слева — категории дефектов. Сверху — артикулы. Столбцы сжаты: наведите курсор на заголовок, чтобы увидеть полное название артикула. **Кликните на цветную ячейку для детализации!**")
+            st.info("💡 **Как читать:** Слева — категории. Сверху — артикулы. Столбцы сжаты: наведите курсор на заголовок для подсказки. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 
-                # --- ТРАНСПОНИРУЕМ: Строки = Причины, Столбцы = Артикулы ---
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
                 
-                # Сортируем причины по порядку (от 1 до 13)
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
-                # ИТОГО по каждой причине
                 total_counts = pivot.sum(axis=1)
                 pivot.insert(0, 'ИТОГО', total_counts)
                 
-                # Сбрасываем индекс: теперь 'Причина' - это обычная колонка (слева)
                 pivot = pivot.reset_index()
                 
-                # --- НАСТРОЙКА КОЛОНОК (Узкие артикулы + Tooltips) ---
                 col_config = {
-                    'Причина': st.column_config.TextColumn("Причина дефекта"), # Ширина подстроится под текст
+                    'Причина': st.column_config.TextColumn("Причина дефекта"), 
                     'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=45, help="Всего дефектов по категории")
                 }
                 
-                # Жестко зажимаем столбцы артикулов и добавляем всплывающие подсказки (help)
                 for col in pivot.columns:
                     if col not in ['Причина', 'ИТОГО']:
                         col_config[col] = st.column_config.NumberColumn(
                             col, 
-                            width=40, # Делаем колонку узкой (текст обрежется)
-                            help=f"Артикул: {col}" # Всплывающее полное название при наведении
+                            width=40, 
+                            help=f"Артикул: {col}"
                         )
 
-                # Высота таблицы (13 категорий дефектов всегда помещаются на экран)
                 dynamic_height = len(pivot) * 35 + 43
-                
-                # Красим все столбцы, кроме Причины и ИТОГО
                 gradient_cols = [c for c in pivot.columns if c not in ['Причина', 'ИТОГО']]
+                
+                # СКРЫТЫЙ МАРКЕР МАТРИЦЫ (Для CSS)
+                st.markdown('<div id="matrix-marker"></div>', unsafe_allow_html=True)
                 
                 event = st.dataframe(
                     pivot.style.background_gradient(cmap='Blues', subset=gradient_cols),
                     on_select="rerun",
                     selection_mode="single-cell",
-                    hide_index=True, # Убираем технические цифры 0, 1, 2... слева
+                    hide_index=True, 
                     height=dynamic_height,
                     column_config=col_config
                 )
                 
-                # --- НАШ СТАРЫЙ БЕЗОТКАЗНЫЙ ПЕРЕХВАТЧИК КЛИКОВ ---
                 if hasattr(event, "selection") and event.selection.get("cells"):
                     selected_cell = event.selection.get("cells")[0]
                     row_idx = selected_cell[0]
                     col_name = selected_cell[1]
                     
-                    # Проверяем, что кликнули на ячейку с данными, а не на заголовки
                     if col_name not in ['Причина', 'ИТОГО']:
-                        selected_sku = str(col_name) # Заголовок столбца - это артикул
-                        selected_reason = str(pivot.iloc[row_idx]['Причина']) # Значение ячейки в колонке "Причина"
+                        selected_sku = str(col_name) 
+                        selected_reason = str(pivot.iloc[row_idx]['Причина']) 
                         reason_id_clicked = int(selected_reason.split('.')[0])
                         
                         show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
@@ -1169,6 +1174,9 @@ elif page == "📊 Отчет производства":
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
+                
+                # СКРЫТЫЙ МАРКЕР ИНВОЙСОВ (Для CSS)
+                st.markdown('<div id="invoices-marker"></div>', unsafe_allow_html=True)
                 st.dataframe(inv_counts.head(10))
             else:
                 st.info("Данных для инвойсов пока нет.")
