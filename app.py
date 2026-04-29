@@ -876,7 +876,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Широкая нативная матрица с узкими столбцами)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Идеальная растянутая матрица с центрированием)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,10 +884,12 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Делаем шрифт в таблице компактным, чтобы строки стали у́же */
-    [data-testid="stDataFrame"] { font-size: 11px !important; }
+    /* Убираем старый кривой zoom. Просто используем компактный шрифт */
+    [data-testid="stDataFrame"] { 
+        font-size: 11px !important; 
+    }
     
-    /* Увеличиваем размер текста во всплывающих подсказках (tooltip) */
+    /* Увеличиваем размер текста во всплывающих подсказках */
     [data-testid="stTooltipContent"] { font-size: 16px !important; }
     
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
@@ -1089,19 +1091,18 @@ elif page == "📊 Отчет производства":
                     for _, r in temp.iterrows():
                         matrix_list.append({
                             'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}",
+                            'Причина': f"{i}. {CATEGORIES[i]}", 
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
             st.markdown("---")
             st.markdown("### 🧮 Транспонированная Матрица")
-            st.info("💡 **Как читать:** Слева — причины. Сверху — артикулы. Наведите курсор на узкий столбец, чтобы увидеть полное название артикула. **Кликните на цветную ячейку для детализации!**")
+            st.info("💡 **Как читать:** Слева — причины. Сверху — артикулы. Наведите курсор на столбец, чтобы увидеть полное название. **Кликните на цветную ячейку для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
@@ -1109,30 +1110,69 @@ elif page == "📊 Отчет производства":
                 pivot.insert(0, 'ИТОГО', total_counts)
                 
                 pivot = pivot.reset_index()
-                
-                # --- ЖЕСТКАЯ НАСТРОЙКА ШИРИНЫ КОЛОНОК ---
-                col_config = {
-                    'Причина': st.column_config.TextColumn("Причина дефекта"), 
-                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width=40)
-                }
-                
-                # Зажимаем все колонки с артикулами до минимума (width=15). 
-                # Стримлит ужмет их ровно настолько, чтобы влезла самая широкая цифра.
+
+                # ===============================================
+                # 🛠 ГЛАВНАЯ МАГИЯ УРАВНИВАНИЯ СТОЛБЦОВ
+                # Мы обрезаем все артикулы ровно до 6 символов, 
+                # чтобы Стримлит идеально поровну распределил ширину!
+                # ===============================================
+                sku_mapping = {}
                 for col in pivot.columns:
                     if col not in ['Причина', 'ИТОГО']:
-                        col_config[col] = st.column_config.NumberColumn(
-                            col, 
-                            width=15, 
-                            help=f"Артикул: {col}"
-                        )
-
-                # Высота таблицы подстраивается под 13 категорий
-                dynamic_height = len(pivot) * 35 + 43
+                        # Обрезаем до 5 символов и ставим многоточие
+                        short_name = (col[:5] + "…") if len(col) > 6 else col
+                        
+                        # Защита от дублей (если два артикула начинаются одинаково)
+                        orig_short = short_name
+                        counter = 1
+                        while short_name in sku_mapping.values():
+                            short_name = f"{orig_short[:4]}{counter}…"
+                            counter += 1
+                        
+                        sku_mapping[col] = short_name
+                
+                # Обратный словарь для кликов (короткое имя -> полное имя)
+                reverse_sku_mapping = {v: k for k, v in sku_mapping.items()}
+                
+                # Переименовываем столбцы в таблице
+                pivot = pivot.rename(columns=sku_mapping)
+                
+                # Настройка визуального отображения колонок
+                col_config = {
+                    'Причина': st.column_config.TextColumn("Причина дефекта", width="medium"), 
+                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width="small")
+                }
+                
                 gradient_cols = [c for c in pivot.columns if c not in ['Причина', 'ИТОГО']]
                 
-                # width="stretch" - заставляет таблицу растянуться на ширину всей страницы (как в красном прямоугольнике)
+                for col in gradient_cols:
+                    col_config[col] = st.column_config.NumberColumn(
+                        col, 
+                        # Подсказка содержит полное оригинальное название
+                        help=f"Артикул: {reverse_sku_mapping[col]}"
+                    )
+
+                # Добавляем центрирование текста и отрисовку четкой сетки (через Pandas Styler)
+                styled_pivot = pivot.style\
+                    .background_gradient(cmap='Blues', subset=gradient_cols)\
+                    .set_properties(**{
+                        'text-align': 'center',       # Центрируем цифры
+                        'border': '1px solid #cbd5e1' # Добавляем серую сетку
+                    }, subset=gradient_cols)\
+                    .set_properties(**{
+                        'text-align': 'center',
+                        'font-weight': 'bold',
+                        'border': '1px solid #cbd5e1'
+                    }, subset=['ИТОГО'])\
+                    .set_properties(**{
+                        'border': '1px solid #cbd5e1'
+                    }, subset=['Причина'])
+
+                dynamic_height = len(pivot) * 35 + 43
+                
+                # width="stretch" теперь работает правильно и идеально ровно заполняет страницу
                 event = st.dataframe(
-                    pivot.style.background_gradient(cmap='Blues', subset=gradient_cols),
+                    styled_pivot,
                     on_select="rerun",
                     selection_mode="single-cell",
                     hide_index=True, 
@@ -1141,14 +1181,15 @@ elif page == "📊 Отчет производства":
                     column_config=col_config
                 )
                 
-                # Нативный перехватчик кликов (работает безотказно без CSS zoom)
+                # Нативный перехватчик кликов
                 if hasattr(event, "selection") and event.selection.get("cells"):
                     selected_cell = event.selection.get("cells")[0]
                     row_idx = selected_cell[0]
                     col_name = selected_cell[1]
                     
                     if col_name not in ['Причина', 'ИТОГО']:
-                        selected_sku = str(col_name) 
+                        # Восстанавливаем оригинальный артикул из короткого названия
+                        selected_sku = reverse_sku_mapping.get(col_name, col_name)
                         selected_reason = str(pivot.iloc[row_idx]['Причина']) 
                         reason_id_clicked = int(selected_reason.split('.')[0])
                         
