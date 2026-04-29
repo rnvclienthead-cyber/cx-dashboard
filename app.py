@@ -882,6 +882,8 @@ elif page == "🧠 Обучение ИИ":
 
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
+    if 'matrix_key' not in st.session_state: st.session_state.matrix_key = 0
+    if 'last_processed_click' not in st.session_state: st.session_state.last_processed_click = None
     
     st.markdown("""
     <style>
@@ -1006,10 +1008,10 @@ elif page == "📊 Отчет производства":
             st.write("Нет данных по этому пересечению.")
 
         # --- ИСПРАВЛЕННОЕ ЗАКРЫТИЕ ---
-        if st.button("Закрыть детализацию"):
+       if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
-            # Сбрасываем выбор в Altair через смену ключа
-            st.session_state.matrix_key = st.session_state.get('matrix_key', 0) + 1
+            st.session_state.last_processed_click = None  # Очищаем память клика
+            st.session_state.matrix_key += 1             # Меняем ключ для сброса графика
             st.rerun()
 
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
@@ -1146,31 +1148,39 @@ elif page == "📊 Отчет производства":
                     key=f"prod_matrix_{st.session_state.get('matrix_key', 0)}"
                 )
                 
-                # --- ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК ---
+                # --- УМНЫЙ ПЕРЕХВАТЧИК ---
                 try:
                     if event and hasattr(event, "selection"):
                         sel = event.selection
                         click_data = sel.get("cell_click", []) if isinstance(sel, dict) else getattr(sel, "cell_click", [])
                             
                         if click_data and len(click_data) > 0:
-                            # Проверяем, не открыто ли уже окно, чтобы избежать циклов
-                            if not st.session_state.get('show_detail_trigger'):
-                                clicked_point = click_data[0]
-                                sku_clicked = clicked_point.get('Артикул_Метка')
-                                reason_clicked = clicked_point.get('Причина_Метка')
+                            clicked_point = click_data[0]
+                            sku_clicked = clicked_point.get('Артикул_Метка')
+                            reason_clicked = clicked_point.get('Причина_Метка')
+                            
+                            # Генерируем уникальный ID этого клика
+                            current_click_id = f"{sku_clicked}_{reason_clicked}"
+
+                            # СРАБАТЫВАЕТ ТОЛЬКО ЕСЛИ:
+                            # 1. Окно еще не открыто
+                            # 2. И этот клик отличается от того, что мы уже обрабатывали
+                            if not st.session_state.get('show_detail_trigger') and current_click_id != st.session_state.last_processed_click:
                                 
-                                if sku_clicked and reason_clicked:
-                                    clean_sku = sku_clicked.split(' [')[0]
-                                    clean_reason = reason_clicked.split(' [')[0]
-                                    reason_id_clicked = int(clean_reason.split('.')[0])
-                                    
-                                    st.session_state.show_detail_trigger = {
-                                        'sku': clean_sku,
-                                        'reason': clean_reason,
-                                        'df': df_filtered,
-                                        'id': reason_id_clicked
-                                    }
-                                    st.rerun()
+                                clean_sku = sku_clicked.split(' [')[0]
+                                clean_reason = reason_clicked.split(' [')[0]
+                                reason_id_clicked = int(clean_reason.split('.')[0])
+                                
+                                # Запоминаем, что мы этот клик обработали
+                                st.session_state.last_processed_click = current_click_id
+                                
+                                st.session_state.show_detail_trigger = {
+                                    'sku': clean_sku,
+                                    'reason': clean_reason,
+                                    'df': df_filtered,
+                                    'id': reason_id_clicked
+                                }
+                                st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка системы перехвата клика: {e}")
 
