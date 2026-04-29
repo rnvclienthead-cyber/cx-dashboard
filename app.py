@@ -882,6 +882,8 @@ elif page == "🧠 Обучение ИИ":
 
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
+    
+    # ПРЕДОХРАНИТЕЛИ (добавьте эти 2 строки сразу после титула)
     if 'matrix_key' not in st.session_state: st.session_state.matrix_key = 0
     if 'last_processed_click' not in st.session_state: st.session_state.last_processed_click = None
     
@@ -942,13 +944,10 @@ elif page == "📊 Отчет производства":
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
-                    with st.spinner("Сбор фото и архивация... (Пожалуйста, подождите)"):
+                    with st.spinner("Сбор фото и архивация..."):
                         zip_all = create_images_zip(all_photos)
                         b64 = base64.b64encode(zip_all).decode()
-                        dl_link = f'''
-                        <a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a>
-                        <script>document.getElementById("dl").click();</script>
-                        '''
+                        dl_link = f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a><script>document.getElementById("dl").click();</script>'
                         components.html(dl_link, width=0, height=0)
             
             st.markdown("---")
@@ -956,62 +955,48 @@ elif page == "📊 Отчет производства":
             for _, r in details.iterrows():
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
-                    
                     c1, media_col = st.columns([1.2, 1])
-                    
                     m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
                     urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                    row_photos = []
-                    videos = []
+                    row_photos, videos = [], []
                     for u in urls:
                         clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                         if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                        if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
-                            videos.append(clean_url)
-                        else:
-                            row_photos.append(clean_url)
+                        if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
+                        else: row_photos.append(clean_url)
 
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Текст_Клиента', '---')}")
                         st.write(f"📅 **Дата:** {r.get('Дата', '---')}")
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
-                        
                         if row_photos:
                             if st.button("📥 Скачать фото", key=f"dl_row_{r.name}"):
                                 with st.spinner("Архивация..."):
                                     zip_row = create_images_zip(row_photos)
                                     b64 = base64.b64encode(zip_row).decode()
-                                    filename = f"order_{r.get('Инвойс', 'photos')}.zip"
-                                    dl_link = f'''
-                                    <a id="dl" href="data:application/zip;base64,{b64}" download="{filename}"></a>
-                                    <script>document.getElementById("dl").click();</script>
-                                    '''
+                                    dl_link = f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>'
                                     components.html(dl_link, width=0, height=0)
                     
                     with media_col:
-                        if row_photos or videos:
+                        if row_photos:
                             images_html = '<div class="media-row">'
                             for clean_url in row_photos[:6]:
                                 images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
-                            images_html += '</div>'
-                            st.markdown(images_html, unsafe_allow_html=True)
-                            
-                            if videos:
-                                v_html = '<div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">'
-                                for v_idx, v_url in enumerate(videos):
-                                    v_html += f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Смотреть видео {v_idx+1}</a>'
-                                v_html += '</div>'
-                                st.markdown(v_html, unsafe_allow_html=True)
-                                
+                            st.markdown(images_html + '</div>', unsafe_allow_html=True)
+                        if videos:
+                            v_html = '<div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">'
+                            for v_idx, v_url in enumerate(videos):
+                                v_html += f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Смотреть видео {v_idx+1}</a>'
+                            st.markdown(v_html + '</div>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.write("Нет данных по этому пересечению.")
 
-        # --- ИСПРАВЛЕННОЕ ЗАКРЫТИЕ ---
-       if st.button("Закрыть детализацию"):
+        # --- КНОПКА ЗАКРЫТИЯ (Выровнена верно) ---
+        if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
-            st.session_state.last_processed_click = None  # Очищаем память клика
-            st.session_state.matrix_key += 1             # Меняем ключ для сброса графика
+            st.session_state.last_processed_click = None # Сброс памяти
+            st.session_state.matrix_key += 1            # Сброс графика
             st.rerun()
 
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ИЗ SESSION STATE ---
@@ -1140,7 +1125,7 @@ elif page == "📊 Отчет производства":
                 
                 final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
                 
-                # --- ДИНАМИЧЕСКИЙ КЛЮЧ ДЛЯ СБРОСА ВЫБОРА ---
+                # Рендер графика с уникальным ключом
                 event = st.altair_chart(
                     final_chart, 
                     use_container_width=True, 
@@ -1159,21 +1144,16 @@ elif page == "📊 Отчет производства":
                             sku_clicked = clicked_point.get('Артикул_Метка')
                             reason_clicked = clicked_point.get('Причина_Метка')
                             
-                            # Генерируем уникальный ID этого клика
+                            # Уникальный ID клика
                             current_click_id = f"{sku_clicked}_{reason_clicked}"
 
-                            # СРАБАТЫВАЕТ ТОЛЬКО ЕСЛИ:
-                            # 1. Окно еще не открыто
-                            # 2. И этот клик отличается от того, что мы уже обрабатывали
+                            # Срабатывает только если клик новый и окно еще не открыто
                             if not st.session_state.get('show_detail_trigger') and current_click_id != st.session_state.last_processed_click:
-                                
                                 clean_sku = sku_clicked.split(' [')[0]
                                 clean_reason = reason_clicked.split(' [')[0]
                                 reason_id_clicked = int(clean_reason.split('.')[0])
                                 
-                                # Запоминаем, что мы этот клик обработали
                                 st.session_state.last_processed_click = current_click_id
-                                
                                 st.session_state.show_detail_trigger = {
                                     'sku': clean_sku,
                                     'reason': clean_reason,
