@@ -616,38 +616,55 @@ elif page == "🔬 ИИ Тегирование":
 elif page == "📝 Модерация":
     st.title("📋 Модерация (Ручная проверка)")
 
-    # Стили: фото по горизонтали, увеличены на 40% (фиксировано 140px)
+    # Стили: фото по горизонтали, увеличены (140px), стилизация кнопок пагинации
     st.markdown("""
     <style>
-    .media-row {
-        display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px;
-    }
-    .photo-zoom {
-        width: 140px; /* Увеличено на 40% */
-        height: 140px;
-        object-fit: cover;
-        border-radius: 8px;
-        transition: transform 0.3s ease;
-        cursor: pointer;
-    }
-    .photo-zoom:hover {
-        transform: scale(4); 
-        z-index: 9999;
-        position: relative;
-        box-shadow: 0 10px 20px rgba(0,0,0,0.5);
-    }
-    .ai-tags-box {
-        background-color: #f0fdf4; padding: 10px 14px; border-radius: 6px; 
-        font-size: 14px; color: #166534; margin-bottom: 15px; font-weight: 500;
-        border-left: 4px solid #22c55e;
-    }
+    .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
+    .photo-zoom { width: 140px; height: 140px; object-fit: cover; border-radius: 8px; transition: transform 0.3s ease; cursor: pointer; }
+    .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
+    .ai-tags-box { background-color: #f0fdf4; padding: 10px 14px; border-radius: 6px; font-size: 14px; color: #166534; margin-bottom: 15px; font-weight: 500; border-left: 4px solid #22c55e; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Модальное окно без width="large" - динамичный размер под экран
     @st.dialog("Просмотр видео")
     def play_video_modal(url):
         st.video(url)
+
+    # Функция отрисовки красивой пагинации
+    def render_pagination(total_pages, key_prefix):
+        if total_pages <= 1: return
+        
+        curr = st.session_state.mod_page
+        
+        # Логика окна страниц (например: 1, 2, 3, ..., 10)
+        if total_pages <= 7: window = list(range(1, total_pages + 1))
+        elif curr <= 4: window = [1, 2, 3, 4, 5, "...", total_pages]
+        elif curr >= total_pages - 3: window = [1, "...", total_pages - 4, total_pages - 3, total_pages - 2, total_pages - 1, total_pages]
+        else: window = [1, "...", curr - 1, curr, curr + 1, "...", total_pages]
+
+        # Контейнер для центрирования
+        _, center_col, _ = st.columns([1, 2, 1])
+        with center_col:
+            cols = st.columns(len(window) + 2, gap="small")
+            
+            with cols[0]:
+                if st.button("«", key=f"{key_prefix}_prev", disabled=(curr == 1), use_container_width=True):
+                    st.session_state.mod_page -= 1
+                    st.rerun()
+                    
+            for i, p in enumerate(window):
+                with cols[i+1]:
+                    if p == "...":
+                        st.markdown("<div style='text-align: center; color: #888; padding-top: 5px; font-weight: bold;'>...</div>", unsafe_allow_html=True)
+                    else:
+                        if st.button(str(p), key=f"{key_prefix}_page_{p}", type="primary" if p == curr else "secondary", use_container_width=True):
+                            st.session_state.mod_page = p
+                            st.rerun()
+                            
+            with cols[-1]:
+                if st.button("»", key=f"{key_prefix}_next", disabled=(curr == total_pages), use_container_width=True):
+                    st.session_state.mod_page += 1
+                    st.rerun()
 
     try:
         client = get_gspread_client()
@@ -658,46 +675,35 @@ elif page == "📝 Модерация":
             headers = [str(h).strip() for h in data[0]]
             df = pd.DataFrame(data[1:], columns=headers)
             
-            # Фильтр: есть ли теги вообще
-            def has_tags(row):
-                return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
+            def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
             df['has_any_tag'] = df.apply(has_tags, axis=1)
             
-            # --- БЛОК ФИЛЬТРАЦИИ ---
             st.markdown("### 🔍 Фильтр обращений")
-            filter_mode = st.radio(
-                "Показать обращения:", 
-                ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], 
-                horizontal=True
-            )
+            filter_mode = st.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], horizontal=True)
             
-            # Базовая выборка: есть теги, НЕТ корректировки
             base_review = df[(df['has_any_tag']) & (df.get('Корректировка', '').astype(str).str.strip() == '')]
-            
-            # Дополнительный фильтр по ошибкам аудита
             if filter_mode == "С замечаниями от Аудитора (Кросс-проверка)":
-                if 'Аудит' in base_review.columns:
-                    base_review = base_review[base_review['Аудит'].astype(str).str.upper().str.contains('ОШИБКА')]
-                else:
-                    st.warning("Колонка 'Аудит' отсутствует в таблице!")
+                if 'Аудит' in base_review.columns: base_review = base_review[base_review['Аудит'].astype(str).str.upper().str.contains('ОШИБКА')]
+                else: st.warning("Колонка 'Аудит' отсутствует в таблице!")
                     
             to_review = base_review
             
             if not to_review.empty:
-                # --- БЛОК ПАГИНАЦИИ (Для стабильной загрузки) ---
                 total_items = len(to_review)
                 ITEMS_PER_PAGE = 20
                 total_pages = max(1, (total_items - 1) // ITEMS_PER_PAGE + 1)
                 
+                # Защита состояния страницы
+                if 'mod_page' not in st.session_state: st.session_state.mod_page = 1
+                if st.session_state.mod_page > total_pages: st.session_state.mod_page = 1
+                
                 st.success(f"Найдено обращений в очереди: **{total_items}**")
                 
-                page_num = 1
-                if total_pages > 1:
-                    page_num = st.number_input(f"Страница (от 1 до {total_pages})", min_value=1, max_value=total_pages, value=1)
-                    
-                start_idx = (page_num - 1) * ITEMS_PER_PAGE
-                end_idx = start_idx + ITEMS_PER_PAGE
+                # ПАГИНАЦИЯ (ВЕРХ)
+                render_pagination(total_pages, key_prefix="top")
                 
+                start_idx = (st.session_state.mod_page - 1) * ITEMS_PER_PAGE
+                end_idx = start_idx + ITEMS_PER_PAGE
                 current_page_df = to_review.iloc[start_idx:end_idx]
                 
                 cats_list = list(CATEGORIES.values())
@@ -709,46 +715,30 @@ elif page == "📝 Модерация":
                     st.markdown("---")
                     
                     col_info, col_media = st.columns([1.2, 1])
-                    
                     with col_info:
                         st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
                         st.info(row.get('Текст_Клиента', 'Нет текста'))
                         
-                        # --- ПОКАЗ ВЫБОРА ИИ ---
                         ai_selected = []
                         for i in range(1, 14):
-                            if str(row.get(f'Кат {i}', '')).strip().lower() in ['1', '1.0', '+', 'v', 'да', 'true']:
-                                ai_selected.append(f"{CATEGORIES[i]}")
-                        
+                            if str(row.get(f'Кат {i}', '')).strip().lower() in ['1', '1.0', '+', 'v', 'да', 'true']: ai_selected.append(f"{CATEGORIES[i]}")
                         ai_text = ", ".join(ai_selected) if ai_selected else "Категории не определены"
                         st.markdown(f'<div class="ai-tags-box">🤖 <b>Выбор ИИ:</b> {ai_text}</div>', unsafe_allow_html=True)
                         
-                        selected_cats = st.multiselect(
-                            "Выберите правильные категории:", 
-                            options=cats_list, 
-                            default=[], 
-                            key=f"ms_{row_index_gs}"
-                        )
+                        selected_cats = st.multiselect("Выберите правильные категории:", options=cats_list, default=[], key=f"ms_{row_index_gs}")
                         
                         if st.button("💾 Сохранить решение", key=f"btn_{row_index_gs}", type="primary"):
                             if selected_cats:
                                 batch_updates = []
-                                # 1. Очищаем старые теги ИИ
                                 for c in range(1, 14):
                                     h = f"кат {c}"
-                                    if h in header_map_clean: 
-                                        batch_updates.append({'range': f"{header_map_clean[h]}{row_index_gs}", 'values': [['']]})
-                                
-                                # 2. Записываем новые теги модератора
+                                    if h in header_map_clean: batch_updates.append({'range': f"{header_map_clean[h]}{row_index_gs}", 'values': [['']]})
                                 for cat_name in selected_cats:
                                     cat_num = reverse_cats.get(cat_name.strip().lower())
-                                    if cat_num: 
-                                        batch_updates.append({'range': f"{header_map_clean[f'кат {cat_num}']}{row_index_gs}", 'values': [['1']]})
+                                    if cat_num: batch_updates.append({'range': f"{header_map_clean[f'кат {cat_num}']}{row_index_gs}", 'values': [['1']]})
                                 
-                                # 3. Пишем в Корректировку для ухода из очереди и обучения ИИ
                                 corr_header = "корректировка"
                                 if corr_header in header_map_clean:
-                                    # Записываем текстом, чтобы скрипт "Обучение ИИ" мог это прочитать
                                     corr_val = "; ".join(selected_cats)
                                     batch_updates.append({'range': f"{header_map_clean[corr_header]}{row_index_gs}", 'values': [[corr_val]]})
                                     
@@ -759,20 +749,15 @@ elif page == "📝 Модерация":
                     with col_media:
                         media_raw = str(row.get('Фотографии', '')) + " " + str(row.get('Видео', ''))
                         urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
-                        
                         if urls:
                             videos = []
                             images_html = '<div class="media-row">'
-                            
                             for u in urls[:6]: 
                                 clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                                 if clean_url.startswith("//"): clean_url = "https:" + clean_url
                                 
-                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
-                                    videos.append(clean_url)
-                                else:
-                                    images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
-                                    
+                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
+                                else: images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
                             images_html += '</div>'
                             st.markdown(images_html, unsafe_allow_html=True)
                             
@@ -780,8 +765,11 @@ elif page == "📝 Модерация":
                                 v_cols = st.columns(len(videos))
                                 for v_idx, v_url in enumerate(videos):
                                     with v_cols[v_idx]:
-                                        if st.button("🎥 Видео", key=f"vid_{row_index_gs}_{v_idx}"):
-                                            play_video_modal(v_url)
+                                        if st.button("🎥 Видео", key=f"vid_{row_index_gs}_{v_idx}"): play_video_modal(v_url)
+                
+                st.markdown("---")
+                # ПАГИНАЦИЯ (НИЗ)
+                render_pagination(total_pages, key_prefix="bottom")
             else:
                 st.success("🎉 Очередь пуста! Все обращения проверены.")
     except Exception as e:
@@ -849,41 +837,29 @@ elif page == "🧠 Обучение ИИ":
 # ==========================================
 
 elif page == "📊 Дашборд":
-    st.title("📊 Аналитика и Матрица дефектов")
+    st.title("📊 Аналитика, Инвойсы и Сводная Матрица")
     
     st.markdown("""
     <style>
     /* Уменьшаем шрифт в таблице для компактности */
     [data-testid="stDataFrame"] { font-size: 11px !important; }
-    
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     
-    /* Контейнер для медиа файлов по горизонтали */
-    .media-container { display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-start; }
-    
-    /* Стили фото без лишних рамок */
-    .photo-zoom-detail {
-        width: 92px; height: 92px; object-fit: cover;
-        border-radius: 8px; cursor: pointer;
-        transition: transform 0.3s ease;
-        border: none !important; outline: none !important; box-shadow: none !important;
-    }
-    .photo-zoom-detail:hover {
-        transform: scale(6.6); 
-        z-index: 9999; position: relative;
-        box-shadow: 0 15px 35px rgba(0,0,0,0.4) !important; /* Тень только при зуме для объема */
-    }
-    
-    /* Стили компактного видеоплеера */
-    .video-inline {
-        height: 92px; border-radius: 8px; background: #000; border: none;
-    }
+    /* Стили как в Модерации: фото по горизонтали, 140px */
+    .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
+    .photo-zoom { width: 140px; height: 140px; object-fit: cover; border-radius: 8px; transition: transform 0.3s ease; cursor: pointer; }
+    .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
     </style>
     """, unsafe_allow_html=True)
 
+    # Динамичное модальное окно для видео
+    @st.dialog("Просмотр видео")
+    def play_video_modal(url):
+        st.video(url)
+
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
-        st.subheader(f"📦 {sku} | 🛠 {reason_name}")
+        st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
         
         details = filtered_df[
             (filtered_df['Артикул'] == sku) & 
@@ -895,33 +871,45 @@ elif page == "📊 Дашборд":
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
                     
-                    # Делим карточку: Слева текст (ширина 1.2), Справа медиа (ширина 2)
-                    c1, media_col = st.columns([1.2, 2])
+                    c1, media_col = st.columns([1.2, 1])
                     
                     with c1:
-                        st.write(f"💬 **Текст:** {r.get('Текст_Клиента', 'Нет текста')}")
-                        st.markdown(f"**Дата:** {r.get('Дата', '')}<br>**Инвойс:** {r.get('Инвойс', 'Не указан')}<br>**Поставка:** {r.get('Номер поставки', '---')}", unsafe_allow_html=True)
+                        st.write(f"💬 **Текст клиента:**\n{r.get('Текст_Клиента', '---')}")
+                        st.write(f"📅 **Дата:** {r.get('Дата', '---')}")
+                        st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
+                        st.write(f"🕵️ **Аудит:** {r.get('Аудит', '---')} | **Коммент:** {r.get('Комментарий', '---')}")
                     
                     with media_col:
                         m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
-                        m_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                         
-                        if m_urls:
-                            media_html = '<div class="media-container">'
-                            for mu in m_urls[:5]:
-                                m_clean = mu.replace("']", "").replace("'", "").replace('"', '')
-                                if m_clean.startswith("//"): m_clean = "https:" + m_clean
-                                
-                                # Видео: нативный плеер с кнопкой Fullscreen
-                                if any(ext in m_clean.lower() for ext in ['.mp4', '.mov', '.avi']):
-                                    media_html += f'<video src="{m_clean}" class="video-inline" controls title="Развернуть на весь экран"></video>'
-                                # Фото
-                                else:
-                                    media_html += f'<img src="{m_clean}" class="photo-zoom-detail">'
-                            media_html += '</div>'
-                            st.markdown(media_html, unsafe_allow_html=True)
+                        if urls:
+                            videos = []
+                            images_html = '<div class="media-row">'
                             
+                            for u in urls[:6]: 
+                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                
+                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
+                                    videos.append(clean_url)
+                                else:
+                                    images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
+                                    
+                            images_html += '</div>'
+                            st.markdown(images_html, unsafe_allow_html=True)
+                            
+                            if videos:
+                                v_cols = st.columns(len(videos))
+                                for v_idx, v_url in enumerate(videos):
+                                    with v_cols[v_idx]:
+                                        # Используем нативную кнопку и модальное окно, как в модерации
+                                        if st.button("🎥 Видео", key=f"dash_vid_{r.name}_{v_idx}"):
+                                            play_video_modal(v_url)
+                                            
                     st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.write("Нет данных по этому пересечению.")
 
     try:
         client = get_gspread_client()
@@ -931,7 +919,6 @@ elif page == "📊 Дашборд":
         if 'supplyID' in df.columns and 'Номер поставки' not in df.columns:
             df.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
         
-        # --- БЛОК ИНВОЙСОВ ---
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
             if inv_id:
@@ -951,51 +938,69 @@ elif page == "📊 Дашборд":
                     
                     df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
         except Exception as e:
-            st.warning(f"Инвойсы не подтянуты: {e}")
+            st.warning(f"Данные инвойсов не подтянуты: {e}")
 
         if not df.empty:
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
+            if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
+
+            def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
+            df['Размечено'] = df.apply(has_tags, axis=1)
             
+            st.markdown("### 🔍 Глобальные фильтры")
             f_col1, f_col2 = st.columns(2)
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip()])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул'] if str(x).strip()])))
-            selected_inv = f_col1.selectbox("Фильтр по Инвойсу:", inv_list)
-            selected_sku = f_col2.selectbox("Фильтр по Артикулу:", sku_list)
+            
+            selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
+            selected_sku = f_col2.selectbox("Артикул:", sku_list)
             
             df_filtered = df.copy()
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
 
+            total_rows = len(df_filtered)
+            tagged_rows = df_filtered['Размечено'].sum()
+            corrected_rows = len(df_filtered[df_filtered.get('Корректировка', '') != ''])
+            
+            accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
+            processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
+            
+            st.markdown("### 📈 Общая статистика")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Всего заявок", total_rows)
+            c2.metric("Размечено", f"{tagged_rows} ({processed_percent}%)")
+            c3.metric("Изменено вручную", corrected_rows)
+            c4.metric("Точность ИИ", f"{accuracy}%")
+            
             matrix_list = []
             for i in range(1, 14):
                 cat_col = f'Кат {i}'
                 if cat_col in df_filtered.columns:
                     temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
                     for _, r in temp.iterrows():
-                        matrix_list.append({
-                            'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}",
-                            'ID': i,
-                            'Инвойс': r.get('Инвойс', 'Не указан')
-                        })
+                        art = str(r.get('Артикул', 'Без артикула')).strip() or 'Без артикула'
+                        matrix_list.append({'Артикул': art, 'Причина': f"{i}. {CATEGORIES[i]}", 'ID': i, 'Инвойс': r.get('Инвойс')})
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                
                 pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
                 pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
                 
+                # Добавляем "ОБЩЕЕ КОЛ-ВО"
                 total_col = pivot.sum(axis=1)
                 pivot.insert(0, 'ОБЩЕЕ КОЛ-ВО', total_col)
                 
+                # Динамическая высота убирает скролл
                 dynamic_height = len(pivot) * 28 + 45
                 
-                st.markdown("### 🧮 Интерактивная Карта дефектов")
+                st.markdown("### 🧮 Интерактивная Матрица (Нажмите на ячейку)")
+                st.info("💡 Кликните на любую цифру в таблице ниже, чтобы открыть детализацию по конкретному артикулу и причине.")
                 
                 styled_pivot = pivot.style.background_gradient(
                     cmap='Blues', 
-                    subset=pivot.columns[1:] 
+                    subset=pivot.columns[1:] # Градиент только для артикулов
                 )
                 
                 event = st.dataframe(
@@ -1017,16 +1022,15 @@ elif page == "📊 Дашборд":
                         reason_id_clicked = int(selected_reason.split('.')[0])
                         show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
 
-                # --- ВОЗВРАЩЕННЫЙ БЛОК ИНВОЙСОВ ---
                 st.markdown("### 📦 Проблемные Инвойсы")
                 inv_counts = df_matrix['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
                 st.dataframe(inv_counts.head(10), use_container_width=True)
 
             else:
-                st.info("Нет данных для отображения матрицы.")
+                st.info("Данных для матрицы пока нет.")
     except Exception as e:
-        st.error(f"Ошибка дашборда: {e}")
+        st.error(f"Ошибка Дашборда: {e}")
         
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
