@@ -13,6 +13,7 @@ import zipfile
 import urllib.request
 import base64
 import streamlit.components.v1 as components
+import altair as alt
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
@@ -876,7 +877,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Идеальная Хитмап-Матрица)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА (Профессиональная Аналитика Altair)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -884,23 +885,14 @@ elif page == "📊 Отчет производства":
     
     st.markdown("""
     <style>
-    /* Делаем шрифт интерфейса компактным */
-    [data-testid="stDataFrame"] { font-size: 11px !important; }
-    
-    /* Крупные всплывающие подсказки */
-    [data-testid="stTooltipContent"] { font-size: 16px !important; padding: 10px !important; }
-    
+    /* Оставляем стили только для карточек и видео! Никаких табличных хаков. */
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
         width: 140px; height: 140px; object-fit: cover; border-radius: 8px; 
-        transition: transform 0.3s ease; cursor: pointer; 
-        border: none !important; outline: none !important; background: transparent !important;
+        transition: transform 0.3s ease; cursor: pointer; border: none !important;
     }
-    .photo-zoom:hover { 
-        transform: scale(4); z-index: 9999; position: relative; 
-        box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; 
-    }
+    .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; box-shadow: 0 15px 30px rgba(0,0,0,0.5) !important; }
     .video-link-btn {
         display: inline-block; padding: 8px 14px; background-color: #2563eb; 
         color: white !important; border-radius: 6px; text-decoration: none; 
@@ -1089,97 +1081,86 @@ elif page == "📊 Отчет производства":
                     for _, r in temp.iterrows():
                         matrix_list.append({
                             'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}", 
+                            'Причина': f"{i}. {CATEGORIES[i]}",
+                            'ID': i,
                             'Инвойс': r.get('Инвойс', 'Не указан')
                         })
 
             st.markdown("---")
-            st.markdown("### 🧮 Транспонированная Матрица дефектов")
-            st.info("💡 Слева — причины. Сверху — артикулы. **Наведите курсор на букву для подсказки. Кликните на цветную ячейку для детализации!**")
+            st.markdown("### 🧮 Тепловая Матрица Производства")
+            st.info("💡 Идеально вписывается в экран. Итоги выведены в названиях. **Кликните на цветной квадрат для детализации!**")
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 
-                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул'])
-                pivot['sort_id'] = [int(x.split('.')[0]) for x in pivot.index]
-                pivot = pivot.sort_values('sort_id').drop(columns=['sort_id'])
+                # 1. Строим полную таблицу со всеми нулями (чтобы сетка была ровной)
+                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул']).fillna(0).astype(int)
+                pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
                 
-                total_counts = pivot.sum(axis=1)
-                pivot.insert(0, 'ИТОГО', total_counts)
+                # 2. Считаем ИТОГИ и добавляем их прямо к названиям строк и столбцов!
+                sku_totals = pivot.drop(columns=['ID']).sum(axis=0).to_dict()
+                reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                 
-                # ===============================================
-                # 🛠 ИДЕАЛЬНОЕ РАСПРЕДЕЛЕНИЕ ШИРИНЫ ЧЕРЕЗ ИНДЕКСЫ
-                # ===============================================
-                # Сохраняем оригинальные названия артикулов по порядку
-                original_skus = [col for col in pivot.columns if col not in ['Причина', 'ИТОГО']]
+                # 3. Переводим таблицу в плоский формат, нужный для Altair
+                df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
-                # Переименовываем столбцы в простые числа 0, 1, 2...
-                # Это гарантия того, что они абсолютно уникальны, и мы избежим скрытых пробелов
-                rename_map = {sku: i for i, sku in enumerate(original_skus)}
-                pivot = pivot.rename(columns=rename_map)
-                pivot = pivot.reset_index()
-
-                # Настраиваем отображение колонок
-                col_config = {
-                    'Причина': st.column_config.TextColumn("Причина дефекта", width="medium"), 
-                    'ИТОГО': st.column_config.NumberColumn("ИТОГО", width="small")
-                }
+                # Присваиваем новые имена с суммами
+                df_melt['Артикул_Метка'] = df_melt['Артикул'].apply(lambda x: f"{x} [{sku_totals.get(x, 0)}]")
+                df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
                 
-                # Присваиваем колонкам-цифрам отображение в виде 1 буквы
-                gradient_cols = []
-                for i, sku in enumerate(original_skus):
-                    gradient_cols.append(i)
-                    display_letter = sku[:1].upper() if sku else "?"
-                    col_config[i] = st.column_config.NumberColumn(
-                        label=display_letter, 
-                        help=f"Артикул: {sku}"
-                    )
+                # Текст для ячеек (скрываем нули, чтобы матрица дышала)
+                df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
                 # ===============================================
-                # 🛠 ЦЕНТРИРОВАНИЕ, РАЗМЕР И РАЗДЕЛЕНИЕ ЦВЕТОВ (БЕЛАЯ СЕТКА)
+                # 🛠 ALTAIR: НАСТОЯЩАЯ ПРОФЕССИОНАЛЬНАЯ ГРАФИКА
                 # ===============================================
-                styled_pivot = pivot.style\
-                    .background_gradient(cmap='Blues', subset=gradient_cols)\
-                    .set_properties(**{
-                        'text-align': 'center',         # Ставим цифры по центру!
-                        'font-size': '10px',            # Уменьшаем цифры, чтобы влезали
-                        'border': '1px solid #ffffff'   # БЕЛАЯ РАМКА! Она отделит темные ячейки друг от друга
-                    }, subset=gradient_cols)\
-                    .set_properties(**{
-                        'text-align': 'center',
-                        'font-weight': 'bold',
-                        'border': '1px solid #e2e8f0'
-                    }, subset=['ИТОГО'])\
-                    .set_properties(**{
-                        'border': '1px solid #e2e8f0'
-                    }, subset=['Причина'])
-
-                dynamic_height = len(pivot) * 35 + 43
+                import altair as alt
                 
-                # width="stretch" теперь равномерно растянет все "однобуквенные" колонки на весь экран!
-                event = st.dataframe(
-                    styled_pivot,
-                    on_select="rerun",
-                    selection_mode="single-cell",
-                    hide_index=True, 
-                    height=dynamic_height,
-                    width="stretch", 
-                    column_config=col_config
+                # Базовый график
+                base = alt.Chart(df_melt).encode(
+                    x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=300, orient='bottom')),
+                    y=alt.Y('Причина_Метка:N', title=None, sort=alt.EncodingSortField(field='ID', order='ascending'))
                 )
                 
-                # Перехватчик кликов
-                if hasattr(event, "selection") and event.selection.get("cells"):
-                    selected_cell = event.selection.get("cells")[0]
-                    row_idx = selected_cell[0]
-                    col_name = selected_cell[1]
-                    
-                    if col_name not in ['Причина', 'ИТОГО']:
-                        # col_name возвращает цифру (индекс), мы вытаскиваем по ней полное имя
-                        selected_sku = original_skus[int(col_name)]
-                        selected_reason = str(pivot.iloc[row_idx]['Причина']) 
-                        reason_id_clicked = int(selected_reason.split('.')[0])
-                        
-                        show_matrix_details(selected_sku, selected_reason, df_filtered, reason_id_clicked)
+                # Квадраты матрицы (с белой рамкой для разделения темных цветов)
+                rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
+                    color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None),
+                    tooltip=[alt.Tooltip('Артикул:N'), alt.Tooltip('Причина:N'), alt.Tooltip('Дефекты:Q')]
+                )
+                
+                # Цифры строго по центру
+                text = base.mark_text(baseline='middle', fontSize=11).encode(
+                    text='Текст:N',
+                    # Если квадрат темный — делаем текст белым, иначе черным
+                    color=alt.condition(
+                        alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2),
+                        alt.value('white'),
+                        alt.value('black')
+                    )
+                )
+                
+                # Динамическая высота
+                chart_height = max(400, len(pivot) * 35)
+                final_chart = (rects + text).properties(height=chart_height)
+                
+                # Рендер: use_container_width=True автоматически распределит ширину на 100% экрана!
+                event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun")
+                
+                # --- НАДЕЖНЫЙ ПЕРЕХВАТЧИК ALTAIR ---
+                if event and event.selection:
+                    for key, val in event.selection.items():
+                        if isinstance(val, list) and len(val) > 0:
+                            clicked_point = val[0]
+                            sku_clicked = clicked_point.get('Артикул_Метка')
+                            reason_clicked = clicked_point.get('Причина_Метка')
+                            
+                            if sku_clicked and reason_clicked:
+                                # Очищаем ИТОГИ в скобках, чтобы достать оригинальные значения для функции
+                                clean_sku = sku_clicked.split(' [')[0]
+                                clean_reason = reason_clicked.split(' [')[0]
+                                reason_id_clicked = int(clean_reason.split('.')[0])
+                                
+                                show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id_clicked)
 
             else:
                 st.info("Данных для матрицы пока нет.")
@@ -1191,7 +1172,7 @@ elif page == "📊 Отчет производства":
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                st.dataframe(inv_counts.head(10), width="stretch")
+                st.dataframe(inv_counts.head(10), use_container_width=True)
             else:
                 st.info("Данных для инвойсов пока нет.")
 
