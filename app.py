@@ -883,13 +883,12 @@ elif page == "🧠 Обучение ИИ":
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
-    # 1. ГАРАНТИРОВАННЫЙ СБРОС
+    # 1. ГАРАНТИРОВАННЫЙ СБРОС (Инициализация)
     if 'matrix_key' not in st.session_state:
         st.session_state.matrix_key = 0
     
     st.markdown("""
     <style>
-    /* Оставляем стили только для карточек детализации */
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
     .photo-zoom { 
@@ -989,11 +988,13 @@ elif page == "📊 Отчет производства":
         else:
             st.write("Нет данных по этому пересечению.")
 
-        # Строка 995: Теперь отступ ровно 8 пробелов (на уровне с "if not details.empty")
+        # --- КНОПКА ЗАКРЫТИЯ (Сброс состояния) ---
         if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
+            # Увеличиваем ключ, чтобы график полностью обновился и сбросил клик
+            st.session_state.matrix_key += 1
             st.rerun()
-           
+            
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
@@ -1007,6 +1008,7 @@ elif page == "📊 Отчет производства":
         if 'supplyID' in df.columns and 'Номер поставки' not in df.columns:
             df.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
         
+        # ЛОГИКА ИНВОЙСОВ (СОХРАНЕНА)
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
             if inv_id:
@@ -1045,6 +1047,7 @@ elif page == "📊 Отчет производства":
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
 
+            # СТАТИСТИКА (СОХРАНЕНА)
             total_rows = len(df_filtered)
             tagged_rows = df_filtered['Размечено'].sum()
             corrected_rows = len(df_filtered[df_filtered.get('Корректировка', '') != ''])
@@ -1078,23 +1081,16 @@ elif page == "📊 Отчет производства":
             
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
-                
                 pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул']).fillna(0).astype(int)
                 pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
-                
-                sku_totals = pivot.drop(columns=['ID']).sum(axis=0).to_dict()
                 reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                 
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
-                
-                # --- УБРАЛИ ЦИФРЫ У АРТИКУЛОВ ---
                 df_melt['Артикул_Метка'] = df_melt['Артикул'] 
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
-                
                 df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
 
                 import altair as alt
-                
                 click_selector = alt.selection_point(name='cell_click', fields=['Артикул_Метка', 'Причина_Метка'])
                 
                 base = alt.Chart(df_melt).encode(
@@ -1109,18 +1105,13 @@ elif page == "📊 Отчет производства":
                 
                 text = base.mark_text(baseline='middle', fontSize=11).encode(
                     text='Текст:N',
-                    color=alt.condition(
-                        alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2),
-                        alt.value('white'),
-                        alt.value('black')
-                    )
+                    color=alt.condition(alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2), alt.value('white'), alt.value('black'))
                 )
                 
                 chart_height = max(400, len(pivot) * 35 + 100)
-                
                 final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
                 
-                # 2. РЕНДЕР С ДИНАМИЧЕСКИМ КЛЮЧОМ
+                # РЕНДЕР С ДИНАМИЧЕСКИМ КЛЮЧОМ
                 event = st.altair_chart(
                     final_chart, 
                     use_container_width=True, 
@@ -1128,19 +1119,16 @@ elif page == "📊 Отчет производства":
                     key=f"prod_matrix_{st.session_state.matrix_key}"
                 )
                 
-                # 3. АТОМНЫЙ ПЕРЕХВАТЧИК
+                # АТОМНЫЙ ПЕРЕХВАТЧИК
                 try:
                     if event and hasattr(event, "selection"):
                         sel = event.selection.get("cell_click", [])
-                        
-                        # Если клик обнаружен И окно еще не открыто
                         if sel and len(sel) > 0 and not st.session_state.get('show_detail_trigger'):
                             clicked_point = sel[0]
                             sku_clicked = clicked_point.get('Артикул_Метка')
                             reason_clicked = clicked_point.get('Причина_Метка')
                             
                             if sku_clicked and reason_clicked:
-                                # Сохраняем данные для окна
                                 clean_sku = sku_clicked.split(' [')[0]
                                 clean_reason = reason_clicked.split(' [')[0]
                                 reason_id_clicked = int(clean_reason.split('.')[0])
@@ -1151,30 +1139,22 @@ elif page == "📊 Отчет производства":
                                     'df': df_filtered,
                                     'id': reason_id_clicked
                                 }
-                                
-                                # ГЛАВНЫЙ МОМЕНТ: Меняем ключ, чтобы убить старый график с его выбором
+                                # Увеличиваем ключ при клике, чтобы на следующем прогоне график был чистым
                                 st.session_state.matrix_key += 1
-                                # Мгновенный перезапуск для открытия окна
                                 st.rerun()
                 except Exception as e:
-                    st.error(f"Ошибка системы перехвата клика: {e}")
-
-                with st.expander("🛠 Техническая отладка (если окно не открывается)"):
-                    st.write("Сырые данные клика от графика:", event)
+                    st.error(f"Ошибка перехвата: {e}")
 
             else:
                 st.info("Данных для матрицы пока нет.")
 
             st.markdown("---")
             st.markdown("### 📦 Проблемные Инвойсы")
-            
             if matrix_list:
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
                 inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
                 st.dataframe(inv_counts.head(10), use_container_width=True)
-            else:
-                st.info("Данных для инвойсов пока нет.")
 
     except Exception as e:
         st.error(f"Ошибка Отчета: {e}")
