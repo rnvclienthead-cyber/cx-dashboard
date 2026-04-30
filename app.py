@@ -273,7 +273,14 @@ def fetch_wb_api(url, params=None):
 def process_wb_api_sync(existing_gs_records):
     report = []
     
-    # Проверяем наличие ключа перед запуском
+    # --- ДИАГНОСТИКА (потом удалим) ---
+    test_key = st.secrets.get("WB_API_KEY")
+    if test_key:
+        st.write(f"🔍 Диагностика: Ключ найден. Длина: {len(test_key)} симв. Начинается на: {test_key[:4]}")
+    else:
+        st.write("🔍 Диагностика: Ключ ВООБЩЕ не виден в st.secrets")
+    # ----------------------------------
+    
     wb_key = st.secrets.get("WB_API_KEY")
     if not wb_key:
         report.append("❌ Ошибка: Ключ WB_API_KEY не найден в настройках Secrets.")
