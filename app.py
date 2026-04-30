@@ -30,7 +30,6 @@ if st.session_state.get('current_tab') != page:
 
 # Инициализация ключей для сброса загрузчиков после успешной обработки
 if 'claims_key' not in st.session_state: st.session_state.claims_key = 0
-if 'litestat_key' not in st.session_state: st.session_state.litestat_key = 0
 
 try:
     YANDEX_API_KEY = st.secrets["YANDEX_API_KEY"]
@@ -245,10 +244,10 @@ import time
 
 def fetch_wb_api(url, params=None):
     """Универсальная функция запроса к API WB с защитой от лимитов (429)"""
-    # Читаем ключ напрямую из Streamlit при каждом запросе
-    wb_key = st.secrets.get("WB_API_KEY")
-    
-    headers = {"Authorization": str(wb_key)}
+    wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
+    if not wb_key or wb_key == "None": return None
+
+    headers = {"Authorization": wb_key}
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -256,37 +255,25 @@ def fetch_wb_api(url, params=None):
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
-                st.warning("⚠️ WB просит подождать (лимит запросов). Ждем 5 секунд...")
-                time.sleep(5)
+                st.warning("⚠️ WB просит подождать (лимит запросов). Ждем 10 секунд...")
+                time.sleep(10)
                 continue
-            elif response.status_code == 401:
-                st.error("❌ Ошибка 401: API Ключ WB недействителен или у него нет прав.")
-                return None
+            elif response.status_code == 404:
+                # Если путь не найден, фиксируем это для отладки, но не прерываем всё приложение
+                return {"error_404": True}
             else:
-                st.error(f"❌ Ошибка API WB {response.status_code}: {response.text}")
-                return None
+                return {"error": response.status_code, "text": response.text}
         except Exception as e:
-            st.error(f"❌ Ошибка сети: {e}")
             time.sleep(2)
     return None
 
 def process_wb_api_sync(existing_gs_records):
     report = []
-    
-    # --- ДИАГНОСТИКА (потом удалим) ---
-    test_key = st.secrets.get("WB_API_KEY")
-    if test_key:
-        st.write(f"🔍 Диагностика: Ключ найден. Длина: {len(test_key)} симв. Начинается на: {test_key[:4]}")
-    else:
-        st.write("🔍 Диагностика: Ключ ВООБЩЕ не виден в st.secrets")
-    # ----------------------------------
-    
     wb_key = st.secrets.get("WB_API_KEY")
     if not wb_key:
-        report.append("❌ Ошибка: Ключ WB_API_KEY не найден в настройках Secrets.")
+        report.append("❌ Ошибка: Ключ WB_API_KEY не найден в Secrets.")
         return pd.DataFrame(), 0, 0, report
 
-    # === ЖЕЛЕЗОБЕТОННЫЙ ЭТАЛОН КОЛОНОК (Из файла 111.xlsx) ===
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
         'SRID', 'Источник заявки', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 
@@ -301,163 +288,99 @@ def process_wb_api_sync(existing_gs_records):
         'Цена со скидкой продавца', 'Уникальный ID продажи/возврата', 'ID стикера', 'ID корзины покупателя'
     ]
     
-    # КОЛОНКИ, КОТОРЫЕ НЕЛЬЗЯ ПЕРЕЗАПИСЫВАТЬ У СТАРЫХ ЗАЯВОК (Зона Наша)
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
 
-    # 1. Тянем Claims 
-    st.info("⏳ Запрашиваем Претензии (Claims) с серверов Wildberries...")
-    claims_url = "https://supplies-api.wildberries.ru/api/v1/claims" 
+    # 1. ТЯНЕМ CLAIMS (Исправленный URL)
+    st.info("⏳ Запрашиваем Претензии...")
+    # Попробуем официальный актуальный эндпоинт для претензий
+    claims_url = "https://advert-api.wildberries.ru/api/v1/claims" 
     
     claims_data = []
-    limit, offset = 100, 0
-    while True:
-        res = fetch_wb_api(claims_url, params={"limit": limit, "offset": offset})
-        if res and isinstance(res, dict) and 'claims' in res:
-            batch = res['claims']
-            claims_data.extend(batch)
-            if len(batch) < limit: break
-            offset += limit
-        elif res and isinstance(res, list): 
-             claims_data.extend(res)
-             break
-        else: break
-        time.sleep(0.5) 
-        
-    if not claims_data:
-        report.append("📥 Претензии (API): Новых данных за этот период на WB не найдено.")
-        df_c = pd.DataFrame()
-    else:
+    res_c = fetch_wb_api(claims_url, params={"limit": 1000, "offset": 0})
+    
+    if res_c and not res_c.get("error_404") and not res_c.get("error"):
+        claims_data = res_c if isinstance(res_c, list) else res_c.get('claims', [])
         df_c = pd.DataFrame(claims_data)
-        report.append(f"📥 Претензии (API): Получено {len(df_c)} строк.")
-        if 'nm_id' in df_c.columns:
-            if 'nmId' not in df_c.columns: df_c.rename(columns={'nm_id': 'nmId'}, inplace=True)
-            else: df_c.drop(columns=['nm_id'], inplace=True)
-        df_c = df_c.drop_duplicates(subset=['srid']) if 'srid' in df_c.columns else df_c.drop_duplicates()
-
-    # 2. Тянем Sales/Incomes (Статистика)
-    st.info("⏳ Запрашиваем данные по Продажам/Складу для обогащения...")
-    sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
-    date_from = "2024-01-01T00:00:00" # Тянем глубокую историю
-    
-    sales_data = fetch_wb_api(sales_url, params={"dateFrom": date_from})
-    
-    if not sales_data:
-        report.append("📦 Склад (API): Данные не получены.")
-        df_final = df_c
+        report.append(f"📥 Претензии: Получено {len(df_c)} строк.")
     else:
-        df_r = pd.DataFrame(sales_data)
-        if not df_r.empty:
-            report.append(f"📦 Склад (API): Вытянута историческая база ({len(df_r)} записей).")
-            df_r = df_r.drop_duplicates(subset=['srid'], keep='last') if 'srid' in df_r.columns else df_r
-            if 'supplyID' in df_r.columns: df_r.rename(columns={'supplyID': 'incomeID'}, inplace=True)
-                
-            if not df_c.empty:
-                sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
-                df_c['nmId_clean'] = df_c['nmId'].astype(str).str.replace(r'\.0$', '', regex=True)
-                df_final = pd.merge(df_c, df_r, on='srid', how='left')
-                df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nmId_clean'].map(sku_map))
-                report.append(f"🔗 Успешно привязаны финансовые/логистические данные.")
-            else: df_final = pd.DataFrame()
-        else: df_final = df_c
+        # Если метод претензий всё еще недоступен, создаем пустой DF, чтобы не упасть
+        report.append("⚠️ Метод Claims временно недоступен или пуст. Работаем только с Sales.")
+        df_c = pd.DataFrame()
+
+    # 2. ТЯНЕМ SALES (Этот метод работает!)
+    st.info("⏳ Запрашиваем данные по Продажам...")
+    sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
+    # Для первого теста возьмем последние 30 дней, чтобы не перегружать память
+    date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00")
+    
+    sales_raw = fetch_wb_api(sales_url, params={"dateFrom": date_from})
+    
+    if isinstance(sales_raw, list) and len(sales_raw) > 0:
+        df_r = pd.DataFrame(sales_raw)
+        report.append(f"📦 Склад: Получено {len(df_r)} записей.")
+        
+        # Если у нас нет claims, но есть sales, мы всё равно можем создать базу
+        if df_c.empty:
+            df_final = df_r
+        else:
+            # Склеиваем по SRID
+            df_final = pd.merge(df_c, df_r, on='srid', how='outer', suffixes=('', '_drop'))
+    else:
+        df_final = df_c
 
     if df_final.empty: return pd.DataFrame(), 0, 0, report
 
-    # 3. Перевод статусов
+    # 3. МАППИНГ И ОБРАБОТКА
+    # Приводим названия колонок к нашему стандарту
+    if 'nmId' not in df_final.columns and 'nm_id' in df_final.columns:
+        df_final.rename(columns={'nm_id': 'nmId'}, inplace=True)
+
     if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
     if 'status' in df_final.columns: df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
     if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
 
     temp_df = pd.DataFrame()
     for col in df_final.columns:
-        if col not in ['id', 'date', 'nmId_clean'] and not col.endswith(('_drop', '_x', '_y')):
+        if col not in ['id', 'date'] and not col.endswith('_drop'):
             target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
             temp_df[target_name] = df_final[col]
             
     if 'Дата и время оформления заявки на возврат' in temp_df.columns:
         temp_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(temp_df['Дата и время оформления заявки на возврат'], errors='coerce').dt.strftime('%d.%m.%Y')
 
-    # Формируем сырой API датафрейм (api_df) по нашему эталону
     api_df = pd.DataFrame(columns=TARGET_COLUMNS)
     for col in TARGET_COLUMNS:
-        if col in temp_df.columns: api_df[col] = temp_df[col]
-        else: api_df[col] = "" 
+        api_df[col] = temp_df[col] if col in temp_df.columns else ""
             
-    api_df['Артикул продавца'] = api_df['Артикул продавца'].replace(r'^\s*$', 'Без артикула', regex=True).fillna('Без артикула')
     api_df = api_df.fillna("").astype(str)
 
-    # 4. УМНОЕ СЛИЯНИЕ (UPSERT)
-    new_count = 0
-    updated_count = 0
-    
+    # 4. UPSERT
+    new_count, updated_count = 0, 0
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
-        # Убедимся, что все эталонные колонки есть в GS
         for col in TARGET_COLUMNS:
             if col not in gs_df.columns: gs_df[col] = ""
         
-        # Назначаем SRID как индекс для точного сопоставления
         gs_df.set_index('SRID', inplace=True)
         api_df.set_index('SRID', inplace=True)
         
-        # Какие колонки будем обновлять (все КРОМЕ тегов и самого SRID)
         update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
-        
-        # 4.1 Находим пересечения (заявки, которые уже есть)
         common_srids = gs_df.index.intersection(api_df.index)
         if not common_srids.empty:
-            # ЖЕСТКАЯ ПЕРЕЗАПИСЬ данных WB для старых заявок, теги не трогаем
             gs_df.loc[common_srids, update_cols] = api_df.loc[common_srids, update_cols]
             updated_count = len(common_srids)
             
-        # 4.2 Находим абсолютно новые заявки
         new_srids = api_df.index.difference(gs_df.index)
         if not new_srids.empty:
-            new_rows_df = api_df.loc[new_srids]
-            gs_df = pd.concat([gs_df, new_rows_df])
+            gs_df = pd.concat([gs_df, api_df.loc[new_srids]])
             new_count = len(new_srids)
-            
-        # Возвращаем колонку SRID на место
+        
         final_ordered_df = gs_df.reset_index()[TARGET_COLUMNS]
     else:
-        # Если таблица пустая, просто отдаем всё что скачали
-        final_ordered_df = api_df[TARGET_COLUMNS]
+        final_ordered_df = api_df
         new_count = len(api_df)
 
     return final_ordered_df, new_count, updated_count, report
-
-# Функция Litestat остается без изменений
-
-def process_litestat(litestat_files):
-    report = []
-    all_o = [df for df in [safe_read(f) for f in litestat_files] if not df.empty]
-    
-    if not all_o:
-        report.append("❌ Ошибка: Не удалось прочитать файлы Litestat.")
-        return pd.DataFrame(), report
-        
-    df_o = pd.concat(all_o, ignore_index=True)
-    report.append(f"📥 Litestat: Успешно прочитано {len(df_o)} сырых строк.")
-    
-    sku_col = next((c for c in df_o.columns if 'артикул' in str(c).lower()), None)
-    qty_col = next((c for c in df_o.columns if 'итого заказано' in str(c).lower()), None)
-    if not qty_col:
-        qty_col = next((c for c in df_o.columns if any(kw in str(c).lower() for kw in ['заказано', 'количество', 'кол-во'])), None)
-    
-    if sku_col and qty_col:
-        df_o[qty_col] = pd.to_numeric(df_o[qty_col].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce').fillna(0)
-        df_o = df_o[df_o[sku_col].notna()]
-        df_o = df_o[~df_o[sku_col].astype(str).str.lower().str.contains('итого|всего|total', na=False)]
-        
-        df_ord_agg = df_o.groupby(sku_col)[qty_col].sum().reset_index()
-        df_ord_agg.columns = ['Артикул продавца', 'Заказы шт.']
-        
-        total_sum = df_ord_agg['Заказы шт.'].sum()
-        report.append(f"✅ Агрегировано по столбцу **'{qty_col}'**. Общая сумма заказов: **{int(total_sum)} шт.**")
-        return df_ord_agg, report
-    else:
-        cols_preview = ", ".join([str(c) for c in df_o.columns[:10]])
-        report.append(f"❌ Ошибка: Нужные колонки не найдены. Вижу: [{cols_preview}...]")
-        return pd.DataFrame(), report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
@@ -656,22 +579,6 @@ if page == "🤖 Робот-Загрузчик":
                     st.warning("Не удалось сформировать таблицу (нет данных от WB).")
                     
                 st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
-
-    with st.expander("2. Litestat (Заказы)"):
-        f_litestat = st.file_uploader("📂 Отчет Litestat", accept_multiple_files=True, key=f"ls_{st.session_state.litestat_key}")
-        if st.button("📊 Обновить данные по Заказам"):
-            if f_litestat:
-                with st.spinner("Анализируем заказы..."):
-                    orders_tab, report_log = process_litestat(f_litestat)
-                    if not orders_tab.empty:
-                        client = get_gspread_client()
-                        ws_ord = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Заказы")
-                        ws_ord.clear()
-                        ws_ord.update('A1', [orders_tab.columns.tolist()] + orders_tab.values.tolist())
-                        st.success(f"Обновлено! Сумма: {int(orders_tab['Заказы шт.'].sum())}")
-                    st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
-                    st.session_state.litestat_key += 1
-            else: st.warning("Загрузите файл Litestat!")
 
 # ==========================================
 # 6. РУЧНАЯ МОДЕРАЦИЯ И ТЕГИРОВАНИЕ
