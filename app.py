@@ -97,6 +97,17 @@ COLUMN_NAMES_RU = {
     'saleID': 'Уникальный ID продажи/возврата',
     'sticker': 'ID стикера',
     'gNumber': 'ID корзины покупателя'
+
+    # --- Специфичные поля метода Orders (Заказы) ---
+    'date': 'Дата и время заказа (со склада)',
+    'isCancel': 'Отменен покупателем (Да/Нет)',
+    'cancelDate': 'Дата и время отмены заказа',
+    'orderType': 'Тип заказа (Клиентский/Внутренний)',
+    
+    # --- Специфичные поля метода Sales (Продажи) ---
+    'saleID': 'Уникальный ID продажи', # У тебя он был назван "Уникальный ID продажи/возврата", можно оставить свой
+    'term': 'Срок доставки до покупателя (в днях)',
+    'IsStorno': 'Признак сторно (ошибочная продажа)',
 }
 
 # --- СЛОВАРИ СТАТУСОВ ---
@@ -109,6 +120,13 @@ STATUSES = {
     '0': 'На рассмотрении',
     '1': 'Отказ',
     '2': 'Одобрено'
+}
+
+BOOLEAN_RU = {
+    True: 'Да', False: 'Нет',
+    'true': 'Да', 'false': 'Нет',
+    'True': 'Да', 'False': 'Нет',
+    1: 'Да', 0: 'Нет'
 }
 
 STATUS_EX = {
@@ -376,6 +394,7 @@ def process_wb_api_sync(existing_gs_records):
     if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
     if 'status' in df_final.columns: df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
     if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
+    if 'isCancel' in df_final.columns: df_final['isCancel'] = df_final['isCancel'].map(BOOLEAN_RU).fillna(df_final['isCancel'])
 
     temp_df = pd.DataFrame()
     for col in df_final.columns:
