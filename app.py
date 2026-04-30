@@ -259,7 +259,6 @@ def fetch_wb_api(url, params=None):
                 time.sleep(10)
                 continue
             elif response.status_code == 404:
-                # Если путь не найден, фиксируем это для отладки, но не прерываем всё приложение
                 return {"error_404": True}
             else:
                 return {"error": response.status_code, "text": response.text}
@@ -290,9 +289,8 @@ def process_wb_api_sync(existing_gs_records):
     
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
 
-    # 1. ТЯНЕМ CLAIMS (Исправленный URL)
+    # 1. ТЯНЕМ CLAIMS
     st.info("⏳ Запрашиваем Претензии...")
-    # Попробуем официальный актуальный эндпоинт для претензий
     claims_url = "https://advert-api.wildberries.ru/api/v1/claims" 
     
     claims_data = []
@@ -303,14 +301,12 @@ def process_wb_api_sync(existing_gs_records):
         df_c = pd.DataFrame(claims_data)
         report.append(f"📥 Претензии: Получено {len(df_c)} строк.")
     else:
-        # Если метод претензий всё еще недоступен, создаем пустой DF, чтобы не упасть
         report.append("⚠️ Метод Claims временно недоступен или пуст. Работаем только с Sales.")
         df_c = pd.DataFrame()
 
-    # 2. ТЯНЕМ SALES (Этот метод работает!)
-    st.info("⏳ Запрашиваем данные по Продажам...")
+    # 2. ТЯНЕМ SALES
+    st.info("⏳ Запрашиваем данные по Продажам (за 30 дней)...")
     sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
-    # Для первого теста возьмем последние 30 дней, чтобы не перегружать память
     date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00")
     
     sales_raw = fetch_wb_api(sales_url, params={"dateFrom": date_from})
@@ -318,12 +314,9 @@ def process_wb_api_sync(existing_gs_records):
     if isinstance(sales_raw, list) and len(sales_raw) > 0:
         df_r = pd.DataFrame(sales_raw)
         report.append(f"📦 Склад: Получено {len(df_r)} записей.")
-        
-        # Если у нас нет claims, но есть sales, мы всё равно можем создать базу
         if df_c.empty:
             df_final = df_r
         else:
-            # Склеиваем по SRID
             df_final = pd.merge(df_c, df_r, on='srid', how='outer', suffixes=('', '_drop'))
     else:
         df_final = df_c
@@ -331,7 +324,6 @@ def process_wb_api_sync(existing_gs_records):
     if df_final.empty: return pd.DataFrame(), 0, 0, report
 
     # 3. МАППИНГ И ОБРАБОТКА
-    # Приводим названия колонок к нашему стандарту
     if 'nmId' not in df_final.columns and 'nm_id' in df_final.columns:
         df_final.rename(columns={'nm_id': 'nmId'}, inplace=True)
 
@@ -354,18 +346,24 @@ def process_wb_api_sync(existing_gs_records):
             
     api_df = api_df.fillna("").astype(str)
 
-    # 4. UPSERT
+    # 4. UPSERT (СЛИЯНИЕ С ЗАЩИТОЙ ОТ ДУБЛИКАТОВ)
     new_count, updated_count = 0, 0
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
         for col in TARGET_COLUMNS:
             if col not in gs_df.columns: gs_df[col] = ""
+            
+        # --- ФИКС ДУБЛИКАТОВ ---
+        # Удаляем дубли из старой базы и из новой, оставляя только самые свежие записи
+        gs_df = gs_df.drop_duplicates(subset=['SRID'], keep='last')
+        api_df = api_df.reset_index(drop=True).drop_duplicates(subset=['SRID'], keep='last')
         
         gs_df.set_index('SRID', inplace=True)
         api_df.set_index('SRID', inplace=True)
         
         update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
         common_srids = gs_df.index.intersection(api_df.index)
+        
         if not common_srids.empty:
             gs_df.loc[common_srids, update_cols] = api_df.loc[common_srids, update_cols]
             updated_count = len(common_srids)
@@ -377,8 +375,9 @@ def process_wb_api_sync(existing_gs_records):
         
         final_ordered_df = gs_df.reset_index()[TARGET_COLUMNS]
     else:
-        final_ordered_df = api_df
-        new_count = len(api_df)
+        # Если таблица пустая, тоже чистим скачанное от дублей перед вставкой
+        final_ordered_df = api_df.reset_index(drop=True).drop_duplicates(subset=['SRID'], keep='last')[TARGET_COLUMNS]
+        new_count = len(final_ordered_df)
 
     return final_ordered_df, new_count, updated_count, report
         
