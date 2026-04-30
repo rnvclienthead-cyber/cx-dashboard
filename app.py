@@ -301,78 +301,74 @@ def process_wb_api_sync(existing_gs_records):
     # 1. ТЯНЕМ ЯДРО - CLAIMS (ПРЕТЕНЗИИ)
     st.info("⏳ Запрашиваем Претензии (Активные и Архивные)...")
     claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
-    
     claims_data = []
     
-    # Проходимся по двум типам заявок: активные ("false") и архивные ("true")
     for archive_status in ["false", "true"]:
         params = {"limit": 100, "offset": 0, "is_archive": archive_status} 
         
         while True:
             res_c = fetch_wb_api(claims_url, params=params)
             
-            # --- ДИАГНОСТИКА ОТВЕТА ---
             if res_c and isinstance(res_c, dict):
                 if res_c.get("error_401"):
-                    st.error("🛑 Ошибка 401: Токен не принят. Проверь галочку 'Возвраты покупателей'.")
                     report.append("❌ Ошибка авторизации (401) в методе Claims.")
                     return pd.DataFrame(), 0, 0, report
                 if res_c.get("error_404"):
-                    report.append("❌ Метод Claims вернул 404 (Не найдено).")
+                    report.append("❌ Метод Claims вернул 404.")
                     return pd.DataFrame(), 0, 0, report
                 if res_c.get("error"):
-                    st.error(f"🛑 Ошибка WB API: {res_c.get('error')} -> {res_c.get('text')}")
-                    report.append(f"❌ Сбой API при скачивании Claims: {res_c.get('error')}.")
+                    report.append(f"❌ Сбой API Claims: {res_c.get('error')}.")
                     return pd.DataFrame(), 0, 0, report
                     
                 batch = res_c.get("claims", [])
-                
-                if not batch: 
-                    break 
+                if not batch: break 
                     
                 claims_data.extend(batch)
                 
-                # Если пришло меньше лимита, значит это последняя страница для текущего статуса
-                if len(batch) < params["limit"]:
-                    break
-                    
+                if len(batch) < params["limit"]: break
                 params["offset"] += params["limit"]
                 time.sleep(3.5) 
             else:
                 break
 
     if not claims_data:
-        st.warning("⚠️ WB ответил 'ОК', но список претензий пуст.")
         report.append("⚠️ За этот период новых претензий не найдено. Работа остановлена.")
         return pd.DataFrame(), 0, 0, report
         
     df_c = pd.DataFrame(claims_data)
     
-    # ЖЕСТКИЙ ФИЛЬТР: Только строки, где есть текст комментария
     comment_col = 'user_comment' if 'user_comment' in df_c.columns else 'comment'
     if comment_col in df_c.columns:
         df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
         
-    report.append(f"📥 Претензии (Ядро): Успешно скачано {len(df_c)} целевых заявок с текстом.")
+    report.append(f"📥 Претензии (Ядро): Скачано {len(df_c)} заявок с текстом.")
 
-    # 2. ТЯНЕМ SALES ДЛЯ ОБОГАЩЕНИЯ (ЗА 180 ДНЕЙ)
-    st.info("⏳ Запрашиваем данные по Продажам (за полгода) для поиска логистики...")
-    # Метод статистики имеет лимит 1 запрос в минуту. Небольшая пауза.
-    time.sleep(2)
-    sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
+    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (ЗА 180 ДНЕЙ)
+    st.info("⏳ Запрашиваем логистику (Продажи + Заказы) для поиска совпадений...")
     date_from = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00")
     
+    time.sleep(2) # Пауза перед сменой метода
+    sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
     sales_raw = fetch_wb_api(sales_url, params={"dateFrom": date_from})
-    
-    if isinstance(sales_raw, list) and len(sales_raw) > 0:
-        df_r = pd.DataFrame(sales_raw)
-        report.append(f"📦 Склад: База в {len(df_r)} продаж загружена в память для поиска совпадений.")
+    df_sales = pd.DataFrame(sales_raw) if isinstance(sales_raw, list) else pd.DataFrame()
+
+    time.sleep(2) # Пауза перед сменой метода
+    orders_url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
+    orders_raw = fetch_wb_api(orders_url, params={"dateFrom": date_from})
+    df_orders = pd.DataFrame(orders_raw) if isinstance(orders_raw, list) else pd.DataFrame()
+
+    if not df_sales.empty or not df_orders.empty:
+        # Склеиваем обе базы в одну
+        df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
+        # Удаляем дубликаты по SRID, чтобы не задваивать данные
+        df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
+        report.append(f"📦 Логистика: Собрана база из {len(df_logistics)} уникальных записей.")
         
-        # LEFT JOIN: Оставляем только претензии, подтягивая к ним логистику
-        df_final = pd.merge(df_c, df_r, on='srid', how='left', suffixes=('', '_drop'))
+        # LEFT JOIN: Приклеиваем логистику к претензиям
+        df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_drop'))
         report.append("🔗 Найдена и прикреплена логистика для претензий.")
     else:
-        report.append("⚠️ Данные по продажам не получены. Претензии загружены без привязки к поставкам.")
+        report.append("⚠️ Данные по логистике не получены. Претензии загружены 'как есть'.")
         df_final = df_c
 
     # 3. МАППИНГ И ОБРАБОТКА
