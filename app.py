@@ -303,8 +303,8 @@ def process_wb_api_sync(existing_gs_records):
     claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
     
     claims_data = []
-    # Безопасный лимит для пагинации
-    params = {"limit": 100, "offset": 0} 
+    # Добавлен обязательный параметр is_archive
+    params = {"limit": 100, "offset": 0, "is_archive": "false"}
     
     while True:
         res_c = fetch_wb_api(claims_url, params=params)
