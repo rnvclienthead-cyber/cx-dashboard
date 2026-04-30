@@ -496,23 +496,52 @@ def process_wb_api_sync(existing_gs_records):
     for col in TARGET_COLUMNS: api_df[col] = temp_df[col] if col in temp_df.columns else ""
     api_df = api_df.fillna("").astype(str)
 
-    # 4. UPSERT
+    # 4. UPSERT (УМНОЕ СЛИЯНИЕ С ЗАЩИТОЙ ОТ ДУБЛИКАТОВ)
+    new_count, updated_count = 0, 0
+    
+    # Очистка API данных перед индексацией
+    api_df['SRID'] = api_df['SRID'].astype(str).str.strip()
+    api_df = api_df[api_df['SRID'] != ""] # Убираем пустые SRID
+    api_df = api_df.drop_duplicates(subset=['SRID'], keep='last')
+    api_df.set_index('SRID', inplace=True)
+
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
-        gs_df.set_index('SRID', inplace=True)
-        api_df.set_index('SRID', inplace=True)
         
-        update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
-        common = gs_df.index.intersection(api_df.index)
-        if not common.empty: gs_df.loc[common, update_cols] = api_df.loc[common, update_cols]
-        
-        new_items = api_df.index.difference(gs_df.index)
-        if not new_items.empty: gs_df = pd.concat([gs_df, api_df.loc[new_items]])
-        
-        final_df = gs_df.reset_index()[TARGET_COLUMNS]
-        return final_df, df_orders_summary, len(new_items), len(common), report
+        # Очистка данных из Google Таблицы
+        if 'SRID' in gs_df.columns:
+            gs_df['SRID'] = gs_df['SRID'].astype(str).str.strip()
+            gs_df = gs_df[gs_df['SRID'] != ""] # Убираем пустые
+            gs_df = gs_df.drop_duplicates(subset=['SRID'], keep='last')
+            gs_df.set_index('SRID', inplace=True)
+            
+            for col in TARGET_COLUMNS:
+                if col not in gs_df.columns: gs_df[col] = ""
+            
+            update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
+            
+            # Находим пересечения (что обновить)
+            common = gs_df.index.intersection(api_df.index)
+            if not common.empty:
+                # Теперь ошибки не будет, так как индексы уникальны
+                gs_df.loc[common, update_cols] = api_df.loc[common, update_cols]
+                updated_count = len(common)
+            
+            # Находим новые (чего еще нет в базе)
+            new_items = api_df.index.difference(gs_df.index)
+            if not new_items.empty:
+                gs_df = pd.concat([gs_df, api_df.loc[new_items]])
+                new_count = len(new_items)
+            
+            final_df = gs_df.reset_index()[TARGET_COLUMNS]
+            return final_df, df_orders_summary, new_count, updated_count, report
+        else:
+            # Если в таблице нет колонки SRID, создаем с нуля
+            api_df_reset = api_df.reset_index()
+            return api_df_reset[TARGET_COLUMNS], df_orders_summary, len(api_df_reset), 0, report
     else:
-        return api_df, df_orders_summary, len(api_df), 0, report
+        api_df_reset = api_df.reset_index()
+        return api_df_reset[TARGET_COLUMNS], df_orders_summary, len(api_df_reset), 0, report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
