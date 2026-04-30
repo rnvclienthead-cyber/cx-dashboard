@@ -282,31 +282,36 @@ def process_claims_and_returns(claims_files, returned_files):
         df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
 
     res_df = pd.DataFrame()
+    
+    # 1. ФОРМИРУЕМ "ЗОЛОТОЕ ЯДРО" (Обязательные колонки в строгом порядке)
     res_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
     res_df['Артикул продавца'] = df_final.get('supplierArticle', 'Без артикула')
+    res_df['Артикул WB'] = df_final.get('nmId', '') # Вернули Артикул WB!
     res_df['Комментарий покупателя'] = df_final.get('user_comment', '')
     res_df['SRID'] = df_final.get('srid', '')
     res_df['Источник заявки'] = df_final.get('claim_type', '')
     
-    # Генерируем столбцы с чистыми цифрами (вместо Кат 1)
+    # Системные колонки ИИ
     for i in range(1, 14): res_df[str(i)] = ""
-    
     res_df['Обоснование'] = ""
     res_df['Корректировка'] = ""
     res_df['Аудит'] = ""
     res_df['Комментарий'] = ""
     
-    # Список колонок, которые мы игнорируем (технический мусор)
-    ignore_cols = ['dt', 'supplierArticle', 'user_comment', 'srid', 'claim_type', 'nmId_clean', 'id', 'date']
+    # 2. ПОДТЯГИВАЕМ ВСЕ ОСТАЛЬНЫЕ ДАННЫЕ ИЗ ФАЙЛОВ
+    # Список колонок, которые мы уже добавили или которые являются техническим мусором
+    ignore_cols = ['dt', 'supplierArticle', 'user_comment', 'srid', 'claim_type', 'nmId', 'nmId_clean', 'id', 'date']
     
     for col in df_final.columns:
         # Пропускаем мусор и колонки после мерджа с суффиксами _x, _y, _drop
         if col not in ignore_cols and not col.endswith(('_drop', '_x', '_y')):
             
-            # Переименовываем incomeID в "Номер поставки" напрямую, если он есть
+            # Переименовываем по нашему словарю COLUMN_NAMES_RU
             target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
             
-            res_df[target_name] = df_final[col]
+            # Добавляем, только если такой колонки еще нет (чтобы не задвоить)
+            if target_name not in res_df.columns:
+                res_df[target_name] = df_final[col]
             
     return res_df, report
 
