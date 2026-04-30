@@ -238,11 +238,46 @@ def add_system_log(action, status, details=""):
         st.error(f"🚨 ОШИБКА ЗАПИСИ ЛОГА В ГУГЛ ТАБЛИЦУ: {e}")
 
 # ==========================================
-# 3. ОБРАБОТКА ДАННЫХ
+# 3. ОБРАБОТКА ДАННЫХ И API WILDBERRIES
 # ==========================================
-def process_claims_and_returns(claims_files, returned_files):
+import requests
+import time
+
+try:
+    WB_API_KEY = st.secrets["WB_API_KEY"]
+except:
+    WB_API_KEY = None
+
+def fetch_wb_api(url, params=None):
+    """Универсальная функция запроса к API WB с защитой от лимитов (429)"""
+    headers = {"Authorization": WB_API_KEY}
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 429:
+                st.warning("⚠️ WB просит подождать (лимит запросов). Ждем 5 секунд...")
+                time.sleep(5)
+                continue
+            elif response.status_code == 401:
+                st.error("❌ Ошибка: API Ключ WB недействителен.")
+                return None
+            else:
+                st.error(f"❌ Ошибка API WB {response.status_code}: {response.text}")
+                return None
+        except Exception as e:
+            st.error(f"❌ Ошибка сети: {e}")
+            time.sleep(2)
+    return None
+
+def process_wb_api_sync(existing_gs_records):
     report = []
-    
+    if not WB_API_KEY:
+        report.append("❌ Ошибка: Не найден ключ WB_API_KEY в Secrets.")
+        return pd.DataFrame(), 0, 0, report
+
     # === ЖЕЛЕЗОБЕТОННЫЙ ЭТАЛОН КОЛОНОК (Из файла 111.xlsx) ===
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
@@ -257,65 +292,132 @@ def process_claims_and_returns(claims_files, returned_files):
         'Скидка за оплату WB Кошельком, ₽', 'К перечислению продавцу', 'Фактическая цена с учётом всех скидок', 
         'Цена со скидкой продавца', 'Уникальный ID продажи/возврата', 'ID стикера', 'ID корзины покупателя'
     ]
-
-    raw_claims = pd.concat([safe_read(f) for f in claims_files], ignore_index=True)
     
-    # Решаем проблему с дублями артикулов WB
-    if 'nm_id' in raw_claims.columns:
-        if 'nmId' not in raw_claims.columns: raw_claims.rename(columns={'nm_id': 'nmId'}, inplace=True)
-        else: raw_claims.drop(columns=['nm_id'], inplace=True)
-            
-    df_c = raw_claims.drop_duplicates(subset=['srid']) if 'srid' in raw_claims.columns else raw_claims.drop_duplicates()
+    # КОЛОНКИ, КОТОРЫЕ НЕЛЬЗЯ ПЕРЕЗАПИСЫВАТЬ У СТАРЫХ ЗАЯВОК (Зона Наша)
+    MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
+
+    # 1. Тянем Claims 
+    st.info("⏳ Запрашиваем Претензии (Claims) с серверов Wildberries...")
+    claims_url = "https://supplies-api.wildberries.ru/api/v1/claims" 
     
-    report.append(f"📥 Претензии: Загружено {len(raw_claims)} строк.")
-    if len(raw_claims) > len(df_c):
-        report.append(f"🧹 Удалено локальных дублей: {len(raw_claims) - len(df_c)} шт.")
-
-    df_final = df_c
-    if returned_files:
-        df_r = pd.concat([safe_read(f) for f in returned_files], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
+    claims_data = []
+    limit, offset = 100, 0
+    while True:
+        res = fetch_wb_api(claims_url, params={"limit": limit, "offset": offset})
+        if res and isinstance(res, dict) and 'claims' in res:
+            batch = res['claims']
+            claims_data.extend(batch)
+            if len(batch) < limit: break
+            offset += limit
+        elif res and isinstance(res, list): 
+             claims_data.extend(res)
+             break
+        else: break
+        time.sleep(0.5) 
         
-        # Унифицируем номер поставки
-        if 'supplyID' in df_r.columns:
-            df_r.rename(columns={'supplyID': 'incomeID'}, inplace=True)
-            
-        sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
-        df_c['nmId_clean'] = df_c['nmId'].astype(str).str.replace(r'\.0$', '', regex=True)
-        df_final = pd.merge(df_c, df_r, on='srid', how='left')
-        
-        df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nmId_clean'].map(sku_map))
-        report.append(f"📦 Склад: Успешно привязаны артикулы для {df_final['supplierArticle'].notna().sum()} заявок.")
+    if not claims_data:
+        report.append("📥 Претензии (API): Новых данных за этот период на WB не найдено.")
+        df_c = pd.DataFrame()
+    else:
+        df_c = pd.DataFrame(claims_data)
+        report.append(f"📥 Претензии (API): Получено {len(df_c)} строк.")
+        if 'nm_id' in df_c.columns:
+            if 'nmId' not in df_c.columns: df_c.rename(columns={'nm_id': 'nmId'}, inplace=True)
+            else: df_c.drop(columns=['nm_id'], inplace=True)
+        df_c = df_c.drop_duplicates(subset=['srid']) if 'srid' in df_c.columns else df_c.drop_duplicates()
 
-    # ПЕРЕВОД СТАТУСОВ (Маппинг цифр в текст)
+    # 2. Тянем Sales/Incomes (Статистика)
+    st.info("⏳ Запрашиваем данные по Продажам/Складу для обогащения...")
+    sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
+    date_from = "2024-01-01T00:00:00" # Тянем глубокую историю
+    
+    sales_data = fetch_wb_api(sales_url, params={"dateFrom": date_from})
+    
+    if not sales_data:
+        report.append("📦 Склад (API): Данные не получены.")
+        df_final = df_c
+    else:
+        df_r = pd.DataFrame(sales_data)
+        if not df_r.empty:
+            report.append(f"📦 Склад (API): Вытянута историческая база ({len(df_r)} записей).")
+            df_r = df_r.drop_duplicates(subset=['srid'], keep='last') if 'srid' in df_r.columns else df_r
+            if 'supplyID' in df_r.columns: df_r.rename(columns={'supplyID': 'incomeID'}, inplace=True)
+                
+            if not df_c.empty:
+                sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
+                df_c['nmId_clean'] = df_c['nmId'].astype(str).str.replace(r'\.0$', '', regex=True)
+                df_final = pd.merge(df_c, df_r, on='srid', how='left')
+                df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nmId_clean'].map(sku_map))
+                report.append(f"🔗 Успешно привязаны финансовые/логистические данные.")
+            else: df_final = pd.DataFrame()
+        else: df_final = df_c
+
+    if df_final.empty: return pd.DataFrame(), 0, 0, report
+
+    # 3. Перевод статусов
     if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
     if 'status' in df_final.columns: df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
     if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
 
-    # 1. Переименовываем все пришедшие от WB колонки по нашему словарю
     temp_df = pd.DataFrame()
     for col in df_final.columns:
         if col not in ['id', 'date', 'nmId_clean'] and not col.endswith(('_drop', '_x', '_y')):
             target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
             temp_df[target_name] = df_final[col]
             
-    # Особое форматирование дат
     if 'Дата и время оформления заявки на возврат' in temp_df.columns:
         temp_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(temp_df['Дата и время оформления заявки на возврат'], errors='coerce').dt.strftime('%d.%m.%Y')
 
-    # 2. Собираем итоговую таблицу СТРОГО ПО ЭТАЛОНУ из 61 колонки
-    final_ordered_df = pd.DataFrame(columns=TARGET_COLUMNS)
+    # Формируем сырой API датафрейм (api_df) по нашему эталону
+    api_df = pd.DataFrame(columns=TARGET_COLUMNS)
     for col in TARGET_COLUMNS:
-        if col in temp_df.columns:
-            final_ordered_df[col] = temp_df[col]
-        else:
-            final_ordered_df[col] = "" # Оставляем колонку пустой
+        if col in temp_df.columns: api_df[col] = temp_df[col]
+        else: api_df[col] = "" 
             
-    final_ordered_df['Артикул продавца'] = final_ordered_df['Артикул продавца'].replace(r'^\s*$', 'Без артикула', regex=True).fillna('Без артикула')
-    
-    # Заменяем NaN на пустые строки для красивого вывода в Google Sheets
-    final_ordered_df = final_ordered_df.fillna("")
+    api_df['Артикул продавца'] = api_df['Артикул продавца'].replace(r'^\s*$', 'Без артикула', regex=True).fillna('Без артикула')
+    api_df = api_df.fillna("").astype(str)
 
-    return final_ordered_df, report
+    # 4. УМНОЕ СЛИЯНИЕ (UPSERT)
+    new_count = 0
+    updated_count = 0
+    
+    if existing_gs_records:
+        gs_df = pd.DataFrame(existing_gs_records).astype(str)
+        # Убедимся, что все эталонные колонки есть в GS
+        for col in TARGET_COLUMNS:
+            if col not in gs_df.columns: gs_df[col] = ""
+        
+        # Назначаем SRID как индекс для точного сопоставления
+        gs_df.set_index('SRID', inplace=True)
+        api_df.set_index('SRID', inplace=True)
+        
+        # Какие колонки будем обновлять (все КРОМЕ тегов и самого SRID)
+        update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
+        
+        # 4.1 Находим пересечения (заявки, которые уже есть)
+        common_srids = gs_df.index.intersection(api_df.index)
+        if not common_srids.empty:
+            # ЖЕСТКАЯ ПЕРЕЗАПИСЬ данных WB для старых заявок, теги не трогаем
+            gs_df.loc[common_srids, update_cols] = api_df.loc[common_srids, update_cols]
+            updated_count = len(common_srids)
+            
+        # 4.2 Находим абсолютно новые заявки
+        new_srids = api_df.index.difference(gs_df.index)
+        if not new_srids.empty:
+            new_rows_df = api_df.loc[new_srids]
+            gs_df = pd.concat([gs_df, new_rows_df])
+            new_count = len(new_srids)
+            
+        # Возвращаем колонку SRID на место
+        final_ordered_df = gs_df.reset_index()[TARGET_COLUMNS]
+    else:
+        # Если таблица пустая, просто отдаем всё что скачали
+        final_ordered_df = api_df[TARGET_COLUMNS]
+        new_count = len(api_df)
+
+    return final_ordered_df, new_count, updated_count, report
+
+# Функция Litestat остается без изменений
 
 def process_litestat(litestat_files):
     report = []
@@ -517,38 +619,35 @@ def get_col_letter(col_idx):
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
 if page == "🤖 Робот-Загрузчик":
-    st.title("🤖 Робот-Загрузчик")
+    st.title("🤖 Робот-Загрузчик (API Режим)")
     
-    with st.expander("1. Претензии и Склад", expanded=True):
-        c1, c2 = st.columns(2)
-        f_claims = c1.file_uploader("📂 Загрузите Претензии", accept_multiple_files=True, key=f"cl_{st.session_state.claims_key}")
-        f_returned = c2.file_uploader("📂 Загрузите Склад", accept_multiple_files=True)
+    with st.expander("1. Синхронизация с API Wildberries", expanded=True):
+        st.write("Робот сам подключится к WB, заберет новые претензии и обновит статусы у старых, не трогая ваши теги.")
         
-        if st.button("🚀 Синхронизировать Претензии", type="primary"):
-            if f_claims:
-                with st.spinner("Склеиваем данные и проверяем дубликаты..."):
-                    final_tab, report_log = process_claims_and_returns(f_claims, f_returned)
-                    client = get_gspread_client()
-                    ws_ret = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
+        if st.button("🚀 ЗАПУСТИТЬ СИНХРОНИЗАЦИЮ", type="primary"):
+            with st.spinner("Связываемся с Wildberries, обновляем статусы и склеиваем данные..."):
+                client = get_gspread_client()
+                ws_ret = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
+                
+                # Скачиваем текущую базу, чтобы передать ее в функцию слияния
+                existing_data = ws_ret.get_all_records()
+                
+                # Запускаем магию
+                final_tab, new_added, rows_updated, report_log = process_wb_api_sync(existing_data)
+                
+                if not final_tab.empty:
+                    # Если есть хоть какие-то данные, полностью перезаписываем лист Гугла
+                    # Это безопасно, т.к. наши теги сохранены внутри final_tab на шаге слияния
+                    ws_ret.clear()
+                    ws_ret.update([final_tab.columns.values.tolist()] + final_tab.values.tolist())
                     
-                    existing_data = ws_ret.get_all_records(expected_headers=final_tab.columns.tolist())
-                    existing_srids = set([str(row.get('SRID', '')) for row in existing_data if row.get('SRID')])
-                    report_log.append(f"☁️ Найдено в Google Таблице: {len(existing_data)} записей.")
+                    report_log.append(f"🔄 **Обновлено старых заявок:** {rows_updated} шт. (Статусы и логистика актуализированы)")
+                    report_log.append(f"✅ **Добавлено новых заявок:** {new_added} шт.")
+                    st.success("Синхронизация успешно завершена! Таблица актуальна.")
+                else:
+                    st.warning("Не удалось сформировать таблицу (нет данных от WB).")
                     
-                    new_data = final_tab[~final_tab['SRID'].astype(str).isin(existing_srids)]
-                    duplicates_gs = len(final_tab) - len(new_data)
-                    if duplicates_gs > 0: report_log.append(f"🛡️ Отсеяно дублей (уже есть в Google): {duplicates_gs} шт.")
-                    report_log.append(f"✅ К добавлению: **{len(new_data)} новых строк**.")
-
-                    if not new_data.empty:
-                        if not existing_data: ws_ret.update('A1', [new_data.columns.tolist()])
-                        ws_ret.update(f'A{len(ws_ret.get_all_values()) + 1}', new_data.fillna('').values.tolist())
-                        st.success("Данные успешно добавлены!")
-                    else: st.info("Новых уникальных заявок не найдено.")
-                    
-                    st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
-                    st.session_state.claims_key += 1
-            else: st.warning("Загрузите файл претензий!")
+                st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
 
     with st.expander("2. Litestat (Заказы)"):
         f_litestat = st.file_uploader("📂 Отчет Litestat", accept_multiple_files=True, key=f"ls_{st.session_state.litestat_key}")
