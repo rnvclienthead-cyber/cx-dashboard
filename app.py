@@ -311,10 +311,18 @@ def process_wb_api_sync(existing_gs_records):
         'Округ', 'Регион', 'Баркод', 'Категория', 'Предмет', 'Бренд', 'Размер товара', 'Номер поставки', 
         'Договор поставки', 'Договор реализации', 'Цена без скидок', 'Скидка продавца, %', 'Скидка WB, %', 
         'Скидка за оплату WB Кошельком, ₽', 'К перечислению продавцу', 'Фактическая цена с учётом всех скидок', 
-        'Цена со скидкой продавца', 'Уникальный ID продажи/возврата', 'ID стикера', 'ID корзины покупателя'
+        'Цена со скидкой продавца', 'Уникальный ID продажи/возврата', 'ID стикера', 'ID корзины покупателя',
+        'Отменен покупателем (Да/Нет)', 'Дата и время отмены заказа', 'Тип заказа (Клиентский/Внутренний)'
     ]
     
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
+
+    BOOLEAN_RU = {
+        True: 'Да', False: 'Нет',
+        'true': 'Да', 'false': 'Нет',
+        'True': 'Да', 'False': 'Нет',
+        1: 'Да', 0: 'Нет'
+    }
 
     # 1. ТЯНЕМ ЯДРО - CLAIMS
     st.info("⏳ Запрашиваем Претензии (Активные и Архивные)...")
@@ -348,9 +356,9 @@ def process_wb_api_sync(existing_gs_records):
         df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
     report.append(f"📥 Претензии: Скачано {len(df_c)} заявок с текстом.")
 
-    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (180 дней)
-    st.info("⏳ Запрашиваем логистику (Продажи + Заказы)...")
-    date_from = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00")
+    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (УВЕЛИЧЕНО ДО 365 ДНЕЙ)
+    st.info("⏳ Запрашиваем логистику за год для поиска совпадений...")
+    date_from = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00")
     
     time.sleep(2)
     sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
@@ -381,11 +389,25 @@ def process_wb_api_sync(existing_gs_records):
         report.append(f"📊 Заказы: Сформирована сводная таблица по дням ({len(df_orders_grouped)} строк).")
     # -------------------------------------------------------------
 
-    # Обогащаем претензии логистикой
+    # Обогащаем претензии логистикой (УМНОЕ СЛИЯНИЕ)
     if not df_sales.empty or not df_orders.empty:
         df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
         df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
-        df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_drop'))
+        
+        # Оставляем в логистике ТОЛЬКО те srid, которые есть в претензиях (строгий фильтр)
+        valid_srids = df_c['srid'].dropna().unique()
+        df_logistics = df_logistics[df_logistics['srid'].isin(valid_srids)]
+        
+        # Делаем srid индексом для точного сопоставления
+        df_c.set_index('srid', inplace=True)
+        df_logistics.set_index('srid', inplace=True)
+        
+        # Превращаем все "пустоты" в претензиях в настоящие пустоты (NaN)
+        df_c = df_c.replace(r'^\s*$', pd.NA, regex=True).replace(['', 'None', 'nan'], pd.NA)
+        
+        # combine_first: Берем строку претензии, и если ячейка пустая - берем из логистики
+        df_final = df_c.combine_first(df_logistics).reset_index()
+        report.append("🔗 Найдена логистика (пустые артикулы и данные складов заполнены).")
     else:
         df_final = df_c
 
@@ -394,7 +416,10 @@ def process_wb_api_sync(existing_gs_records):
     if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
     if 'status' in df_final.columns: df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
     if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
-    if 'isCancel' in df_final.columns: df_final['isCancel'] = df_final['isCancel'].map(BOOLEAN_RU).fillna(df_final['isCancel'])
+    
+    # Перевод значений Да/Нет
+    if 'isCancel' in df_final.columns: 
+        df_final['isCancel'] = df_final['isCancel'].map(BOOLEAN_RU).fillna(df_final['isCancel'])
 
     temp_df = pd.DataFrame()
     for col in df_final.columns:
