@@ -241,6 +241,8 @@ def add_system_log(action, status, details=""):
 # ==========================================
 import requests
 import time
+from datetime import datetime, timedelta
+import pandas as pd
 
 def fetch_wb_api(url, params=None):
     """Универсальная функция запроса к API WB с защитой от лимитов (429)"""
@@ -289,39 +291,49 @@ def process_wb_api_sync(existing_gs_records):
     
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
 
-    # 1. ТЯНЕМ CLAIMS
-    st.info("⏳ Запрашиваем Претензии...")
-    claims_url = "https://advert-api.wildberries.ru/api/v1/claims" 
+    # 1. ТЯНЕМ ЯДРО - CLAIMS (ПРЕТЕНЗИИ)
+    st.info("⏳ Запрашиваем Претензии (Ядро данных)...")
+    claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
     
-    claims_data = []
     res_c = fetch_wb_api(claims_url, params={"limit": 1000, "offset": 0})
     
     if res_c and not res_c.get("error_404") and not res_c.get("error"):
         claims_data = res_c if isinstance(res_c, list) else res_c.get('claims', [])
         df_c = pd.DataFrame(claims_data)
-        report.append(f"📥 Претензии: Получено {len(df_c)} строк.")
+        
+        # ЖЕСТКИЙ ФИЛЬТР: Только строки, где есть текст комментария
+        comment_col = 'user_comment' if 'user_comment' in df_c.columns else 'comment'
+        if comment_col in df_c.columns:
+            df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
+            
+        report.append(f"📥 Претензии (Ядро): Получено {len(df_c)} целевых заявок с текстом.")
     else:
-        report.append("⚠️ Метод Claims временно недоступен или пуст. Работаем только с Sales.")
-        df_c = pd.DataFrame()
+        # СТОП-КРАН: Если претензий нет, дальше не идем
+        report.append("❌ Ошибка: Метод Claims недоступен или вернул пустой ответ. Обогащение остановлено.")
+        return pd.DataFrame(), 0, 0, report
 
-    # 2. ТЯНЕМ SALES
-    st.info("⏳ Запрашиваем данные по Продажам (за 30 дней)...")
+    # Если вытянули claims, но все они оказались без текста
+    if df_c.empty:
+        report.append("⚠️ За этот период новых претензий с текстом не найдено.")
+        return pd.DataFrame(), 0, 0, report
+
+    # 2. ТЯНЕМ SALES ДЛЯ ОБОГАЩЕНИЯ (ЗА 180 ДНЕЙ)
+    st.info("⏳ Запрашиваем данные по Продажам (за полгода) для поиска логистики...")
     sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
-    date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00")
+    date_from = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00")
     
     sales_raw = fetch_wb_api(sales_url, params={"dateFrom": date_from})
     
     if isinstance(sales_raw, list) and len(sales_raw) > 0:
         df_r = pd.DataFrame(sales_raw)
-        report.append(f"📦 Склад: Получено {len(df_r)} записей.")
-        if df_c.empty:
-            df_final = df_r
-        else:
-            df_final = pd.merge(df_c, df_r, on='srid', how='outer', suffixes=('', '_drop'))
+        report.append(f"📦 Склад: База в {len(df_r)} продаж загружена в память для поиска совпадений.")
+        
+        # LEFT JOIN: Берем ТОЛЬКО наши Claims и подклеиваем к ним данные из Sales
+        df_final = pd.merge(df_c, df_r, on='srid', how='left', suffixes=('', '_drop'))
+        report.append("🔗 Найдена и прикреплена логистика для претензий.")
     else:
+        report.append("⚠️ Данные по продажам не получены. Претензии загружены без привязки к поставкам.")
         df_final = df_c
-
-    if df_final.empty: return pd.DataFrame(), 0, 0, report
 
     # 3. МАППИНГ И ОБРАБОТКА
     if 'nmId' not in df_final.columns and 'nm_id' in df_final.columns:
@@ -346,15 +358,13 @@ def process_wb_api_sync(existing_gs_records):
             
     api_df = api_df.fillna("").astype(str)
 
-    # 4. UPSERT (СЛИЯНИЕ С ЗАЩИТОЙ ОТ ДУБЛИКАТОВ)
+    # 4. UPSERT (УМНОЕ СЛИЯНИЕ С ГУГЛ ТАБЛИЦЕЙ)
     new_count, updated_count = 0, 0
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
         for col in TARGET_COLUMNS:
             if col not in gs_df.columns: gs_df[col] = ""
             
-        # --- ФИКС ДУБЛИКАТОВ ---
-        # Удаляем дубли из старой базы и из новой, оставляя только самые свежие записи
         gs_df = gs_df.drop_duplicates(subset=['SRID'], keep='last')
         api_df = api_df.reset_index(drop=True).drop_duplicates(subset=['SRID'], keep='last')
         
@@ -375,7 +385,6 @@ def process_wb_api_sync(existing_gs_records):
         
         final_ordered_df = gs_df.reset_index()[TARGET_COLUMNS]
     else:
-        # Если таблица пустая, тоже чистим скачанное от дублей перед вставкой
         final_ordered_df = api_df.reset_index(drop=True).drop_duplicates(subset=['SRID'], keep='last')[TARGET_COLUMNS]
         new_count = len(final_ordered_df)
 
