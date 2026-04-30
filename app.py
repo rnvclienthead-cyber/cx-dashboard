@@ -394,7 +394,7 @@ def process_wb_api_sync(existing_gs_records):
         report.append("❌ Ошибка: Ключ WB_API_KEY не найден.")
         return pd.DataFrame(), pd.DataFrame(), 0, 0, report
 
-    # --- КОЛОНКИ ---
+    # --- 1. Артикул WB УДАЛЕН ИЗ СПИСКА ---
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Комментарий покупателя', 
         'SRID', 'Источник заявки', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 
@@ -447,22 +447,18 @@ def process_wb_api_sync(existing_gs_records):
     df_orders_for_claims = fetch_wb_logistics_filtered(orders_url, date_from, target_srids, "Заказы (поиск)")
     df_orders_summary = fetch_wb_orders_summary_optimized(orders_url, date_from)
 
-    # --- ЖЕСТКОЕ ОБОГАЩЕНИЕ ПРЕТЕНЗИЙ ---
+    # --- 2. ОБОГАЩЕНИЕ (Усиленный поиск артикула) ---
     if not df_sales.empty or not df_orders_for_claims.empty:
         df_logistics = pd.concat([df_sales, df_orders_for_claims], ignore_index=True)
         df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
         
-        # Расширенный маппинг артикулов (учитываем все варианты имен из разных API)
-        df_c.rename(columns={
-            'nm_id': 'nmId', 
-            'supplier_article': 'supplierArticle', 
-            'sa_name': 'supplierArticle',
-            'article': 'supplierArticle'
-        }, inplace=True)
+        # Переименовываем все варианты имен артикула в стандарт
+        df_c.rename(columns={'nm_id': 'nmId', 'supplier_article': 'supplierArticle', 'sa_name': 'supplierArticle', 'article': 'supplierArticle'}, inplace=True)
         
         df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_log'))
         
-        for col in ['supplierArticle', 'warehouseName', 'nmId', 'category', 'subject', 'brand']:
+        # Если артикул пустой — берем из логов. Артикул WB тоже подтягиваем из логов, если нужно.
+        for col in ['supplierArticle', 'warehouseName', 'category', 'subject', 'brand', 'nmId']:
             log_col = f"{col}_log"
             if log_col in df_final.columns:
                 df_final[col] = df_final[col].replace(['nan', 'NaN', 'None', '', None], pd.NA)
@@ -470,11 +466,7 @@ def process_wb_api_sync(existing_gs_records):
     else:
         df_final = df_c
 
-    # 3. МАППИНГ НА РУССКИЙ
-    if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
-    if 'status' in df_final.columns: df_final['Решение по возврату покупателю'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
-    if 'isCancel' in df_final.columns: df_final['isCancel'] = df_final['isCancel'].map(BOOLEAN_RU).fillna(df_final['isCancel'])
-
+    # --- 3. ПОДГОТОВКА temp_df ---
     temp_df = pd.DataFrame()
     for col in df_final.columns:
         if col not in ['id', 'date'] and not col.endswith('_log'):
@@ -482,29 +474,30 @@ def process_wb_api_sync(existing_gs_records):
             temp_df[target_name] = df_final[col]
             
     api_df = pd.DataFrame(columns=TARGET_COLUMNS)
-    for col in TARGET_COLUMNS: api_df[col] = temp_df[col] if col in temp_df.columns else ""
-    api_df = api_df.fillna("").astype(str)
+    for col in TARGET_COLUMNS:
+        api_df[col] = temp_df[col] if col in temp_df.columns else ""
 
-    # 4. UPSERT (С ЗАЩИТОЙ ОТ ДУБЛИКАТОВ)
+    # --- 4. UPSERT (ИСПРАВЛЕННЫЙ) ---
     new_count, updated_count = 0, 0
     api_df['SRID'] = api_df['SRID'].astype(str).str.strip()
-    api_df = api_df[api_df['SRID'] != ""] 
-    api_df = api_df.drop_duplicates(subset=['SRID'], keep='last')
+    api_df = api_df[api_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
     api_df.set_index('SRID', inplace=True)
 
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
         if 'SRID' in gs_df.columns:
             gs_df['SRID'] = gs_df['SRID'].astype(str).str.strip()
-            gs_df = gs_df[gs_df['SRID'] != ""] 
-            gs_df = gs_df.drop_duplicates(subset=['SRID'], keep='last')
+            gs_df = gs_df[gs_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
             gs_df.set_index('SRID', inplace=True)
             
+            # ФИКС ОШИБКИ: Проверяем наличие колонок, пропуская индекс SRID
             for col in TARGET_COLUMNS:
-                if col not in gs_df.columns: gs_df[col] = ""
+                if col != 'SRID' and col not in gs_df.columns: 
+                    gs_df[col] = ""
             
             update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
             common = gs_df.index.intersection(api_df.index)
+            
             if not common.empty:
                 gs_df.loc[common, update_cols] = api_df.loc[common, update_cols]
                 updated_count = len(common)
@@ -514,14 +507,16 @@ def process_wb_api_sync(existing_gs_records):
                 gs_df = pd.concat([gs_df, api_df.loc[new_items]])
                 new_count = len(new_items)
             
-            final_df = gs_df.reset_index()[TARGET_COLUMNS]
+            # ФИКС: Сначала берем только нужные колонки, а потом сбрасываем индекс
+            final_df = gs_df[ [c for c in TARGET_COLUMNS if c != 'SRID'] ].reset_index()
+            # Возвращаем колонки в правильном порядке
+            final_df = final_df[TARGET_COLUMNS]
+            
             return final_df, df_orders_summary, new_count, updated_count, report
-        else:
-            api_df_reset = api_df.reset_index()
-            return api_df_reset[TARGET_COLUMNS], df_orders_summary, len(api_df_reset), 0, report
-    else:
-        api_df_reset = api_df.reset_index()
-        return api_df_reset[TARGET_COLUMNS], df_orders_summary, len(api_df_reset), 0, report
+    
+    # Если база пустая
+    final_df = api_df.reset_index()[TARGET_COLUMNS]
+    return final_df, df_orders_summary, len(final_df), 0, report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
