@@ -298,37 +298,53 @@ def fetch_wb_api(url, params=None):
             time.sleep(3)
     return None
 
-def fetch_wb_statistics_all(url, start_date):
-    """Скачивание статистики кусками по дате (обход лимита 100k)"""
+def fetch_wb_statistics_all(url, start_date, describe):
+    """
+    Скачивание статистики 'марафонским' методом (по логике Рустама).
+    Использует lastChangeDate для перехода к следующей порции данных.
+    """
     all_data = []
-    current_date = start_date
-    limit_threshold = 99990 # Безопасный порог лимита
+    current_from = start_date
+    # Конечная точка — завтрашний день, чтобы захватить всё по текущий момент
+    date_to = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+    limit = 80000 # Лимит из кода коллеги
+    page = 1
+    
+    status_placeholder = st.empty()
     
     while True:
-        params = {"dateFrom": current_date, "flag": 0}
+        status_placeholder.info(f"⏳ {describe}: Скачиваем страницу {page}... (уже собрано: {len(all_data)} строк)")
+        
+        params = {
+            "dateFrom": current_from,
+            "dateTo": date_to,
+            "flag": 0,
+            "limit": limit
+        }
+        
         res = fetch_wb_api(url, params=params)
         
-        if not res or (isinstance(res, dict) and res.get("error")):
+        if not res or not isinstance(res, list):
             break
             
-        batch = res if isinstance(res, list) else []
-        if not batch:
-            break
-            
-        all_data.extend(batch)
+        all_data.extend(res)
         
-        # Если пришло меньше лимита, значит мы скачали всё
-        if len(batch) < limit_threshold:
+        # Если данных пришло меньше лимита — значит, мы достигли конца
+        if len(res) < limit:
             break
             
-        # Если уперлись в лимит - берем дату последнего заказа и качаем дальше
-        last_date = batch[-1].get("date")
-        if not last_date:
+        # Берем дату последнего изменения для следующего шага[cite: 3]
+        last_change = res[-1].get("lastChangeDate")
+        if not last_change or last_change == current_from:
             break
             
-        current_date = last_date
-        time.sleep(4) # Защитная пауза между огромными запросами
+        current_from = last_change
+        page += 1
         
+        # Коллега использует 60 секунд, мы попробуем 15 для баланса скорости и безопасности[cite: 3]
+        time.sleep(15) 
+        
+    status_placeholder.empty()
     return all_data
 
 def process_wb_api_sync(existing_gs_records):
@@ -338,6 +354,7 @@ def process_wb_api_sync(existing_gs_records):
         report.append("❌ Ошибка: Ключ WB_API_KEY не найден в Secrets.")
         return pd.DataFrame(), pd.DataFrame(), 0, 0, report
 
+    # Колонки для финальной таблицы
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
         'SRID', 'Источник заявки', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 
@@ -355,125 +372,89 @@ def process_wb_api_sync(existing_gs_records):
     
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
 
-    BOOLEAN_RU = {
-        True: 'Да', False: 'Нет',
-        'true': 'Да', 'false': 'Нет',
-        'True': 'Да', 'False': 'Нет',
-        1: 'Да', 0: 'Нет'
-    }
+    BOOLEAN_RU = {True: 'Да', False: 'Нет', 'true': 'Да', 'false': 'Нет', 1: 'Да', 0: 'Нет'}
 
-    # 1. ТЯНЕМ ЯДРО - CLAIMS
-    st.info("⏳ Запрашиваем Претензии (Активные и Архивные)...")
+    # 1. CLAIMS (ПРЕТЕНЗИИ)
+    st.info("⏳ Запрашиваем Претензии...")
     claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
     claims_data = []
-    
     for archive_status in ["false", "true"]:
         params = {"limit": 100, "offset": 0, "is_archive": archive_status} 
         while True:
             res_c = fetch_wb_api(claims_url, params=params)
             if res_c and isinstance(res_c, dict):
-                if res_c.get("error_401") or res_c.get("error_404") or res_c.get("error"):
-                    report.append("❌ Ошибка API Claims.")
-                    return pd.DataFrame(), pd.DataFrame(), 0, 0, report
                 batch = res_c.get("claims", [])
                 if not batch: break 
+                for item in batch:
+                    item['Статус'] = 'Архивная' if archive_status == 'true' else 'Активная'
                 claims_data.extend(batch)
                 if len(batch) < params["limit"]: break
                 params["offset"] += params["limit"]
-                time.sleep(3.5) 
-            else:
-                break
+                time.sleep(4)
+            else: break
 
     if not claims_data:
-        report.append("⚠️ За этот период новых претензий не найдено.")
-        return pd.DataFrame(), pd.DataFrame(), 0, 0, report
+        return pd.DataFrame(), pd.DataFrame(), 0, 0, ["⚠️ Нет претензий за период."]
         
     df_c = pd.DataFrame(claims_data)
-    comment_col = 'user_comment' if 'user_comment' in df_c.columns else 'comment'
-    if comment_col in df_c.columns:
-        df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
-        
-    # Добавляем статус Активная/Архивная (идея из кода коллеги)
-    df_c['Статус'] = 'Архивная' if archive_status == 'true' else 'Активная'
-    report.append(f"📥 Претензии: Скачано {len(df_c)} заявок с текстом.")
+    report.append(f"📥 Претензии: Скачано {len(df_c)} заявок.")
 
-    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (ОБХОД ЛИМИТА 100k)
-    st.info("⏳ Запрашиваем 100% логистики за год (может занять время)...")
+    # 2. ПОЛНАЯ ВЫГРУЗКА ЛОГИСТИКИ (ПАГИНАЦИЯ ПО КОДУ КОЛЛЕГИ)
+    st.info("🚀 Запускаем глубокий сбор логистики за год (обход лимита 100k)...")
     date_from = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00")
     
-    time.sleep(2)
     sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
-    sales_raw = fetch_wb_statistics_all(sales_url, date_from)
+    sales_raw = fetch_wb_statistics_all(sales_url, date_from, "Продажи")
     df_sales = pd.DataFrame(sales_raw) if sales_raw else pd.DataFrame()
 
-    time.sleep(2)
+    time.sleep(10) # Пауза между методами статистики
+
     orders_url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
-    orders_raw = fetch_wb_statistics_all(orders_url, date_from)
+    orders_raw = fetch_wb_statistics_all(orders_url, date_from, "Заказы")
     df_orders = pd.DataFrame(orders_raw) if orders_raw else pd.DataFrame()
 
-    report.append(f"📦 Скачано продаж: {len(df_sales)}. Скачано заказов: {len(df_orders)}.")
+    report.append(f"📦 Итого собрано для анализа: Продаж — {len(df_sales)}, Заказов — {len(df_orders)}.")
 
-    # --- ФОРМИРУЕМ АГРЕГИРОВАННУЮ БАЗУ ЗАКАЗОВ (ДЛЯ ДАШБОРДА) ---
+    # --- СВОДКА ПО ЗАКАЗАМ ---
     df_orders_grouped = pd.DataFrame()
     if not df_orders.empty:
         df_orders['Дата'] = pd.to_datetime(df_orders['date']).dt.strftime('%d.%m.%Y')
         df_orders['Отмена'] = df_orders['isCancel'].fillna(False).astype(bool).astype(int)
-        
         df_orders_grouped = df_orders.groupby(['Дата', 'nmId', 'category', 'subject', 'brand']).agg(
             Всего_заказов=('srid', 'count'),
             Отмен=('Отмена', 'sum')
         ).reset_index()
-        
         df_orders_grouped['Чистые_заказы'] = df_orders_grouped['Всего_заказов'] - df_orders_grouped['Отмен']
-        df_orders_grouped.rename(columns={
-            'nmId': 'Артикул WB', 'category': 'Категория', 
-            'subject': 'Предмет', 'brand': 'Бренд'
-        }, inplace=True)
-    # -------------------------------------------------------------
+        df_orders_grouped.rename(columns={'nmId': 'Артикул WB', 'category': 'Категория', 'subject': 'Предмет', 'brand': 'Бренд'}, inplace=True)
 
-    # Обогащаем претензии логистикой (ЖЕСТКИЙ ПЕРЕКРЕСТНЫЙ МЕРЖ)
+    # --- ЖЕСТКОЕ ОБОГАЩЕНИЕ ПРЕТЕНЗИЙ ---
     if not df_sales.empty or not df_orders.empty:
         df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
-        # Удаляем дубликаты, оставляя самые свежие данные по srid
         df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
         
-        # 1. Принудительно выравниваем названия колонок ядра (Claims) под логистику
-        rename_map = {
-            'nm_id': 'nmId',
-            'supplier_article': 'supplierArticle',
-            'article': 'supplierArticle'
-        }
-        df_c.rename(columns=rename_map, inplace=True)
+        # Переименовываем колонки претензий под стандарт
+        df_c.rename(columns={'nm_id': 'nmId', 'supplier_article': 'supplierArticle', 'article': 'supplierArticle'}, inplace=True)
         
-        # 2. Джойн. Колонки из логистики получают суффикс _log
+        # Склеиваем
         df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_log'))
         
-        # 3. Перебираем колонки с суффиксом и "залепляем" ими пустые места
+        # Заполняем пустоты
         for col in list(df_final.columns):
             if col.endswith('_log'):
                 base_col = col.replace('_log', '')
                 if base_col in df_final.columns:
-                    # Превращаем пробелы и слова 'nan' в настоящие пустоты Pandas
-                    df_final[base_col] = df_final[base_col].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN', 'None', '', None], pd.NA)
-                    # Вставляем данные логистики туда, где пусто
+                    df_final[base_col] = df_final[base_col].replace(['nan', 'NaN', 'None', '', None], pd.NA)
                     df_final[base_col] = df_final[base_col].fillna(df_final[col])
                     df_final.drop(columns=[col], inplace=True)
                 else:
                     df_final.rename(columns={col: base_col}, inplace=True)
-                    
-        report.append("🔗 Логистика привязана: артикулы жестко восстановлены из API Статистики.")
     else:
         df_final = df_c
 
-    # 3. МАППИНГ И ОБРАБОТКА ПРЕТЕНЗИЙ
+    # 3. МАППИНГ
     if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
-    # Заменяем статус только если мы его еще не заполнили (чтобы не затереть "Активная/Архивная")
     if 'status' in df_final.columns: df_final['Решение по возврату покупателю'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
-    if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
-    
-    # Перевод значений Да/Нет
-    if 'isCancel' in df_final.columns: 
-        df_final['isCancel'] = df_final['isCancel'].map(BOOLEAN_RU).fillna(df_final['isCancel'])
+    if 'isCancel' in df_final.columns: df_final['isCancel'] = df_final['isCancel'].map(BOOLEAN_RU).fillna(df_final['isCancel'])
 
     temp_df = pd.DataFrame()
     for col in df_final.columns:
@@ -481,44 +462,27 @@ def process_wb_api_sync(existing_gs_records):
             target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
             temp_df[target_name] = df_final[col]
             
-    if 'Дата и время оформления заявки на возврат' in temp_df.columns:
-        temp_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(temp_df['Дата и время оформления заявки на возврат'], errors='coerce').dt.strftime('%d.%m.%Y')
-
     api_df = pd.DataFrame(columns=TARGET_COLUMNS)
     for col in TARGET_COLUMNS: api_df[col] = temp_df[col] if col in temp_df.columns else ""
     api_df = api_df.fillna("").astype(str)
 
-    # 4. UPSERT ПРЕТЕНЗИЙ
-    new_count, updated_count = 0, 0
+    # 4. UPSERT
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
-        for col in TARGET_COLUMNS:
-            if col not in gs_df.columns: gs_df[col] = ""
-            
-        gs_df = gs_df.drop_duplicates(subset=['SRID'], keep='last')
-        api_df = api_df.reset_index(drop=True).drop_duplicates(subset=['SRID'], keep='last')
-        
         gs_df.set_index('SRID', inplace=True)
         api_df.set_index('SRID', inplace=True)
         
         update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
-        common_srids = gs_df.index.intersection(api_df.index)
+        common = gs_df.index.intersection(api_df.index)
+        if not common.empty: gs_df.loc[common, update_cols] = api_df.loc[common, update_cols]
         
-        if not common_srids.empty:
-            gs_df.loc[common_srids, update_cols] = api_df.loc[common_srids, update_cols]
-            updated_count = len(common_srids)
-            
-        new_srids = api_df.index.difference(gs_df.index)
-        if not new_srids.empty:
-            gs_df = pd.concat([gs_df, api_df.loc[new_srids]])
-            new_count = len(new_srids)
+        new_items = api_df.index.difference(gs_df.index)
+        if not new_items.empty: gs_df = pd.concat([gs_df, api_df.loc[new_items]])
         
-        final_ordered_df = gs_df.reset_index()[TARGET_COLUMNS]
+        final_df = gs_df.reset_index()[TARGET_COLUMNS]
+        return final_df, df_orders_grouped, len(new_items), len(common), report
     else:
-        final_ordered_df = api_df.reset_index(drop=True).drop_duplicates(subset=['SRID'], keep='last')[TARGET_COLUMNS]
-        new_count = len(final_ordered_df)
-
-    return final_ordered_df, df_orders_grouped, new_count, updated_count, report
+        return api_df, df_orders_grouped, len(api_df), 0, report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
