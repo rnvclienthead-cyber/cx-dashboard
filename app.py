@@ -280,7 +280,7 @@ def process_wb_api_sync(existing_gs_records):
     wb_key = st.secrets.get("WB_API_KEY")
     if not wb_key:
         report.append("❌ Ошибка: Ключ WB_API_KEY не найден в Secrets.")
-        return pd.DataFrame(), 0, 0, report
+        return pd.DataFrame(), pd.DataFrame(), 0, 0, report # Добавлен пустой DF для заказов
 
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
@@ -298,33 +298,22 @@ def process_wb_api_sync(existing_gs_records):
     
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
 
-    # 1. ТЯНЕМ ЯДРО - CLAIMS (ПРЕТЕНЗИИ)
+    # 1. ТЯНЕМ ЯДРО - CLAIMS
     st.info("⏳ Запрашиваем Претензии (Активные и Архивные)...")
     claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
     claims_data = []
     
     for archive_status in ["false", "true"]:
         params = {"limit": 100, "offset": 0, "is_archive": archive_status} 
-        
         while True:
             res_c = fetch_wb_api(claims_url, params=params)
-            
             if res_c and isinstance(res_c, dict):
-                if res_c.get("error_401"):
-                    report.append("❌ Ошибка авторизации (401) в методе Claims.")
-                    return pd.DataFrame(), 0, 0, report
-                if res_c.get("error_404"):
-                    report.append("❌ Метод Claims вернул 404.")
-                    return pd.DataFrame(), 0, 0, report
-                if res_c.get("error"):
-                    report.append(f"❌ Сбой API Claims: {res_c.get('error')}.")
-                    return pd.DataFrame(), 0, 0, report
-                    
+                if res_c.get("error_401") or res_c.get("error_404") or res_c.get("error"):
+                    report.append("❌ Ошибка API Claims.")
+                    return pd.DataFrame(), pd.DataFrame(), 0, 0, report
                 batch = res_c.get("claims", [])
                 if not batch: break 
-                    
                 claims_data.extend(batch)
-                
                 if len(batch) < params["limit"]: break
                 params["offset"] += params["limit"]
                 time.sleep(3.5) 
@@ -332,49 +321,65 @@ def process_wb_api_sync(existing_gs_records):
                 break
 
     if not claims_data:
-        report.append("⚠️ За этот период новых претензий не найдено. Работа остановлена.")
-        return pd.DataFrame(), 0, 0, report
+        report.append("⚠️ За этот период новых претензий не найдено.")
+        return pd.DataFrame(), pd.DataFrame(), 0, 0, report
         
     df_c = pd.DataFrame(claims_data)
-    
     comment_col = 'user_comment' if 'user_comment' in df_c.columns else 'comment'
     if comment_col in df_c.columns:
         df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
-        
-    report.append(f"📥 Претензии (Ядро): Скачано {len(df_c)} заявок с текстом.")
+    report.append(f"📥 Претензии: Скачано {len(df_c)} заявок с текстом.")
 
-    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (ЗА 180 ДНЕЙ)
-    st.info("⏳ Запрашиваем логистику (Продажи + Заказы) для поиска совпадений...")
+    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (180 дней)
+    st.info("⏳ Запрашиваем логистику (Продажи + Заказы)...")
     date_from = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00")
     
-    time.sleep(2) # Пауза перед сменой метода
+    time.sleep(2)
     sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
     sales_raw = fetch_wb_api(sales_url, params={"dateFrom": date_from})
     df_sales = pd.DataFrame(sales_raw) if isinstance(sales_raw, list) else pd.DataFrame()
 
-    time.sleep(2) # Пауза перед сменой метода
+    time.sleep(2)
     orders_url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
     orders_raw = fetch_wb_api(orders_url, params={"dateFrom": date_from})
     df_orders = pd.DataFrame(orders_raw) if isinstance(orders_raw, list) else pd.DataFrame()
 
-    if not df_sales.empty or not df_orders.empty:
-        # Склеиваем обе базы в одну
-        df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
-        # Удаляем дубликаты по SRID, чтобы не задваивать данные
-        df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
-        report.append(f"📦 Логистика: Собрана база из {len(df_logistics)} уникальных записей.")
+    # --- ФОРМИРУЕМ АГРЕГИРОВАННУЮ БАЗУ ЗАКАЗОВ (ДЛЯ ДАШБОРДА) ---
+    df_orders_grouped = pd.DataFrame()
+    if not df_orders.empty:
+        # Выделяем только дату (без времени)
+        df_orders['Дата'] = pd.to_datetime(df_orders['date']).dt.strftime('%d.%m.%Y')
+        # Превращаем isCancel в числа (1 если отмена, 0 если нет)
+        df_orders['Отмена'] = df_orders['isCancel'].fillna(False).astype(bool).astype(int)
         
-        # LEFT JOIN: Приклеиваем логистику к претензиям
+        # Группируем по дате и артикулу
+        df_orders_grouped = df_orders.groupby(['Дата', 'nmId', 'category', 'subject', 'brand']).agg(
+            Всего_заказов=('srid', 'count'),
+            Отмен=('Отмена', 'sum')
+        ).reset_index()
+        
+        # Считаем чистые
+        df_orders_grouped['Чистые_заказы'] = df_orders_grouped['Всего_заказов'] - df_orders_grouped['Отмен']
+        # Переименовываем колонки для красоты
+        df_orders_grouped.rename(columns={
+            'nmId': 'Артикул WB', 
+            'category': 'Категория', 
+            'subject': 'Предмет',
+            'brand': 'Бренд'
+        }, inplace=True)
+        report.append(f"📊 Заказы: Сформирована сводная таблица по дням ({len(df_orders_grouped)} строк).")
+    # -------------------------------------------------------------
+
+    # Обогащаем претензии логистикой (как и раньше)
+    if not df_sales.empty or not df_orders.empty:
+        df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
+        df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
         df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_drop'))
-        report.append("🔗 Найдена и прикреплена логистика для претензий.")
     else:
-        report.append("⚠️ Данные по логистике не получены. Претензии загружены 'как есть'.")
         df_final = df_c
 
-    # 3. МАППИНГ И ОБРАБОТКА
-    if 'nmId' not in df_final.columns and 'nm_id' in df_final.columns:
-        df_final.rename(columns={'nm_id': 'nmId'}, inplace=True)
-
+    # 3. МАППИНГ И ОБРАБОТКА ПРЕТЕНЗИЙ
+    if 'nmId' not in df_final.columns and 'nm_id' in df_final.columns: df_final.rename(columns={'nm_id': 'nmId'}, inplace=True)
     if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
     if 'status' in df_final.columns: df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
     if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
@@ -389,12 +394,10 @@ def process_wb_api_sync(existing_gs_records):
         temp_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(temp_df['Дата и время оформления заявки на возврат'], errors='coerce').dt.strftime('%d.%m.%Y')
 
     api_df = pd.DataFrame(columns=TARGET_COLUMNS)
-    for col in TARGET_COLUMNS:
-        api_df[col] = temp_df[col] if col in temp_df.columns else ""
-            
+    for col in TARGET_COLUMNS: api_df[col] = temp_df[col] if col in temp_df.columns else ""
     api_df = api_df.fillna("").astype(str)
 
-    # 4. UPSERT (УМНОЕ СЛИЯНИЕ)
+    # 4. UPSERT ПРЕТЕНЗИЙ
     new_count, updated_count = 0, 0
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
@@ -424,7 +427,8 @@ def process_wb_api_sync(existing_gs_records):
         final_ordered_df = api_df.reset_index(drop=True).drop_duplicates(subset=['SRID'], keep='last')[TARGET_COLUMNS]
         new_count = len(final_ordered_df)
 
-    return final_ordered_df, new_count, updated_count, report
+    # ВОЗВРАЩАЕМ ОБЕ ТАБЛИЦЫ
+    return final_ordered_df, df_orders_grouped, new_count, updated_count, report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
