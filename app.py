@@ -242,14 +242,28 @@ def add_system_log(action, status, details=""):
 # ==========================================
 def process_claims_and_returns(claims_files, returned_files):
     report = []
+    
+    # === ЖЕЛЕЗОБЕТОННЫЙ ЭТАЛОН КОЛОНОК (Из файла 111.xlsx) ===
+    TARGET_COLUMNS = [
+        'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
+        'SRID', 'Источник заявки', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 
+        'Обоснование', 'Корректировка', 'Аудит', 'Комментарий', 'Статус', 'Решение по возврату покупателю', 
+        'Статус товара', 'Ответ покупателю', 'Название товара', 'Дата заказа', 'Дата и время рассмотрения заявки', 
+        'Фотографии', 'Видео', 'Варианты ответа продавца на заявку', 'Фактическая цена с учетом всех скидок (к взиманию с покупателя)', 
+        'Код валюты цены', 'Результат сверки IMEI для возврата через ПВЗ', 'Дата и время получения заказа покупателем', 
+        'Дата и время обновления информации в сервисе', 'Склад отгрузки', 'Тип склада хранения товаров', 'Страна', 
+        'Округ', 'Регион', 'Баркод', 'Категория', 'Предмет', 'Бренд', 'Размер товара', 'Номер поставки', 
+        'Договор поставки', 'Договор реализации', 'Цена без скидок', 'Скидка продавца, %', 'Скидка WB, %', 
+        'Скидка за оплату WB Кошельком, ₽', 'К перечислению продавцу', 'Фактическая цена с учётом всех скидок', 
+        'Цена со скидкой продавца', 'Уникальный ID продажи/возврата', 'ID стикера', 'ID корзины покупателя'
+    ]
+
     raw_claims = pd.concat([safe_read(f) for f in claims_files], ignore_index=True)
     
-    # Удаляем дублирующий nm_id из претензий (оставляем только nmId, если он есть)
+    # Решаем проблему с дублями артикулов WB
     if 'nm_id' in raw_claims.columns:
-        if 'nmId' not in raw_claims.columns:
-            raw_claims.rename(columns={'nm_id': 'nmId'}, inplace=True)
-        else:
-            raw_claims.drop(columns=['nm_id'], inplace=True)
+        if 'nmId' not in raw_claims.columns: raw_claims.rename(columns={'nm_id': 'nmId'}, inplace=True)
+        else: raw_claims.drop(columns=['nm_id'], inplace=True)
             
     df_c = raw_claims.drop_duplicates(subset=['srid']) if 'srid' in raw_claims.columns else raw_claims.drop_duplicates()
     
@@ -261,7 +275,7 @@ def process_claims_and_returns(claims_files, returned_files):
     if returned_files:
         df_r = pd.concat([safe_read(f) for f in returned_files], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
         
-        # Унификация поставки из возвратов
+        # Унифицируем номер поставки
         if 'supplyID' in df_r.columns:
             df_r.rename(columns={'supplyID': 'incomeID'}, inplace=True)
             
@@ -269,51 +283,39 @@ def process_claims_and_returns(claims_files, returned_files):
         df_c['nmId_clean'] = df_c['nmId'].astype(str).str.replace(r'\.0$', '', regex=True)
         df_final = pd.merge(df_c, df_r, on='srid', how='left')
         
-        # Если Артикул продавца пустой, пытаемся подтянуть его по цифровому артикулу
         df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nmId_clean'].map(sku_map))
         report.append(f"📦 Склад: Успешно привязаны артикулы для {df_final['supplierArticle'].notna().sum()} заявок.")
 
-    # ПЕРЕВОД СТАТУСОВ (Маппинг)
-    if 'claim_type' in df_final.columns:
-        df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
-    if 'status' in df_final.columns:
-        df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
-    if 'status_ex' in df_final.columns:
-        df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
+    # ПЕРЕВОД СТАТУСОВ (Маппинг цифр в текст)
+    if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
+    if 'status' in df_final.columns: df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
+    if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
 
-    res_df = pd.DataFrame()
-    
-    # 1. ФОРМИРУЕМ "ЗОЛОТОЕ ЯДРО" (Обязательные колонки в строгом порядке)
-    res_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
-    res_df['Артикул продавца'] = df_final.get('supplierArticle', 'Без артикула')
-    res_df['Артикул WB'] = df_final.get('nmId', '') # Вернули Артикул WB!
-    res_df['Комментарий покупателя'] = df_final.get('user_comment', '')
-    res_df['SRID'] = df_final.get('srid', '')
-    res_df['Источник заявки'] = df_final.get('claim_type', '')
-    
-    # Системные колонки ИИ
-    for i in range(1, 14): res_df[str(i)] = ""
-    res_df['Обоснование'] = ""
-    res_df['Корректировка'] = ""
-    res_df['Аудит'] = ""
-    res_df['Комментарий'] = ""
-    
-    # 2. ПОДТЯГИВАЕМ ВСЕ ОСТАЛЬНЫЕ ДАННЫЕ ИЗ ФАЙЛОВ
-    # Список колонок, которые мы уже добавили или которые являются техническим мусором
-    ignore_cols = ['dt', 'supplierArticle', 'user_comment', 'srid', 'claim_type', 'nmId', 'nmId_clean', 'id', 'date']
-    
+    # 1. Переименовываем все пришедшие от WB колонки по нашему словарю
+    temp_df = pd.DataFrame()
     for col in df_final.columns:
-        # Пропускаем мусор и колонки после мерджа с суффиксами _x, _y, _drop
-        if col not in ignore_cols and not col.endswith(('_drop', '_x', '_y')):
-            
-            # Переименовываем по нашему словарю COLUMN_NAMES_RU
+        if col not in ['id', 'date', 'nmId_clean'] and not col.endswith(('_drop', '_x', '_y')):
             target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
+            temp_df[target_name] = df_final[col]
             
-            # Добавляем, только если такой колонки еще нет (чтобы не задвоить)
-            if target_name not in res_df.columns:
-                res_df[target_name] = df_final[col]
+    # Особое форматирование дат
+    if 'Дата и время оформления заявки на возврат' in temp_df.columns:
+        temp_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(temp_df['Дата и время оформления заявки на возврат'], errors='coerce').dt.strftime('%d.%m.%Y')
+
+    # 2. Собираем итоговую таблицу СТРОГО ПО ЭТАЛОНУ из 61 колонки
+    final_ordered_df = pd.DataFrame(columns=TARGET_COLUMNS)
+    for col in TARGET_COLUMNS:
+        if col in temp_df.columns:
+            final_ordered_df[col] = temp_df[col]
+        else:
+            final_ordered_df[col] = "" # Оставляем колонку пустой
             
-    return res_df, report
+    final_ordered_df['Артикул продавца'] = final_ordered_df['Артикул продавца'].replace(r'^\s*$', 'Без артикула', regex=True).fillna('Без артикула')
+    
+    # Заменяем NaN на пустые строки для красивого вывода в Google Sheets
+    final_ordered_df = final_ordered_df.fillna("")
+
+    return final_ordered_df, report
 
 def process_litestat(litestat_files):
     report = []
