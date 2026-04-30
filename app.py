@@ -243,14 +243,12 @@ def add_system_log(action, status, details=""):
 import requests
 import time
 
-try:
-    WB_API_KEY = st.secrets["WB_API_KEY"]
-except:
-    WB_API_KEY = None
-
 def fetch_wb_api(url, params=None):
     """Универсальная функция запроса к API WB с защитой от лимитов (429)"""
-    headers = {"Authorization": WB_API_KEY}
+    # Читаем ключ напрямую из Streamlit при каждом запросе
+    wb_key = st.secrets.get("WB_API_KEY")
+    
+    headers = {"Authorization": str(wb_key)}
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -262,7 +260,7 @@ def fetch_wb_api(url, params=None):
                 time.sleep(5)
                 continue
             elif response.status_code == 401:
-                st.error("❌ Ошибка: API Ключ WB недействителен.")
+                st.error("❌ Ошибка 401: API Ключ WB недействителен или у него нет прав.")
                 return None
             else:
                 st.error(f"❌ Ошибка API WB {response.status_code}: {response.text}")
@@ -274,8 +272,11 @@ def fetch_wb_api(url, params=None):
 
 def process_wb_api_sync(existing_gs_records):
     report = []
-    if not WB_API_KEY:
-        report.append("❌ Ошибка: Не найден ключ WB_API_KEY в Secrets.")
+    
+    # Проверяем наличие ключа перед запуском
+    wb_key = st.secrets.get("WB_API_KEY")
+    if not wb_key:
+        report.append("❌ Ошибка: Ключ WB_API_KEY не найден в настройках Secrets.")
         return pd.DataFrame(), 0, 0, report
 
     # === ЖЕЛЕЗОБЕТОННЫЙ ЭТАЛОН КОЛОНОК (Из файла 111.xlsx) ===
