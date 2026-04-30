@@ -883,11 +883,15 @@ elif page == "🧠 Обучение ИИ":
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
-    # 1. ГАРАНТИРОВАННЫЙ СБРОС И ЗАЩИТА ОТ ФАНТОМОВ
+    # 1. ГАРАНТИРОВАННЫЙ СБРОС И ЗАЩИТА
     if 'matrix_key' not in st.session_state:
         st.session_state.matrix_key = 0
     if 'last_click_id' not in st.session_state:
         st.session_state.last_click_id = None
+    if 'prev_inv' not in st.session_state:
+        st.session_state.prev_inv = None
+    if 'prev_sku' not in st.session_state:
+        st.session_state.prev_sku = None
     
     st.markdown("""
     <style>
@@ -946,13 +950,10 @@ elif page == "📊 Отчет производства":
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
-                    with st.spinner("Сбор фото и архивация... (Пожалуйста, подождите)"):
+                    with st.spinner("Сбор фото и архивация..."):
                         zip_all = create_images_zip(all_photos)
                         b64 = base64.b64encode(zip_all).decode()
-                        dl_link = f'''
-                        <a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a>
-                        <script>document.getElementById("dl").click();</script>
-                        '''
+                        dl_link = f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a><script>document.getElementById("dl").click();</script>'
                         components.html(dl_link, width=0, height=0)
             
             st.markdown("---")
@@ -978,11 +979,7 @@ elif page == "📊 Отчет производства":
                                 with st.spinner("Архивация..."):
                                     zip_row = create_images_zip(row_photos)
                                     b64 = base64.b64encode(zip_row).decode()
-                                    filename = f"order_{r.get('Инвойс', 'photos')}.zip"
-                                    dl_link = f'''
-                                    <a id="dl" href="data:application/zip;base64,{b64}" download="{filename}"></a>
-                                    <script>document.getElementById("dl").click();</script>
-                                    '''
+                                    dl_link = f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>'
                                     components.html(dl_link, width=0, height=0)
                     
                     with media_col:
@@ -1000,7 +997,7 @@ elif page == "📊 Отчет производства":
 
         if st.button("Закрыть детализацию"):
             st.session_state.show_detail_trigger = None
-            st.session_state.matrix_key += 1  # Сбрасываем график только при закрытии окна
+            st.session_state.last_click_id = None
             st.rerun()
             
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
@@ -1050,6 +1047,13 @@ elif page == "📊 Отчет производства":
             selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
             selected_sku = f_col2.selectbox("Артикул:", sku_list)
             
+            # Если фильтры изменились, принудительно сбрасываем окно (чтобы не открывалось само)
+            if st.session_state.prev_inv != selected_inv or st.session_state.prev_sku != selected_sku:
+                st.session_state.show_detail_trigger = None
+                st.session_state.last_click_id = None
+                st.session_state.prev_inv = selected_inv
+                st.session_state.prev_sku = selected_sku
+            
             df_filtered = df.copy()
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
@@ -1096,7 +1100,6 @@ elif page == "📊 Отчет производства":
                 
                 df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
                 
-                # --- УБРАЛИ ЦИФРЫ У АРТИКУЛОВ ---
                 df_melt['Артикул_Метка'] = df_melt['Артикул'] 
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
                 
@@ -1137,13 +1140,13 @@ elif page == "📊 Отчет производства":
                     key=f"prod_matrix_{st.session_state.matrix_key}"
                 )
                 
-                # 3. АТОМНЫЙ ПЕРЕХВАТЧИК (Блокировка фантомного дубля)
+                # 3. ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК КЛИКОВ
                 try:
                     if event and hasattr(event, "selection"):
                         sel = event.selection.get("cell_click", [])
                         
-                        # Если клик обнаружен И окно еще не открыто
-                        if sel and len(sel) > 0 and not st.session_state.get('show_detail_trigger'):
+                        # Реагируем на любой клик по графику (Блокировка 'not show_detail_trigger' убрана)
+                        if sel and len(sel) > 0:
                             clicked_point = sel[0]
                             sku_clicked = clicked_point.get('Артикул_Метка')
                             reason_clicked = clicked_point.get('Причина_Метка')
@@ -1151,15 +1154,15 @@ elif page == "📊 Отчет производства":
                             if sku_clicked and reason_clicked:
                                 current_click_id = f"{sku_clicked}_{reason_clicked}"
                                 
-                                # Защита: пропускаем, только если этот клик отличается от предыдущего обработанного
+                                # Открываем ТОЛЬКО если кликнули на новую ячейку
                                 if current_click_id != st.session_state.get('last_click_id'):
-                                    st.session_state.last_click_id = current_click_id  # Запоминаем клик
+                                    st.session_state.last_click_id = current_click_id
                                     
-                                    # Сохраняем данные для окна
                                     clean_sku = sku_clicked.split(' [')[0]
                                     clean_reason = reason_clicked.split(' [')[0]
                                     reason_id_clicked = int(clean_reason.split('.')[0])
                                     
+                                    # Мгновенно перезаписываем триггер новыми данными
                                     st.session_state.show_detail_trigger = {
                                         'sku': clean_sku,
                                         'reason': clean_reason,
@@ -1167,13 +1170,11 @@ elif page == "📊 Отчет производства":
                                         'id': reason_id_clicked
                                     }
                                     
-                                    # Мгновенный перезапуск для открытия окна (без сброса графика)
+                                    # Уничтожаем график, чтобы он "забыл" клик
+                                    st.session_state.matrix_key += 1
                                     st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка системы перехвата клика: {e}")
-
-                with st.expander("🛠 Техническая отладка (если окно не открывается)"):
-                    st.write("Сырые данные клика от графика:", event)
 
             else:
                 st.info("Данных для матрицы пока нет.")
