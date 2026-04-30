@@ -280,7 +280,7 @@ def process_wb_api_sync(existing_gs_records):
     wb_key = st.secrets.get("WB_API_KEY")
     if not wb_key:
         report.append("❌ Ошибка: Ключ WB_API_KEY не найден в Secrets.")
-        return pd.DataFrame(), pd.DataFrame(), 0, 0, report # Добавлен пустой DF для заказов
+        return pd.DataFrame(), pd.DataFrame(), 0, 0, report
 
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
@@ -347,30 +347,23 @@ def process_wb_api_sync(existing_gs_records):
     # --- ФОРМИРУЕМ АГРЕГИРОВАННУЮ БАЗУ ЗАКАЗОВ (ДЛЯ ДАШБОРДА) ---
     df_orders_grouped = pd.DataFrame()
     if not df_orders.empty:
-        # Выделяем только дату (без времени)
         df_orders['Дата'] = pd.to_datetime(df_orders['date']).dt.strftime('%d.%m.%Y')
-        # Превращаем isCancel в числа (1 если отмена, 0 если нет)
         df_orders['Отмена'] = df_orders['isCancel'].fillna(False).astype(bool).astype(int)
         
-        # Группируем по дате и артикулу
         df_orders_grouped = df_orders.groupby(['Дата', 'nmId', 'category', 'subject', 'brand']).agg(
             Всего_заказов=('srid', 'count'),
             Отмен=('Отмена', 'sum')
         ).reset_index()
         
-        # Считаем чистые
         df_orders_grouped['Чистые_заказы'] = df_orders_grouped['Всего_заказов'] - df_orders_grouped['Отмен']
-        # Переименовываем колонки для красоты
         df_orders_grouped.rename(columns={
-            'nmId': 'Артикул WB', 
-            'category': 'Категория', 
-            'subject': 'Предмет',
-            'brand': 'Бренд'
+            'nmId': 'Артикул WB', 'category': 'Категория', 
+            'subject': 'Предмет', 'brand': 'Бренд'
         }, inplace=True)
         report.append(f"📊 Заказы: Сформирована сводная таблица по дням ({len(df_orders_grouped)} строк).")
     # -------------------------------------------------------------
 
-    # Обогащаем претензии логистикой (как и раньше)
+    # Обогащаем претензии логистикой
     if not df_sales.empty or not df_orders.empty:
         df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
         df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
@@ -600,57 +593,42 @@ def get_col_letter(col_idx):
 if page == "🤖 Робот-Загрузчик":
     st.title("🤖 Робот-Загрузчик (API Режим)")
     
-    # --- ДИАГНОСТИКА ДОСТУПА К ЗАКАЗАМ ---
-    if st.button("🔍 Тест доступа к Orders (Заказы)"):
-        import requests
-        from datetime import datetime, timedelta
-        
-        wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
-        headers = {"Authorization": wb_key}
-        # Берем всего 5 дней для быстрого теста
-        date_from = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%dT00:00:00")
-        url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
-        
-        st.info(f"Стучимся в {url} ...")
-        
-        try:
-            res = requests.get(url, headers=headers, params={"dateFrom": date_from})
-            if res.status_code == 200:
-                data = res.json()
-                st.success(f"✅ ДОСТУП ЕСТЬ! API Заказов работает. Получено {len(data)} строк за 5 дней.")
-            elif res.status_code == 401:
-                st.error("❌ Ошибка 401: У токена действительно нет прав на галочку 'Статистика'.")
-            elif res.status_code == 429:
-                st.warning("⚠️ Сработал лимит запросов, нужно подождать минуту.")
-            else:
-                st.error(f"⚠️ Неизвестная ошибка {res.status_code}: {res.text}")
-        except Exception as e:
-            st.error(f"Сбой: {e}")
-    # ------------------------------------
-    
     with st.expander("1. Синхронизация с API Wildberries", expanded=True):
-        st.write("Робот сам подключится к WB, заберет новые претензии и обновит статусы у старых, не трогая ваши теги.")
+        st.write("Робот сам подключится к WB, заберет новые претензии, обновит статусы, а также выгрузит агрегированные чистые заказы.")
         
         if st.button("🚀 ЗАПУСТИТЬ СИНХРОНИЗАЦИЮ", type="primary"):
             with st.spinner("Связываемся с Wildberries, обновляем статусы и склеиваем данные..."):
                 client = get_gspread_client()
                 ws_ret = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
                 
-                # Скачиваем текущую базу, чтобы передать ее в функцию слияния
+                # Скачиваем текущую базу претензий
                 existing_data = ws_ret.get_all_records()
                 
-                # Запускаем магию
-                final_tab, new_added, rows_updated, report_log = process_wb_api_sync(existing_data)
+                # Запускаем магию API (теперь возвращает и заказы тоже)
+                final_tab, df_orders_grouped, new_added, rows_updated, report_log = process_wb_api_sync(existing_data)
                 
                 if not final_tab.empty:
-                    # Если есть хоть какие-то данные, полностью перезаписываем лист Гугла
-                    # Это безопасно, т.к. наши теги сохранены внутри final_tab на шаге слияния
+                    # 1. ОБНОВЛЯЕМ ПРЕТЕНЗИИ
                     ws_ret.clear()
                     ws_ret.update([final_tab.columns.values.tolist()] + final_tab.values.tolist())
                     
-                    report_log.append(f"🔄 **Обновлено старых заявок:** {rows_updated} шт. (Статусы и логистика актуализированы)")
+                    # 2. СОХРАНЯЕМ ЗАКАЗЫ (На отдельный лист)
+                    if not df_orders_grouped.empty:
+                        try:
+                            # Пробуем найти лист "Заказы"
+                            ws_orders = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Заказы")
+                        except gspread.exceptions.WorksheetNotFound:
+                            # Если его нет — создаем
+                            ws_orders = client.open_by_key(SPREADSHEET_ID_MAIN).add_worksheet(title="Заказы", rows="1000", cols="10")
+                        
+                        # Перезаписываем данные о заказах
+                        ws_orders.clear()
+                        ws_orders.update([df_orders_grouped.columns.values.tolist()] + df_orders_grouped.values.tolist())
+                        report_log.append("✅ **Заказы:** Сводная таблица чистых заказов успешно сохранена на лист 'Заказы'.")
+                    
+                    report_log.append(f"🔄 **Обновлено старых заявок:** {rows_updated} шт.")
                     report_log.append(f"✅ **Добавлено новых заявок:** {new_added} шт.")
-                    st.success("Синхронизация успешно завершена! Таблица актуальна.")
+                    st.success("Синхронизация успешно завершена! Таблицы актуальны.")
                 else:
                     st.warning("Не удалось сформировать таблицу (нет данных от WB).")
                     
