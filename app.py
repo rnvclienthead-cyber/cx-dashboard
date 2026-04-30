@@ -13,9 +13,20 @@ import zipfile
 import urllib.request
 import base64
 import streamlit.components.v1 as components
-import altair as alt
+import time
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
+
+# --- ГЛОБАЛЬНЫЙ ТРЕКЕР СМЕНЫ СТРАНИЦ ---
+page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Отчет производства", "📜 Системный Журнал"])
+
+if st.session_state.get('current_tab') != page:
+    st.session_state.current_tab = page
+    # При любом переключении меню полностью убиваем память графика и окон
+    st.session_state.matrix_key = int(time.time())
+    st.session_state.show_detail_trigger = None
+    st.session_state.last_click_id = None
+# ---------------------------------------
 
 # Инициализация ключей для сброса загрузчиков после успешной обработки
 if 'claims_key' not in st.session_state: st.session_state.claims_key = 0
@@ -271,9 +282,9 @@ def process_claims_and_returns(claims_files, returned_files):
         df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
 
     res_df = pd.DataFrame()
-    res_df['Дата'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
-    res_df['Артикул'] = df_final.get('supplierArticle', 'Без артикула')
-    res_df['Текст_Клиента'] = df_final.get('user_comment', '')
+    res_df['Дата и время оформления заявки на возврат'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
+    res_df['Артикул продавца'] = df_final.get('supplierArticle', 'Без артикула')
+    res_df['Комментарий покупателя'] = df_final.get('user_comment', '')
     res_df['SRID'] = df_final.get('srid', '')
     res_df['Источник заявки'] = df_final.get('claim_type', '')
     
@@ -321,7 +332,7 @@ def process_litestat(litestat_files):
         df_o = df_o[~df_o[sku_col].astype(str).str.lower().str.contains('итого|всего|total', na=False)]
         
         df_ord_agg = df_o.groupby(sku_col)[qty_col].sum().reset_index()
-        df_ord_agg.columns = ['Артикул', 'Заказы шт.']
+        df_ord_agg.columns = ['Артикул продавца', 'Заказы шт.']
         
         total_sum = df_ord_agg['Заказы шт.'].sum()
         report.append(f"✅ Агрегировано по столбцу **'{qty_col}'**. Общая сумма заказов: **{int(total_sum)} шт.**")
@@ -470,12 +481,12 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
         batch = []
         for idx, row in df_to_tag.iterrows():
             if mode == "tagging":
-                batch.append({"id": f"REF_{idx}", "text": f"Артикул: {row.get('Артикул','')}. Текст: {row.get('Текст_Клиента','')}"})
+                batch.append({"id": f"REF_{idx}", "text": f"Артикул: {row.get('Артикул продавца','')}. Текст: {row.get('Комментарий покупателя','')}"})
             else:
                 # Собираем текущие теги, чтобы Grok видел, что проверять
-                current_tags = [str(c) for c in range(1, 14) if str(row.get(f'Кат {c}', '')).strip() in ['1', '1.0', '+', 'v', 'да', 'true']]
+                current_tags = [str(c) for c in range(1, 14) if str(row.get(str(c), '')).strip() in ['1', '1.0', '+', 'v', 'да', 'true']]
                 tags_str = ", ".join(current_tags) if current_tags else "Нет тегов"
-                batch.append({"id": f"REF_{idx}", "text": f"Текст: {row.get('Текст_Клиента','')}. Текущие теги (ID): {tags_str}"})
+                batch.append({"id": f"REF_{idx}", "text": f"Текст: {row.get('Комментарий покупателя','')}. Текущие теги (ID): {tags_str}"})
                 
             if len(batch) >= 10:
                 if mode == "tagging": res = await fetch_ai_tags(session, batch, memory_records, model_choice)
@@ -497,18 +508,6 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
 def get_col_letter(col_idx):
     if col_idx < 26: return chr(ord('A') + col_idx)
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
-
-page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Отчет производства", "📜 Системный Журнал"])
-
-# --- ГЛОБАЛЬНЫЙ ТРЕКЕР СМЕНЫ СТРАНИЦ ---
-if st.session_state.get('current_tab') != page:
-    st.session_state.current_tab = page
-    import time
-    # При любом переключении меню полностью убиваем память графика и окон
-    st.session_state.matrix_key = int(time.time())
-    st.session_state.show_detail_trigger = None
-    st.session_state.last_click_id = None
-# ---------------------------------------
 
 if page == "🤖 Робот-Загрузчик":
     st.title("🤖 Робот-Загрузчик")
@@ -585,7 +584,7 @@ elif page == "🔬 ИИ Тегирование":
         
     # Умный фильтр: проверяет, есть ли хотя бы один тег в строке
     def has_tags(row):
-        return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
+        return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
     
     df['has_any_tag'] = df.apply(has_tags, axis=1)
     
@@ -655,7 +654,7 @@ elif page == "🔬 ИИ Тегирование":
                                     cat_num_match = re.search(r'\d+', str(cat_val))
                                     if cat_num_match:
                                         cat_num = int(cat_num_match.group())
-                                        header = f"кат {cat_num}"
+                                        header = str(cat_num)
                                         if header in header_map_clean:
                                             batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['1']]})
 
@@ -665,7 +664,7 @@ elif page == "🔬 ИИ Тегирование":
                             row_idx = idx + 2
                             if row_idx not in tagged_row_idxs:
                                 skipped_rows.append(str(row_idx))
-                                header = "кат 12" # Принудительно ставим "Не подошло"
+                                header = "12" # Принудительно ставим "Не подошло"
                                 if header in header_map_clean:
                                     batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['1']]})
 
@@ -742,7 +741,7 @@ elif page == "🔬 ИИ Тегирование":
                             if audit_status.upper() != "ОК" and cats_array:
                                 # 1. Стираем все старые галочки
                                 for c in range(1, 14):
-                                    header = f"кат {c}"
+                                    header = str(c)
                                     if header in header_map_clean:
                                         batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['']]})
                                 # 2. Ставим новые правильные
@@ -750,7 +749,7 @@ elif page == "🔬 ИИ Тегирование":
                                     cat_num_match = re.search(r'\d+', str(cat_val))
                                     if cat_num_match:
                                         cat_num = int(cat_num_match.group())
-                                        header = f"кат {cat_num}"
+                                        header = str(cat_num)
                                         if header in header_map_clean:
                                             batch_updates.append({'range': f"{header_map_clean[header]}{row_idx}", 'values': [['1']]})
 
@@ -825,7 +824,7 @@ elif page == "📝 Модерация":
             headers = [str(h).strip() for h in data[0]]
             df = pd.DataFrame(data[1:], columns=headers)
             
-            def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
+            def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','v','да','true'] for i in range(1,14))
             df['has_any_tag'] = df.apply(has_tags, axis=1)
             
             st.markdown("### 🔍 Фильтр обращений")
@@ -866,12 +865,12 @@ elif page == "📝 Модерация":
                     
                     col_info, col_media = st.columns([1.2, 1])
                     with col_info:
-                        st.markdown(f"**Артикул:** {row.get('Артикул', '---')} | **Дата:** {row.get('Дата', '')}")
-                        st.info(row.get('Текст_Клиента', 'Нет текста'))
+                        st.markdown(f"**Артикул:** {row.get('Артикул продавца', '---')} | **Дата:** {row.get('Дата и время оформления заявки на возврат', '')}")
+                        st.info(row.get('Комментарий покупателя', 'Нет текста'))
                         
                         ai_selected = []
                         for i in range(1, 14):
-                            if str(row.get(f'Кат {i}', '')).strip().lower() in ['1', '1.0', '+', 'v', 'да', 'true']: ai_selected.append(f"{CATEGORIES[i]}")
+                            if str(row.get(str(i), '')).strip().lower() in ['1', '1.0', '+', 'v', 'да', 'true']: ai_selected.append(f"{CATEGORIES[i]}")
                         ai_text = ", ".join(ai_selected) if ai_selected else "Категории не определены"
                         st.markdown(f'<div class="ai-tags-box">🤖 <b>Выбор ИИ:</b> {ai_text}</div>', unsafe_allow_html=True)
                         
@@ -881,11 +880,11 @@ elif page == "📝 Модерация":
                             if selected_cats:
                                 batch_updates = []
                                 for c in range(1, 14):
-                                    h = f"кат {c}"
+                                    h = str(c)
                                     if h in header_map_clean: batch_updates.append({'range': f"{header_map_clean[h]}{row_index_gs}", 'values': [['']]})
                                 for cat_name in selected_cats:
                                     cat_num = reverse_cats.get(cat_name.strip().lower())
-                                    if cat_num: batch_updates.append({'range': f"{header_map_clean[f'кат {cat_num}']}{row_index_gs}", 'values': [['1']]})
+                                    if cat_num: batch_updates.append({'range': f"{header_map_clean[str(cat_num)]}{row_index_gs}", 'values': [['1']]})
                                 
                                 corr_header = "корректировка"
                                 if corr_header in header_map_clean:
@@ -937,7 +936,7 @@ elif page == "🧠 Обучение ИИ":
                 df_import = safe_read(f_import)
                 if not df_import.empty:
                     import re
-                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in ['текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment']]
+                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in ['текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment', 'комментарий покупателя']]
                     corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
                     tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
                     cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
@@ -992,9 +991,7 @@ elif page == "📊 Отчет производства":
     # 1. ГАРАНТИРОВАННЫЙ СБРОС И ЗАЩИТА ОТ ФАНТОМОВ
     if 'matrix_key' not in st.session_state:
         import time
-        # Теперь после F5 ключ будет уникальным (например, 1714500000), 
-        # и браузер не сможет подсунуть старый кэш клика!
-        st.session_state.matrix_key = int(time.time()) 
+        st.session_state.matrix_key = int(time.time())
     if 'last_click_id' not in st.session_state:
         st.session_state.last_click_id = None
     if 'prev_inv' not in st.session_state:
@@ -1042,8 +1039,8 @@ elif page == "📊 Отчет производства":
         st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
         
         details = filtered_df[
-            (filtered_df['Артикул'] == sku) & 
-            (filtered_df[f'Кат {reason_id}'].astype(str).str.strip().isin(['1', '1.0', '+']))
+            (filtered_df['Артикул продавца'] == sku) & 
+            (filtered_df[str(reason_id)].astype(str).str.strip().isin(['1', '1.0', '+']))
         ]
         
         if not details.empty:
@@ -1059,10 +1056,13 @@ elif page == "📊 Отчет производства":
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
-                    with st.spinner("Сбор фото и архивация..."):
+                    with st.spinner("Сбор фото и архивация... (Пожалуйста, подождите)"):
                         zip_all = create_images_zip(all_photos)
                         b64 = base64.b64encode(zip_all).decode()
-                        dl_link = f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a><script>document.getElementById("dl").click();</script>'
+                        dl_link = f'''
+                        <a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a>
+                        <script>document.getElementById("dl").click();</script>
+                        '''
                         components.html(dl_link, width=0, height=0)
             
             st.markdown("---")
@@ -1080,15 +1080,19 @@ elif page == "📊 Отчет производства":
                         else: row_photos.append(clean_url)
 
                     with c1:
-                        st.write(f"💬 **Текст клиента:**\n{r.get('Текст_Клиента', '---')}")
-                        st.write(f"📅 **Дата:** {r.get('Дата', '---')}")
+                        st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
+                        st.write(f"📅 **Дата:** {r.get('Дата и время оформления заявки на возврат', '---')}")
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
                         if row_photos:
                             if st.button("📥 Скачать фото", key=f"dl_row_{r.name}"):
                                 with st.spinner("Архивация..."):
                                     zip_row = create_images_zip(row_photos)
                                     b64 = base64.b64encode(zip_row).decode()
-                                    dl_link = f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>'
+                                    filename = f"order_{r.get('Инвойс', 'photos')}.zip"
+                                    dl_link = f'''
+                                    <a id="dl" href="data:application/zip;base64,{b64}" download="{filename}"></a>
+                                    <script>document.getElementById("dl").click();</script>
+                                    '''
                                     components.html(dl_link, width=0, height=0)
                     
                     with media_col:
@@ -1108,19 +1112,20 @@ elif page == "📊 Отчет производства":
             st.session_state.show_detail_trigger = None
             st.session_state.last_click_id = None
             st.rerun()
-            
+
     # --- ТРИГГЕР ОТКРЫТИЯ ОКНА ---
     if st.session_state.get('show_detail_trigger'):
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
-    # ⚡️ ФУНКЦИЯ С КЭШЕМ (Качает данные раз в 5 минут, а не при каждом клике)
+    # ⚡️ ФУНКЦИЯ С КЭШЕМ (Качает данные раз в 5 минут)
     @st.cache_data(ttl=300) 
     def load_cached_google_data():
         client = get_gspread_client()
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
         df_temp = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
         
+        # Обновленные названия для проверки
         if 'supplyID' in df_temp.columns and 'Номер поставки' not in df_temp.columns:
             df_temp.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
         
@@ -1153,29 +1158,28 @@ elif page == "📊 Отчет производства":
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
             if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
             
-            def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
+            def has_tags(row): return any(str(row.get(str(i),'')).strip() in ['1','1.0','+'] for i in range(1,14))
             df['Размечено'] = df.apply(has_tags, axis=1)
             
             st.markdown("### 🔍 Глобальные фильтры")
             f_col1, f_col2 = st.columns(2)
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip()])))
-            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул'] if str(x).strip()])))
+            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
             
             selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
             selected_sku = f_col2.selectbox("Артикул:", sku_list)
             
-            # Если фильтры изменились, принудительно сбрасываем окно (чтобы не открывалось само)
+            # Если фильтры изменились, принудительно сбрасываем окно
             if st.session_state.prev_inv != selected_inv or st.session_state.prev_sku != selected_sku:
                 st.session_state.show_detail_trigger = None
                 st.session_state.last_click_id = None
                 st.session_state.prev_inv = selected_inv
                 st.session_state.prev_sku = selected_sku
-                # ДОБАВИТЬ ЭТУ СТРОКУ: При смене фильтра уничтожаем старый график с его выделениями
-                st.session_state.matrix_key += 1
+                st.session_state.matrix_key += 1 
             
             df_filtered = df.copy()
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
-            if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул'].astype(str) == selected_sku]
+            if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
 
             total_rows = len(df_filtered)
             tagged_rows = df_filtered['Размечено'].sum()
@@ -1193,12 +1197,12 @@ elif page == "📊 Отчет производства":
             
             matrix_list = []
             for i in range(1, 14):
-                cat_col = f'Кат {i}'
+                cat_col = str(i)
                 if cat_col in df_filtered.columns:
                     temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
                     for _, r in temp.iterrows():
                         matrix_list.append({
-                            'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
+                            'Артикул продавца': str(r.get('Артикул продавца', 'Без артикула')).strip(),
                             'Причина': f"{i}. {CATEGORIES[i]}",
                             'ID': i,
                             'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
@@ -1212,15 +1216,15 @@ elif page == "📊 Отчет производства":
             if matrix_list:
                 df_matrix = pd.DataFrame(matrix_list)
                 
-                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул']).fillna(0).astype(int)
+                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул продавца']).fillna(0).astype(int)
                 pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
                 
                 sku_totals = pivot.drop(columns=['ID']).sum(axis=0).to_dict()
                 reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                 
-                df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул', value_name='Дефекты')
+                df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул продавца', value_name='Дефекты')
                 
-                df_melt['Артикул_Метка'] = df_melt['Артикул'] 
+                df_melt['Артикул_Метка'] = df_melt['Артикул продавца'] 
                 df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
                 
                 df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
@@ -1236,7 +1240,7 @@ elif page == "📊 Отчет производства":
                 
                 rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
                     color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None),
-                    tooltip=[alt.Tooltip('Артикул:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
+                    tooltip=[alt.Tooltip('Артикул продавца:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
                 )
                 
                 text = base.mark_text(baseline='middle', fontSize=11).encode(
@@ -1265,7 +1269,6 @@ elif page == "📊 Отчет производства":
                     if event and hasattr(event, "selection"):
                         sel = event.selection.get("cell_click", [])
                         
-                        # Реагируем на любой клик по графику (Блокировка 'not show_detail_trigger' убрана)
                         if sel and len(sel) > 0:
                             clicked_point = sel[0]
                             sku_clicked = clicked_point.get('Артикул_Метка')
@@ -1274,7 +1277,6 @@ elif page == "📊 Отчет производства":
                             if sku_clicked and reason_clicked:
                                 current_click_id = f"{sku_clicked}_{reason_clicked}"
                                 
-                                # Открываем ТОЛЬКО если кликнули на новую ячейку
                                 if current_click_id != st.session_state.get('last_click_id'):
                                     st.session_state.last_click_id = current_click_id
                                     
@@ -1282,7 +1284,6 @@ elif page == "📊 Отчет производства":
                                     clean_reason = reason_clicked.split(' [')[0]
                                     reason_id_clicked = int(clean_reason.split('.')[0])
                                     
-                                    # Мгновенно перезаписываем триггер новыми данными
                                     st.session_state.show_detail_trigger = {
                                         'sku': clean_sku,
                                         'reason': clean_reason,
@@ -1290,7 +1291,6 @@ elif page == "📊 Отчет производства":
                                         'id': reason_id_clicked
                                     }
                                     
-                                    # Уничтожаем график, чтобы он "забыл" клик
                                     st.session_state.matrix_key += 1
                                     st.rerun()
                 except Exception as e:
@@ -1307,12 +1307,12 @@ elif page == "📊 Отчет производства":
             <style>
             #vg-tooltip-element {
                 font-family: sans-serif;
-                font-size: 11px !important;  /* 📉 УМЕНЬШИЛИ ШРИФТ (было 13) */
-                line-height: 1.3 !important; /* Делаем строки плотнее друг к другу */
+                font-size: 11px !important;
+                line-height: 1.3 !important;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
                 border-radius: 6px !important;
                 border: 1px solid #e0e0e0 !important;
-                max-width: 600px !important; /* ↔️ СДЕЛАЛИ ШИРЕ (было 400), чтобы текст не рос вниз */
+                max-width: 600px !important;
                 white-space: normal !important;
             }
             #vg-tooltip-element table tr {
@@ -1322,7 +1322,7 @@ elif page == "📊 Отчет производства":
                 border-bottom: none;
             }
             #vg-tooltip-element table td {
-                padding: 6px 8px !important; /* 🗜 СОЖМАЛИ ОТСТУПЫ вокруг текста (было 10px 12px) */
+                padding: 6px 8px !important;
                 vertical-align: top;
             }
             #vg-tooltip-element table td.key {
@@ -1344,9 +1344,8 @@ elif page == "📊 Отчет производства":
                     if not supplies: 
                         supplies = "Не указана"
                     
-                    sku_counts = group['Артикул'].value_counts()
+                    sku_counts = group['Артикул продавца'].value_counts()
                     
-                    # УБРАЛ ОГРАНИЧЕНИЕ: Теперь выводим все артикулы, разделяя их точкой
                     all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in sku_counts.items()])
                         
                     inv_grouped.append({
@@ -1369,7 +1368,7 @@ elif page == "📊 Отчет производства":
                             alt.Tooltip('Инвойс:N', title='Инвойс'),
                             alt.Tooltip('Дефекты:Q', title='Всего дефектов'),
                             alt.Tooltip('Поставки:N', title='Поставки'),
-                            alt.Tooltip('Список Артикулов:N', title='Артикулы') # Название изменено
+                            alt.Tooltip('Список Артикулов:N', title='Артикулы')
                         ]
                     ).properties(height=350)
                     
@@ -1381,7 +1380,7 @@ elif page == "📊 Отчет производства":
 
     except Exception as e:
         st.error(f"Ошибка Отчета: {e}")
-        
+
 # ==========================================
 # 8. СИСТЕМНЫЙ ЖУРНАЛ
 # ==========================================
