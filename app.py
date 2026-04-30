@@ -404,6 +404,16 @@ def get_col_letter(col_idx):
 
 page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Отчет производства", "📜 Системный Журнал"])
 
+# --- ГЛОБАЛЬНЫЙ ТРЕКЕР СМЕНЫ СТРАНИЦ ---
+if st.session_state.get('current_tab') != page:
+    st.session_state.current_tab = page
+    import time
+    # При любом переключении меню полностью убиваем память графика и окон
+    st.session_state.matrix_key = int(time.time())
+    st.session_state.show_detail_trigger = None
+    st.session_state.last_click_id = None
+# ---------------------------------------
+
 if page == "🤖 Робот-Загрузчик":
     st.title("🤖 Робот-Загрузчик")
     
