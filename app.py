@@ -232,6 +232,14 @@ def add_system_log(action, status, details=""):
 def process_claims_and_returns(claims_files, returned_files):
     report = []
     raw_claims = pd.concat([safe_read(f) for f in claims_files], ignore_index=True)
+    
+    # Удаляем дублирующий nm_id из претензий (оставляем только nmId, если он есть)
+    if 'nm_id' in raw_claims.columns:
+        if 'nmId' not in raw_claims.columns:
+            raw_claims.rename(columns={'nm_id': 'nmId'}, inplace=True)
+        else:
+            raw_claims.drop(columns=['nm_id'], inplace=True)
+            
     df_c = raw_claims.drop_duplicates(subset=['srid']) if 'srid' in raw_claims.columns else raw_claims.drop_duplicates()
     
     report.append(f"📥 Претензии: Загружено {len(raw_claims)} строк.")
@@ -241,11 +249,26 @@ def process_claims_and_returns(claims_files, returned_files):
     df_final = df_c
     if returned_files:
         df_r = pd.concat([safe_read(f) for f in returned_files], ignore_index=True).drop_duplicates(subset=['srid'], keep='last')
+        
+        # Унификация поставки из возвратов
+        if 'supplyID' in df_r.columns:
+            df_r.rename(columns={'supplyID': 'incomeID'}, inplace=True)
+            
         sku_map = df_r.dropna(subset=['supplierArticle']).set_index(df_r['nmId'].astype(str).str.replace(r'\.0$', '', regex=True))['supplierArticle'].to_dict()
-        df_c['nm_id_clean'] = df_c['nm_id'].astype(str).str.replace(r'\.0$', '', regex=True)
+        df_c['nmId_clean'] = df_c['nmId'].astype(str).str.replace(r'\.0$', '', regex=True)
         df_final = pd.merge(df_c, df_r, on='srid', how='left')
-        df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nm_id_clean'].map(sku_map))
+        
+        # Если Артикул продавца пустой, пытаемся подтянуть его по цифровому артикулу
+        df_final['supplierArticle'] = df_final['supplierArticle'].fillna(df_final['nmId_clean'].map(sku_map))
         report.append(f"📦 Склад: Успешно привязаны артикулы для {df_final['supplierArticle'].notna().sum()} заявок.")
+
+    # ПЕРЕВОД СТАТУСОВ (Маппинг)
+    if 'claim_type' in df_final.columns:
+        df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
+    if 'status' in df_final.columns:
+        df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
+    if 'status_ex' in df_final.columns:
+        df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
 
     res_df = pd.DataFrame()
     res_df['Дата'] = pd.to_datetime(df_final.get('dt', ''), errors='coerce').dt.strftime('%d.%m.%Y')
@@ -254,13 +277,25 @@ def process_claims_and_returns(claims_files, returned_files):
     res_df['SRID'] = df_final.get('srid', '')
     res_df['Источник заявки'] = df_final.get('claim_type', '')
     
-    for i in range(1, 14): res_df[f"Кат {i}"] = ""
+    # Генерируем столбцы с чистыми цифрами (вместо Кат 1)
+    for i in range(1, 14): res_df[str(i)] = ""
+    
     res_df['Обоснование'] = ""
     res_df['Корректировка'] = ""
+    res_df['Аудит'] = ""
+    res_df['Комментарий'] = ""
+    
+    # Список колонок, которые мы игнорируем (технический мусор)
+    ignore_cols = ['dt', 'supplierArticle', 'user_comment', 'srid', 'claim_type', 'nmId_clean', 'id', 'date']
     
     for col in df_final.columns:
-        if col not in ['dt', 'supplierArticle', 'user_comment', 'srid', 'claim_type', 'nm_id_clean'] and not col.endswith('_drop'):
-            res_df[COLUMN_NAMES_RU.get(col, col)] = df_final[col]
+        # Пропускаем мусор и колонки после мерджа с суффиксами _x, _y, _drop
+        if col not in ignore_cols and not col.endswith(('_drop', '_x', '_y')):
+            
+            # Переименовываем incomeID в "Номер поставки" напрямую, если он есть
+            target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
+            
+            res_df[target_name] = df_final[col]
             
     return res_df, report
 
