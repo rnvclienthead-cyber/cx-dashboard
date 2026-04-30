@@ -883,9 +883,12 @@ elif page == "🧠 Обучение ИИ":
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
-    # 1. ГАРАНТИРОВАННЫЙ СБРОС И ЗАЩИТА
+    # 1. ГАРАНТИРОВАННЫЙ СБРОС И ЗАЩИТА ОТ ФАНТОМОВ
     if 'matrix_key' not in st.session_state:
-        st.session_state.matrix_key = 0
+        import time
+        # Теперь после F5 ключ будет уникальным (например, 1714500000), 
+        # и браузер не сможет подсунуть старый кэш клика!
+        st.session_state.matrix_key = int(time.time()) 
     if 'last_click_id' not in st.session_state:
         st.session_state.last_click_id = None
     if 'prev_inv' not in st.session_state:
@@ -1061,6 +1064,8 @@ elif page == "📊 Отчет производства":
                 st.session_state.last_click_id = None
                 st.session_state.prev_inv = selected_inv
                 st.session_state.prev_sku = selected_sku
+                # ДОБАВИТЬ ЭТУ СТРОКУ: При смене фильтра уничтожаем старый график с его выделениями
+                st.session_state.matrix_key += 1
             
             df_filtered = df.copy()
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
