@@ -299,52 +299,50 @@ def process_wb_api_sync(existing_gs_records):
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
 
     # 1. ТЯНЕМ ЯДРО - CLAIMS (ПРЕТЕНЗИИ)
-    st.info("⏳ Запрашиваем Претензии с учетом лимита (Интервал 3 сек)...")
+    st.info("⏳ Запрашиваем Претензии (Активные и Архивные)...")
     claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
     
     claims_data = []
-    # Добавлен обязательный параметр is_archive
-    params = {"limit": 100, "offset": 0, "is_archive": "false"}
     
-    while True:
-        res_c = fetch_wb_api(claims_url, params=params)
+    # Проходимся по двум типам заявок: активные ("false") и архивные ("true")
+    for archive_status in ["false", "true"]:
+        params = {"limit": 100, "offset": 0, "is_archive": archive_status} 
         
-        # --- ДИАГНОСТИКА ОТВЕТА (ПАРСИНГ КАК НА СКРИНШОТЕ) ---
-        if res_c and isinstance(res_c, dict):
-            if res_c.get("error_401"):
-                st.error("🛑 Ошибка 401: Токен не принят. Проверь галочку 'Возвраты покупателей' в настройках токена WB.")
-                report.append("❌ Ошибка авторизации (401) в методе Claims.")
-                return pd.DataFrame(), 0, 0, report
-            if res_c.get("error_404"):
-                report.append("❌ Метод Claims вернул 404 (Не найдено).")
-                return pd.DataFrame(), 0, 0, report
-            if res_c.get("error"):
-                st.error(f"🛑 Ошибка WB API: {res_c.get('error')} -> {res_c.get('text')}")
-                report.append(f"❌ Сбой API при скачивании Claims: {res_c.get('error')}.")
-                return pd.DataFrame(), 0, 0, report
-                
-            # Строго следуем структуре ответа {"claims": [...], "total": X}
-            batch = res_c.get("claims", [])
-            total_claims = res_c.get("total", 0)
+        while True:
+            res_c = fetch_wb_api(claims_url, params=params)
             
-            if not batch: 
-                break 
+            # --- ДИАГНОСТИКА ОТВЕТА ---
+            if res_c and isinstance(res_c, dict):
+                if res_c.get("error_401"):
+                    st.error("🛑 Ошибка 401: Токен не принят. Проверь галочку 'Возвраты покупателей'.")
+                    report.append("❌ Ошибка авторизации (401) в методе Claims.")
+                    return pd.DataFrame(), 0, 0, report
+                if res_c.get("error_404"):
+                    report.append("❌ Метод Claims вернул 404 (Не найдено).")
+                    return pd.DataFrame(), 0, 0, report
+                if res_c.get("error"):
+                    st.error(f"🛑 Ошибка WB API: {res_c.get('error')} -> {res_c.get('text')}")
+                    report.append(f"❌ Сбой API при скачивании Claims: {res_c.get('error')}.")
+                    return pd.DataFrame(), 0, 0, report
+                    
+                batch = res_c.get("claims", [])
                 
-            claims_data.extend(batch)
-            
-            # Если скачали всё, что указано в total, выходим
-            if len(claims_data) >= total_claims or len(batch) < params["limit"]:
+                if not batch: 
+                    break 
+                    
+                claims_data.extend(batch)
+                
+                # Если пришло меньше лимита, значит это последняя страница для текущего статуса
+                if len(batch) < params["limit"]:
+                    break
+                    
+                params["offset"] += params["limit"]
+                time.sleep(3.5) 
+            else:
                 break
-                
-            params["offset"] += params["limit"]
-            
-            # 👈 ЖЕСТКОЕ СОБЛЮДЕНИЕ ЛИМИТА: Интервал > 3 сек
-            time.sleep(3.5) 
-        else:
-            break
 
     if not claims_data:
-        st.warning("⚠️ WB ответил 'ОК', но список претензий пуст. За последние 14 дней заявок нет.")
+        st.warning("⚠️ WB ответил 'ОК', но список претензий пуст.")
         report.append("⚠️ За этот период новых претензий не найдено. Работа остановлена.")
         return pd.DataFrame(), 0, 0, report
         
