@@ -1206,26 +1206,27 @@ elif page == "📊 Отчет производства":
             st.markdown("---")
             st.markdown("### 📦 Проблемные Инвойсы (Топ-15)")
             
-            # --- CSS для красивого всплывающего окна (тултипа) с рамками ---
+            # --- CSS для всплывающего окна (Компактный вид) ---
             st.markdown("""
             <style>
             #vg-tooltip-element {
                 font-family: sans-serif;
-                font-size: 13px;
+                font-size: 11px !important;  /* 📉 УМЕНЬШИЛИ ШРИФТ (было 13) */
+                line-height: 1.3 !important; /* Делаем строки плотнее друг к другу */
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
-                border-radius: 8px !important;
+                border-radius: 6px !important;
                 border: 1px solid #e0e0e0 !important;
-                max-width: 400px; /* Ограничиваем ширину, чтобы длинный текст красиво переносился */
+                max-width: 600px !important; /* ↔️ СДЕЛАЛИ ШИРЕ (было 400), чтобы текст не рос вниз */
                 white-space: normal !important;
             }
             #vg-tooltip-element table tr {
-                border-bottom: 1px solid #d1d5db; /* Те самые разделительные линии */
+                border-bottom: 1px solid #d1d5db;
             }
             #vg-tooltip-element table tr:last-child {
-                border-bottom: none; /* Убираем линию у последней строки */
+                border-bottom: none;
             }
             #vg-tooltip-element table td {
-                padding: 10px 12px !important; /* Добавляем воздух между строками */
+                padding: 6px 8px !important; /* 🗜 СОЖМАЛИ ОТСТУПЫ вокруг текста (было 10px 12px) */
                 vertical-align: top;
             }
             #vg-tooltip-element table td.key {
