@@ -356,7 +356,7 @@ def process_wb_api_sync(existing_gs_records):
         df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
     report.append(f"📥 Претензии: Скачано {len(df_c)} заявок с текстом.")
 
-    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (УВЕЛИЧЕНО ДО 365 ДНЕЙ)
+    # 2. ТЯНЕМ ЛОГИСТИКУ: ПРОДАЖИ + ЗАКАЗЫ (365 ДНЕЙ)
     st.info("⏳ Запрашиваем логистику за год для поиска совпадений...")
     date_from = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00")
     
@@ -389,30 +389,41 @@ def process_wb_api_sync(existing_gs_records):
         report.append(f"📊 Заказы: Сформирована сводная таблица по дням ({len(df_orders_grouped)} строк).")
     # -------------------------------------------------------------
 
-    # Обогащаем претензии логистикой (УМНОЕ СЛИЯНИЕ)
+    # Обогащаем претензии логистикой (ЖЕСТКИЙ ПЕРЕКРЕСТНЫЙ МЕРЖ)
     if not df_sales.empty or not df_orders.empty:
         df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
         df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
         
-        # Оставляем в логистике ТОЛЬКО те srid, которые есть в претензиях (строгий фильтр)
-        valid_srids = df_c['srid'].dropna().unique()
-        df_logistics = df_logistics[df_logistics['srid'].isin(valid_srids)]
+        # 1. Принудительно выравниваем названия колонок ядра (Claims) под логистику
+        rename_map = {
+            'nm_id': 'nmId',
+            'supplier_article': 'supplierArticle',
+            'article': 'supplierArticle'
+        }
+        df_c.rename(columns=rename_map, inplace=True)
         
-        # Делаем srid индексом для точного сопоставления
-        df_c.set_index('srid', inplace=True)
-        df_logistics.set_index('srid', inplace=True)
+        # 2. Делаем левый джойн. Все пересекающиеся колонки из логистики получат суффикс _log
+        df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_log'))
         
-        # Превращаем все "пустоты" в претензиях в настоящие пустоты (NaN)
-        df_c = df_c.replace(r'^\s*$', pd.NA, regex=True).replace(['', 'None', 'nan'], pd.NA)
-        
-        # combine_first: Берем строку претензии, и если ячейка пустая - берем из логистики
-        df_final = df_c.combine_first(df_logistics).reset_index()
-        report.append("🔗 Найдена логистика (пустые артикулы и данные складов заполнены).")
+        # 3. Перебираем колонки с суффиксом и "залепляем" ими пустые места в основных колонках
+        for col in list(df_final.columns):
+            if col.endswith('_log'):
+                base_col = col.replace('_log', '')
+                if base_col in df_final.columns:
+                    # Превращаем пробелы, слова 'nan' и None в настоящие пустоты
+                    df_final[base_col] = df_final[base_col].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN', 'None', '', None], pd.NA)
+                    # Вставляем данные логистики туда, где пусто
+                    df_final[base_col] = df_final[base_col].fillna(df_final[col])
+                    # Удаляем колонку-донора
+                    df_final.drop(columns=[col], inplace=True)
+                else:
+                    df_final.rename(columns={col: base_col}, inplace=True)
+                    
+        report.append("🔗 Логистика привязана: артикулы и склады жестко восстановлены из API Статистики.")
     else:
         df_final = df_c
 
     # 3. МАППИНГ И ОБРАБОТКА ПРЕТЕНЗИЙ
-    if 'nmId' not in df_final.columns and 'nm_id' in df_final.columns: df_final.rename(columns={'nm_id': 'nmId'}, inplace=True)
     if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
     if 'status' in df_final.columns: df_final['status'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
     if 'status_ex' in df_final.columns: df_final['status_ex'] = df_final['status_ex'].astype(str).map(STATUS_EX).fillna(df_final['status_ex'])
