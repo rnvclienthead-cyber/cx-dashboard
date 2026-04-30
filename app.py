@@ -1090,7 +1090,8 @@ elif page == "📊 Отчет производства":
                             'Артикул': str(r.get('Артикул', 'Без артикула')).strip(),
                             'Причина': f"{i}. {CATEGORIES[i]}",
                             'ID': i,
-                            'Инвойс': r.get('Инвойс', 'Не указан')
+                            'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
+                            'Номер поставки': str(r.get('Номер поставки', 'Не указан')).strip()
                         })
 
             st.markdown("---")
@@ -1188,13 +1189,58 @@ elif page == "📊 Отчет производства":
                 st.info("Данных для матрицы пока нет.")
 
             st.markdown("---")
-            st.markdown("### 📦 Проблемные Инвойсы")
+            st.markdown("### 📦 Проблемные Инвойсы (Топ-15)")
             
             if matrix_list:
                 df_matrix_inv = pd.DataFrame(matrix_list)
-                inv_counts = df_matrix_inv['Инвойс'].value_counts().reset_index()
-                inv_counts.columns = ['Инвойс / Поставка', 'Количество дефектов']
-                st.dataframe(inv_counts.head(10), use_container_width=True)
+                
+                # Подготавливаем данные для графика
+                inv_grouped = []
+                for inv, group in df_matrix_inv.groupby('Инвойс'):
+                    defect_count = len(group)
+                    
+                    # Собираем уникальные поставки в красивую строку
+                    supplies = ", ".join(sorted(list(set([str(x) for x in group['Номер поставки'] if str(x) != 'Не указан']))))
+                    if not supplies: 
+                        supplies = "Не указана"
+                    
+                    # Считаем проблемные артикулы в этом инвойсе
+                    sku_counts = group['Артикул'].value_counts()
+                    
+                    # Формируем строку для тултипа (берем Топ-5 артикулов, чтобы окошко не было огромным)
+                    top_skus = ", ".join([f"{k} ({v} шт.)" for k, v in sku_counts.head(5).items()])
+                    if len(sku_counts) > 5:
+                        top_skus += " и еще..."
+                        
+                    inv_grouped.append({
+                        'Инвойс': inv,
+                        'Дефекты': defect_count,
+                        'Поставки': supplies,
+                        'Проблемные Артикулы': top_skus
+                    })
+                
+                if inv_grouped:
+                    # Берем Топ-15 самых проблемных инвойсов
+                    df_inv_chart = pd.DataFrame(inv_grouped).sort_values('Дефекты', ascending=False).head(15)
+                    
+                    import altair as alt
+                    
+                    # Рисуем столбчатую диаграмму
+                    inv_chart = alt.Chart(df_inv_chart).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                        x=alt.X('Инвойс:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)),
+                        y=alt.Y('Дефекты:Q', title='Количество дефектов'),
+                        color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None),
+                        tooltip=[
+                            alt.Tooltip('Инвойс:N', title='Инвойс'),
+                            alt.Tooltip('Дефекты:Q', title='Всего дефектов'),
+                            alt.Tooltip('Поставки:N', title='Включает поставки'),
+                            alt.Tooltip('Проблемные Артикулы:N', title='Артикулы (Топ-5)')
+                        ]
+                    ).properties(height=350)
+                    
+                    st.altair_chart(inv_chart, use_container_width=True)
+                else:
+                    st.info("Нет данных по инвойсам.")
             else:
                 st.info("Данных для инвойсов пока нет.")
 
