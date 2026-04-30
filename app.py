@@ -1204,43 +1204,67 @@ elif page == "📊 Отчет производства":
                 st.info("Данных для матрицы пока нет.")
 
             st.markdown("---")
+            sst.markdown("---")
             st.markdown("### 📦 Проблемные Инвойсы (Топ-15)")
+            
+            # --- CSS для красивого всплывающего окна (тултипа) с рамками ---
+            st.markdown("""
+            <style>
+            #vg-tooltip-element {
+                font-family: sans-serif;
+                font-size: 13px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+                border-radius: 8px !important;
+                border: 1px solid #e0e0e0 !important;
+                max-width: 400px; /* Ограничиваем ширину, чтобы длинный текст красиво переносился */
+                white-space: normal !important;
+            }
+            #vg-tooltip-element table tr {
+                border-bottom: 1px solid #d1d5db; /* Те самые разделительные линии */
+            }
+            #vg-tooltip-element table tr:last-child {
+                border-bottom: none; /* Убираем линию у последней строки */
+            }
+            #vg-tooltip-element table td {
+                padding: 10px 12px !important; /* Добавляем воздух между строками */
+                vertical-align: top;
+            }
+            #vg-tooltip-element table td.key {
+                color: #6b7280;
+                font-weight: 600;
+                white-space: nowrap;
+            }
+            </style>
+            """, unsafe_allow_html=True)
             
             if matrix_list:
                 df_matrix_inv = pd.DataFrame(matrix_list)
                 
-                # Подготавливаем данные для графика
                 inv_grouped = []
                 for inv, group in df_matrix_inv.groupby('Инвойс'):
                     defect_count = len(group)
                     
-                    # Собираем уникальные поставки в красивую строку
                     supplies = ", ".join(sorted(list(set([str(x) for x in group['Номер поставки'] if str(x) != 'Не указан']))))
                     if not supplies: 
                         supplies = "Не указана"
                     
-                    # Считаем проблемные артикулы в этом инвойсе
                     sku_counts = group['Артикул'].value_counts()
                     
-                    # Формируем строку для тултипа (берем Топ-5 артикулов, чтобы окошко не было огромным)
-                    top_skus = ", ".join([f"{k} ({v} шт.)" for k, v in sku_counts.head(5).items()])
-                    if len(sku_counts) > 5:
-                        top_skus += " и еще..."
+                    # УБРАЛ ОГРАНИЧЕНИЕ: Теперь выводим все артикулы, разделяя их точкой
+                    all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in sku_counts.items()])
                         
                     inv_grouped.append({
                         'Инвойс': inv,
                         'Дефекты': defect_count,
                         'Поставки': supplies,
-                        'Проблемные Артикулы': top_skus
+                        'Список Артикулов': all_skus
                     })
                 
                 if inv_grouped:
-                    # Берем Топ-15 самых проблемных инвойсов
                     df_inv_chart = pd.DataFrame(inv_grouped).sort_values('Дефекты', ascending=False).head(15)
                     
                     import altair as alt
                     
-                    # Рисуем столбчатую диаграмму
                     inv_chart = alt.Chart(df_inv_chart).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
                         x=alt.X('Инвойс:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)),
                         y=alt.Y('Дефекты:Q', title='Количество дефектов'),
@@ -1248,8 +1272,8 @@ elif page == "📊 Отчет производства":
                         tooltip=[
                             alt.Tooltip('Инвойс:N', title='Инвойс'),
                             alt.Tooltip('Дефекты:Q', title='Всего дефектов'),
-                            alt.Tooltip('Поставки:N', title='Включает поставки'),
-                            alt.Tooltip('Проблемные Артикулы:N', title='Артикулы (Топ-5)')
+                            alt.Tooltip('Поставки:N', title='Поставки'),
+                            alt.Tooltip('Список Артикулов:N', title='Артикулы') # Название изменено
                         ]
                     ).properties(height=350)
                     
