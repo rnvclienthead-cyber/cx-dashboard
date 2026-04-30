@@ -245,23 +245,30 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 def fetch_wb_api(url, params=None):
-    """Универсальная функция запроса к API WB с защитой от лимитов (429)"""
+    """Функция запроса с обработкой лимитов и ошибок"""
     wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
     if not wb_key or wb_key == "None": return None
 
-    headers = {"Authorization": wb_key}
+    headers = {
+        "Authorization": wb_key,
+        "Content-Type": "application/json"
+    }
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
+            
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
-                st.warning("⚠️ WB просит подождать (лимит запросов). Ждем 10 секунд...")
-                time.sleep(10)
+                st.warning("⚠️ Сработал лимит WB. Пауза 5 секунд...")
+                time.sleep(5)
                 continue
             elif response.status_code == 404:
                 return {"error_404": True}
+            elif response.status_code == 401:
+                return {"error_401": True, "text": "Ключ невалиден или нет прав на этот раздел"}
             else:
                 return {"error": response.status_code, "text": response.text}
         except Exception as e:
@@ -292,33 +299,68 @@ def process_wb_api_sync(existing_gs_records):
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
 
     # 1. ТЯНЕМ ЯДРО - CLAIMS (ПРЕТЕНЗИИ)
-    st.info("⏳ Запрашиваем Претензии (Ядро данных)...")
+    st.info("⏳ Запрашиваем Претензии с учетом лимита (Интервал 3 сек)...")
     claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
     
-    res_c = fetch_wb_api(claims_url, params={"limit": 1000, "offset": 0})
+    claims_data = []
+    # Безопасный лимит для пагинации
+    params = {"limit": 100, "offset": 0} 
     
-    if res_c and not res_c.get("error_404") and not res_c.get("error"):
-        claims_data = res_c if isinstance(res_c, list) else res_c.get('claims', [])
-        df_c = pd.DataFrame(claims_data)
+    while True:
+        res_c = fetch_wb_api(claims_url, params=params)
         
-        # ЖЕСТКИЙ ФИЛЬТР: Только строки, где есть текст комментария
-        comment_col = 'user_comment' if 'user_comment' in df_c.columns else 'comment'
-        if comment_col in df_c.columns:
-            df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
+        # --- ДИАГНОСТИКА ОТВЕТА (ПАРСИНГ КАК НА СКРИНШОТЕ) ---
+        if res_c and isinstance(res_c, dict):
+            if res_c.get("error_401"):
+                st.error("🛑 Ошибка 401: Токен не принят. Проверь галочку 'Возвраты покупателей' в настройках токена WB.")
+                report.append("❌ Ошибка авторизации (401) в методе Claims.")
+                return pd.DataFrame(), 0, 0, report
+            if res_c.get("error_404"):
+                report.append("❌ Метод Claims вернул 404 (Не найдено).")
+                return pd.DataFrame(), 0, 0, report
+            if res_c.get("error"):
+                st.error(f"🛑 Ошибка WB API: {res_c.get('error')} -> {res_c.get('text')}")
+                report.append(f"❌ Сбой API при скачивании Claims: {res_c.get('error')}.")
+                return pd.DataFrame(), 0, 0, report
+                
+            # Строго следуем структуре ответа {"claims": [...], "total": X}
+            batch = res_c.get("claims", [])
+            total_claims = res_c.get("total", 0)
             
-        report.append(f"📥 Претензии (Ядро): Получено {len(df_c)} целевых заявок с текстом.")
-    else:
-        # СТОП-КРАН: Если претензий нет, дальше не идем
-        report.append("❌ Ошибка: Метод Claims недоступен или вернул пустой ответ. Обогащение остановлено.")
-        return pd.DataFrame(), 0, 0, report
+            if not batch: 
+                break 
+                
+            claims_data.extend(batch)
+            
+            # Если скачали всё, что указано в total, выходим
+            if len(claims_data) >= total_claims or len(batch) < params["limit"]:
+                break
+                
+            params["offset"] += params["limit"]
+            
+            # 👈 ЖЕСТКОЕ СОБЛЮДЕНИЕ ЛИМИТА: Интервал > 3 сек
+            time.sleep(3.5) 
+        else:
+            break
 
-    # Если вытянули claims, но все они оказались без текста
-    if df_c.empty:
-        report.append("⚠️ За этот период новых претензий с текстом не найдено.")
+    if not claims_data:
+        st.warning("⚠️ WB ответил 'ОК', но список претензий пуст. За последние 14 дней заявок нет.")
+        report.append("⚠️ За этот период новых претензий не найдено. Работа остановлена.")
         return pd.DataFrame(), 0, 0, report
+        
+    df_c = pd.DataFrame(claims_data)
+    
+    # ЖЕСТКИЙ ФИЛЬТР: Только строки, где есть текст комментария
+    comment_col = 'user_comment' if 'user_comment' in df_c.columns else 'comment'
+    if comment_col in df_c.columns:
+        df_c = df_c[df_c[comment_col].notna() & (df_c[comment_col].astype(str).str.strip() != '')]
+        
+    report.append(f"📥 Претензии (Ядро): Успешно скачано {len(df_c)} целевых заявок с текстом.")
 
     # 2. ТЯНЕМ SALES ДЛЯ ОБОГАЩЕНИЯ (ЗА 180 ДНЕЙ)
     st.info("⏳ Запрашиваем данные по Продажам (за полгода) для поиска логистики...")
+    # Метод статистики имеет лимит 1 запрос в минуту. Небольшая пауза.
+    time.sleep(2)
     sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
     date_from = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00")
     
@@ -328,7 +370,7 @@ def process_wb_api_sync(existing_gs_records):
         df_r = pd.DataFrame(sales_raw)
         report.append(f"📦 Склад: База в {len(df_r)} продаж загружена в память для поиска совпадений.")
         
-        # LEFT JOIN: Берем ТОЛЬКО наши Claims и подклеиваем к ним данные из Sales
+        # LEFT JOIN: Оставляем только претензии, подтягивая к ним логистику
         df_final = pd.merge(df_c, df_r, on='srid', how='left', suffixes=('', '_drop'))
         report.append("🔗 Найдена и прикреплена логистика для претензий.")
     else:
@@ -358,7 +400,7 @@ def process_wb_api_sync(existing_gs_records):
             
     api_df = api_df.fillna("").astype(str)
 
-    # 4. UPSERT (УМНОЕ СЛИЯНИЕ С ГУГЛ ТАБЛИЦЕЙ)
+    # 4. UPSERT (УМНОЕ СЛИЯНИЕ)
     new_count, updated_count = 0, 0
     if existing_gs_records:
         gs_df = pd.DataFrame(existing_gs_records).astype(str)
