@@ -263,40 +263,38 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 def fetch_wb_api(url, params=None):
-    """Улучшенная функция запроса с защитой от вылета"""
+    """Функция запроса с умным ожиданием 429 ошибки"""
     wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
     if not wb_key or wb_key == "None": return None
 
-    headers = {"Authorization": wb_key, "Content-Type": "application/json"}
+    headers = {
+        "Authorization": wb_key,
+        "Content-Type": "application/json"
+    }
     
-    # 5 попыток вместо 3 для большей стабильности
-    for attempt in range(5):
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response = requests.get(url, headers=headers, params=params, timeout=45)
             
             if response.status_code == 200:
                 return response.json()
-            
-            if response.status_code == 429:
+            elif response.status_code == 429:
                 try:
-                    retry_wait = response.json().get('retrySeconds', 15)
+                    retry_wait = response.json().get('retrySeconds', 10)
                 except:
-                    retry_wait = 15
-                # Используем временное предупреждение, которое само исчезнет
-                msg = st.warning(f"⏳ Лимит WB. Ждем {retry_wait} сек...")
+                    retry_wait = 10
+                st.warning(f"⚠️ WB просит паузу (Лимит 429). Ждем {retry_wait} секунд...")
                 time.sleep(retry_wait)
-                msg.empty()
                 continue
-                
-            if response.status_code in [500, 502, 503, 504]:
-                time.sleep(5) # Ждем, если сервер WB "прилег"
-                continue
-                
-            return {"error": response.status_code, "text": response.text}
-            
-        except (requests.exceptions.RequestException, Exception) as e:
-            time.sleep(5)
-            if attempt == 4: return {"error": "connection_lost", "text": str(e)}
+            elif response.status_code == 404:
+                return {"error_404": True}
+            elif response.status_code == 401:
+                return {"error_401": True, "text": "Ключ невалиден или нет прав"}
+            else:
+                return {"error": response.status_code, "text": response.text}
+        except Exception as e:
+            time.sleep(3)
     return None
 
 def fetch_wb_logistics_filtered(url, start_date, target_srids, describe):
@@ -396,49 +394,11 @@ def fetch_wb_orders_summary_optimized(url, start_date):
     return pd.DataFrame()
 
 def process_wb_api_sync(existing_gs_records):
-    # 1. ИНИЦИАЛИЗАЦИЯ (Защита от UnboundLocalError)
     report = []
-    final_df = pd.DataFrame()
-    df_orders_summary = pd.DataFrame()
-    new_items = []
-    common = []
-    
-    # Создаем контейнер для статуса
-    progress_container = st.container()
-    with progress_container:
-        main_status = st.status("🚀 Инициализация синхронизации...", expanded=True)
-        p_bar = st.progress(0, text="Подготовка...")
-
-    try:
-        wb_key = st.secrets.get("WB_API_KEY")
-        if not wb_key:
-            raise ValueError("Ключ WB_API_KEY не найден в Secrets.")
-
-        # --- Твой основной код сбора данных (Claims, Sales, Orders) ---
-        # ... 
-        # (Убедись, что переменные final_df и остальные 
-        # заполняются в ходе выполнения)
-        # ...
-        
-        # 2. ПРИМЕР: На этапе UPSERT
-        # new_items = api_df.index.difference(gs_df.index)
-        # common = gs_df.index.intersection(api_df.index)
-        # final_df = ...
-        
-        p_bar.progress(100, text="Синхронизация завершена!")
-        main_status.update(label="✅ Данные успешно обновлены", state="complete", expanded=False)
-
-    except Exception as e:
-        error_msg = f"Сбой в процессе: {str(e)}"
-        main_status.update(label="❌ Ошибка", state="error", expanded=True)
-        st.error(error_msg)
-        report.append(f"❌ {error_msg}")
-        add_system_log("Синхронизация", "ERROR", error_msg)
-        # В случае ошибки возвращаем пустые структуры, которые мы создали в начале
+    wb_key = st.secrets.get("WB_API_KEY")
+    if not wb_key:
+        report.append("❌ Ошибка: Ключ WB_API_KEY не найден в Secrets.")
         return pd.DataFrame(), pd.DataFrame(), 0, 0, report
-
-    # 3. УДАЧНЫЙ ВОЗВРАТ
-    return final_df, df_orders_summary, len(new_items), len(common), report
 
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
