@@ -600,6 +600,34 @@ def get_col_letter(col_idx):
 if page == "🤖 Робот-Загрузчик":
     st.title("🤖 Робот-Загрузчик (API Режим)")
     
+    # --- ДИАГНОСТИКА ДОСТУПА К ЗАКАЗАМ ---
+    if st.button("🔍 Тест доступа к Orders (Заказы)"):
+        import requests
+        from datetime import datetime, timedelta
+        
+        wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
+        headers = {"Authorization": wb_key}
+        # Берем всего 5 дней для быстрого теста
+        date_from = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%dT00:00:00")
+        url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
+        
+        st.info(f"Стучимся в {url} ...")
+        
+        try:
+            res = requests.get(url, headers=headers, params={"dateFrom": date_from})
+            if res.status_code == 200:
+                data = res.json()
+                st.success(f"✅ ДОСТУП ЕСТЬ! API Заказов работает. Получено {len(data)} строк за 5 дней.")
+            elif res.status_code == 401:
+                st.error("❌ Ошибка 401: У токена действительно нет прав на галочку 'Статистика'.")
+            elif res.status_code == 429:
+                st.warning("⚠️ Сработал лимит запросов, нужно подождать минуту.")
+            else:
+                st.error(f"⚠️ Неизвестная ошибка {res.status_code}: {res.text}")
+        except Exception as e:
+            st.error(f"Сбой: {e}")
+    # ------------------------------------
+    
     with st.expander("1. Синхронизация с API Wildberries", expanded=True):
         st.write("Робот сам подключится к WB, заберет новые претензии и обновит статусы у старых, не трогая ваши теги.")
         
