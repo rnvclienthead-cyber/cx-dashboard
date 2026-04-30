@@ -1005,13 +1005,15 @@ elif page == "📊 Отчет производства":
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
-    try:
+    # ⚡️ ФУНКЦИЯ С КЭШЕМ (Качает данные раз в 5 минут, а не при каждом клике)
+    @st.cache_data(ttl=300) 
+    def load_cached_google_data():
         client = get_gspread_client()
         sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
-        df = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
+        df_temp = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
         
-        if 'supplyID' in df.columns and 'Номер поставки' not in df.columns:
-            df.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+        if 'supplyID' in df_temp.columns and 'Номер поставки' not in df_temp.columns:
+            df_temp.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
         
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
@@ -1025,17 +1027,23 @@ elif page == "📊 Отчет производства":
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
                     df_inv.columns = [str(c).strip() for c in df_inv.columns]
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
-                    if 'Инвойс' in df.columns: df = df.drop(columns=['Инвойс'])
+                    if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
                     cols_to_merge = ['Номер поставки']
                     if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
-                    df = df.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
-        except Exception as e:
-            st.warning(f"Данные инвойсов не подтянуты: {e}")
+                    df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
+        except Exception:
+            pass
+            
+        return df_temp
+
+    try:
+        # Мгновенно берем данные из оперативной памяти
+        df = load_cached_google_data()
 
         if not df.empty:
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
             if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
-
+            
             def has_tags(row): return any(str(row.get(f'Кат {i}','')).strip() in ['1','1.0','+'] for i in range(1,14))
             df['Размечено'] = df.apply(has_tags, axis=1)
             
