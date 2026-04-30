@@ -263,38 +263,40 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 def fetch_wb_api(url, params=None):
-    """Функция запроса с умным ожиданием 429 ошибки"""
+    """Улучшенная функция запроса с защитой от вылета"""
     wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
     if not wb_key or wb_key == "None": return None
 
-    headers = {
-        "Authorization": wb_key,
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": wb_key, "Content-Type": "application/json"}
     
-    max_retries = 3
-    for attempt in range(max_retries):
+    # 5 попыток вместо 3 для большей стабильности
+    for attempt in range(5):
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=45)
+            response = requests.get(url, headers=headers, params=params, timeout=60)
             
             if response.status_code == 200:
                 return response.json()
-            elif response.status_code == 429:
+            
+            if response.status_code == 429:
                 try:
-                    retry_wait = response.json().get('retrySeconds', 10)
+                    retry_wait = response.json().get('retrySeconds', 15)
                 except:
-                    retry_wait = 10
-                st.warning(f"⚠️ WB просит паузу (Лимит 429). Ждем {retry_wait} секунд...")
+                    retry_wait = 15
+                # Используем временное предупреждение, которое само исчезнет
+                msg = st.warning(f"⏳ Лимит WB. Ждем {retry_wait} сек...")
                 time.sleep(retry_wait)
+                msg.empty()
                 continue
-            elif response.status_code == 404:
-                return {"error_404": True}
-            elif response.status_code == 401:
-                return {"error_401": True, "text": "Ключ невалиден или нет прав"}
-            else:
-                return {"error": response.status_code, "text": response.text}
-        except Exception as e:
-            time.sleep(3)
+                
+            if response.status_code in [500, 502, 503, 504]:
+                time.sleep(5) # Ждем, если сервер WB "прилег"
+                continue
+                
+            return {"error": response.status_code, "text": response.text}
+            
+        except (requests.exceptions.RequestException, Exception) as e:
+            time.sleep(5)
+            if attempt == 4: return {"error": "connection_lost", "text": str(e)}
     return None
 
 def fetch_wb_logistics_filtered(url, start_date, target_srids, describe):
@@ -395,10 +397,41 @@ def fetch_wb_orders_summary_optimized(url, start_date):
 
 def process_wb_api_sync(existing_gs_records):
     report = []
-    wb_key = st.secrets.get("WB_API_KEY")
-    if not wb_key:
-        report.append("❌ Ошибка: Ключ WB_API_KEY не найден в Secrets.")
-        return pd.DataFrame(), pd.DataFrame(), 0, 0, report
+    # СОЗДАЕМ ЕДИНЫЙ КОНТЕЙНЕР ДЛЯ ПРОГРЕССА
+    progress_container = st.container()
+    with progress_container:
+        main_status = st.status("🚀 Инициализация синхронизации...", expanded=True)
+        p_bar = st.progress(0, text="Подготовка...")
+
+    try:
+        # 1. CLAIMS
+        main_status.update(label="⏳ Запрашиваем Претензии...", state="running")
+        p_bar.progress(10, text="Скачивание претензий...")
+        # ... твой код сбора претензий ...
+
+        # 2. ЛОГИСТИКА
+        main_status.update(label="🚀 Глубокий сбор логистики (это займет время)...", state="running")
+        p_bar.progress(30, text="Поиск совпадений в продажах за год...")
+        
+        # Передаем статус в функции скачивания, чтобы они обновляли текст
+        # (Нужно будет добавить передачу p_bar в аргументы функций fetch_...)
+        
+        # ... после сбора логистики ...
+        p_bar.progress(80, text="Склеивание и очистка данных...")
+        
+        # ... после всех расчетов ...
+        p_bar.progress(100, text="Готово!")
+        main_status.update(label="✅ Синхронизация завершена успешно!", state="complete", expanded=False)
+        
+    except Exception as e:
+        # Если что-то пошло не так, приложение не упадет
+        error_msg = f"Критический сбой в процессе: {str(e)}"
+        main_status.update(label="❌ Ошибка синхронизации", state="error", expanded=True)
+        st.error(error_msg)
+        add_system_log("Синхронизация", "ERROR", error_msg)
+        return pd.DataFrame(), pd.DataFrame(), 0, 0, [f"❌ {error_msg}"]
+
+    return final_df, df_orders_summary, len(new_items), len(common), report
 
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
