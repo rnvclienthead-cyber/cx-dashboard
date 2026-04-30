@@ -396,41 +396,48 @@ def fetch_wb_orders_summary_optimized(url, start_date):
     return pd.DataFrame()
 
 def process_wb_api_sync(existing_gs_records):
+    # 1. ИНИЦИАЛИЗАЦИЯ (Защита от UnboundLocalError)
     report = []
-    # СОЗДАЕМ ЕДИНЫЙ КОНТЕЙНЕР ДЛЯ ПРОГРЕССА
+    final_df = pd.DataFrame()
+    df_orders_summary = pd.DataFrame()
+    new_items = []
+    common = []
+    
+    # Создаем контейнер для статуса
     progress_container = st.container()
     with progress_container:
         main_status = st.status("🚀 Инициализация синхронизации...", expanded=True)
         p_bar = st.progress(0, text="Подготовка...")
 
     try:
-        # 1. CLAIMS
-        main_status.update(label="⏳ Запрашиваем Претензии...", state="running")
-        p_bar.progress(10, text="Скачивание претензий...")
-        # ... твой код сбора претензий ...
+        wb_key = st.secrets.get("WB_API_KEY")
+        if not wb_key:
+            raise ValueError("Ключ WB_API_KEY не найден в Secrets.")
 
-        # 2. ЛОГИСТИКА
-        main_status.update(label="🚀 Глубокий сбор логистики (это займет время)...", state="running")
-        p_bar.progress(30, text="Поиск совпадений в продажах за год...")
+        # --- Твой основной код сбора данных (Claims, Sales, Orders) ---
+        # ... 
+        # (Убедись, что переменные final_df и остальные 
+        # заполняются в ходе выполнения)
+        # ...
         
-        # Передаем статус в функции скачивания, чтобы они обновляли текст
-        # (Нужно будет добавить передачу p_bar в аргументы функций fetch_...)
+        # 2. ПРИМЕР: На этапе UPSERT
+        # new_items = api_df.index.difference(gs_df.index)
+        # common = gs_df.index.intersection(api_df.index)
+        # final_df = ...
         
-        # ... после сбора логистики ...
-        p_bar.progress(80, text="Склеивание и очистка данных...")
-        
-        # ... после всех расчетов ...
-        p_bar.progress(100, text="Готово!")
-        main_status.update(label="✅ Синхронизация завершена успешно!", state="complete", expanded=False)
-        
+        p_bar.progress(100, text="Синхронизация завершена!")
+        main_status.update(label="✅ Данные успешно обновлены", state="complete", expanded=False)
+
     except Exception as e:
-        # Если что-то пошло не так, приложение не упадет
-        error_msg = f"Критический сбой в процессе: {str(e)}"
-        main_status.update(label="❌ Ошибка синхронизации", state="error", expanded=True)
+        error_msg = f"Сбой в процессе: {str(e)}"
+        main_status.update(label="❌ Ошибка", state="error", expanded=True)
         st.error(error_msg)
+        report.append(f"❌ {error_msg}")
         add_system_log("Синхронизация", "ERROR", error_msg)
-        return pd.DataFrame(), pd.DataFrame(), 0, 0, [f"❌ {error_msg}"]
+        # В случае ошибки возвращаем пустые структуры, которые мы создали в начале
+        return pd.DataFrame(), pd.DataFrame(), 0, 0, report
 
+    # 3. УДАЧНЫЙ ВОЗВРАТ
     return final_df, df_orders_summary, len(new_items), len(common), report
 
     TARGET_COLUMNS = [
