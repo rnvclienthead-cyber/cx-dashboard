@@ -263,7 +263,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 def fetch_wb_api(url, params=None):
-    """Функция запроса с умным ожиданием 429 ошибки (из кода коллеги)"""
+    """Функция запроса с умным ожиданием 429 ошибки"""
     wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
     if not wb_key or wb_key == "None": return None
 
@@ -280,7 +280,6 @@ def fetch_wb_api(url, params=None):
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
-                # УМНОЕ ОЖИДАНИЕ: WB сам говорит, сколько секунд ждать
                 try:
                     retry_wait = response.json().get('retrySeconds', 10)
                 except:
@@ -298,54 +297,101 @@ def fetch_wb_api(url, params=None):
             time.sleep(3)
     return None
 
-def fetch_wb_statistics_all(url, start_date, describe):
+def fetch_wb_logistics_filtered(url, start_date, target_srids, describe):
     """
-    Скачивание статистики 'марафонским' методом (по логике Рустама).
-    Использует lastChangeDate для перехода к следующей порции данных.
+    Скачивает логистику и СРАЗУ фильтрует её по SRID претензий.
+    Это экономит 99% оперативной памяти.
     """
-    all_data = []
+    all_filtered = []
     current_from = start_date
-    # Конечная точка — завтрашний день, чтобы захватить всё по текущий момент
     date_to = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
-    limit = 80000 # Лимит из кода коллеги
+    limit = 80000 
     page = 1
     
     status_placeholder = st.empty()
     
     while True:
-        status_placeholder.info(f"⏳ {describe}: Скачиваем страницу {page}... (уже собрано: {len(all_data)} строк)")
-        
-        params = {
-            "dateFrom": current_from,
-            "dateTo": date_to,
-            "flag": 0,
-            "limit": limit
-        }
-        
+        status_placeholder.info(f"⏳ {describe}: Поиск совпадений, стр. {page}...")
+        params = {"dateFrom": current_from, "dateTo": date_to, "flag": 0, "limit": limit}
         res = fetch_wb_api(url, params=params)
         
-        if not res or not isinstance(res, list):
-            break
+        if not res or not isinstance(res, list): break
             
-        all_data.extend(res)
+        df_batch = pd.DataFrame(res)
+        if 'srid' in df_batch.columns:
+            # Оставляем только те строки, которые реально есть в наших претензиях
+            filtered = df_batch[df_batch['srid'].isin(target_srids)]
+            if not filtered.empty:
+                # Оставляем только КРИТИЧЕСКИ нужные колонки для склейки
+                NECESSARY_COLS = ['srid', 'supplierArticle', 'nmId', 'warehouseName', 'incomeID', 'category', 'subject', 'brand', 'date', 'lastChangeDate', 'isCancel']
+                cols_to_keep = [c for c in NECESSARY_COLS if c in filtered.columns]
+                all_filtered.append(filtered[cols_to_keep])
         
-        # Если данных пришло меньше лимита — значит, мы достигли конца
-        if len(res) < limit:
-            break
+        if len(res) < limit: break
             
-        # Берем дату последнего изменения для следующего шага[cite: 3]
         last_change = res[-1].get("lastChangeDate")
-        if not last_change or last_change == current_from:
-            break
-            
+        if not last_change or last_change == current_from: break
         current_from = last_change
         page += 1
-        
-        # Коллега использует 60 секунд, мы попробуем 15 для баланса скорости и безопасности[cite: 3]
         time.sleep(15) 
         
     status_placeholder.empty()
-    return all_data
+    if all_filtered:
+        return pd.concat(all_filtered, ignore_index=True)
+    return pd.DataFrame()
+
+def fetch_wb_orders_summary_optimized(url, start_date):
+    """
+    Скачивает заказы и СРАЗУ их группирует. 
+    Миллион строк превращается в пару сотен агрегированных строк.
+    """
+    summary_list = []
+    current_from = start_date
+    date_to = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+    limit = 80000 
+    page = 1
+    
+    status_placeholder = st.empty()
+    
+    while True:
+        status_placeholder.info(f"📊 Сбор статистики заказов, стр. {page}...")
+        params = {"dateFrom": current_from, "dateTo": date_to, "flag": 0, "limit": limit}
+        res = fetch_wb_api(url, params=params)
+        
+        if not res or not isinstance(res, list): break
+            
+        df_batch = pd.DataFrame(res)
+        if not df_batch.empty:
+            # Агрегируем текущую пачку немедленно
+            df_batch['Дата'] = pd.to_datetime(df_batch['date']).dt.strftime('%d.%m.%Y')
+            df_batch['Отмена'] = df_batch['isCancel'].fillna(False).astype(bool).astype(int)
+            
+            grp = df_batch.groupby(['Дата', 'nmId', 'category', 'subject', 'brand']).agg(
+                Всего_заказов=('srid', 'count'),
+                Отмен=('Отмена', 'sum')
+            ).reset_index()
+            summary_list.append(grp)
+        
+        if len(res) < limit: break
+            
+        last_change = res[-1].get("lastChangeDate")
+        if not last_change or last_change == current_from: break
+        current_from = last_change
+        page += 1
+        time.sleep(15) 
+
+    status_placeholder.empty()
+    if summary_list:
+        final_summary = pd.concat(summary_list, ignore_index=True)
+        # Финальная группировка (на случай, если один день попал в разные пачки)
+        final_summary = final_summary.groupby(['Дата', 'nmId', 'category', 'subject', 'brand']).agg(
+            Всего_заказов=('Всего_заказов', 'sum'),
+            Отмен=('Отмен', 'sum')
+        ).reset_index()
+        final_summary['Чистые_заказы'] = final_summary['Всего_заказов'] - final_summary['Отмен']
+        final_summary.rename(columns={'nmId': 'Артикул WB', 'category': 'Категория', 'subject': 'Предмет', 'brand': 'Бренд'}, inplace=True)
+        return final_summary
+    return pd.DataFrame()
 
 def process_wb_api_sync(existing_gs_records):
     report = []
@@ -354,7 +400,6 @@ def process_wb_api_sync(existing_gs_records):
         report.append("❌ Ошибка: Ключ WB_API_KEY не найден в Secrets.")
         return pd.DataFrame(), pd.DataFrame(), 0, 0, report
 
-    # Колонки для финальной таблицы
     TARGET_COLUMNS = [
         'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Артикул WB', 'Комментарий покупателя', 
         'SRID', 'Источник заявки', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 
@@ -371,7 +416,6 @@ def process_wb_api_sync(existing_gs_records):
     ]
     
     MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
-
     BOOLEAN_RU = {True: 'Да', False: 'Нет', 'true': 'Да', 'false': 'Нет', 1: 'Да', 0: 'Нет'}
 
     # 1. CLAIMS (ПРЕТЕНЗИИ)
@@ -397,48 +441,34 @@ def process_wb_api_sync(existing_gs_records):
         return pd.DataFrame(), pd.DataFrame(), 0, 0, ["⚠️ Нет претензий за период."]
         
     df_c = pd.DataFrame(claims_data)
+    # Собираем список SRID, которые нам нужно найти в логистике
+    target_srids = df_c['srid'].dropna().unique().tolist()
     report.append(f"📥 Претензии: Скачано {len(df_c)} заявок.")
 
-    # 2. ПОЛНАЯ ВЫГРУЗКА ЛОГИСТИКИ (ПАГИНАЦИЯ ПО КОДУ КОЛЛЕГИ)
-    st.info("🚀 Запускаем глубокий сбор логистики за год (обход лимита 100k)...")
+    # 2. ОПТИМИЗИРОВАННАЯ ЛОГИСТИКА
+    st.info("🚀 Запускаем умный сбор логистики за год...")
     date_from = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00")
     
     sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
-    sales_raw = fetch_wb_statistics_all(sales_url, date_from, "Продажи")
-    df_sales = pd.DataFrame(sales_raw) if sales_raw else pd.DataFrame()
-
-    time.sleep(10) # Пауза между методами статистики
-
     orders_url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
-    orders_raw = fetch_wb_statistics_all(orders_url, date_from, "Заказы")
-    df_orders = pd.DataFrame(orders_raw) if orders_raw else pd.DataFrame()
+    
+    # Ищем только те продажи/заказы, которые есть в претензиях
+    df_sales = fetch_wb_logistics_filtered(sales_url, date_from, target_srids, "Продажи")
+    df_orders_for_claims = fetch_wb_logistics_filtered(orders_url, date_from, target_srids, "Заказы (поиск)")
+    
+    # Собираем агрегированную статистику для отдельного листа
+    df_orders_summary = fetch_wb_orders_summary_optimized(orders_url, date_from)
 
-    report.append(f"📦 Итого собрано для анализа: Продаж — {len(df_sales)}, Заказов — {len(df_orders)}.")
-
-    # --- СВОДКА ПО ЗАКАЗАМ ---
-    df_orders_grouped = pd.DataFrame()
-    if not df_orders.empty:
-        df_orders['Дата'] = pd.to_datetime(df_orders['date']).dt.strftime('%d.%m.%Y')
-        df_orders['Отмена'] = df_orders['isCancel'].fillna(False).astype(bool).astype(int)
-        df_orders_grouped = df_orders.groupby(['Дата', 'nmId', 'category', 'subject', 'brand']).agg(
-            Всего_заказов=('srid', 'count'),
-            Отмен=('Отмена', 'sum')
-        ).reset_index()
-        df_orders_grouped['Чистые_заказы'] = df_orders_grouped['Всего_заказов'] - df_orders_grouped['Отмен']
-        df_orders_grouped.rename(columns={'nmId': 'Артикул WB', 'category': 'Категория', 'subject': 'Предмет', 'brand': 'Бренд'}, inplace=True)
+    report.append(f"📦 Логистика найдена для {len(df_sales) + len(df_orders_for_claims)} заявок.")
 
     # --- ЖЕСТКОЕ ОБОГАЩЕНИЕ ПРЕТЕНЗИЙ ---
-    if not df_sales.empty or not df_orders.empty:
-        df_logistics = pd.concat([df_sales, df_orders], ignore_index=True)
+    if not df_sales.empty or not df_orders_for_claims.empty:
+        df_logistics = pd.concat([df_sales, df_orders_for_claims], ignore_index=True)
         df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
         
-        # Переименовываем колонки претензий под стандарт
         df_c.rename(columns={'nm_id': 'nmId', 'supplier_article': 'supplierArticle', 'article': 'supplierArticle'}, inplace=True)
-        
-        # Склеиваем
         df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_log'))
         
-        # Заполняем пустоты
         for col in list(df_final.columns):
             if col.endswith('_log'):
                 base_col = col.replace('_log', '')
@@ -480,9 +510,9 @@ def process_wb_api_sync(existing_gs_records):
         if not new_items.empty: gs_df = pd.concat([gs_df, api_df.loc[new_items]])
         
         final_df = gs_df.reset_index()[TARGET_COLUMNS]
-        return final_df, df_orders_grouped, len(new_items), len(common), report
+        return final_df, df_orders_summary, len(new_items), len(common), report
     else:
-        return api_df, df_orders_grouped, len(api_df), 0, report
+        return api_df, df_orders_summary, len(api_df), 0, report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
