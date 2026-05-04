@@ -704,14 +704,16 @@ elif page == "📊 Отчет производства":
             all_photos = []
             for _, r in details.iterrows():
                 srid = r['SRID']
-                claim_data = pd.read_sql(f"SELECT photos, video_paths FROM wb_claims WHERE srid = '{srid}'", engine)
-                if not claim_data.empty:
-                    m_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
-                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                    for u in urls:
-                        clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                        if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                        if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos.append(clean_url)
+                try:
+                    claim_data = pd.read_sql(text("SELECT photos, video_paths FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
+                    if not claim_data.empty:
+                        m_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
+                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                        for u in urls:
+                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                            if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos.append(clean_url)
+                except Exception: pass
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
@@ -728,15 +730,17 @@ elif page == "📊 Отчет производства":
                     srid = r['SRID']
                     
                     row_photos, videos = [], []
-                    claim_data = pd.read_sql(f"SELECT photos, video_paths FROM wb_claims WHERE srid = '{srid}'", engine)
-                    if not claim_data.empty:
-                        m_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
-                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                        for u in urls:
-                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                            if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                            else: row_photos.append(clean_url)
+                    try:
+                        claim_data = pd.read_sql(text("SELECT photos, video_paths FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
+                        if not claim_data.empty:
+                            m_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
+                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                            for u in urls:
+                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
+                                else: row_photos.append(clean_url)
+                    except Exception: pass
 
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
@@ -767,47 +771,81 @@ elif page == "📊 Отчет производства":
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
-    @st.cache_data(ttl=60) 
+    # --- ОПТИМИЗИРОВАННАЯ ЗАГРУЗКА ---
+    @st.cache_data(ttl=120) 
     def load_cached_hybrid_data():
-        df_temp = pd.read_sql("SELECT * FROM view_cx_dashboard", engine)
+        # Быстрый SQL-запрос только нужных колонок (без тяжелых фото и видео)
+        query = """
+            SELECT 
+                "SRID", "Дата и время оформления заявки на возврат", "Артикул продавца", 
+                "Комментарий покупателя", "Решение по возврату покупателю", "Статус товара",
+                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
+                "Корректировка", "Номер поставки"
+            FROM view_cx_dashboard
+        """
+        df_temp = pd.read_sql(query, engine)
+        
+        # Очистка мусорных артикулов
+        df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
+        df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
+
+        if 'Номер поставки' not in df_temp.columns:
+            df_temp['Номер поставки'] = 'Не указан'
+            
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
             if inv_id:
                 df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
-                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
+                    df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
                     df_inv.columns = [str(c).strip() for c in df_inv.columns]
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
-                    if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
-                    cols_to_merge = ['Номер поставки']
-                    if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
                     
-                    df_temp['Номер поставки'] = df_temp['SRID'].astype(str).str.split('.').str[0]
+                    df_temp['Номер поставки'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None'], 'Не указан')
+                    df_inv_unique['Номер поставки'] = df_inv_unique['Номер поставки'].astype(str)
+                    
+                    if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
+                    cols_to_merge = ['Номер поставки', 'Инвойс'] if 'Инвойс' in df_inv.columns else ['Номер поставки']
+                    
                     df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
-        except Exception: pass
+        except Exception as e: 
+            print(f"Ошибка загрузки инвойсов: {e}")
+            pass
+            
         return df_temp
 
-    @st.cache_data(ttl=60)
+    @st.cache_data(ttl=120)
     def load_cached_orders():
-        query = """SELECT supplier_article AS "Артикул продавца", COUNT(srid) - SUM(CASE WHEN is_cancel THEN 1 ELSE 0 END) AS "Чистые_заказы" FROM wb_logistics WHERE doc_type = 'ORDER' GROUP BY supplier_article"""
-        try: return pd.read_sql(query, engine)
+        query = """
+            SELECT supplier_article AS "Артикул продавца", COUNT(srid) - SUM(CASE WHEN is_cancel THEN 1 ELSE 0 END) AS "Чистые_заказы" 
+            FROM wb_logistics 
+            WHERE doc_type = 'ORDER' 
+            GROUP BY supplier_article
+        """
+        try: 
+            df_ord = pd.read_sql(query, engine)
+            df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
+            return df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
         except: return pd.DataFrame()
 
     try:
-        df = load_cached_hybrid_data()
-        df_orders = load_cached_orders()
+        with st.spinner("📊 Загрузка и анализ данных..."):
+            df = load_cached_hybrid_data()
+            df_orders = load_cached_orders()
 
         if not df.empty:
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
-            if 'Номер поставки' not in df.columns: df['Номер поставки'] = 'Не указан'
+            df['Инвойс'] = df['Инвойс'].fillna('Не указан')
+            df['Номер поставки'] = df.get('Номер поставки', 'Не указан').fillna('Не указан')
             
             def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14))
             df['Размечено'] = df.apply(has_tags, axis=1)
             
             st.markdown("### 🔍 Глобальные фильтры")
             f_col1, f_col2 = st.columns(2)
-            inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'nan'])))
-            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip() and str(x) != 'nan'])))
+            inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'Не указан'])))
+            sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
             
             selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
             selected_sku = f_col2.selectbox("Артикул:", sku_list)
@@ -914,11 +952,14 @@ elif page == "📊 Отчет производства":
                     st.info("Данных для инвойсов пока нет.")
 
             with tab_ppm:
-                st.info("💡 **Аналитика PPM (Parts Per Million)**: Соотношение дефектных товаров (где возврат одобрен) к общему количеству заказов.")
+                st.info("💡 **Аналитика PPM**: Учитываются ТОЛЬКО заявки со статусом 'Одобрено' (возврат одобрен).")
+                import numpy as np
+                
                 if not df_orders.empty:
-                    valid_statuses = ['одобрено', '2', '2.0', 'true', 'да', 'активная']
+                    # СТРОГИЙ ФИЛЬТР: ТОЛЬКО ОДОБРЕННЫЙ БРАК (Учтен пункт 4)
+                    valid_statuses = ['одобрено', '2', '2.0', 'true', 'да']
                     if 'Решение по возврату покупателю' in df_filtered.columns:
-                        df_approved = df_filtered[df_filtered['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) | df_filtered['Статус'].astype(str).str.strip().str.lower().isin(valid_statuses)]
+                        df_approved = df_filtered[df_filtered['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses)]
                         df_approved = df_approved[df_approved['Размечено'] == True]
                     else: 
                         df_approved = pd.DataFrame()
@@ -926,12 +967,16 @@ elif page == "📊 Отчет производства":
                     if 'Артикул продавца' in df_orders.columns:
                         df_orders['Чистые_заказы'] = pd.to_numeric(df_orders.get('Чистые_заказы', 0), errors='coerce').fillna(0)
                         orders_grouped = df_orders.groupby('Артикул продавца')['Чистые_заказы'].sum().reset_index()
+                        
                         defects_grouped = df_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)') if not df_approved.empty else pd.DataFrame(columns=['Артикул продавца', 'Одобренный брак (шт)'])
                         
+                        # ЗАЩИТА ОТ ДЕЛЕНИЯ НА НОЛЬ И ОШИБОК РАСЧЕТА
                         ppm_df = pd.merge(orders_grouped, defects_grouped, on='Артикул продавца', how='left').fillna(0)
-                        ppm_df['PPM'] = (ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 1000000
-                        ppm_df['PPM'] = ppm_df['PPM'].replace([float('inf'), -float('inf')], 0).astype(int)
-                        ppm_df['Доля брака, %'] = round((ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 100, 2)
+                        
+                        ppm_df['PPM'] = np.where(ppm_df['Чистые_заказы'] > 0, (ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 1000000, 0)
+                        ppm_df['PPM'] = ppm_df['PPM'].astype(int)
+                        
+                        ppm_df['Доля брака, %'] = np.where(ppm_df['Чистые_заказы'] > 0, round((ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 100, 2), 0)
                         
                         ppm_alerts = ppm_df[ppm_df['PPM'] > 10000].sort_values('PPM', ascending=False)
                         
@@ -947,13 +992,15 @@ elif page == "📊 Отчет производства":
                                 all_photos_claim = []
                                 for _, r in sku_defects.iterrows():
                                     srid = r['SRID']
-                                    claim_data = pd.read_sql(f"SELECT photos FROM wb_claims WHERE srid = '{srid}'", engine)
-                                    if not claim_data.empty:
-                                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(claim_data.iloc[0].get('photos', '')))
-                                        for u in urls:
-                                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                            if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos_claim.append(clean_url)
+                                    try:
+                                        claim_data = pd.read_sql(text("SELECT photos FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
+                                        if not claim_data.empty:
+                                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(claim_data.iloc[0].get('photos', '')))
+                                            for u in urls:
+                                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                                if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos_claim.append(clean_url)
+                                    except: pass
                                             
                                 all_photos_claim = list(set(all_photos_claim))[:15]
                                 
@@ -961,7 +1008,7 @@ elif page == "📊 Отчет производства":
                                 c_prc = ppm_alerts[ppm_alerts['Артикул продавца'] == selected_sku_claim]['Доля брака, %'].values[0]
                                 c_qty = ppm_alerts[ppm_alerts['Артикул продавца'] == selected_sku_claim]['Одобренный брак (шт)'].values[0]
                                 
-                                claim_text = f"Здравствуйте!\n\nИнформируем вас о превышении допустимого уровня брака по товару (Артикул: {selected_sku_claim}).\nУровень PPM составляет {c_ppm} ({c_prc}% от всех заказов за период).\nВсего зафиксировано и подтверждено брака: {int(c_qty)} ед. (статус заявок - 'Одобрено').\n\nПросим провести внутреннюю проверку на производстве и устранить причину дефектов.\n"
+                                claim_text = f"Здравствуйте!\n\nИнформируем вас о превышении допустимого уровня брака по товару (Артикул: {selected_sku_claim}).\nУровень PPM составляет {c_ppm} ({c_prc}% от всех заказов за период).\nВсего зафиксировано и подтверждено брака: {int(c_qty)} ед. (статус заявки - 'Одобрено').\n\nПросим провести внутреннюю проверку на производстве и устранить причину дефектов.\n"
                                 if all_photos_claim: 
                                     claim_text += "\nСсылки на фотографии брака для подтверждения:\n" + "\n".join(all_photos_claim)
                                 st.text_area("Готовое письмо:", value=claim_text, height=300)
