@@ -263,38 +263,40 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 def fetch_wb_api(url, params=None):
-    """Функция запроса с умным ожиданием 429 ошибки"""
+    """Улучшенная функция запроса с защитой от вылета"""
     wb_key = str(st.secrets.get("WB_API_KEY", "")).strip()
     if not wb_key or wb_key == "None": return None
 
-    headers = {
-        "Authorization": wb_key,
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": wb_key, "Content-Type": "application/json"}
     
-    max_retries = 3
-    for attempt in range(max_retries):
+    # 5 попыток вместо 3 для большей стабильности
+    for attempt in range(5):
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=45)
+            response = requests.get(url, headers=headers, params=params, timeout=60)
             
             if response.status_code == 200:
                 return response.json()
-            elif response.status_code == 429:
+            
+            if response.status_code == 429:
                 try:
-                    retry_wait = response.json().get('retrySeconds', 10)
+                    retry_wait = response.json().get('retrySeconds', 15)
                 except:
-                    retry_wait = 10
-                st.warning(f"⚠️ WB просит паузу (Лимит 429). Ждем {retry_wait} секунд...")
+                    retry_wait = 15
+                # Используем временное предупреждение, которое само исчезнет
+                msg = st.warning(f"⏳ Лимит WB. Ждем {retry_wait} сек...")
                 time.sleep(retry_wait)
+                msg.empty()
                 continue
-            elif response.status_code == 404:
-                return {"error_404": True}
-            elif response.status_code == 401:
-                return {"error_401": True, "text": "Ключ невалиден или нет прав"}
-            else:
-                return {"error": response.status_code, "text": response.text}
-        except Exception as e:
-            time.sleep(3)
+                
+            if response.status_code in [500, 502, 503, 504]:
+                time.sleep(5) # Ждем, если сервер WB "прилег"
+                continue
+                
+            return {"error": response.status_code, "text": response.text}
+            
+        except (requests.exceptions.RequestException, Exception) as e:
+            time.sleep(5)
+            if attempt == 4: return {"error": "connection_lost", "text": str(e)}
     return None
 
 def fetch_wb_logistics_filtered(url, start_date, target_srids, describe):
@@ -389,155 +391,167 @@ def fetch_wb_orders_summary_optimized(url, start_date):
 
 def process_wb_api_sync(existing_gs_records):
     report = []
-    wb_key = st.secrets.get("WB_API_KEY")
-    if not wb_key:
-        report.append("❌ Ошибка: Ключ WB_API_KEY не найден.")
-        return pd.DataFrame(), pd.DataFrame(), 0, 0, report
-
-    # --- 1. Артикул WB УДАЛЕН ИЗ СПИСКА ---
-    TARGET_COLUMNS = [
-        'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Комментарий покупателя', 
-        'SRID', 'Источник заявки', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 
-        'Обоснование', 'Корректировка', 'Аудит', 'Комментарий', 'Статус', 'Решение по возврату покупателю', 
-        'Статус товара', 'Ответ покупателю', 'Название товара', 'Дата заказа', 'Дата и время рассмотрения заявки', 
-        'Фотографии', 'Видео', 'Варианты ответа продавца на заявку', 'Фактическая цена с учетом всех скидок (к взиманию с покупателя)', 
-        'Код валюты цены', 'Результат сверки IMEI для возврата через ПВЗ', 'Дата и время получения заказа покупателем', 
-        'Дата и время обновления информации в сервисе', 'Склад отгрузки', 'Тип склада хранения товаров', 'Страна', 
-        'Округ', 'Регион', 'Баркод', 'Категория', 'Предмет', 'Бренд', 'Размер товара', 'Номер поставки', 
-        'Договор поставки', 'Договор реализации', 'Цена без скидок', 'Скидка продавца, %', 'Скидка WB, %', 
-        'Скидка за оплату WB Кошельком, ₽', 'К перечислению продавцу', 'Фактическая цена с учётом всех скидок', 
-        'Цена со скидкой продавца', 'Уникальный ID продажи/возврата', 'ID стикера', 'ID корзины покупателя',
-        'Отменен покупателем (Да/Нет)', 'Дата и время отмены заказа', 'Тип заказа (Клиентский/Внутренний)'
-    ]
+    final_df = pd.DataFrame()
+    df_orders_summary = pd.DataFrame()
+    new_items_count = 0
+    updated_count = 0
     
-    MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
-    BOOLEAN_RU = {True: 'Да', False: 'Нет', 'true': 'Да', 'false': 'Нет', 1: 'Да', 0: 'Нет'}
+    progress_container = st.container()
+    with progress_container:
+        main_status = st.status("🚀 Инициализация синхронизации...", expanded=True)
+        p_bar = st.progress(0, text="Подготовка...")
 
-    st.info("⏳ Запрашиваем Претензии...")
-    claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
-    claims_data = []
-    for archive_status in ["false", "true"]:
-        params = {"limit": 100, "offset": 0, "is_archive": archive_status} 
-        while True:
-            res_c = fetch_wb_api(claims_url, params=params)
-            if res_c and isinstance(res_c, dict):
-                batch = res_c.get("claims", [])
-                if not batch: break 
-                for item in batch:
-                    item['Статус'] = 'Архивная' if archive_status == 'true' else 'Активная'
-                claims_data.extend(batch)
-                if len(batch) < params["limit"]: break
-                params["offset"] += params["limit"]
-                time.sleep(4)
-            else: break
+    try:
+        wb_key = st.secrets.get("WB_API_KEY")
+        if not wb_key:
+            raise ValueError("Ключ WB_API_KEY не найден.")
 
-    if not claims_data:
-        return pd.DataFrame(), pd.DataFrame(), 0, 0, ["⚠️ Нет претензий за период."]
+        # --- 1. СПИСОК КОЛОНОК (Артикул WB ПОЛНОСТЬЮ УДАЛЕН) ---
+        TARGET_COLUMNS = [
+            'Дата и время оформления заявки на возврат', 'Артикул продавца', 'Комментарий покупателя', 
+            'SRID', 'Источник заявки', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 
+            'Обоснование', 'Корректировка', 'Аудит', 'Комментарий', 'Статус', 'Решение по возврату покупателю', 
+            'Статус товара', 'Ответ покупателю', 'Название товара', 'Дата заказа', 'Дата и время рассмотрения заявки', 
+            'Фотографии', 'Видео', 'Варианты ответа продавца на заявку', 'Фактическая цена с учетом всех скидок (к взиманию с покупателя)', 
+            'Код валюты цены', 'Результат сверки IMEI для возврата через ПВЗ', 'Дата и время получения заказа покупателем', 
+            'Дата и время обновления информации в сервисе', 'Склад отгрузки', 'Тип склада хранения товаров', 'Страна', 
+            'Округ', 'Регион', 'Баркод', 'Категория', 'Предмет', 'Бренд', 'Размер товара', 'Номер поставки', 
+            'Договор поставки', 'Договор реализации', 'Цена без скидок', 'Скидка продавца, %', 'Скидка WB, %', 
+            'Скидка за оплату WB Кошельком, ₽', 'К перечислению продавцу', 'Фактическая цена с учётом всех скидок', 
+            'Цена со скидкой продавца', 'Уникальный ID продажи/возврата', 'ID стикера', 'ID корзины покупателя',
+            'Отменен покупателем (Да/Нет)', 'Дата и время отмены заказа', 'Тип заказа (Клиентский/Внутренний)'
+        ]
         
-    df_c = pd.DataFrame(claims_data)
-    target_srids = df_c['srid'].dropna().unique().tolist()
-    report.append(f"📥 Претензии: Скачано {len(df_c)} заявок.")
+        MANUAL_COLS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', 'Обоснование', 'Корректировка', 'Аудит', 'Комментарий']
+        BOOLEAN_RU = {True: 'Да', False: 'Нет', 'true': 'Да', 'false': 'Нет', 1: 'Да', 0: 'Нет'}
 
-    st.info("🚀 Запускаем умный сбор логистики за год...")
-    date_from = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00")
-    sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
-    orders_url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
-    
-    df_sales = fetch_wb_logistics_filtered(sales_url, date_from, target_srids, "Продажи")
-    df_orders_for_claims = fetch_wb_logistics_filtered(orders_url, date_from, target_srids, "Заказы (поиск)")
-    df_orders_summary = fetch_wb_orders_summary_optimized(orders_url, date_from)
+        main_status.update(label="⏳ Запрашиваем Претензии...", state="running")
+        claims_url = "https://returns-api.wildberries.ru/api/v1/claims" 
+        claims_data = []
+        for archive_status in ["false", "true"]:
+            params = {"limit": 100, "offset": 0, "is_archive": archive_status} 
+            while True:
+                res_c = fetch_wb_api(claims_url, params=params)
+                if res_c and isinstance(res_c, dict):
+                    batch = res_c.get("claims", [])
+                    if not batch: break 
+                    for item in batch:
+                        item['Статус'] = 'Архивная' if archive_status == 'true' else 'Активная'
+                    claims_data.extend(batch)
+                    if len(batch) < params["limit"]: break
+                    params["offset"] += params["limit"]
+                    time.sleep(4)
+                else: break
 
-    # --- 2. ОБОГАЩЕНИЕ (Усиленный поиск артикула) ---
-    if not df_sales.empty or not df_orders_for_claims.empty:
-        df_logistics = pd.concat([df_sales, df_orders_for_claims], ignore_index=True)
-        df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
+        if not claims_data:
+            report.append("⚠️ Нет претензий за период.")
+            return pd.DataFrame(), pd.DataFrame(), 0, 0, report
+            
+        df_c = pd.DataFrame(claims_data)
+        target_srids = df_c['srid'].dropna().unique().tolist()
+        report.append(f"📥 Претензии: Скачано {len(df_c)} заявок.")
+
+        main_status.update(label="🚀 Запускаем умный сбор логистики за год...", state="running")
+        date_from = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00")
+        sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
+        orders_url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
         
-        # Переименовываем все варианты имен артикула в стандарт
-        df_c.rename(columns={'nm_id': 'nmId', 'supplier_article': 'supplierArticle', 'sa_name': 'supplierArticle', 'article': 'supplierArticle'}, inplace=True)
-        
-        df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_log'))
-        
-        # Если артикул пустой — берем из логов. Артикул WB тоже подтягиваем из логов, если нужно.
-        for col in ['supplierArticle', 'warehouseName', 'category', 'subject', 'brand', 'nmId']:
-            log_col = f"{col}_log"
-            if log_col in df_final.columns:
-                df_final[col] = df_final[col].replace(['nan', 'NaN', 'None', '', None], pd.NA)
-                df_final[col] = df_final[col].fillna(df_final[log_col])
-    else:
-        df_final = df_c
+        df_sales = fetch_wb_logistics_filtered(sales_url, date_from, target_srids, "Продажи")
+        df_orders_for_claims = fetch_wb_logistics_filtered(orders_url, date_from, target_srids, "Заказы (поиск)")
+        df_orders_summary = fetch_wb_orders_summary_optimized(orders_url, date_from)
 
-    # --- 3. ПОДГОТОВКА temp_df ---
-    temp_df = pd.DataFrame()
-    for col in df_final.columns:
-        if col not in ['id', 'date'] and not col.endswith('_log'):
-            target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
-            temp_df[target_name] = df_final[col]
+        report.append(f"📦 Логистика найдена для {len(df_sales) + len(df_orders_for_claims)} заявок.")
+
+        # --- 2. ОБОГАЩЕНИЕ (Усиленный поиск артикула) ---
+        if not df_sales.empty or not df_orders_for_claims.empty:
+            df_logistics = pd.concat([df_sales, df_orders_for_claims], ignore_index=True)
+            df_logistics = df_logistics.drop_duplicates(subset=['srid'], keep='last')
             
-    api_df = pd.DataFrame(columns=TARGET_COLUMNS)
-    for col in TARGET_COLUMNS:
-        api_df[col] = temp_df[col] if col in temp_df.columns else ""
+            # Переименовываем все варианты имен артикула в стандарт
+            df_c.rename(columns={'nm_id': 'nmId', 'supplier_article': 'supplierArticle', 'sa_name': 'supplierArticle', 'article': 'supplierArticle'}, inplace=True)
+            
+            df_final = pd.merge(df_c, df_logistics, on='srid', how='left', suffixes=('', '_log'))
+            
+            # Если артикул пустой — берем из логов. 
+            for col in ['supplierArticle', 'warehouseName', 'category', 'subject', 'brand', 'nmId']:
+                log_col = f"{col}_log"
+                if log_col in df_final.columns:
+                    df_final[col] = df_final[col].replace(['nan', 'NaN', 'None', '', None], pd.NA)
+                    df_final[col] = df_final[col].fillna(df_final[log_col])
+        else:
+            df_final = df_c
 
-    # --- 4. UPSERT (С ЖЕСТКОЙ ТИПИЗАЦИЕЙ СТРОК) ---
-    main_status.update(label="🧬 Синхронизация с Google Sheets...", state="running")
-    new_count, updated_count = 0, 0
-    
-    # Жестко превращаем api_df в простые Python-строки
-    api_df = api_df.fillna("").astype(str).replace(['nan', 'None', 'NaN', '<NA>'], '')
-    
-    # Очистка и установка индекса
-    api_df['SRID'] = api_df['SRID'].str.strip()
-    api_df = api_df[api_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
-    api_df.set_index('SRID', inplace=True)
+        # --- 3. МАППИНГ ---
+        if 'claim_type' in df_final.columns: df_final['claim_type'] = df_final['claim_type'].astype(str).map(CLAIM_TYPES).fillna(df_final['claim_type'])
+        if 'status' in df_final.columns: df_final['Решение по возврату покупателю'] = df_final['status'].astype(str).map(STATUSES).fillna(df_final['status'])
+        if 'isCancel' in df_final.columns: df_final['isCancel'] = df_final['isCancel'].map(BOOLEAN_RU).fillna(df_final['isCancel'])
 
-    if existing_gs_records:
-        # Аналогичная жесткая типизация для Гугл Таблицы
-        gs_df = pd.DataFrame(existing_gs_records).fillna("").astype(str).replace(['nan', 'None', 'NaN', '<NA>'], '')
+        temp_df = pd.DataFrame()
+        for col in df_final.columns:
+            if col not in ['id', 'date'] and not col.endswith('_log'):
+                target_name = 'Номер поставки' if col == 'incomeID' else COLUMN_NAMES_RU.get(col, col)
+                temp_df[target_name] = df_final[col]
+                
+        api_df = pd.DataFrame(columns=TARGET_COLUMNS)
+        for col in TARGET_COLUMNS:
+            api_df[col] = temp_df[col] if col in temp_df.columns else ""
+
+        # --- 4. UPSERT (С ЖЕСТКОЙ ТИПИЗАЦИЕЙ СТРОК) ---
+        main_status.update(label="🧬 Синхронизация с Google Sheets...", state="running")
         
-        if 'SRID' in gs_df.columns:
-            gs_df['SRID'] = gs_df['SRID'].str.strip()
-            gs_df = gs_df[gs_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
-            gs_df.set_index('SRID', inplace=True)
+        # Жестко превращаем api_df в простые Python-строки
+        api_df = api_df.fillna("").astype(str).replace(['nan', 'None', 'NaN', '<NA>'], '')
+        
+        # Очистка и установка индекса
+        api_df['SRID'] = api_df['SRID'].str.strip()
+        api_df = api_df[api_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
+        api_df.set_index('SRID', inplace=True)
+
+        if existing_gs_records:
+            # Аналогичная жесткая типизация для Гугл Таблицы
+            gs_df = pd.DataFrame(existing_gs_records).fillna("").astype(str).replace(['nan', 'None', 'NaN', '<NA>'], '')
             
-            # Добавляем недостающие колонки
-            for col in TARGET_COLUMNS:
-                if col != 'SRID' and col not in gs_df.columns:
-                    gs_df[col] = ""
-            
-            update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
-            common = gs_df.index.intersection(api_df.index)
-            
-            if not common.empty:
-                # ТЕПЕРЬ ОШИБКИ ТИПА НЕ БУДЕТ: обе таблицы - это гарантированно чистые строки
-                gs_df.loc[common, update_cols] = api_df.loc[common, update_cols]
-                updated_count = len(common)
-            
-            new_idx = api_df.index.difference(gs_df.index)
-            if not new_idx.empty:
-                gs_df = pd.concat([gs_df, api_df.loc[new_idx]])
-                new_count = len(new_idx)
-            
-            # Формируем финальный результат
-            final_df = gs_df[[c for c in TARGET_COLUMNS if c != 'SRID']].reset_index()
-            final_df = final_df[TARGET_COLUMNS]
+            if 'SRID' in gs_df.columns:
+                gs_df['SRID'] = gs_df['SRID'].str.strip()
+                gs_df = gs_df[gs_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
+                gs_df.set_index('SRID', inplace=True)
+                
+                # Добавляем недостающие колонки
+                for col in TARGET_COLUMNS:
+                    if col != 'SRID' and col not in gs_df.columns:
+                        gs_df[col] = ""
+                
+                update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
+                common = gs_df.index.intersection(api_df.index)
+                
+                if not common.empty:
+                    # ТЕПЕРЬ ОШИБКИ ТИПА НЕ БУДЕТ: обе таблицы - это гарантированно чистые строки
+                    gs_df.loc[common, update_cols] = api_df.loc[common, update_cols]
+                    updated_count = len(common)
+                
+                new_idx = api_df.index.difference(gs_df.index)
+                if not new_idx.empty:
+                    gs_df = pd.concat([gs_df, api_df.loc[new_idx]])
+                    new_items_count = len(new_idx)
+                
+                # Формируем финальный результат
+                final_df = gs_df[[c for c in TARGET_COLUMNS if c != 'SRID']].reset_index()
+                final_df = final_df[TARGET_COLUMNS]
+            else:
+                final_df = api_df.reset_index()[TARGET_COLUMNS]
+                new_items_count = len(final_df)
         else:
             final_df = api_df.reset_index()[TARGET_COLUMNS]
-            new_count = len(final_df)
-    else:
-        final_df = api_df.reset_index()[TARGET_COLUMNS]
-        new_count = len(final_df)
+            new_items_count = len(final_df)
 
-    main_status.update(label="✅ Данные готовы!", state="complete", expanded=False)
-    return final_df, df_orders_summary, new_count, updated_count, report
+        main_status.update(label="✅ Данные готовы!", state="complete", expanded=False)
+        return final_df, df_orders_summary, new_items_count, updated_count, report
 
     except Exception as e:
         error_msg = f"Сбой: {str(e)}"
         st.error(error_msg)
         add_system_log("Синхронизация", "ERROR", error_msg)
         return pd.DataFrame(), pd.DataFrame(), 0, 0, [error_msg]
-    
-    # Если база пустая
-    final_df = api_df.reset_index()[TARGET_COLUMNS]
-    return final_df, df_orders_summary, len(final_df), 0, report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
