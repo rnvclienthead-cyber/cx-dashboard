@@ -590,7 +590,6 @@ elif page == "📝 Модерация":
         st.markdown("### 🔍 Фильтр обращений")
         filter_mode = st.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], horizontal=True)
         
-        # Читаем данные из нашего View
         query = """
             SELECT * FROM view_cx_dashboard 
             WHERE ("1" OR "2" OR "3" OR "4" OR "5" OR "6" OR "7" OR "8" OR "9" OR "10" OR "11" OR "12" OR "13")
@@ -619,7 +618,6 @@ elif page == "📝 Модерация":
             reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
             
             for idx, row in current_page_df.iterrows():
-                # Берем SRID ровно так, как он есть в базе
                 srid = str(row['SRID']).strip()
                 st.markdown("---")
                 col_info, col_media = st.columns([1.2, 1])
@@ -648,30 +646,26 @@ elif page == "📝 Модерация":
                                 st.rerun()
 
                 with col_media:
-                    try:
-                        claim_data = pd.read_sql(text("SELECT photos, video_paths FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
-                        if not claim_data.empty:
-                            media_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
-                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
-                            if urls:
-                                videos, row_photos = [], []
-                                for u in urls[:6]: 
-                                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                    if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                                    else: row_photos.append(clean_url)
-                                
-                                if row_photos:
-                                    img_cols = st.columns(3)
-                                    for i, p in enumerate(row_photos):
-                                        with img_cols[i % 3]:
-                                            st.image(p, use_container_width=True)
-                                
-                                if videos:
-                                    for v_idx, v_url in enumerate(videos):
-                                        if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
-                    except Exception as e:
-                        pass
+                    # Фото берутся мгновенно из View, зум работает через CSS
+                    media_raw = str(row.get('Фотографии', '')) + " " + str(row.get('Видео', ''))
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
+                    if urls:
+                        videos = []
+                        images_html = '<div class="media-row">'
+                        for u in urls[:6]: 
+                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                            
+                            if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
+                            else: images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
+                        images_html += '</div>'
+                        st.markdown(images_html, unsafe_allow_html=True)
+                        
+                        if videos:
+                            v_cols = st.columns(len(videos))
+                            for v_idx, v_url in enumerate(videos):
+                                with v_cols[v_idx]:
+                                    if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
             
             st.markdown("---")
             render_pagination(total_pages, key_prefix="bottom")
@@ -709,16 +703,12 @@ elif page == "📊 Отчет производства":
         if not details.empty:
             all_photos = []
             for _, r in details.iterrows():
-                srid = str(r['SRID']).strip()
-                try:
-                    claim_data = pd.read_sql(text("SELECT photos FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
-                    if not claim_data.empty:
-                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(claim_data.iloc[0].get('photos', '')))
-                        for u in urls:
-                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                            if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos.append(clean_url)
-                except Exception: pass
+                m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                for u in urls:
+                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                    if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos.append(clean_url)
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
@@ -732,20 +722,15 @@ elif page == "📊 Отчет производства":
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
                     c1, media_col = st.columns([1.2, 1])
-                    srid = str(r['SRID']).strip()
                     
                     row_photos, videos = [], []
-                    try:
-                        claim_data = pd.read_sql(text("SELECT photos, video_paths FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
-                        if not claim_data.empty:
-                            m_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
-                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
-                            for u in urls:
-                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                                else: row_photos.append(clean_url)
-                    except Exception: pass
+                    m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                    for u in urls:
+                        clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                        if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                        if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
+                        else: row_photos.append(clean_url)
 
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
@@ -759,10 +744,11 @@ elif page == "📊 Отчет производства":
                                     components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
                     with media_col:
                         if row_photos:
-                            img_cols = st.columns(3)
-                            for i, p in enumerate(row_photos[:6]):
-                                with img_cols[i % 3]:
-                                    st.image(p, use_container_width=True)
+                            images_html = '<div class="media-row">'
+                            for p in row_photos[:6]:
+                                images_html += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
+                            images_html += '</div>'
+                            st.markdown(images_html, unsafe_allow_html=True)
                         if videos:
                             for v_idx, v_url in enumerate(videos): 
                                 st.markdown(f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Видео {v_idx+1}</a>', unsafe_allow_html=True)
@@ -779,23 +765,21 @@ elif page == "📊 Отчет производства":
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
-    # --- ИСПРАВЛЕНИЕ ИНВОЙСОВ ---
     @st.cache_data(ttl=120) 
     def load_cached_hybrid_data():
-        query = """
-            SELECT 
-                "SRID", "Дата и время оформления заявки на возврат", "Артикул продавца", 
-                "Комментарий покупателя", "Решение по возврату покупателю", "Статус товара",
-                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
-                "Корректировка", "Номер поставки"
-            FROM view_cx_dashboard
-        """
-        df_temp = pd.read_sql(query, engine)
+        df_temp = pd.read_sql("SELECT * FROM view_cx_dashboard", engine)
         
+        # 1. ЖЕСТКИЙ ФИЛЬТР: Отчет производства показывает ТОЛЬКО Одобренные заявки
+        valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
+        df_temp = df_temp[
+            df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
+            df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
+        ]
+        
+        # 2. Очистка мусорных артикулов
         df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
         df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
-
-        # Никаких замен .0, берем как есть
+        
         df_temp['SRID'] = df_temp['SRID'].astype(str).str.strip()
 
         if 'Номер поставки' not in df_temp.columns:
@@ -809,16 +793,17 @@ elif page == "📊 Отчет производства":
                     df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                     
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    # Оставляем номера поставок ровно в том виде, в котором они приходят
-                    df_temp['Номер поставки'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
-                    df_inv['Номер поставки'] = df_inv['Номер поставки'].astype(str).str.strip()
+                    # 3. АГРЕССИВНАЯ СКЛЕЙКА ИНВОЙСОВ (режем .0, пробелы и приводим к нижнему регистру)
+                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                    df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     
-                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
+                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки_clean'])
                     
                     if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
-                    cols_to_merge = ['Номер поставки', 'Инвойс'] if 'Инвойс' in df_inv.columns else ['Номер поставки']
+                    cols_to_merge = ['Номер поставки_clean', 'Инвойс'] if 'Инвойс' in df_inv.columns else ['Номер поставки_clean']
                     
-                    df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
+                    df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки_clean', how='left')
+                    df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
         except Exception as e: 
             print(f"Ошибка загрузки инвойсов: {e}")
             
@@ -877,7 +862,7 @@ elif page == "📊 Отчет производства":
             accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
             processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
             
-            st.markdown("### 📈 Общая статистика")
+            st.markdown("### 📈 Общая статистика (ТОЛЬКО 'Одобрено')")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Всего заявок", total_rows)
             c2.metric("Размечено", f"{tagged_rows} ({processed_percent}%)")
@@ -961,21 +946,16 @@ elif page == "📊 Отчет производства":
                     st.info("Данных для инвойсов пока нет.")
 
             with tab_ppm:
-                st.info("💡 **Аналитика PPM**: Учитываются ТОЛЬКО заявки со статусом 'Одобрено' (возврат одобрен).")
+                st.info("💡 **Аналитика PPM**: Расчет идет только по одобренным заявкам на возврат.")
                 import numpy as np
                 
                 if not df_orders.empty:
-                    valid_statuses = ['одобрено', '2', '2.0']
-                    if 'Решение по возврату покупателю' in df_filtered.columns:
-                        df_approved = df_filtered[df_filtered['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses)]
-                        df_approved = df_approved[df_approved['Размечено'] == True]
-                    else: 
-                        df_approved = pd.DataFrame()
-                    
                     if 'Артикул продавца' in df_orders.columns:
                         df_orders['Чистые_заказы'] = pd.to_numeric(df_orders.get('Чистые_заказы', 0), errors='coerce').fillna(0)
                         orders_grouped = df_orders.groupby('Артикул продавца')['Чистые_заказы'].sum().reset_index()
                         
+                        # Брак берем из df_filtered, который УЖЕ отфильтрован только по "Одобрено" в самом начале Отчета
+                        df_approved = df_filtered[df_filtered['Размечено'] == True]
                         defects_grouped = df_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)') if not df_approved.empty else pd.DataFrame(columns=['Артикул продавца', 'Одобренный брак (шт)'])
                         
                         ppm_df = pd.merge(orders_grouped, defects_grouped, on='Артикул продавца', how='left').fillna(0)
@@ -998,16 +978,11 @@ elif page == "📊 Отчет производства":
                                 sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
                                 all_photos_claim = []
                                 for _, r in sku_defects.iterrows():
-                                    srid = str(r['SRID']).strip()
-                                    try:
-                                        claim_data = pd.read_sql(text("SELECT photos FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
-                                        if not claim_data.empty:
-                                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(claim_data.iloc[0].get('photos', '')))
-                                            for u in urls:
-                                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                                if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos_claim.append(clean_url)
-                                    except: pass
+                                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(r.get('Фотографии', '')))
+                                    for u in urls:
+                                        clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                        if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                        if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos_claim.append(clean_url)
                                             
                                 all_photos_claim = list(set(all_photos_claim))[:15]
                                 
