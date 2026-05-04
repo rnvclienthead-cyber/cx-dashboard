@@ -719,20 +719,18 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
 # 5. ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
 
-# 1. Сначала объявляем вспомогательные функции
+# Выносим функцию вверх, чтобы она была доступна всем страницам
 def get_col_letter(col_idx):
-    """Преобразует индекс колонки в букву Google Таблиц (0 -> A, 1 -> B)"""
     if col_idx < 26: return chr(ord('A') + col_idx)
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
-# 2. ГЛАВНЫЙ РОУТИНГ СТРАНИЦ (Начинаем строго с IF)
+# НАЧАЛО НАВИГАЦИИ (Теперь это точка входа)
 if page == "🤖 Робот-Синхронизатор":
     st.title("🤖 Статус Базы Данных (Supabase)")
-    st.info("Сбор логистики и претензий теперь работает автоматически, независимо от дашборда (через ваш скрипт `worker.py`). Streamlit больше не зависает и не выкидывает ошибки памяти.")
+    st.info("Сбор данных теперь идет через worker.py. Streamlit подключается напрямую к PostgreSQL.")
     
     if engine:
         try:
-            # Быстро спрашиваем у базы, сколько в ней строк
             with engine.connect() as conn:
                 claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar()
                 orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar()
@@ -740,17 +738,13 @@ if page == "🤖 Робот-Синхронизатор":
                 
             c1, c2, c3 = st.columns(3)
             c1.metric("Всего Претензий в БД", f"{claims_count:,}".replace(',', ' '))
-            c2.metric("Строк Заказов (ORDER)", f"{orders_count:,}".replace(',', ' '))
-            c3.metric("Строк Продаж (SALE)", f"{sales_count:,}".replace(',', ' '))
-            
-            st.success("✅ База данных подключена и работает штатно.")
-            st.markdown("---")
-            st.markdown("💡 **Напоминание:** Чтобы загрузить свежие данные с Wildberries, запустите файл `worker.py` на вашем компьютере.")
-            
+            c2.metric("Заказов (ORDER)", f"{orders_count:,}".replace(',', ' '))
+            c3.metric("Продаж (SALE)", f"{sales_count:,}".replace(',', ' '))
+            st.success("✅ Соединение с базой установлено.")
         except Exception as e:
-            st.error(f"⚠️ Ошибка подключения к базе данных: {e}")
+            st.error(f"⚠️ Ошибка подключения к базе: {e}")
     else:
-        st.warning("⚠️ Соединение с БД не установлено. Проверьте DB_URL в Secrets.")
+        st.warning("⚠️ База данных не настроена в Secrets (DB_URL).")
 
 # ==========================================
 # 6. РУЧНАЯ МОДЕРАЦИЯ И ТЕГИРОВАНИЕ
