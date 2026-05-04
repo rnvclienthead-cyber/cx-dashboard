@@ -619,7 +619,8 @@ elif page == "📝 Модерация":
             reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
             
             for idx, row in current_page_df.iterrows():
-                srid = row['SRID']
+                # Берем SRID ровно так, как он есть в базе
+                srid = str(row['SRID']).strip()
                 st.markdown("---")
                 col_info, col_media = st.columns([1.2, 1])
                 
@@ -635,7 +636,7 @@ elif page == "📝 Модерация":
                     
                     if st.button("💾 Сохранить решение", key=f"btn_{srid}", type="primary"):
                         if selected_cats:
-                            updates = {f"cat_{i}": False for i in range(1, 14)} # Сбрасываем старые
+                            updates = {f"cat_{i}": False for i in range(1, 14)}
                             for cat_name in selected_cats:
                                 cat_num = reverse_cats.get(cat_name.strip().lower())
                                 if cat_num: updates[f"cat_{cat_num}"] = True
@@ -647,25 +648,30 @@ elif page == "📝 Модерация":
                                 st.rerun()
 
                 with col_media:
-                    # Ищем фото в wb_claims
-                    claim_data = pd.read_sql(f"SELECT photos, video_paths FROM wb_claims WHERE srid = '{srid}'", engine)
-                    if not claim_data.empty:
-                        media_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
-                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
-                        if urls:
-                            videos, images_html = [], '<div class="media-row">'
-                            for u in urls[:6]: 
-                                clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                                else: images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
-                            st.markdown(images_html + '</div>', unsafe_allow_html=True)
-                            
-                            if videos:
-                                v_cols = st.columns(len(videos))
-                                for v_idx, v_url in enumerate(videos):
-                                    with v_cols[v_idx]:
+                    try:
+                        claim_data = pd.read_sql(text("SELECT photos, video_paths FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
+                        if not claim_data.empty:
+                            media_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
+                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
+                            if urls:
+                                videos, row_photos = [], []
+                                for u in urls[:6]: 
+                                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                    if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
+                                    else: row_photos.append(clean_url)
+                                
+                                if row_photos:
+                                    img_cols = st.columns(3)
+                                    for i, p in enumerate(row_photos):
+                                        with img_cols[i % 3]:
+                                            st.image(p, use_container_width=True)
+                                
+                                if videos:
+                                    for v_idx, v_url in enumerate(videos):
                                         if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
+                    except Exception as e:
+                        pass
             
             st.markdown("---")
             render_pagination(total_pages, key_prefix="bottom")
@@ -703,12 +709,11 @@ elif page == "📊 Отчет производства":
         if not details.empty:
             all_photos = []
             for _, r in details.iterrows():
-                srid = r['SRID']
+                srid = str(r['SRID']).strip()
                 try:
-                    claim_data = pd.read_sql(text("SELECT photos, video_paths FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
+                    claim_data = pd.read_sql(text("SELECT photos FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
                     if not claim_data.empty:
-                        m_raw = str(claim_data.iloc[0].get('photos', '')) + " " + str(claim_data.iloc[0].get('video_paths', ''))
-                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(claim_data.iloc[0].get('photos', '')))
                         for u in urls:
                             clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                             if clean_url.startswith("//"): clean_url = "https:" + clean_url
@@ -717,7 +722,7 @@ elif page == "📊 Отчет производства":
             
             if all_photos:
                 if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
-                    with st.spinner("Сбор фото и архивация... (Пожалуйста, подождите)"):
+                    with st.spinner("Сбор фото и архивация..."):
                         zip_all = create_images_zip(all_photos)
                         b64 = base64.b64encode(zip_all).decode()
                         components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
@@ -727,7 +732,7 @@ elif page == "📊 Отчет производства":
                 with st.container():
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
                     c1, media_col = st.columns([1.2, 1])
-                    srid = r['SRID']
+                    srid = str(r['SRID']).strip()
                     
                     row_photos, videos = [], []
                     try:
@@ -754,10 +759,13 @@ elif page == "📊 Отчет производства":
                                     components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
                     with media_col:
                         if row_photos:
-                            images_html = '<div class="media-row">' + "".join([f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>' for p in row_photos[:6]]) + '</div>'
-                            st.markdown(images_html, unsafe_allow_html=True)
+                            img_cols = st.columns(3)
+                            for i, p in enumerate(row_photos[:6]):
+                                with img_cols[i % 3]:
+                                    st.image(p, use_container_width=True)
                         if videos:
-                            for v_idx, v_url in enumerate(videos): st.markdown(f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Видео {v_idx+1}</a>', unsafe_allow_html=True)
+                            for v_idx, v_url in enumerate(videos): 
+                                st.markdown(f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Видео {v_idx+1}</a>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
         else: 
             st.write("Нет данных по этому пересечению.")
@@ -771,10 +779,9 @@ elif page == "📊 Отчет производства":
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
-    # --- ОПТИМИЗИРОВАННАЯ ЗАГРУЗКА ---
+    # --- ИСПРАВЛЕНИЕ ИНВОЙСОВ ---
     @st.cache_data(ttl=120) 
     def load_cached_hybrid_data():
-        # Быстрый SQL-запрос только нужных колонок (без тяжелых фото и видео)
         query = """
             SELECT 
                 "SRID", "Дата и время оформления заявки на возврат", "Артикул продавца", 
@@ -785,9 +792,11 @@ elif page == "📊 Отчет производства":
         """
         df_temp = pd.read_sql(query, engine)
         
-        # Очистка мусорных артикулов
         df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
         df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
+
+        # Никаких замен .0, берем как есть
+        df_temp['SRID'] = df_temp['SRID'].astype(str).str.strip()
 
         if 'Номер поставки' not in df_temp.columns:
             df_temp['Номер поставки'] = 'Не указан'
@@ -798,12 +807,13 @@ elif page == "📊 Отчет производства":
                 df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
                 if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
                     df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
-                if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    df_inv.columns = [str(c).strip() for c in df_inv.columns]
-                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
                     
-                    df_temp['Номер поставки'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None'], 'Не указан')
-                    df_inv_unique['Номер поставки'] = df_inv_unique['Номер поставки'].astype(str)
+                if not df_inv.empty and 'Номер поставки' in df_inv.columns:
+                    # Оставляем номера поставок ровно в том виде, в котором они приходят
+                    df_temp['Номер поставки'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
+                    df_inv['Номер поставки'] = df_inv['Номер поставки'].astype(str).str.strip()
+                    
+                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки'])
                     
                     if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
                     cols_to_merge = ['Номер поставки', 'Инвойс'] if 'Инвойс' in df_inv.columns else ['Номер поставки']
@@ -811,7 +821,6 @@ elif page == "📊 Отчет производства":
                     df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
         except Exception as e: 
             print(f"Ошибка загрузки инвойсов: {e}")
-            pass
             
         return df_temp
 
@@ -956,8 +965,7 @@ elif page == "📊 Отчет производства":
                 import numpy as np
                 
                 if not df_orders.empty:
-                    # СТРОГИЙ ФИЛЬТР: ТОЛЬКО ОДОБРЕННЫЙ БРАК (Учтен пункт 4)
-                    valid_statuses = ['одобрено', '2', '2.0', 'true', 'да']
+                    valid_statuses = ['одобрено', '2', '2.0']
                     if 'Решение по возврату покупателю' in df_filtered.columns:
                         df_approved = df_filtered[df_filtered['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses)]
                         df_approved = df_approved[df_approved['Размечено'] == True]
@@ -970,7 +978,6 @@ elif page == "📊 Отчет производства":
                         
                         defects_grouped = df_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)') if not df_approved.empty else pd.DataFrame(columns=['Артикул продавца', 'Одобренный брак (шт)'])
                         
-                        # ЗАЩИТА ОТ ДЕЛЕНИЯ НА НОЛЬ И ОШИБОК РАСЧЕТА
                         ppm_df = pd.merge(orders_grouped, defects_grouped, on='Артикул продавца', how='left').fillna(0)
                         
                         ppm_df['PPM'] = np.where(ppm_df['Чистые_заказы'] > 0, (ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 1000000, 0)
@@ -991,7 +998,7 @@ elif page == "📊 Отчет производства":
                                 sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
                                 all_photos_claim = []
                                 for _, r in sku_defects.iterrows():
-                                    srid = r['SRID']
+                                    srid = str(r['SRID']).strip()
                                     try:
                                         claim_data = pd.read_sql(text("SELECT photos FROM wb_claims WHERE srid = :srid"), engine, params={"srid": srid})
                                         if not claim_data.empty:
