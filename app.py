@@ -718,32 +718,39 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
 # ==========================================
 # 5. ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
-# СНАЧАЛА ОБЪЯВЛЯЕМ ФУНКЦИЮ:
+
+# 1. Сначала объявляем вспомогательные функции
 def get_col_letter(col_idx):
+    """Преобразует индекс колонки в букву Google Таблиц (0 -> A, 1 -> B)"""
     if col_idx < 26: return chr(ord('A') + col_idx)
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
-elif page == "🤖 Робот-Синхронизатор":
+# 2. ГЛАВНЫЙ РОУТИНГ СТРАНИЦ (Начинаем строго с IF)
+if page == "🤖 Робот-Синхронизатор":
     st.title("🤖 Статус Базы Данных (Supabase)")
     st.info("Сбор логистики и претензий теперь работает автоматически, независимо от дашборда (через ваш скрипт `worker.py`). Streamlit больше не зависает и не выкидывает ошибки памяти.")
     
-    try:
-        # Быстро спрашиваем у базы, сколько в ней строк
-        with engine.connect() as conn:
-            claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar()
-            orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar()
-            sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar()
+    if engine:
+        try:
+            # Быстро спрашиваем у базы, сколько в ней строк
+            with engine.connect() as conn:
+                claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar()
+                orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar()
+                sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar()
+                
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Всего Претензий в БД", f"{claims_count:,}".replace(',', ' '))
+            c2.metric("Строк Заказов (ORDER)", f"{orders_count:,}".replace(',', ' '))
+            c3.metric("Строк Продаж (SALE)", f"{sales_count:,}".replace(',', ' '))
             
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Всего Претензий в БД", claims_count)
-        c2.metric("Строк Заказов (ORDER)", orders_count)
-        c3.metric("Строк Продаж (SALE)", sales_count)
-        
-        st.success("✅ База данных подключена и работает штатно.")
-        st.markdown("💡 *Чтобы загрузить свежие данные с Wildberries, просто запустите файл `worker.py` на вашем компьютере или сервере.*")
-        
-    except Exception as e:
-        st.error(f"⚠️ Ошибка подключения к базе данных: {e}")
+            st.success("✅ База данных подключена и работает штатно.")
+            st.markdown("---")
+            st.markdown("💡 **Напоминание:** Чтобы загрузить свежие данные с Wildberries, запустите файл `worker.py` на вашем компьютере.")
+            
+        except Exception as e:
+            st.error(f"⚠️ Ошибка подключения к базе данных: {e}")
+    else:
+        st.warning("⚠️ Соединение с БД не установлено. Проверьте DB_URL в Secrets.")
 
 # ==========================================
 # 6. РУЧНАЯ МОДЕРАЦИЯ И ТЕГИРОВАНИЕ
@@ -751,15 +758,17 @@ elif page == "🤖 Робот-Синхронизатор":
 
 elif page == "🔬 ИИ Тегирование":
     st.title("🔬 ИИ Тегирование и Проверка")
-    
-    client = get_gspread_client()
-    ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-    headers = ws.row_values(1)
-    
-    header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
-    header_map_original = {str(name).strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
-    
-    df = pd.DataFrame(ws.get_all_records())
+    # Твой существующий код для работы с Google Sheets...
+    try:
+        client = get_gspread_client()
+        ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
+        headers = ws.row_values(1)
+        
+        header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
+        header_map_original = {str(name).strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
+        
+        df = pd.DataFrame(ws.get_all_records())
+        # ... (далее весь твой остальной код страницы Тегирования без изменений)
     
     # Создаем виртуальные колонки, чтобы код не падал, если вы забыли их добавить
     if 'Аудит' not in df.columns: df['Аудит'] = ''
