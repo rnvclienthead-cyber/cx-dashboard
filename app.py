@@ -590,14 +590,16 @@ elif page == "📝 Модерация":
         st.markdown("### 🔍 Фильтр обращений")
         filter_mode = st.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], horizontal=True)
         
-        # 🚀 ПРЯМОЙ И ЧИСТЫЙ ЗАПРОС: Берем ВСЁ (включая фото) напрямую из View
+        # БРОНЕБОЙНЫЙ ЗАПРОС: Тянем фото напрямую из базовой таблицы wb_claims, обходя View!
         query = """
-            SELECT * FROM view_cx_dashboard 
-            WHERE ("1" OR "2" OR "3" OR "4" OR "5" OR "6" OR "7" OR "8" OR "9" OR "10" OR "11" OR "12" OR "13")
-            AND ("Корректировка" IS NULL OR "Корректировка" = '')
+            SELECT v.*, c.photos AS db_photos, c.video_paths AS db_videos
+            FROM view_cx_dashboard v
+            LEFT JOIN wb_claims c ON v."SRID" = c.srid
+            WHERE (v."1" OR v."2" OR v."3" OR v."4" OR v."5" OR v."6" OR v."7" OR v."8" OR v."9" OR v."10" OR v."11" OR v."12" OR v."13")
+            AND (v."Корректировка" IS NULL OR v."Корректировка" = '')
         """
         if filter_mode == "С замечаниями от Аудитора (Кросс-проверка)":
-            query += " AND UPPER(\"Аудит\") LIKE '%ОШИБКА%'"
+            query += " AND UPPER(v.\"Аудит\") LIKE '%ОШИБКА%'"
             
         to_review = pd.read_sql(query, engine)
         
@@ -647,12 +649,12 @@ elif page == "📝 Модерация":
                                 st.rerun()
 
                 with col_media:
-                    # Берем фото напрямую из строки (никаких дополнительных SQL-запросов!)
-                    raw_photos = str(row.get('Фотографии', '')).replace('nan', '').replace('None', '').strip()
-                    raw_videos = str(row.get('Видео', '')).replace('nan', '').replace('None', '').strip()
+                    raw_photos = str(row.get('db_photos', '')).replace('nan', '').replace('None', '').strip()
+                    raw_videos = str(row.get('db_videos', '')).replace('nan', '').replace('None', '').strip()
                     media_raw = raw_photos + " " + raw_videos
                     
-                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
+                    # Умный Regex: теперь он отсекает запятые в конце ссылок
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', media_raw)
                     if urls:
                         videos, row_photos = [], []
                         for u in urls[:6]: 
@@ -709,9 +711,8 @@ elif page == "📊 Отчет производства":
         if not details.empty:
             all_photos = []
             for _, r in details.iterrows():
-                # Фото уже лежат в датафрейме, мгновенный доступ
-                m_raw = str(r.get('Фотографии', '')).replace('nan', '').replace('None', '')
-                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                m_raw = str(r.get('db_photos', '')).replace('nan', '').replace('None', '')
+                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', m_raw)
                 for u in urls:
                     clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                     if clean_url.startswith("//"): clean_url = "https:" + clean_url
@@ -731,11 +732,11 @@ elif page == "📊 Отчет производства":
                     c1, media_col = st.columns([1.2, 1])
                     
                     row_photos, videos = [], []
-                    raw_photos = str(r.get('Фотографии', '')).replace('nan', '').replace('None', '').strip()
-                    raw_videos = str(r.get('Видео', '')).replace('nan', '').replace('None', '').strip()
+                    raw_photos = str(r.get('db_photos', '')).replace('nan', '').replace('None', '').strip()
+                    raw_videos = str(r.get('db_videos', '')).replace('nan', '').replace('None', '').strip()
                     m_raw = raw_photos + " " + raw_videos
                     
-                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', m_raw)
                     for u in urls:
                         clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                         if clean_url.startswith("//"): clean_url = "https:" + clean_url
@@ -781,14 +782,15 @@ elif page == "📊 Отчет производства":
 
     @st.cache_data(ttl=120) 
     def load_cached_hybrid_data():
-        # 🚀 Полностью чистый SQL-запрос ко всему View (работает мгновенно)
+        # Бронебойный SQL-запрос, который сам цепляет фото из wb_claims
         query = """
             SELECT 
-                "SRID", "Дата и время оформления заявки на возврат", "Дата заказа", "Дата и время получения заказа покупателем",
-                "Артикул продавца", "Комментарий покупателя", "Решение по возврату покупателю", "Статус товара",
-                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
-                "Корректировка", "Номер поставки", "Фотографии", "Видео"
-            FROM view_cx_dashboard
+                v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
+                v."Артикул продавца", v."Комментарий покупателя", v."Решение по возврату покупателю", v."Статус товара",
+                v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
+                v."Корректировка", v."Номер поставки", c.photos AS db_photos, c.video_paths AS db_videos
+            FROM view_cx_dashboard v
+            LEFT JOIN wb_claims c ON v."SRID" = c.srid
         """
         df_temp = pd.read_sql(query, engine)
         
@@ -998,7 +1000,7 @@ elif page == "📊 Отчет производства":
                                 sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
                                 all_photos_claim = []
                                 for _, r in sku_defects.iterrows():
-                                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(r.get('Фотографии', '')).replace('nan', ''))
+                                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', str(r.get('db_photos', '')).replace('nan', ''))
                                     for u in urls:
                                         clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                                         if clean_url.startswith("//"): clean_url = "https:" + clean_url
