@@ -590,7 +590,7 @@ elif page == "📝 Модерация":
         st.markdown("### 🔍 Фильтр обращений")
         filter_mode = st.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], horizontal=True)
         
-        # В Модерации мы тянем фото и видео сразу в основном запросе (чтобы не дергать БД лишний раз)
+        # 🚀 ПРЯМОЙ И ЧИСТЫЙ ЗАПРОС: Берем ВСЁ (включая фото) напрямую из View
         query = """
             SELECT * FROM view_cx_dashboard 
             WHERE ("1" OR "2" OR "3" OR "4" OR "5" OR "6" OR "7" OR "8" OR "9" OR "10" OR "11" OR "12" OR "13")
@@ -647,9 +647,9 @@ elif page == "📝 Модерация":
                                 st.rerun()
 
                 with col_media:
-                    # Чистим мусор (nan) из строчек с фото
-                    raw_photos = str(row.get('Фотографии', '')).replace('nan', '').strip()
-                    raw_videos = str(row.get('Видео', '')).replace('nan', '').strip()
+                    # Берем фото напрямую из строки (никаких дополнительных SQL-запросов!)
+                    raw_photos = str(row.get('Фотографии', '')).replace('nan', '').replace('None', '').strip()
+                    raw_videos = str(row.get('Видео', '')).replace('nan', '').replace('None', '').strip()
                     media_raw = raw_photos + " " + raw_videos
                     
                     urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
@@ -662,7 +662,7 @@ elif page == "📝 Модерация":
                             else: row_photos.append(clean_url)
                         
                         if row_photos:
-                            # Возвращаем красивый зум-эффект при клике
+                            # Встроенный зум Streamlit (с крестиком при открытии)
                             img_cols = st.columns(3)
                             for i, p in enumerate(row_photos):
                                 with img_cols[i % 3]:
@@ -709,7 +709,8 @@ elif page == "📊 Отчет производства":
         if not details.empty:
             all_photos = []
             for _, r in details.iterrows():
-                m_raw = str(r.get('Фотографии', '')).replace('nan', '')
+                # Фото уже лежат в датафрейме, мгновенный доступ
+                m_raw = str(r.get('Фотографии', '')).replace('nan', '').replace('None', '')
                 urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                 for u in urls:
                     clean_url = u.replace("']", "").replace("'", "").replace('"', '')
@@ -730,8 +731,8 @@ elif page == "📊 Отчет производства":
                     c1, media_col = st.columns([1.2, 1])
                     
                     row_photos, videos = [], []
-                    raw_photos = str(r.get('Фотографии', '')).replace('nan', '').strip()
-                    raw_videos = str(r.get('Видео', '')).replace('nan', '').strip()
+                    raw_photos = str(r.get('Фотографии', '')).replace('nan', '').replace('None', '').strip()
+                    raw_videos = str(r.get('Видео', '')).replace('nan', '').replace('None', '').strip()
                     m_raw = raw_photos + " " + raw_videos
                     
                     urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
@@ -744,10 +745,9 @@ elif page == "📊 Отчет производства":
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
                         
-                        # ВЫВОД ДАТ (Те самые, которые ты просил)
-                        date_claim = str(r.get('Дата и время оформления заявки на возврат', '')).replace('NaT', '---')
-                        date_order = str(r.get('Дата заказа', '')).replace('NaT', '---')
-                        date_pickup = str(r.get('Дата и время получения заказа покупателем', '')).replace('NaT', '---')
+                        date_claim = str(r.get('Дата и время оформления заявки на возврат', '')).replace('NaT', '---').replace('None', '---')
+                        date_order = str(r.get('Дата заказа', '')).replace('NaT', '---').replace('None', '---')
+                        date_pickup = str(r.get('Дата и время получения заказа покупателем', '')).replace('NaT', '---').replace('None', '---')
                         
                         st.write(f"🕒 **Заявка подана:** {date_claim if date_claim else '---'}")
                         st.write(f"🛒 **Дата заказа:** {date_order if date_order else '---'}")
@@ -781,7 +781,7 @@ elif page == "📊 Отчет производства":
 
     @st.cache_data(ttl=120) 
     def load_cached_hybrid_data():
-        # Быстрый запрос, но теперь мы включили нужные даты и фото!
+        # 🚀 Полностью чистый SQL-запрос ко всему View (работает мгновенно)
         query = """
             SELECT 
                 "SRID", "Дата и время оформления заявки на возврат", "Дата заказа", "Дата и время получения заказа покупателем",
@@ -814,7 +814,7 @@ elif page == "📊 Отчет производства":
                     df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                     
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    # 3. АГРЕССИВНАЯ СКЛЕЙКА ИНВОЙСОВ (режем .0 только здесь)
+                    # 3. АГРЕССИВНАЯ СКЛЕЙКА ИНВОЙСОВ
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).replace(['nan', 'None', ''], 'Не указан').str.strip().str.lower()
                     df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     
