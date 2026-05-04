@@ -477,7 +477,7 @@ def process_wb_api_sync(existing_gs_records):
     for col in TARGET_COLUMNS:
         api_df[col] = temp_df[col] if col in temp_df.columns else ""
 
-   # --- 4. UPSERT (С ЖЕСТКОЙ ТИПИЗАЦИЕЙ СТРОК) ---
+    # --- 4. UPSERT (С ЖЕСТКОЙ ТИПИЗАЦИЕЙ СТРОК) ---
     main_status.update(label="🧬 Синхронизация с Google Sheets...", state="running")
     new_count, updated_count = 0, 0
     
@@ -534,6 +534,10 @@ def process_wb_api_sync(existing_gs_records):
         st.error(error_msg)
         add_system_log("Синхронизация", "ERROR", error_msg)
         return pd.DataFrame(), pd.DataFrame(), 0, 0, [error_msg]
+    
+    # Если база пустая
+    final_df = api_df.reset_index()[TARGET_COLUMNS]
+    return final_df, df_orders_summary, len(final_df), 0, report
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
