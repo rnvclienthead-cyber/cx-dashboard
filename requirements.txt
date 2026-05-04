@@ -9,6 +9,5 @@ python-calamine
 xlrd
 matplotlib
 altair
-aiohttp
 sqlalchemy
 psycopg2-binary
