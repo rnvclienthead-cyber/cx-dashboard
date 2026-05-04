@@ -679,7 +679,6 @@ elif page == "📝 Модерация":
         else: 
             st.success("🎉 Очередь пуста! Все обращения проверены.")
 
-
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
@@ -706,7 +705,9 @@ elif page == "📊 Отчет производства":
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
         st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
-        details = filtered_df[(filtered_df['Артикул продавца'] == sku) & (filtered_df[str(reason_id)].astype(str).str.strip().isin(['1', '1.0', '+', 'True', 'true']))]
+        
+        # ИСПРАВЛЕНИЕ: Добавлен .str.lower() для безошибочного совпадения True/true
+        details = filtered_df[(filtered_df['Артикул продавца'] == sku) & (filtered_df[str(reason_id)].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да']))]
         
         if not details.empty:
             all_photos = []
@@ -754,7 +755,8 @@ elif page == "📊 Отчет производства":
                         st.write(f"🛒 **Дата заказа:** {date_order if date_order else '---'}")
                         st.write(f"📦 **Забрал на ПВЗ:** {date_pickup if date_pickup else '---'}")
                         
-                        st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
+                        # Вывод очищенного инвойса
+                        st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки_ОРИГИНАЛ', '---')}")
                         
                         if row_photos:
                             if st.button("📥 Скачать фото", key=f"dl_row_{r.name}"):
@@ -782,7 +784,6 @@ elif page == "📊 Отчет производства":
 
     @st.cache_data(ttl=120) 
     def load_cached_hybrid_data():
-        # Бронебойный SQL-запрос, который сам цепляет фото из wb_claims
         query = """
             SELECT 
                 v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
@@ -794,19 +795,21 @@ elif page == "📊 Отчет производства":
         """
         df_temp = pd.read_sql(query, engine)
         
-        # 1. ЖЕСТКИЙ ФИЛЬТР: Отчет производства показывает ТОЛЬКО Одобренные заявки
+        # ЖЕСТКИЙ ФИЛЬТР: Сюда можно добавить новые статусы, если найдешь их через SQL!
         valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
         df_temp = df_temp[
             df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
             df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
         ]
         
-        # 2. Очистка мусорных артикулов (убиваем nan)
         df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
         df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
 
         if 'Номер поставки' not in df_temp.columns:
             df_temp['Номер поставки'] = 'Не указан'
+        
+        # Сохраняем оригинальный номер для отображения
+        df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
             
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
@@ -816,9 +819,11 @@ elif page == "📊 Отчет производства":
                     df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                     
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    # 3. АГРЕССИВНАЯ СКЛЕЙКА ИНВОЙСОВ
-                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).replace(['nan', 'None', ''], 'Не указан').str.strip().str.lower()
-                    df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                    # ИСПРАВЛЕНИЕ: Жесткая вырезка .0 через .str.replace()
+                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
+                    
+                    df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки_clean'])
                     
@@ -854,7 +859,7 @@ elif page == "📊 Отчет производства":
         if not df.empty:
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
             df['Инвойс'] = df['Инвойс'].fillna('Не указан')
-            df['Номер поставки'] = df.get('Номер поставки', 'Не указан').fillna('Не указан')
+            df['Номер поставки_ОРИГИНАЛ'] = df.get('Номер поставки_ОРИГИНАЛ', 'Не указан').fillna('Не указан')
             
             def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14))
             df['Размечено'] = df.apply(has_tags, axis=1)
@@ -908,7 +913,7 @@ elif page == "📊 Отчет производства":
                                 'Причина': f"{i}. {CATEGORIES[i]}",
                                 'ID': i,
                                 'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
-                                'Номер поставки': str(r.get('Номер поставки', 'Не указан')).strip()
+                                'Номер поставки': str(r.get('Номер поставки_ОРИГИНАЛ', 'Не указан')).strip()
                             })
 
                 if matrix_list:
@@ -1030,7 +1035,7 @@ elif page == "📊 Отчет производства":
 
     except Exception as e: 
         st.error(f"Ошибка Отчета: {e}")
-
+        
 elif page == "📜 Системный Журнал":
     st.title("📜 Системный Журнал (Черный ящик)")
     st.markdown("Здесь сохраняется хронология всех процессов.")
