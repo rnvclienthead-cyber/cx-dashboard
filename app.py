@@ -477,46 +477,63 @@ def process_wb_api_sync(existing_gs_records):
     for col in TARGET_COLUMNS:
         api_df[col] = temp_df[col] if col in temp_df.columns else ""
 
-    # --- 4. UPSERT (ИСПРАВЛЕННЫЙ) ---
+   # --- 4. UPSERT (С ЖЕСТКОЙ ТИПИЗАЦИЕЙ СТРОК) ---
+    main_status.update(label="🧬 Синхронизация с Google Sheets...", state="running")
     new_count, updated_count = 0, 0
-    api_df['SRID'] = api_df['SRID'].astype(str).str.strip()
+    
+    # Жестко превращаем api_df в простые Python-строки
+    api_df = api_df.fillna("").astype(str).replace(['nan', 'None', 'NaN', '<NA>'], '')
+    
+    # Очистка и установка индекса
+    api_df['SRID'] = api_df['SRID'].str.strip()
     api_df = api_df[api_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
     api_df.set_index('SRID', inplace=True)
 
     if existing_gs_records:
-        gs_df = pd.DataFrame(existing_gs_records).astype(str)
+        # Аналогичная жесткая типизация для Гугл Таблицы
+        gs_df = pd.DataFrame(existing_gs_records).fillna("").astype(str).replace(['nan', 'None', 'NaN', '<NA>'], '')
+        
         if 'SRID' in gs_df.columns:
-            gs_df['SRID'] = gs_df['SRID'].astype(str).str.strip()
+            gs_df['SRID'] = gs_df['SRID'].str.strip()
             gs_df = gs_df[gs_df['SRID'] != ""].drop_duplicates(subset=['SRID'], keep='last')
             gs_df.set_index('SRID', inplace=True)
             
-            # ФИКС ОШИБКИ: Проверяем наличие колонок, пропуская индекс SRID
+            # Добавляем недостающие колонки
             for col in TARGET_COLUMNS:
-                if col != 'SRID' and col not in gs_df.columns: 
+                if col != 'SRID' and col not in gs_df.columns:
                     gs_df[col] = ""
             
             update_cols = [c for c in TARGET_COLUMNS if c not in MANUAL_COLS and c != 'SRID']
             common = gs_df.index.intersection(api_df.index)
             
             if not common.empty:
+                # ТЕПЕРЬ ОШИБКИ ТИПА НЕ БУДЕТ: обе таблицы - это гарантированно чистые строки
                 gs_df.loc[common, update_cols] = api_df.loc[common, update_cols]
                 updated_count = len(common)
             
-            new_items = api_df.index.difference(gs_df.index)
-            if not new_items.empty:
-                gs_df = pd.concat([gs_df, api_df.loc[new_items]])
-                new_count = len(new_items)
+            new_idx = api_df.index.difference(gs_df.index)
+            if not new_idx.empty:
+                gs_df = pd.concat([gs_df, api_df.loc[new_idx]])
+                new_count = len(new_idx)
             
-            # ФИКС: Сначала берем только нужные колонки, а потом сбрасываем индекс
-            final_df = gs_df[ [c for c in TARGET_COLUMNS if c != 'SRID'] ].reset_index()
-            # Возвращаем колонки в правильном порядке
+            # Формируем финальный результат
+            final_df = gs_df[[c for c in TARGET_COLUMNS if c != 'SRID']].reset_index()
             final_df = final_df[TARGET_COLUMNS]
-            
-            return final_df, df_orders_summary, new_count, updated_count, report
-    
-    # Если база пустая
-    final_df = api_df.reset_index()[TARGET_COLUMNS]
-    return final_df, df_orders_summary, len(final_df), 0, report
+        else:
+            final_df = api_df.reset_index()[TARGET_COLUMNS]
+            new_count = len(final_df)
+    else:
+        final_df = api_df.reset_index()[TARGET_COLUMNS]
+        new_count = len(final_df)
+
+    main_status.update(label="✅ Данные готовы!", state="complete", expanded=False)
+    return final_df, df_orders_summary, new_count, updated_count, report
+
+    except Exception as e:
+        error_msg = f"Сбой: {str(e)}"
+        st.error(error_msg)
+        add_system_log("Синхронизация", "ERROR", error_msg)
+        return pd.DataFrame(), pd.DataFrame(), 0, 0, [error_msg]
         
 # ==========================================
 # 4. ИИ ДВИЖОК С УМНЫМ ПОИСКОМ (RAG) И АУДИТОМ
