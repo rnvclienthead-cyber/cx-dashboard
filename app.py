@@ -715,36 +715,39 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
             
     return results
     
-# ==========================================
+    # ==========================================
 # 5. ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
-
-# Выносим функцию вверх, чтобы она была доступна всем страницам
+# СНАЧАЛА ОБЪЯВЛЯЕМ ФУНКЦИЮ:
 def get_col_letter(col_idx):
     if col_idx < 26: return chr(ord('A') + col_idx)
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
-# НАЧАЛО НАВИГАЦИИ (Теперь это точка входа)
+# ПЕРВЫЙ БЛОК НАВИГАЦИИ ДОЛЖЕН БЫТЬ "if", А НЕ "elif"!
 if page == "🤖 Робот-Синхронизатор":
     st.title("🤖 Статус Базы Данных (Supabase)")
-    st.info("Сбор данных теперь идет через worker.py. Streamlit подключается напрямую к PostgreSQL.")
+    st.info("Сбор логистики и претензий теперь работает автоматически, независимо от дашборда (через ваш скрипт `worker.py`). Streamlit больше не зависает и не выкидывает ошибки памяти.")
     
     if engine:
         try:
+            # Быстро спрашиваем у базы, сколько в ней строк
             with engine.connect() as conn:
                 claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar()
                 orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar()
                 sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar()
                 
             c1, c2, c3 = st.columns(3)
-            c1.metric("Всего Претензий в БД", f"{claims_count:,}".replace(',', ' '))
-            c2.metric("Заказов (ORDER)", f"{orders_count:,}".replace(',', ' '))
-            c3.metric("Продаж (SALE)", f"{sales_count:,}".replace(',', ' '))
-            st.success("✅ Соединение с базой установлено.")
+            c1.metric("Всего Претензий в БД", claims_count)
+            c2.metric("Строк Заказов (ORDER)", orders_count)
+            c3.metric("Строк Продаж (SALE)", sales_count)
+            
+            st.success("✅ База данных подключена и работает штатно.")
+            st.markdown("💡 *Чтобы загрузить свежие данные с Wildberries, просто запустите файл `worker.py` на вашем компьютере или сервере.*")
+            
         except Exception as e:
-            st.error(f"⚠️ Ошибка подключения к базе: {e}")
+            st.error(f"⚠️ Ошибка подключения к базе данных: {e}")
     else:
-        st.warning("⚠️ База данных не настроена в Secrets (DB_URL).")
+        st.warning("⚠️ База данных не подключена. Проверьте параметр DB_URL в Secrets.")
 
 # ==========================================
 # 6. РУЧНАЯ МОДЕРАЦИЯ И ТЕГИРОВАНИЕ
@@ -752,17 +755,15 @@ if page == "🤖 Робот-Синхронизатор":
 
 elif page == "🔬 ИИ Тегирование":
     st.title("🔬 ИИ Тегирование и Проверка")
-    # Твой существующий код для работы с Google Sheets...
-    try:
-        client = get_gspread_client()
-        ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-        headers = ws.row_values(1)
-        
-        header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
-        header_map_original = {str(name).strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
-        
-        df = pd.DataFrame(ws.get_all_records())
-        # ... (далее весь твой остальной код страницы Тегирования без изменений)
+    
+    client = get_gspread_client()
+    ws = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
+    headers = ws.row_values(1)
+    
+    header_map_clean = {str(name).strip().lower(): get_col_letter(idx) for idx, name in enumerate(headers)}
+    header_map_original = {str(name).strip(): get_col_letter(idx) for idx, name in enumerate(headers)}
+    
+    df = pd.DataFrame(ws.get_all_records())
     
     # Создаем виртуальные колонки, чтобы код не падал, если вы забыли их добавить
     if 'Аудит' not in df.columns: df['Аудит'] = ''
