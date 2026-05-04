@@ -10,4 +10,5 @@ xlrd
 matplotlib
 altair
 aiohttp
-gspread
+sqlalchemy
+psycopg2-binary
