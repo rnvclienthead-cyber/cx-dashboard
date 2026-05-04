@@ -14,6 +14,7 @@ import urllib.request
 import base64
 import streamlit.components.v1 as components
 import time
+from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
@@ -38,6 +39,8 @@ try:
     SPREADSHEET_ID_MAIN = st.secrets["SPREADSHEET_ID_MAIN"]
     SPREADSHEET_ID_INVOICES = st.secrets["SPREADSHEET_ID_INVOICES"]
     GOOGLE_CREDS = dict(st.secrets["gcp_service_account"])
+    DB_URL = st.secrets.get("DB_URL") 
+    engine = create_engine(DB_URL) if DB_URL else None
 except Exception as e:
     st.error(f"❌ Ошибка в Secrets: {e}")
     st.stop()
@@ -1323,20 +1326,17 @@ elif page == "📊 Отчет производства":
         t = st.session_state.show_detail_trigger
         show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
 
-    # ⚡️ ФУНКЦИЯ С КЭШЕМ (Качает данные раз в 5 минут)
-    @st.cache_data(ttl=300) 
+    # ⚡️ ФУНКЦИЯ С КЭШЕМ (Теперь качает из PostgreSQL)
+    @st.cache_data(ttl=60) 
     def load_cached_google_data():
-        client = get_gspread_client()
-        sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
-        df_temp = pd.DataFrame(sheet_main.worksheet("Возвраты").get_all_records())
+        # 1. Мгновенно берем склеенные претензии и продажи из нашего нового View
+        df_temp = pd.read_sql("SELECT * FROM view_cx_dashboard", engine)
         
-        # Обновленные названия для проверки
-        if 'supplyID' in df_temp.columns and 'Номер поставки' not in df_temp.columns:
-            df_temp.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
-        
+        # 2. Инвойсы берем по-старому из Google Таблиц
         try:
             inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
             if inv_id:
+                client = get_gspread_client()
                 sheet_inv = client.open_by_key(inv_id)
                 df_inv = pd.DataFrame(sheet_inv.get_worksheet(0).get_all_records())
                 
@@ -1349,20 +1349,28 @@ elif page == "📊 Отчет производства":
                     if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
                     cols_to_merge = ['Номер поставки']
                     if 'Инвойс' in df_inv.columns: cols_to_merge.append('Инвойс')
-                    df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки', how='left')
+                    
+                    df_temp = df_temp.merge(df_inv_unique[cols_to_merge], left_on='SRID', right_on='Номер поставки', how='left')
         except Exception:
             pass
             
         return df_temp
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=60)
     def load_cached_orders():
+        # Берем заказы напрямую из БД и считаем "Чистые заказы" прямо на лету!
+        query = """
+            SELECT 
+                supplier_article AS "Артикул продавца", 
+                COUNT(srid) - SUM(CASE WHEN is_cancel THEN 1 ELSE 0 END) AS "Чистые_заказы"
+            FROM wb_logistics 
+            WHERE doc_type = 'ORDER'
+            GROUP BY supplier_article
+        """
         try:
-            client = get_gspread_client()
-            sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
-            df_orders = pd.DataFrame(sheet_main.worksheet("Заказы").get_all_records())
-            return df_orders
-        except Exception:
+            return pd.read_sql(query, engine)
+        except Exception as e:
+            st.error(f"Ошибка загрузки заказов из БД: {e}")
             return pd.DataFrame()
 
     try:
