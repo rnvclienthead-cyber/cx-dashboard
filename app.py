@@ -590,6 +590,7 @@ elif page == "📝 Модерация":
         st.markdown("### 🔍 Фильтр обращений")
         filter_mode = st.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], horizontal=True)
         
+        # В Модерации мы тянем фото и видео сразу в основном запросе (чтобы не дергать БД лишний раз)
         query = """
             SELECT * FROM view_cx_dashboard 
             WHERE ("1" OR "2" OR "3" OR "4" OR "5" OR "6" OR "7" OR "8" OR "9" OR "10" OR "11" OR "12" OR "13")
@@ -623,7 +624,7 @@ elif page == "📝 Модерация":
                 col_info, col_media = st.columns([1.2, 1])
                 
                 with col_info:
-                    st.markdown(f"**Артикул:** {row.get('Артикул продавца', '---')} | **Дата:** {row.get('Дата и время оформления заявки на возврат', '')}")
+                    st.markdown(f"**Артикул:** {row.get('Артикул продавца', '---')} | **Дата заявки:** {row.get('Дата и время оформления заявки на возврат', '')}")
                     st.info(row.get('Комментарий покупателя', 'Нет текста'))
                     
                     ai_selected = [CATEGORIES[i] for i in range(1, 14) if row.get(str(i)) == True]
@@ -646,31 +647,36 @@ elif page == "📝 Модерация":
                                 st.rerun()
 
                 with col_media:
-                    # Фото берутся мгновенно из View, зум работает через CSS
-                    media_raw = str(row.get('Фотографии', '')) + " " + str(row.get('Видео', ''))
+                    # Чистим мусор (nan) из строчек с фото
+                    raw_photos = str(row.get('Фотографии', '')).replace('nan', '').strip()
+                    raw_videos = str(row.get('Видео', '')).replace('nan', '').strip()
+                    media_raw = raw_photos + " " + raw_videos
+                    
                     urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', media_raw)
                     if urls:
-                        videos = []
-                        images_html = '<div class="media-row">'
+                        videos, row_photos = [], []
                         for u in urls[:6]: 
                             clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                             if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                            
                             if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                            else: images_html += f'<a href="{clean_url}" target="_blank"><img src="{clean_url}" class="photo-zoom"></a>'
-                        images_html += '</div>'
-                        st.markdown(images_html, unsafe_allow_html=True)
+                            else: row_photos.append(clean_url)
+                        
+                        if row_photos:
+                            # Возвращаем красивый зум-эффект при клике
+                            img_cols = st.columns(3)
+                            for i, p in enumerate(row_photos):
+                                with img_cols[i % 3]:
+                                    st.image(p, use_container_width=True)
                         
                         if videos:
-                            v_cols = st.columns(len(videos))
                             for v_idx, v_url in enumerate(videos):
-                                with v_cols[v_idx]:
-                                    if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
+                                if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
             
             st.markdown("---")
             render_pagination(total_pages, key_prefix="bottom")
         else: 
             st.success("🎉 Очередь пуста! Все обращения проверены.")
+
 
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
@@ -703,7 +709,7 @@ elif page == "📊 Отчет производства":
         if not details.empty:
             all_photos = []
             for _, r in details.iterrows():
-                m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                m_raw = str(r.get('Фотографии', '')).replace('nan', '')
                 urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                 for u in urls:
                     clean_url = u.replace("']", "").replace("'", "").replace('"', '')
@@ -724,7 +730,10 @@ elif page == "📊 Отчет производства":
                     c1, media_col = st.columns([1.2, 1])
                     
                     row_photos, videos = [], []
-                    m_raw = str(r.get('Фотографии', '')) + " " + str(r.get('Видео', ''))
+                    raw_photos = str(r.get('Фотографии', '')).replace('nan', '').strip()
+                    raw_videos = str(r.get('Видео', '')).replace('nan', '').strip()
+                    m_raw = raw_photos + " " + raw_videos
+                    
                     urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
                     for u in urls:
                         clean_url = u.replace("']", "").replace("'", "").replace('"', '')
@@ -734,8 +743,18 @@ elif page == "📊 Отчет производства":
 
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
-                        st.write(f"📅 **Дата:** {r.get('Дата и время оформления заявки на возврат', '---')}")
+                        
+                        # ВЫВОД ДАТ (Те самые, которые ты просил)
+                        date_claim = str(r.get('Дата и время оформления заявки на возврат', '')).replace('NaT', '---')
+                        date_order = str(r.get('Дата заказа', '')).replace('NaT', '---')
+                        date_pickup = str(r.get('Дата и время получения заказа покупателем', '')).replace('NaT', '---')
+                        
+                        st.write(f"🕒 **Заявка подана:** {date_claim if date_claim else '---'}")
+                        st.write(f"🛒 **Дата заказа:** {date_order if date_order else '---'}")
+                        st.write(f"📦 **Забрал на ПВЗ:** {date_pickup if date_pickup else '---'}")
+                        
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки', '---')}")
+                        
                         if row_photos:
                             if st.button("📥 Скачать фото", key=f"dl_row_{r.name}"):
                                 with st.spinner("Архивация..."):
@@ -744,11 +763,10 @@ elif page == "📊 Отчет производства":
                                     components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
                     with media_col:
                         if row_photos:
-                            images_html = '<div class="media-row">'
-                            for p in row_photos[:6]:
-                                images_html += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
-                            images_html += '</div>'
-                            st.markdown(images_html, unsafe_allow_html=True)
+                            img_cols = st.columns(3)
+                            for i, p in enumerate(row_photos[:6]):
+                                with img_cols[i % 3]:
+                                    st.image(p, use_container_width=True)
                         if videos:
                             for v_idx, v_url in enumerate(videos): 
                                 st.markdown(f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Видео {v_idx+1}</a>', unsafe_allow_html=True)
@@ -761,13 +779,18 @@ elif page == "📊 Отчет производства":
             st.session_state.last_click_id = None
             st.rerun()
 
-    if st.session_state.get('show_detail_trigger'):
-        t = st.session_state.show_detail_trigger
-        show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
-
     @st.cache_data(ttl=120) 
     def load_cached_hybrid_data():
-        df_temp = pd.read_sql("SELECT * FROM view_cx_dashboard", engine)
+        # Быстрый запрос, но теперь мы включили нужные даты и фото!
+        query = """
+            SELECT 
+                "SRID", "Дата и время оформления заявки на возврат", "Дата заказа", "Дата и время получения заказа покупателем",
+                "Артикул продавца", "Комментарий покупателя", "Решение по возврату покупателю", "Статус товара",
+                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
+                "Корректировка", "Номер поставки", "Фотографии", "Видео"
+            FROM view_cx_dashboard
+        """
+        df_temp = pd.read_sql(query, engine)
         
         # 1. ЖЕСТКИЙ ФИЛЬТР: Отчет производства показывает ТОЛЬКО Одобренные заявки
         valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
@@ -776,11 +799,9 @@ elif page == "📊 Отчет производства":
             df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
         ]
         
-        # 2. Очистка мусорных артикулов
+        # 2. Очистка мусорных артикулов (убиваем nan)
         df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
         df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
-        
-        df_temp['SRID'] = df_temp['SRID'].astype(str).str.strip()
 
         if 'Номер поставки' not in df_temp.columns:
             df_temp['Номер поставки'] = 'Не указан'
@@ -793,8 +814,8 @@ elif page == "📊 Отчет производства":
                     df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                     
                 if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    # 3. АГРЕССИВНАЯ СКЛЕЙКА ИНВОЙСОВ (режем .0, пробелы и приводим к нижнему регистру)
-                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                    # 3. АГРЕССИВНАЯ СКЛЕЙКА ИНВОЙСОВ (режем .0 только здесь)
+                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).replace(['nan', 'None', ''], 'Не указан').str.strip().str.lower()
                     df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     
                     df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки_clean'])
@@ -954,7 +975,6 @@ elif page == "📊 Отчет производства":
                         df_orders['Чистые_заказы'] = pd.to_numeric(df_orders.get('Чистые_заказы', 0), errors='coerce').fillna(0)
                         orders_grouped = df_orders.groupby('Артикул продавца')['Чистые_заказы'].sum().reset_index()
                         
-                        # Брак берем из df_filtered, который УЖЕ отфильтрован только по "Одобрено" в самом начале Отчета
                         df_approved = df_filtered[df_filtered['Размечено'] == True]
                         defects_grouped = df_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)') if not df_approved.empty else pd.DataFrame(columns=['Артикул продавца', 'Одобренный брак (шт)'])
                         
@@ -978,7 +998,7 @@ elif page == "📊 Отчет производства":
                                 sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
                                 all_photos_claim = []
                                 for _, r in sku_defects.iterrows():
-                                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(r.get('Фотографии', '')))
+                                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', str(r.get('Фотографии', '')).replace('nan', ''))
                                     for u in urls:
                                         clean_url = u.replace("']", "").replace("'", "").replace('"', '')
                                         if clean_url.startswith("//"): clean_url = "https:" + clean_url
