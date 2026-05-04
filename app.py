@@ -1187,7 +1187,7 @@ elif page == "🧠 Обучение ИИ":
         else: st.warning("Пожалуйста, загрузите файл.")
 
 # ==========================================
-# 7. ОТЧЕТ ПРОИЗВОДСТВА (Altair Хитмап + Фикс Текста и Кликов)
+# 7. ОТЧЕТ ПРОИЗВОДСТВА И PPM (Матрица + Инвойсы + Рекламации)
 # ==========================================
 
 elif page == "📊 Отчет производства":
@@ -1355,9 +1355,20 @@ elif page == "📊 Отчет производства":
             
         return df_temp
 
+    @st.cache_data(ttl=300)
+    def load_cached_orders():
+        try:
+            client = get_gspread_client()
+            sheet_main = client.open_by_key(SPREADSHEET_ID_MAIN)
+            df_orders = pd.DataFrame(sheet_main.worksheet("Заказы").get_all_records())
+            return df_orders
+        except Exception:
+            return pd.DataFrame()
+
     try:
         # Мгновенно берем данные из оперативной памяти
         df = load_cached_google_data()
+        df_orders = load_cached_orders()
 
         if not df.empty:
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
@@ -1400,188 +1411,268 @@ elif page == "📊 Отчет производства":
             c3.metric("Изменено вручную", corrected_rows)
             c4.metric("Точность ИИ", f"{accuracy}%")
             
-            matrix_list = []
-            for i in range(1, 14):
-                cat_col = str(i)
-                if cat_col in df_filtered.columns:
-                    temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
-                    for _, r in temp.iterrows():
-                        matrix_list.append({
-                            'Артикул продавца': str(r.get('Артикул продавца', 'Без артикула')).strip(),
-                            'Причина': f"{i}. {CATEGORIES[i]}",
-                            'ID': i,
-                            'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
-                            'Номер поставки': str(r.get('Номер поставки', 'Не указан')).strip()
-                        })
-
             st.markdown("---")
-            st.markdown("### 🧮 Тепловая Матрица Производства")
-            st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
             
-            if matrix_list:
-                df_matrix = pd.DataFrame(matrix_list)
-                
-                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул продавца']).fillna(0).astype(int)
-                pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
-                
-                sku_totals = pivot.drop(columns=['ID']).sum(axis=0).to_dict()
-                reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
-                
-                df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул продавца', value_name='Дефекты')
-                
-                df_melt['Артикул_Метка'] = df_melt['Артикул продавца'] 
-                df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
-                
-                df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
-
-                import altair as alt
-                
-                click_selector = alt.selection_point(name='cell_click', fields=['Артикул_Метка', 'Причина_Метка'])
-                
-                base = alt.Chart(df_melt).encode(
-                    x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000, orient='bottom')),
-                    y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending'))
-                )
-                
-                rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
-                    color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None),
-                    tooltip=[alt.Tooltip('Артикул продавца:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
-                )
-                
-                text = base.mark_text(baseline='middle', fontSize=11).encode(
-                    text='Текст:N',
-                    color=alt.condition(
-                        alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2),
-                        alt.value('white'),
-                        alt.value('black')
-                    )
-                )
-                
-                chart_height = max(400, len(pivot) * 35 + 100)
-                
-                final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
-                
-                # 2. РЕНДЕР С ДИНАМИЧЕСКИМ КЛЮЧОМ
-                event = st.altair_chart(
-                    final_chart, 
-                    use_container_width=True, 
-                    on_select="rerun",
-                    key=f"prod_matrix_{st.session_state.matrix_key}"
-                )
-                
-                # 3. ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК КЛИКОВ
-                try:
-                    if event and hasattr(event, "selection"):
-                        sel = event.selection.get("cell_click", [])
-                        
-                        if sel and len(sel) > 0:
-                            clicked_point = sel[0]
-                            sku_clicked = clicked_point.get('Артикул_Метка')
-                            reason_clicked = clicked_point.get('Причина_Метка')
-                            
-                            if sku_clicked and reason_clicked:
-                                current_click_id = f"{sku_clicked}_{reason_clicked}"
-                                
-                                if current_click_id != st.session_state.get('last_click_id'):
-                                    st.session_state.last_click_id = current_click_id
-                                    
-                                    clean_sku = sku_clicked.split(' [')[0]
-                                    clean_reason = reason_clicked.split(' [')[0]
-                                    reason_id_clicked = int(clean_reason.split('.')[0])
-                                    
-                                    st.session_state.show_detail_trigger = {
-                                        'sku': clean_sku,
-                                        'reason': clean_reason,
-                                        'df': df_filtered,
-                                        'id': reason_id_clicked
-                                    }
-                                    
-                                    st.session_state.matrix_key += 1
-                                    st.rerun()
-                except Exception as e:
-                    st.error(f"Ошибка системы перехвата клика: {e}")
-
-            else:
-                st.info("Данных для матрицы пока нет.")
-
-            st.markdown("---")
-            st.markdown("### 📦 Проблемные Инвойсы (Топ-15)")
+            # === ВКЛАДКИ ===
+            tab_matrix, tab_ppm = st.tabs(["🧮 Тепловая Матрица Производства", "⚠️ Расчет PPM и Рекламации"])
             
-            # --- CSS для всплывающего окна (Компактный вид) ---
-            st.markdown("""
-            <style>
-            #vg-tooltip-element {
-                font-family: sans-serif;
-                font-size: 11px !important;
-                line-height: 1.3 !important;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
-                border-radius: 6px !important;
-                border: 1px solid #e0e0e0 !important;
-                max-width: 600px !important;
-                white-space: normal !important;
-            }
-            #vg-tooltip-element table tr {
-                border-bottom: 1px solid #d1d5db;
-            }
-            #vg-tooltip-element table tr:last-child {
-                border-bottom: none;
-            }
-            #vg-tooltip-element table td {
-                padding: 6px 8px !important;
-                vertical-align: top;
-            }
-            #vg-tooltip-element table td.key {
-                color: #6b7280;
-                font-weight: 600;
-                white-space: nowrap;
-            }
-            </style>
-            """, unsafe_allow_html=True)
-            
-            if matrix_list:
-                df_matrix_inv = pd.DataFrame(matrix_list)
+            with tab_matrix:
+                st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
                 
-                inv_grouped = []
-                for inv, group in df_matrix_inv.groupby('Инвойс'):
-                    defect_count = len(group)
+                matrix_list = []
+                for i in range(1, 14):
+                    cat_col = str(i)
+                    if cat_col in df_filtered.columns:
+                        temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().isin(['1', '1.0', '+'])]
+                        for _, r in temp.iterrows():
+                            matrix_list.append({
+                                'Артикул продавца': str(r.get('Артикул продавца', 'Без артикула')).strip(),
+                                'Причина': f"{i}. {CATEGORIES[i]}",
+                                'ID': i,
+                                'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
+                                'Номер поставки': str(r.get('Номер поставки', 'Не указан')).strip()
+                            })
+
+                if matrix_list:
+                    df_matrix = pd.DataFrame(matrix_list)
                     
-                    supplies = ", ".join(sorted(list(set([str(x) for x in group['Номер поставки'] if str(x) != 'Не указан']))))
-                    if not supplies: 
-                        supplies = "Не указана"
+                    pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул продавца']).fillna(0).astype(int)
+                    pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
                     
-                    sku_counts = group['Артикул продавца'].value_counts()
+                    sku_totals = pivot.drop(columns=['ID']).sum(axis=0).to_dict()
+                    reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
                     
-                    all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in sku_counts.items()])
-                        
-                    inv_grouped.append({
-                        'Инвойс': inv,
-                        'Дефекты': defect_count,
-                        'Поставки': supplies,
-                        'Список Артикулов': all_skus
-                    })
-                
-                if inv_grouped:
-                    df_inv_chart = pd.DataFrame(inv_grouped).sort_values('Дефекты', ascending=False).head(15)
+                    df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул продавца', value_name='Дефекты')
                     
+                    df_melt['Артикул_Метка'] = df_melt['Артикул продавца'] 
+                    df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
+                    
+                    df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
+
                     import altair as alt
                     
-                    inv_chart = alt.Chart(df_inv_chart).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-                        x=alt.X('Инвойс:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)),
-                        y=alt.Y('Дефекты:Q', title='Количество дефектов'),
-                        color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None),
-                        tooltip=[
-                            alt.Tooltip('Инвойс:N', title='Инвойс'),
-                            alt.Tooltip('Дефекты:Q', title='Всего дефектов'),
-                            alt.Tooltip('Поставки:N', title='Поставки'),
-                            alt.Tooltip('Список Артикулов:N', title='Артикулы')
-                        ]
-                    ).properties(height=350)
+                    click_selector = alt.selection_point(name='cell_click', fields=['Артикул_Метка', 'Причина_Метка'])
                     
-                    st.altair_chart(inv_chart, use_container_width=True)
+                    base = alt.Chart(df_melt).encode(
+                        x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000, orient='bottom')),
+                        y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending'))
+                    )
+                    
+                    rects = base.mark_rect(stroke='white', strokeWidth=1).encode(
+                        color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None),
+                        tooltip=[alt.Tooltip('Артикул продавца:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')]
+                    )
+                    
+                    text = base.mark_text(baseline='middle', fontSize=11).encode(
+                        text='Текст:N',
+                        color=alt.condition(
+                            alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2),
+                            alt.value('white'),
+                            alt.value('black')
+                        )
+                    )
+                    
+                    chart_height = max(400, len(pivot) * 35 + 100)
+                    
+                    final_chart = alt.layer(rects, text).properties(height=chart_height).add_params(click_selector)
+                    
+                    # 2. РЕНДЕР С ДИНАМИЧЕСКИМ КЛЮЧОМ
+                    event = st.altair_chart(
+                        final_chart, 
+                        use_container_width=True, 
+                        on_select="rerun",
+                        key=f"prod_matrix_{st.session_state.matrix_key}"
+                    )
+                    
+                    # 3. ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК КЛИКОВ
+                    try:
+                        if event and hasattr(event, "selection"):
+                            sel = event.selection.get("cell_click", [])
+                            
+                            if sel and len(sel) > 0:
+                                clicked_point = sel[0]
+                                sku_clicked = clicked_point.get('Артикул_Метка')
+                                reason_clicked = clicked_point.get('Причина_Метка')
+                                
+                                if sku_clicked and reason_clicked:
+                                    current_click_id = f"{sku_clicked}_{reason_clicked}"
+                                    
+                                    if current_click_id != st.session_state.get('last_click_id'):
+                                        st.session_state.last_click_id = current_click_id
+                                        
+                                        clean_sku = sku_clicked.split(' [')[0]
+                                        clean_reason = reason_clicked.split(' [')[0]
+                                        reason_id_clicked = int(clean_reason.split('.')[0])
+                                        
+                                        st.session_state.show_detail_trigger = {
+                                            'sku': clean_sku,
+                                            'reason': clean_reason,
+                                            'df': df_filtered,
+                                            'id': reason_id_clicked
+                                        }
+                                        
+                                        st.session_state.matrix_key += 1
+                                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка системы перехвата клика: {e}")
+
                 else:
-                    st.info("Нет данных по инвойсам.")
-            else:
-                st.info("Данных для инвойсов пока нет.")
+                    st.info("Данных для матрицы пока нет.")
+
+                st.markdown("---")
+                st.markdown("### 📦 Проблемные Инвойсы (Топ-15)")
+                
+                # --- CSS для всплывающего окна (Компактный вид) ---
+                st.markdown("""
+                <style>
+                #vg-tooltip-element {
+                    font-family: sans-serif;
+                    font-size: 11px !important;
+                    line-height: 1.3 !important;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+                    border-radius: 6px !important;
+                    border: 1px solid #e0e0e0 !important;
+                    max-width: 600px !important;
+                    white-space: normal !important;
+                }
+                #vg-tooltip-element table tr {
+                    border-bottom: 1px solid #d1d5db;
+                }
+                #vg-tooltip-element table tr:last-child {
+                    border-bottom: none;
+                }
+                #vg-tooltip-element table td {
+                    padding: 6px 8px !important;
+                    vertical-align: top;
+                }
+                #vg-tooltip-element table td.key {
+                    color: #6b7280;
+                    font-weight: 600;
+                    white-space: nowrap;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+                
+                if matrix_list:
+                    df_matrix_inv = pd.DataFrame(matrix_list)
+                    
+                    inv_grouped = []
+                    for inv, group in df_matrix_inv.groupby('Инвойс'):
+                        defect_count = len(group)
+                        
+                        supplies = ", ".join(sorted(list(set([str(x) for x in group['Номер поставки'] if str(x) != 'Не указан']))))
+                        if not supplies: 
+                            supplies = "Не указана"
+                        
+                        sku_counts = group['Артикул продавца'].value_counts()
+                        
+                        all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in sku_counts.items()])
+                            
+                        inv_grouped.append({
+                            'Инвойс': inv,
+                            'Дефекты': defect_count,
+                            'Поставки': supplies,
+                            'Список Артикулов': all_skus
+                        })
+                    
+                    if inv_grouped:
+                        df_inv_chart = pd.DataFrame(inv_grouped).sort_values('Дефекты', ascending=False).head(15)
+                        
+                        import altair as alt
+                        
+                        inv_chart = alt.Chart(df_inv_chart).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                            x=alt.X('Инвойс:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)),
+                            y=alt.Y('Дефекты:Q', title='Количество дефектов'),
+                            color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None),
+                            tooltip=[
+                                alt.Tooltip('Инвойс:N', title='Инвойс'),
+                                alt.Tooltip('Дефекты:Q', title='Всего дефектов'),
+                                alt.Tooltip('Поставки:N', title='Поставки'),
+                                alt.Tooltip('Список Артикулов:N', title='Артикулы')
+                            ]
+                        ).properties(height=350)
+                        
+                        st.altair_chart(inv_chart, use_container_width=True)
+                    else:
+                        st.info("Нет данных по инвойсам.")
+                else:
+                    st.info("Данных для инвойсов пока нет.")
+
+            with tab_ppm:
+                st.info("💡 **Аналитика PPM (Parts Per Million)**: Соотношение дефектных товаров (где возврат одобрен) к общему количеству заказов.")
+                
+                if not df_orders.empty:
+                    # 1. Маппинг: Забираем только ОДОБРЕННЫЕ возвраты
+                    valid_statuses = ['одобрено', '2', '2.0', 'true', 'да']
+                    df_approved = df_filtered[df_filtered['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses)]
+                    df_approved = df_approved[df_approved['Размечено'] == True] # Только реальные дефекты
+                    
+                    # 2. Агрегация заказов. Избавляемся от nm_id, переводим все в Артикул продавца
+                    mapping_sku = df[['Артикул WB', 'Артикул продавца']].dropna().drop_duplicates()
+                    mapping_dict = dict(zip(mapping_sku['Артикул WB'].astype(str), mapping_sku['Артикул продавца'].astype(str)))
+                    
+                    df_orders['Артикул продавца'] = df_orders['Артикул WB'].astype(str).map(mapping_dict)
+                    df_orders['Чистые_заказы'] = pd.to_numeric(df_orders['Чистые_заказы'], errors='coerce').fillna(0)
+                    
+                    orders_grouped = df_orders.groupby('Артикул продавца')['Чистые_заказы'].sum().reset_index()
+                    defects_grouped = df_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)')
+                    
+                    # 3. Расчет PPM
+                    ppm_df = pd.merge(orders_grouped, defects_grouped, on='Артикул продавца', how='left').fillna(0)
+                    ppm_df['PPM'] = (ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 1000000
+                    ppm_df['PPM'] = ppm_df['PPM'].replace([float('inf'), -float('inf')], 0).astype(int)
+                    ppm_df['Доля брака, %'] = round((ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 100, 2)
+                    
+                    # Фильтруем проблемные (PPM > 10000)
+                    ppm_alerts = ppm_df[ppm_df['PPM'] > 10000].sort_values('PPM', ascending=False)
+                    
+                    if not ppm_alerts.empty:
+                        st.error(f"🚨 **Внимание!** Найдено проблемных товаров (PPM > 10 000): {len(ppm_alerts)} шт.")
+                        # Выводим таблицу без nm_id
+                        st.dataframe(ppm_alerts[['Артикул продавца', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']], use_container_width=True)
+                        
+                        st.markdown("### 📝 Генерация рекламации на завод")
+                        selected_sku_claim = st.selectbox("Выберите проблемный артикул для подготовки письма:", ppm_alerts['Артикул продавца'].tolist())
+                        
+                        if selected_sku_claim:
+                            sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
+                            
+                            all_photos_claim = []
+                            for _, r in sku_defects.iterrows():
+                                m_raw = str(r.get('Фотографии', ''))
+                                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[]+', m_raw)
+                                for u in urls:
+                                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                    if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']):
+                                        all_photos_claim.append(clean_url)
+                                        
+                            all_photos_claim = list(set(all_photos_claim))[:15] # Берем до 15 уникальных фото
+                            
+                            c_ppm = ppm_alerts[ppm_alerts['Артикул продавца'] == selected_sku_claim]['PPM'].values[0]
+                            c_prc = ppm_alerts[ppm_alerts['Артикул продавца'] == selected_sku_claim]['Доля брака, %'].values[0]
+                            c_qty = ppm_alerts[ppm_alerts['Артикул продавца'] == selected_sku_claim]['Одобренный брак (шт)'].values[0]
+                            
+                            claim_text = f"Здравствуйте!\n\nИнформируем вас о превышении допустимого уровня брака по товару (Артикул: {selected_sku_claim}).\n"
+                            claim_text += f"Уровень PPM составляет {c_ppm} ({c_prc}% от всех заказов за период).\n"
+                            claim_text += f"Всего зафиксировано и подтверждено брака: {int(c_qty)} ед. (статус заявок - 'Одобрено').\n\n"
+                            claim_text += "Просим провести внутреннюю проверку на производстве и устранить причину дефектов.\n"
+                            
+                            if all_photos_claim:
+                                claim_text += "\nСсылки на фотографии брака для подтверждения:\n" + "\n".join(all_photos_claim)
+                                
+                            st.text_area("Готовое письмо (можно скопировать):", value=claim_text, height=300)
+                            
+                            if all_photos_claim:
+                                if st.button("📥 Скачать архив с фото для завода", key="dl_claim_photos", type="primary"):
+                                    with st.spinner("Сбор фото..."):
+                                        zip_claim = create_images_zip(all_photos_claim)
+                                        b64_claim = base64.b64encode(zip_claim).decode()
+                                        components.html(f'<a id="dl_c" href="data:application/zip;base64,{b64_claim}" download="Рекламация_{selected_sku_claim}.zip"></a><script>document.getElementById("dl_c").click();</script>', width=0, height=0)
+                    else:
+                        st.success("🎉 Отлично! У всех товаров PPM в норме (менее 10 000).")
+                else:
+                    st.warning("⚠️ Нет данных о заказах. Сначала запустите синхронизацию в Роботе-Загрузчике.")
 
     except Exception as e:
         st.error(f"Ошибка Отчета: {e}")
