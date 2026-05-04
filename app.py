@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, text
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
 # --- ГЛОБАЛЬНЫЙ ТРЕКЕР СМЕНЫ СТРАНИЦ ---
-page = st.sidebar.radio("Навигация", ["🤖 Робот-Загрузчик", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Отчет производства", "📜 Системный Журнал"])
+page = st.sidebar.radio("Навигация", ["🤖 Робот-Синхронизатор", "🔬 ИИ Тегирование", "📝 Модерация", "🧠 Обучение ИИ", "📊 Отчет производства", "📜 Системный Журнал"])
 
 if st.session_state.get('current_tab') != page:
     st.session_state.current_tab = page
@@ -723,49 +723,27 @@ def get_col_letter(col_idx):
     if col_idx < 26: return chr(ord('A') + col_idx)
     return chr(ord('A') + (col_idx // 26) - 1) + chr(ord('A') + (col_idx % 26))
 
-if page == "🤖 Робот-Загрузчик":
-    st.title("🤖 Робот-Загрузчик (API Режим)")
+elif page == "🤖 Робот-Синхронизатор":
+    st.title("🤖 Статус Базы Данных (Supabase)")
+    st.info("Сбор логистики и претензий теперь работает автоматически, независимо от дашборда (через ваш скрипт `worker.py`). Streamlit больше не зависает и не выкидывает ошибки памяти.")
     
-    with st.expander("1. Синхронизация с API Wildberries", expanded=True):
-        st.write("Робот сам подключится к WB, заберет новые претензии, обновит статусы, а также выгрузит агрегированные чистые заказы.")
+    try:
+        # Быстро спрашиваем у базы, сколько в ней строк
+        with engine.connect() as conn:
+            claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar()
+            orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar()
+            sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar()
+            
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Всего Претензий в БД", claims_count)
+        c2.metric("Строк Заказов (ORDER)", orders_count)
+        c3.metric("Строк Продаж (SALE)", sales_count)
         
-        if st.button("🚀 ЗАПУСТИТЬ СИНХРОНИЗАЦИЮ", type="primary"):
-            with st.spinner("Связываемся с Wildberries, обновляем статусы и склеиваем данные..."):
-                client = get_gspread_client()
-                ws_ret = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Возвраты")
-                
-                # Скачиваем текущую базу претензий
-                existing_data = ws_ret.get_all_records()
-                
-                # Запускаем магию API (теперь возвращает и заказы тоже)
-                final_tab, df_orders_grouped, new_added, rows_updated, report_log = process_wb_api_sync(existing_data)
-                
-                if not final_tab.empty:
-                    # 1. ОБНОВЛЯЕМ ПРЕТЕНЗИИ
-                    ws_ret.clear()
-                    ws_ret.update([final_tab.columns.values.tolist()] + final_tab.values.tolist())
-                    
-                    # 2. СОХРАНЯЕМ ЗАКАЗЫ (На отдельный лист)
-                    if not df_orders_grouped.empty:
-                        try:
-                            # Пробуем найти лист "Заказы"
-                            ws_orders = client.open_by_key(SPREADSHEET_ID_MAIN).worksheet("Заказы")
-                        except gspread.exceptions.WorksheetNotFound:
-                            # Если его нет — создаем
-                            ws_orders = client.open_by_key(SPREADSHEET_ID_MAIN).add_worksheet(title="Заказы", rows="1000", cols="10")
-                        
-                        # Перезаписываем данные о заказах
-                        ws_orders.clear()
-                        ws_orders.update([df_orders_grouped.columns.values.tolist()] + df_orders_grouped.values.tolist())
-                        report_log.append("✅ **Заказы:** Сводная таблица чистых заказов успешно сохранена на лист 'Заказы'.")
-                    
-                    report_log.append(f"🔄 **Обновлено старых заявок:** {rows_updated} шт.")
-                    report_log.append(f"✅ **Добавлено новых заявок:** {new_added} шт.")
-                    st.success("Синхронизация успешно завершена! Таблицы актуальны.")
-                else:
-                    st.warning("Не удалось сформировать таблицу (нет данных от WB).")
-                    
-                st.markdown(f'<div class="report-card">{"<br>".join(report_log)}</div>', unsafe_allow_html=True)
+        st.success("✅ База данных подключена и работает штатно.")
+        st.markdown("💡 *Чтобы загрузить свежие данные с Wildberries, просто запустите файл `worker.py` на вашем компьютере или сервере.*")
+        
+    except Exception as e:
+        st.error(f"⚠️ Ошибка подключения к базе данных: {e}")
 
 # ==========================================
 # 6. РУЧНАЯ МОДЕРАЦИЯ И ТЕГИРОВАНИЕ
