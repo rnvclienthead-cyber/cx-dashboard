@@ -682,44 +682,6 @@ elif page == "📝 Модерация":
 
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
-
-    import pandas as pd
-    from datetime import date, timedelta
-
-    # --- УМНЫЙ ФИЛЬТР ПО МЕСЯЦАМ (В ОДИН КЛИК) ---
-    st.sidebar.markdown("### 📅 Период аналитики")
-
-    months_ru = {1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель', 5: 'Май', 6: 'Июнь', 
-                 7: 'Июль', 8: 'Август', 9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'}
-
-    today = datetime.date.today()
-    
-    # Формируем список: 6 последних месяцев + "За всё время"
-    period_options = []
-    for i in range(6): 
-        m = today.month - i
-        y = today.year
-        if m <= 0:
-            m += 12
-            y -= 1
-        period_options.append(f"{months_ru[m]} {y}")
-        
-    period_options.append("За всё время")
-
-    # Выпадающий список (index=0 означает, что по умолчанию всегда выбран текущий месяц)
-    selected_period = st.sidebar.selectbox("Выберите месяц:", period_options, index=0)
-
-    # Применяем фильтр к базе
-    if selected_period != "За всё время":
-        month_name, year_str = selected_period.split(' ')
-        selected_m = list(months_ru.keys())[list(months_ru.values()).index(month_name)]
-        selected_y = int(year_str)
-        
-        # Фильтруем данные строго по выбранному месяцу и году
-        # Убедись, что переменная df совпадает с названием твоего основного датафрейма!
-        df_filtered = df[(df['Дата_ДТ'].dt.month == selected_m) & (df['Дата_ДТ'].dt.year == selected_y)]
-    else:
-        df_filtered = df.copy()
     
     if 'matrix_key' not in st.session_state: st.session_state.matrix_key = int(time.time())
     if 'last_click_id' not in st.session_state: st.session_state.last_click_id = None
@@ -949,41 +911,45 @@ elif page == "📊 Отчет производства":
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'Не указан'])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
             
-            # Определяем крайние даты для календаря
-            valid_dates = df['Дата_ДТ'].dropna()
-            min_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
-            max_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
+            # --- УМНЫЙ ФИЛЬТР ДАТ (МЕСЯЦЫ) ---
+            months_ru = {1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель', 5: 'Май', 6: 'Июнь', 
+                         7: 'Июль', 8: 'Август', 9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'}
+            today_date = datetime.now()
             
-            # 1. Фильтр Даты (Диапазон)
-            date_range = f_col1.date_input("Период (Дата заявки):", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+            period_options = []
+            for i in range(6): 
+                m = today_date.month - i
+                y = today_date.year
+                if m <= 0:
+                    m += 12
+                    y -= 1
+                period_options.append(f"{months_ru[m]} {y}")
+            period_options.append("За всё время")
+
+            # 1. Фильтр Даты (Выпадающий список)
+            selected_month = f_col1.selectbox("Период (Дата заявки):", period_options, index=0)
             # 2. Фильтр Артикула
             selected_sku = f_col2.selectbox("Артикул:", sku_list)
             # 3. Фильтр Инвойса
             selected_inv = f_col3.selectbox("Инвойс / Поставка:", inv_list)
             
             # Проверяем изменения любого из трех фильтров
-            if st.session_state.prev_inv != selected_inv or st.session_state.prev_sku != selected_sku or st.session_state.prev_date != date_range:
+            if st.session_state.prev_inv != selected_inv or st.session_state.prev_sku != selected_sku or st.session_state.prev_date != selected_month:
                 st.session_state.show_detail_trigger = None
                 st.session_state.last_click_id = None
                 st.session_state.prev_inv = selected_inv
                 st.session_state.prev_sku = selected_sku
-                st.session_state.prev_date = date_range
+                st.session_state.prev_date = selected_month
                 st.session_state.matrix_key += 1 
             
             df_filtered = df.copy()
             
-            # Применяем фильтр по дате (обрабатываем выбор 1 или 2 дат в календаре)
-            if isinstance(date_range, tuple):
-                if len(date_range) == 2:
-                    start_d, end_d = date_range
-                elif len(date_range) == 1:
-                    start_d = end_d = date_range[0]
-                else:
-                    start_d, end_d = min_date, max_date
-                
-                # Фильтруем таблицу
-                mask = (df_filtered['Дата_ДТ'].dt.date >= start_d) & (df_filtered['Дата_ДТ'].dt.date <= end_d)
-                df_filtered = df_filtered[mask]
+            # Применяем фильтр по месяцу
+            if selected_month != "За всё время":
+                month_name, year_str = selected_month.split(' ')
+                selected_m = list(months_ru.keys())[list(months_ru.values()).index(month_name)]
+                selected_y = int(year_str)
+                df_filtered = df_filtered[(df_filtered['Дата_ДТ'].dt.month == selected_m) & (df_filtered['Дата_ДТ'].dt.year == selected_y)]
 
             # Применяем текстовые фильтры
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
