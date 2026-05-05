@@ -1064,24 +1064,52 @@ elif page == "📊 Отчет производства":
                         abc_filter = st.selectbox("Показать группу:", ["Все", "A", "B", "C"])
                         display_df = ppm_df if abc_filter == "Все" else ppm_df[ppm_df['ABC_Группа'] == abc_filter]
                         
-                        display_df = display_df.sort_values('PPM', ascending=False)
+                        # 1. УМНАЯ СОРТИРОВКА: Сначала Группа (A -> B -> C), затем по уровню PPM (от большего к меньшему)
+                        display_df = display_df.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
                         
-                        # Выводим ЕДИНСТВЕННУЮ красивую таблицу с правильным порядком колонок
-                        st.dataframe(
-                            display_df[['Артикул продавца', 'ABC_Группа', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']], 
-                            use_container_width=True, 
-                            hide_index=True
-                        )
+                        # 2. ПОДСВЕТКА БРАКА (Красный цвет для PPM > 10000)
+                        def highlight_ppm(row):
+                            # Если PPM больше 10000 (1%), красим всю строку в красный
+                            return ['background-color: #fee2e2; color: #991b1b' if row['PPM'] > 10000 else ''] * len(row)
                         
-                        # Оставляем только текстовое предупреждение (без второй таблицы)
+                        # Применяем стили к нашей таблице
+                        cols_to_show = ['Артикул продавца', 'ABC_Группа', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']
+                        styled_df = display_df[cols_to_show].style.apply(highlight_ppm, axis=1)
+                        
+                        st.info("💡 **Интерактив:** Кликните на любую строку в таблице, чтобы обновить график динамики ниже!")
+                        
+                        # 3. ИНТЕРАКТИВНАЯ ТАБЛИЦА (Перехват клика)
+                        clicked_sku = None
+                        try:
+                            # on_select="rerun" заставляет страницу обновиться при клике на строку
+                            event = st.dataframe(
+                                styled_df, 
+                                use_container_width=True, 
+                                hide_index=True,
+                                on_select="rerun",
+                                selection_mode="single-row"
+                            )
+                            # Вытаскиваем артикул из строки, по которой кликнул пользователь
+                            if event.selection.rows:
+                                selected_row_idx = event.selection.rows[0]
+                                clicked_sku = display_df.iloc[selected_row_idx]['Артикул продавца']
+                        except TypeError:
+                            # Если версия Streamlit устарела и не поддерживает клики, выводим как обычно
+                            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                        
                         ppm_alerts = ppm_df[ppm_df['PPM'] > 10000]
                         if not ppm_alerts.empty:
-                            st.error(f"🚨 **Внимание!** Найдено проблемных товаров (PPM > 10 000): {len(ppm_alerts)} шт. Они находятся вверху таблицы.")
+                            st.error(f"🚨 **Внимание!** Найдено проблемных товаров (PPM > 10 000): {len(ppm_alerts)} шт. В таблице они подсвечены красным.")
                             
                         # --- 4. ГРАФИК ДИНАМИКИ ---
                         st.markdown("---")
                         st.markdown("### 📈 Динамика PPM по месяцам")
-                        selected_sku_chart = st.selectbox("Выберите артикул для графика:", ppm_df['Артикул продавца'].tolist())
+                        
+                        # МАГИЯ СВЯЗКИ: Если кликнули в таблице — подставляем этот артикул в выпадающий список графика
+                        chart_sku_list = ppm_df['Артикул продавца'].tolist()
+                        default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
+                        
+                        selected_sku_chart = st.selectbox("Выберите артикул для графика:", chart_sku_list, index=default_chart_idx)
                         
                         if selected_sku_chart:
                             sku_orders = df_orders[df_orders['Артикул продавца'] == selected_sku_chart].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
