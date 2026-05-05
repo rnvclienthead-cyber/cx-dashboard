@@ -664,10 +664,10 @@ elif page == "📝 Модерация":
                             else: row_photos.append(clean_url)
                         
                         if row_photos:
-                            # Возвращаем HTML-рендеринг для работы CSS-класса photo-zoom
                             html_imgs = '<div class="media-row">'
                             for p in row_photos:
-                                html_imgs += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
+                                # ДОБАВЛЕНА ЗАЩИТА ОТ БЛОКИРОВКИ WB (rel="noreferrer" и referrerpolicy="no-referrer")
+                                html_imgs += f'<a href="{p}" target="_blank" rel="noreferrer"><img src="{p}" class="photo-zoom" referrerpolicy="no-referrer"></a>'
                             html_imgs += '</div>'
                             st.markdown(html_imgs, unsafe_allow_html=True)
                         
