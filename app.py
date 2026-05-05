@@ -686,31 +686,40 @@ elif page == "📊 Отчет производства":
     import pandas as pd
     from datetime import date, timedelta
 
-    # --- УМНЫЙ ФИЛЬТР ДАТ ---
+    # --- УМНЫЙ ФИЛЬТР ПО МЕСЯЦАМ (В ОДИН КЛИК) ---
     st.sidebar.markdown("### 📅 Период аналитики")
 
-    today = date.today()
-    this_month_start = today.replace(day=1)
-    last_month_start = (this_month_start - timedelta(days=1)).replace(day=1)
+    months_ru = {1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель', 5: 'Май', 6: 'Июнь', 
+                 7: 'Июль', 8: 'Август', 9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'}
 
-    period_options = ["Текущий месяц", "Прошлый месяц", "За всё время", "Свой период"]
-    selected_period = st.sidebar.selectbox("Быстрый выбор:", period_options)
+    today = datetime.date.today()
+    
+    # Формируем список: 6 последних месяцев + "За всё время"
+    period_options = []
+    for i in range(6): 
+        m = today.month - i
+        y = today.year
+        if m <= 0:
+            m += 12
+            y -= 1
+        period_options.append(f"{months_ru[m]} {y}")
+        
+    period_options.append("За всё время")
 
-    if selected_period == "Текущий месяц":
-        start_date = this_month_start
-        end_date = today
-    elif selected_period == "Прошлый месяц":
-        start_date = last_month_start
-        end_date = this_month_start - timedelta(days=1)
-    elif selected_period == "За всё время":
-        start_date = date(2025, 1, 1) 
-        end_date = today
+    # Выпадающий список (index=0 означает, что по умолчанию всегда выбран текущий месяц)
+    selected_period = st.sidebar.selectbox("Выберите месяц:", period_options, index=0)
+
+    # Применяем фильтр к базе
+    if selected_period != "За всё время":
+        month_name, year_str = selected_period.split(' ')
+        selected_m = list(months_ru.keys())[list(months_ru.values()).index(month_name)]
+        selected_y = int(year_str)
+        
+        # Фильтруем данные строго по выбранному месяцу и году
+        # Убедись, что переменная df совпадает с названием твоего основного датафрейма!
+        df_filtered = df[(df['Дата_ДТ'].dt.month == selected_m) & (df['Дата_ДТ'].dt.year == selected_y)]
     else:
-        date_range = st.sidebar.date_input("Укажите даты:", [this_month_start, today])
-        if len(date_range) == 2:
-            start_date, end_date = date_range
-        else:
-            start_date, end_date = this_month_start, today
+        df_filtered = df.copy()
     
     if 'matrix_key' not in st.session_state: st.session_state.matrix_key = int(time.time())
     if 'last_click_id' not in st.session_state: st.session_state.last_click_id = None
