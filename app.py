@@ -653,23 +653,21 @@ elif page == "📝 Модерация":
                     raw_videos = str(row.get('db_videos', '')).replace('nan', '').replace('None', '').strip()
                     media_raw = raw_photos + " " + raw_videos
                     
-                    # Умный Regex: отсекает любой мусор и скобки в конце ссылок
                     urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', media_raw)
                     if urls:
                         videos, row_photos = [], []
                         for u in urls[:10]: 
-                            clean_url = u.strip()
+                            clean_url = u.replace("']", "").replace("'", "").replace('"', '').strip()
                             if clean_url.startswith("//"): clean_url = "https:" + clean_url
                             if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
                             else: row_photos.append(clean_url)
                         
                         if row_photos:
-                            html_imgs = '<div class="media-row">'
-                            for p in row_photos:
-                                # ДОБАВЛЕНА ЗАЩИТА ОТ БЛОКИРОВКИ WB (rel="noreferrer" и referrerpolicy="no-referrer")
-                                html_imgs += f'<a href="{p}" target="_blank" rel="noreferrer"><img src="{p}" class="photo-zoom" referrerpolicy="no-referrer"></a>'
-                            html_imgs += '</div>'
-                            st.markdown(html_imgs, unsafe_allow_html=True)
+                            # 100% рабочий блок отображения (скопирован из Отчета производства)
+                            img_cols = st.columns(3)
+                            for i, p in enumerate(row_photos):
+                                with img_cols[i % 3]:
+                                    st.image(p, use_container_width=True)
                         
                         if videos:
                             for v_idx, v_url in enumerate(videos):
