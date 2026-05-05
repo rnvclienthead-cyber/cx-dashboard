@@ -869,33 +869,32 @@ elif page == "📊 Отчет производства":
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
                     
-                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ + ДИНАМИЧЕСКИЙ ПОИСК КОЛОНОК
+                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ + АГРЕГАЦИЯ ТОЛЬКО ПО ПОСТАВКЕ
                     df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     
-                    # 1. Убиваем все невидимые пробелы в названиях колонок
+                    # Убиваем все невидимые пробелы в названиях колонок
                     df_inv.columns = df_inv.columns.str.strip()
                     
-                    # 2. Умный поиск: ищем колонки, где просто есть слово 'артикул' или 'инвойс'
-                    art_col = next((col for col in df_inv.columns if 'артикул' in col.lower()), None)
+                    # Умный поиск колонки с инвойсом
                     inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
                     
-                    if art_col and inv_col:
-                        # Переименовываем их в стандарты для нашего кода
-                        df_inv = df_inv.rename(columns={art_col: 'Артикул продавца', inv_col: 'Инвойс'})
+                    if inv_col:
+                        # Переименовываем для стандарта
+                        df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
                         
-                        # МАГИЯ АГРЕГАЦИИ: Группируем инвойсы по Поставке И Артикулу. 
+                        # МАГИЯ АГРЕГАЦИИ: Так как артикула в таблице нет, группируем инвойсы только по Поставке!
+                        # Если на 1 поставку есть 2 инвойса, они склеятся в строку "INV-1, INV-2"
                         inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
-                            ['Номер поставки_clean', 'Артикул продавца']
-                        )['Инвойс'].apply(lambda x: ', '.join(x.unique())).reset_index()
+                            'Номер поставки_clean'
+                        )['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
                         
                         if 'Инвойс' in df_temp.columns: 
                             df_temp = df_temp.drop(columns=['Инвойс'])
                         
-                        # Мержим строго по ДВУМ ключам. Левые артикулы отсекаются!
-                        df_temp = df_temp.merge(inv_grouped, on=['Номер поставки_clean', 'Артикул продавца'], how='left')
+                        # Мержим по одному ключу - Номеру поставки
+                        df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
                     else:
-                        # Если скрипт всё равно не нашел колонки, он выведет на экран то, что реально видит в файле
-                        st.warning(f"🚨 Ошибка связки! В таблице Инвойсов сейчас такие колонки: {df_inv.columns.tolist()}")
+                        st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
                     
                     df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки_clean', how='left')
                     df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
