@@ -682,6 +682,35 @@ elif page == "📝 Модерация":
 
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
+
+    import pandas as pd
+    from datetime import date, timedelta
+
+    # --- УМНЫЙ ФИЛЬТР ДАТ ---
+    st.sidebar.markdown("### 📅 Период аналитики")
+
+    today = date.today()
+    this_month_start = today.replace(day=1)
+    last_month_start = (this_month_start - timedelta(days=1)).replace(day=1)
+
+    period_options = ["Текущий месяц", "Прошлый месяц", "За всё время", "Свой период"]
+    selected_period = st.sidebar.selectbox("Быстрый выбор:", period_options)
+
+    if selected_period == "Текущий месяц":
+        start_date = this_month_start
+        end_date = today
+    elif selected_period == "Прошлый месяц":
+        start_date = last_month_start
+        end_date = this_month_start - timedelta(days=1)
+    elif selected_period == "За всё время":
+        start_date = date(2025, 1, 1) 
+        end_date = today
+    else:
+        date_range = st.sidebar.date_input("Укажите даты:", [this_month_start, today])
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date, end_date = this_month_start, today
     
     if 'matrix_key' not in st.session_state: st.session_state.matrix_key = int(time.time())
     if 'last_click_id' not in st.session_state: st.session_state.last_click_id = None
@@ -840,16 +869,21 @@ elif page == "📊 Отчет производства":
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
                     
-                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ + ДВОЙНОЙ КЛЮЧ
+                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ + ДИНАМИЧЕСКИЙ ПОИСК КОЛОНОК
                     df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     
-                    # Убеждаемся, что названия колонок артикула совпадают
-                    if 'Артикул' in df_inv.columns and 'Артикул продавца' not in df_inv.columns:
-                        df_inv = df_inv.rename(columns={'Артикул': 'Артикул продавца'})
+                    # 1. Убиваем все невидимые пробелы в названиях колонок
+                    df_inv.columns = df_inv.columns.str.strip()
                     
-                    if 'Артикул продавца' in df_inv.columns and 'Инвойс' in df_inv.columns:
+                    # 2. Умный поиск: ищем колонки, где просто есть слово 'артикул' или 'инвойс'
+                    art_col = next((col for col in df_inv.columns if 'артикул' in col.lower()), None)
+                    inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
+                    
+                    if art_col and inv_col:
+                        # Переименовываем их в стандарты для нашего кода
+                        df_inv = df_inv.rename(columns={art_col: 'Артикул продавца', inv_col: 'Инвойс'})
+                        
                         # МАГИЯ АГРЕГАЦИИ: Группируем инвойсы по Поставке И Артикулу. 
-                        # Если их несколько, они склеятся в "INV-1, INV-2"
                         inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
                             ['Номер поставки_clean', 'Артикул продавца']
                         )['Инвойс'].apply(lambda x: ', '.join(x.unique())).reset_index()
@@ -860,7 +894,8 @@ elif page == "📊 Отчет производства":
                         # Мержим строго по ДВУМ ключам. Левые артикулы отсекаются!
                         df_temp = df_temp.merge(inv_grouped, on=['Номер поставки_clean', 'Артикул продавца'], how='left')
                     else:
-                        st.warning("В таблице Инвойсов нет колонки 'Артикул' или 'Инвойс'. Связка невозможна.")
+                        # Если скрипт всё равно не нашел колонки, он выведет на экран то, что реально видит в файле
+                        st.warning(f"🚨 Ошибка связки! В таблице Инвойсов сейчас такие колонки: {df_inv.columns.tolist()}")
                     
                     df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки_clean', how='left')
                     df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
