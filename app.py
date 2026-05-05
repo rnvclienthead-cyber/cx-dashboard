@@ -653,22 +653,23 @@ elif page == "📝 Модерация":
                     raw_videos = str(row.get('db_videos', '')).replace('nan', '').replace('None', '').strip()
                     media_raw = raw_photos + " " + raw_videos
                     
-                    # Умный Regex: теперь он отсекает запятые в конце ссылок
-                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', media_raw)
+                    # Умный Regex: отсекает любой мусор и скобки в конце ссылок
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', media_raw)
                     if urls:
                         videos, row_photos = [], []
-                        for u in urls[:6]: 
-                            clean_url = u.replace("']", "").replace("'", "").replace('"', '')
+                        for u in urls[:10]: 
+                            clean_url = u.strip()
                             if clean_url.startswith("//"): clean_url = "https:" + clean_url
                             if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
                             else: row_photos.append(clean_url)
                         
                         if row_photos:
-                            # Встроенный зум Streamlit (с крестиком при открытии)
-                            img_cols = st.columns(3)
-                            for i, p in enumerate(row_photos):
-                                with img_cols[i % 3]:
-                                    st.image(p, use_container_width=True)
+                            # Возвращаем HTML-рендеринг для работы CSS-класса photo-zoom
+                            html_imgs = '<div class="media-row">'
+                            for p in row_photos:
+                                html_imgs += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
+                            html_imgs += '</div>'
+                            st.markdown(html_imgs, unsafe_allow_html=True)
                         
                         if videos:
                             for v_idx, v_url in enumerate(videos):
@@ -766,10 +767,13 @@ elif page == "📊 Отчет производства":
                                     components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
                     with media_col:
                         if row_photos:
-                            img_cols = st.columns(3)
-                            for i, p in enumerate(row_photos[:6]):
-                                with img_cols[i % 3]:
-                                    st.image(p, use_container_width=True)
+                            # Возвращаем HTML-рендеринг для работы CSS-класса photo-zoom
+                            html_imgs = '<div class="media-row">'
+                            for p in row_photos[:6]:
+                                html_imgs += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
+                            html_imgs += '</div>'
+                            st.markdown(html_imgs, unsafe_allow_html=True)
+                            
                         if videos:
                             for v_idx, v_url in enumerate(videos): 
                                 st.markdown(f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Видео {v_idx+1}</a>', unsafe_allow_html=True)
