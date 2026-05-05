@@ -840,13 +840,27 @@ elif page == "📊 Отчет производства":
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
                     
-                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ: Оставляем только первый найденный инвойс для каждой поставки
+                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ + ДВОЙНОЙ КЛЮЧ
                     df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                    # drop_duplicates гарантирует, что 1 поставка = 1 инвойс
-                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки_clean'], keep='first')
                     
-                    if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
-                    cols_to_merge = ['Номер поставки_clean', 'Инвойс'] if 'Инвойс' in df_inv.columns else ['Номер поставки_clean']
+                    # Убеждаемся, что названия колонок артикула совпадают
+                    if 'Артикул' in df_inv.columns and 'Артикул продавца' not in df_inv.columns:
+                        df_inv = df_inv.rename(columns={'Артикул': 'Артикул продавца'})
+                    
+                    if 'Артикул продавца' in df_inv.columns and 'Инвойс' in df_inv.columns:
+                        # МАГИЯ АГРЕГАЦИИ: Группируем инвойсы по Поставке И Артикулу. 
+                        # Если их несколько, они склеятся в "INV-1, INV-2"
+                        inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
+                            ['Номер поставки_clean', 'Артикул продавца']
+                        )['Инвойс'].apply(lambda x: ', '.join(x.unique())).reset_index()
+                        
+                        if 'Инвойс' in df_temp.columns: 
+                            df_temp = df_temp.drop(columns=['Инвойс'])
+                        
+                        # Мержим строго по ДВУМ ключам. Левые артикулы отсекаются!
+                        df_temp = df_temp.merge(inv_grouped, on=['Номер поставки_clean', 'Артикул продавца'], how='left')
+                    else:
+                        st.warning("В таблице Инвойсов нет колонки 'Артикул' или 'Инвойс'. Связка невозможна.")
                     
                     df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки_clean', how='left')
                     df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
