@@ -950,6 +950,11 @@ elif page == "📊 Отчет производства":
                                         st.rerun()
                     except Exception as e: 
                         st.error(f"Ошибка системы перехвата клика: {e}")
+                    
+                    if st.session_state.get('show_detail_trigger'):
+                        t = st.session_state.show_detail_trigger
+                        show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
+                
                 else: 
                     st.info("Данных для матрицы пока нет.")
 
