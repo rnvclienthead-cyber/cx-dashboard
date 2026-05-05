@@ -798,9 +798,18 @@ elif page == "📊 Отчет производства":
             LEFT JOIN wb_claims c ON v."SRID" = c.srid
         """
         df_temp = pd.read_sql(query, engine)
-
-        df_temp['Дата_ДТ'] = pd.to_datetime(df_temp['Дата и время оформления заявки на возврат'], errors='coerce')
-        df_temp['Дата и время оформления заявки на возврат'] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
+        
+        # --- БРОНЕБОЙНАЯ СТАНДАРТИЗАЦИЯ ДАТЫ ---
+        # Ищем колонку по ключевым словам, игнорируя то, как база передала регистр
+        date_col = next((c for c in df_temp.columns if 'оформления заявки' in str(c).lower()), None)
+        
+        if date_col:
+            df_temp['Дата_ДТ'] = pd.to_datetime(df_temp[date_col], errors='coerce')
+            df_temp[date_col] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
+        else:
+            df_temp['Дата_ДТ'] = pd.NaT  # Заглушка, если колонки вообще нет
+            
+        # ЖЕСТКИЙ ФИЛЬТР: Сюда можно добавить новые статусы, если найдешь их через SQL!
         
         # ЖЕСТКИЙ ФИЛЬТР: Сюда можно добавить новые статусы, если найдешь их через SQL!
         valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
