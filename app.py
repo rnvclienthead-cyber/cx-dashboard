@@ -749,15 +749,7 @@ elif page == "📊 Отчет производства":
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
                         
-                        date_claim = str(r.get('Дата и время оформления заявки на возврат', '')).replace('NaT', '---').replace('None', '---')
-                        date_order = str(r.get('Дата заказа', '')).replace('NaT', '---').replace('None', '---')
-                        date_pickup = str(r.get('Дата и время получения заказа покупателем', '')).replace('NaT', '---').replace('None', '---')
-                        
-                        st.write(f"🕒 **Заявка подана:** {date_claim if date_claim else '---'}")
-                        st.write(f"🛒 **Дата заказа:** {date_order if date_order else '---'}")
-                        st.write(f"📦 **Забрал на ПВЗ:** {date_pickup if date_pickup else '---'}")
-                        
-                        # Вывод очищенного инвойса
+                        # Вывод очищенного инвойса (Даты мы отсюда удалили)
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки_ОРИГИНАЛ', '---')}")
                         
                         if row_photos:
@@ -766,6 +758,7 @@ elif page == "📊 Отчет производства":
                                     zip_row = create_images_zip(row_photos)
                                     b64 = base64.b64encode(zip_row).decode()
                                     components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="order_{r.get("Инвойс", "photos")}.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
+
                     with media_col:
                         if row_photos:
                             # Возвращаем HTML-рендеринг для работы CSS-класса photo-zoom
