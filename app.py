@@ -686,6 +686,7 @@ elif page == "📊 Отчет производства":
     if 'last_click_id' not in st.session_state: st.session_state.last_click_id = None
     if 'prev_inv' not in st.session_state: st.session_state.prev_inv = None
     if 'prev_sku' not in st.session_state: st.session_state.prev_sku = None
+    if 'prev_date' not in st.session_state: st.session_state.prev_date = None
 
     def create_images_zip(urls):
         zip_buffer = io.BytesIO()
@@ -797,6 +798,9 @@ elif page == "📊 Отчет производства":
             LEFT JOIN wb_claims c ON v."SRID" = c.srid
         """
         df_temp = pd.read_sql(query, engine)
+
+        df_temp['Дата_ДТ'] = pd.to_datetime(df_temp['Дата и время оформления заявки на возврат'], errors='coerce')
+        df_temp['Дата и время оформления заявки на возврат'] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
         
         # ЖЕСТКИЙ ФИЛЬТР: Сюда можно добавить новые статусы, если найдешь их через SQL!
         valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
@@ -868,23 +872,50 @@ elif page == "📊 Отчет производства":
             df['Размечено'] = df.apply(has_tags, axis=1)
             
             st.markdown("### 🔍 Глобальные фильтры")
-            f_col1, f_col2 = st.columns(2)
+            f_col1, f_col2, f_col3 = st.columns(3)
+            
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'Не указан'])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
             
-            selected_inv = f_col1.selectbox("Инвойс / Поставка:", inv_list)
-            selected_sku = f_col2.selectbox("Артикул:", sku_list)
+            # Определяем крайние даты для календаря
+            valid_dates = df['Дата_ДТ'].dropna()
+            min_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
+            max_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
             
-            if st.session_state.prev_inv != selected_inv or st.session_state.prev_sku != selected_sku:
+            # 1. Фильтр Даты (Диапазон)
+            date_range = f_col1.date_input("Период (Дата заявки):", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+            # 2. Фильтр Артикула
+            selected_sku = f_col2.selectbox("Артикул:", sku_list)
+            # 3. Фильтр Инвойса
+            selected_inv = f_col3.selectbox("Инвойс / Поставка:", inv_list)
+            
+            # Проверяем изменения любого из трех фильтров
+            if st.session_state.prev_inv != selected_inv or st.session_state.prev_sku != selected_sku or st.session_state.prev_date != date_range:
                 st.session_state.show_detail_trigger = None
                 st.session_state.last_click_id = None
                 st.session_state.prev_inv = selected_inv
                 st.session_state.prev_sku = selected_sku
+                st.session_state.prev_date = date_range
                 st.session_state.matrix_key += 1 
             
             df_filtered = df.copy()
-            if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
+            
+            # Применяем фильтр по дате (обрабатываем выбор 1 или 2 дат в календаре)
+            if isinstance(date_range, tuple):
+                if len(date_range) == 2:
+                    start_d, end_d = date_range
+                elif len(date_range) == 1:
+                    start_d = end_d = date_range[0]
+                else:
+                    start_d, end_d = min_date, max_date
+                
+                # Фильтруем таблицу
+                mask = (df_filtered['Дата_ДТ'].dt.date >= start_d) & (df_filtered['Дата_ДТ'].dt.date <= end_d)
+                df_filtered = df_filtered[mask]
+
+            # Применяем текстовые фильтры
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
+            if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
 
             total_rows = len(df_filtered)
             tagged_rows = df_filtered['Размечено'].sum()
