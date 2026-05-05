@@ -590,16 +590,15 @@ elif page == "📝 Модерация":
         st.markdown("### 🔍 Фильтр обращений")
         filter_mode = st.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], horizontal=True)
         
-        # БРОНЕБОЙНЫЙ ЗАПРОС: Тянем фото напрямую из базовой таблицы wb_claims, обходя View!
+        # БРОНЕБОЙНЫЙ ЗАПРОС: Избегаем дублирования колонок, чтобы Pandas не обрезал ссылки!
         query = """
-            SELECT v.*, c.photos AS db_photos, c.video_paths AS db_videos
-            FROM view_cx_dashboard v
-            LEFT JOIN wb_claims c ON v."SRID" = c.srid
-            WHERE (v."1" OR v."2" OR v."3" OR v."4" OR v."5" OR v."6" OR v."7" OR v."8" OR v."9" OR v."10" OR v."11" OR v."12" OR v."13")
-            AND (v."Корректировка" IS NULL OR v."Корректировка" = '')
+            SELECT *
+            FROM view_cx_dashboard
+            WHERE ("1" OR "2" OR "3" OR "4" OR "5" OR "6" OR "7" OR "8" OR "9" OR "10" OR "11" OR "12" OR "13")
+            AND ("Корректировка" IS NULL OR "Корректировка" = '')
         """
         if filter_mode == "С замечаниями от Аудитора (Кросс-проверка)":
-            query += " AND UPPER(v.\"Аудит\") LIKE '%ОШИБКА%'"
+            query += " AND UPPER(\"Аудит\") LIKE '%ОШИБКА%'"
             
         to_review = pd.read_sql(query, engine)
         
@@ -657,17 +656,19 @@ elif page == "📝 Модерация":
                     if urls:
                         videos, row_photos = [], []
                         for u in urls[:10]: 
-                            clean_url = u.replace("']", "").replace("'", "").replace('"', '').strip()
+                            clean_url = u.strip()
                             if clean_url.startswith("//"): clean_url = "https:" + clean_url
                             if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
                             else: row_photos.append(clean_url)
                         
                         if row_photos:
-                            # 100% рабочий блок отображения (скопирован из Отчета производства)
-                            img_cols = st.columns(3)
-                            for i, p in enumerate(row_photos):
-                                with img_cols[i % 3]:
-                                    st.image(p, use_container_width=True)
+                            # Встроенный CSS для красивого зума + защита от блокировок WB
+                            html_imgs = '<style>.mod-zoom { transition: transform 0.2s ease; cursor: pointer; border-radius: 8px; object-fit: cover; } .mod-zoom:hover { transform: scale(2.5); z-index: 9999; position: relative; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }</style>'
+                            html_imgs += '<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">'
+                            for p in row_photos[:6]:
+                                html_imgs += f'<a href="{p}" target="_blank" rel="noreferrer noopener"><img src="{p}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer"></a>'
+                            html_imgs += '</div>'
+                            st.markdown(html_imgs, unsafe_allow_html=True)
                         
                         if videos:
                             for v_idx, v_url in enumerate(videos):
