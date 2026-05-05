@@ -24,7 +24,8 @@ page = st.sidebar.radio("Навигация", [
     "🔬 ИИ Тегирование", 
     "📝 Модерация", 
     "🧠 Обучение ИИ", 
-    "📊 Отчет производства", 
+    "📊 Отчет производства",
+    "⭐ Рейтинг товаров",
     "📜 Системный Журнал"
 ])
 
@@ -839,9 +840,10 @@ elif page == "📊 Отчет производства":
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
                     df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
                     
+                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ: Оставляем только первый найденный инвойс для каждой поставки
                     df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                    
-                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки_clean'])
+                    # drop_duplicates гарантирует, что 1 поставка = 1 инвойс
+                    df_inv_unique = df_inv.drop_duplicates(subset=['Номер поставки_clean'], keep='first')
                     
                     if 'Инвойс' in df_temp.columns: df_temp = df_temp.drop(columns=['Инвойс'])
                     cols_to_merge = ['Номер поставки_clean', 'Инвойс'] if 'Инвойс' in df_inv.columns else ['Номер поставки_clean']
@@ -1025,8 +1027,9 @@ elif page == "📊 Отчет производства":
                 else: 
                     st.info("Данных для инвойсов пока нет.")
 
-            with tab_ppm:
-                st.info("💡 **Аналитика PPM**: Расчет идет только по одобренным заявкам. Предел PPM установлен на 10 000 (1%).")
+           with tab_ppm:
+                # ПУНКТ 3: Четкая плашка с правилами
+                st.info("💡 **Аналитика PPM**: Расчет идет только по заявкам, которые: 1) Имеют статус «Одобрено» 2) Размечены ИИ или вручную (присвоена любая категория от 1 до 13). Предел PPM установлен на 10 000 (1%).")
                 import numpy as np
                 import plotly.graph_objects as go
                 
@@ -1105,22 +1108,35 @@ elif page == "📊 Отчет производства":
                         st.markdown("---")
                         st.markdown("### 📈 Динамика PPM по месяцам")
                         
-                        # МАГИЯ СВЯЗКИ: Если кликнули в таблице — подставляем этот артикул в выпадающий список графика
-                        chart_sku_list = ppm_df['Артикул продавца'].tolist()
+                        chart_sku_list = ['[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
                         default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
                         
-                        selected_sku_chart = st.selectbox("Выберите артикул для графика:", chart_sku_list, index=default_chart_idx)
+                        selected_sku_chart = st.selectbox("Выберите артикул или Группу для графика:", chart_sku_list, index=default_chart_idx)
                         
                         if selected_sku_chart:
-                            sku_orders = df_orders[df_orders['Артикул продавца'] == selected_sku_chart].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
-                            
-                            if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
-                                df_app_sku = df_approved[df_approved['Артикул продавца'] == selected_sku_chart].copy()
-                                df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
-                                sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
-                            else:
-                                sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
+                            # Логика для Групп
+                            if selected_sku_chart.startswith('[Вся Группа'):
+                                group_letter = selected_sku_chart[-2] # Достаем букву A, B или C
+                                skus_in_group = ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist()
+                                sku_orders = df_orders[df_orders['Артикул продавца'].isin(skus_in_group)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
                                 
+                                if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
+                                    df_app_sku = df_approved[df_approved['Артикул продавца'].isin(skus_in_group)].copy()
+                                    df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                                    sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                                else:
+                                    sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
+                            # Логика для конкретного артикула
+                            else:
+                                sku_orders = df_orders[df_orders['Артикул продавца'] == selected_sku_chart].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                                
+                                if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
+                                    df_app_sku = df_approved[df_approved['Артикул продавца'] == selected_sku_chart].copy()
+                                    df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                                    sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                                else:
+                                    sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
+                                    
                             sku_orders['Месяц_ДТ'] = pd.to_datetime(sku_orders['Месяц_ДТ'])
                             sku_defects['Месяц_ДТ'] = pd.to_datetime(sku_defects['Месяц_ДТ'])
                             
@@ -1129,11 +1145,8 @@ elif page == "📊 Отчет производства":
                             monthly_df['PPM'] = np.where(monthly_df['Чистые_заказы'] > 0, (monthly_df['Брак'] / monthly_df['Чистые_заказы']) * 1000000, 0).astype(int)
                             
                             fig = go.Figure()
-                            # Синие столбики - Заказы (левая ось)
                             fig.add_trace(go.Bar(x=monthly_df['Месяц_Стр'], y=monthly_df['Чистые_заказы'], name='Заказы', marker_color='#3b82f6', yaxis='y'))
-                            # Красная линия - PPM (правая ось)
                             fig.add_trace(go.Scatter(x=monthly_df['Месяц_Стр'], y=monthly_df['PPM'], name='PPM', mode='lines+markers', line=dict(color='#ef4444', width=3), yaxis='y2'))
-                            # Желтая пунктирная линия - Предел
                             fig.add_hline(y=10000, line_dash="dot", line_color="#f59e0b", annotation_text="Предел 10 000", yref='y2')
                             
                             fig.update_layout(
@@ -1184,6 +1197,11 @@ elif page == "📊 Отчет производства":
 
     except Exception as e: 
         st.error(f"Ошибка Отчета: {e}")
+
+elif page == "⭐ Рейтинг товаров":
+    st.title("⭐ Мониторинг Рейтинга (В разработке)")
+    st.info("Здесь будет отображаться динамика рейтинга товаров (звезды) на основе данных из API Wildberries.")
+    st.markdown("Мы настроим воркер на ежедневный сбор оценок, чтобы вы могли видеть падения рейтинга в реальном времени и сопоставлять их с данными PPM.")
         
 elif page == "📜 Системный Журнал":
     st.title("📜 Системный Журнал (Черный ящик)")
