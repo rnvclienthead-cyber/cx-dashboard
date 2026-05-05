@@ -1065,16 +1065,18 @@ elif page == "📊 Отчет производства":
                         display_df = ppm_df if abc_filter == "Все" else ppm_df[ppm_df['ABC_Группа'] == abc_filter]
                         
                         display_df = display_df.sort_values('PPM', ascending=False)
-                        # hide_index=True убирает технический мусор из первой колонки!
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
                         
-                        ppm_alerts = ppm_df[ppm_df['PPM'] > 10000].sort_values('PPM', ascending=False)
+                        # Выводим ЕДИНСТВЕННУЮ красивую таблицу с правильным порядком колонок
+                        st.dataframe(
+                            display_df[['Артикул продавца', 'ABC_Группа', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']], 
+                            use_container_width=True, 
+                            hide_index=True
+                        )
+                        
+                        # Оставляем только текстовое предупреждение (без второй таблицы)
+                        ppm_alerts = ppm_df[ppm_df['PPM'] > 10000]
                         if not ppm_alerts.empty:
-                            st.error(f"🚨 **Внимание!** Найдено проблемных товаров (PPM > 10 000): {len(ppm_alerts)} шт.")
-                            # Возвращаем таблицу алертов на законное место:
-                            st.dataframe(ppm_alerts[['Артикул продавца', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']], use_container_width=True, hide_index=True)
-                            
-                        # --- 4. ГРАФИК ДИНАМИКИ ---
+                            st.error(f"🚨 **Внимание!** Найдено проблемных товаров (PPM > 10 000): {len(ppm_alerts)} шт. Они находятся вверху таблицы.")
                             
                         # --- 4. ГРАФИК ДИНАМИКИ ---
                         st.markdown("---")
