@@ -1151,75 +1151,105 @@ elif page == "📊 Отчет производства":
                             
                             selected_sku_chart = st.selectbox("📊 Аналитика по объекту:", chart_sku_list, index=default_chart_idx)
                             
-                        # --- 4. ГРАФИК ДИНАМИКИ ---
+                        # --- 4. ДВУХКОЛОНОЧНЫЙ ИНТЕРФЕЙС (МАСТЕР-ДЕТАЛЬ) ---
                         st.markdown("---")
-                        st.markdown("### 📈 Динамика PPM по месяцам")
                         
-                        # Добавили "[Все артикулы]" в самое начало списка
-                        chart_sku_list = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
-                        default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
+                        # Разделяем экран на две колонки
+                        col_table, col_chart = st.columns([1.1, 2], gap="large") 
                         
-                        selected_sku_chart = st.selectbox("Выберите артикул или Группу для графика:", chart_sku_list, index=default_chart_idx)
-                        
-                        if selected_sku_chart:
-                            # Логика для "Все артикулы" (суммируем вообще всё)
-                            if selected_sku_chart == '[Все артикулы]':
-                                sku_orders = df_orders.groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                        clicked_sku = None
+
+                        with col_table:
+                            st.markdown("#### 📋 Список товаров")
+                            
+                            # Настраиваем компактное и чистое отображение таблицы
+                            try:
+                                event = st.dataframe(
+                                    styled_df, 
+                                    use_container_width=True, 
+                                    hide_index=True,
+                                    on_select="rerun",
+                                    selection_mode="single-row",
+                                    height=470, # Фиксируем высоту
+                                    column_config={
+                                        "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
+                                        "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
+                                        "Чистые_заказы": st.column_config.NumberColumn("Заказы", format="%d"),
+                                        "Одобренный брак (шт)": st.column_config.NumberColumn("Брак (шт)", format="%d"),
+                                        "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f"),
+                                        "PPM": st.column_config.NumberColumn("PPM", format="%d")
+                                    }
+                                )
+                                if event.selection.rows:
+                                    selected_row_idx = event.selection.rows[0]
+                                    clicked_sku = display_df.iloc[selected_row_idx]['Артикул продавца']
+                            except TypeError:
+                                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+                        with col_chart:
+                            st.markdown("#### 📈 Динамика PPM по месяцам")
+                            
+                            chart_sku_list = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
+                            default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
+                            
+                            # Селектбокс синхронизирован с кликом по таблице
+                            selected_sku_chart = st.selectbox("Аналитика по объекту:", chart_sku_list, index=default_chart_idx, label_visibility="collapsed")
+                            
+                            if selected_sku_chart:
+                                # Логика для "Все артикулы"
+                                if selected_sku_chart == '[Все артикулы]':
+                                    sku_orders = df_orders.groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                                    if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
+                                        df_app_sku = df_approved.copy()
+                                        df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                                        sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                                    else:
+                                        sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
                                 
-                                if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
-                                    df_app_sku = df_approved.copy()
-                                    df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
-                                    sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
-                                else:
-                                    sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
-                            
-                            # Логика для Групп ABC
-                            elif selected_sku_chart.startswith('[Вся Группа'):
-                                group_letter = selected_sku_chart[-2] # Достаем букву A, B или C
-                                skus_in_group = ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist()
-                                sku_orders = df_orders[df_orders['Артикул продавца'].isin(skus_in_group)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                                # Логика для Групп ABC
+                                elif selected_sku_chart.startswith('[Вся Группа'):
+                                    group_letter = selected_sku_chart[-2]
+                                    skus_in_group = ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist()
+                                    sku_orders = df_orders[df_orders['Артикул продавца'].isin(skus_in_group)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                                    if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
+                                        df_app_sku = df_approved[df_approved['Артикул продавца'].isin(skus_in_group)].copy()
+                                        df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                                        sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                                    else:
+                                        sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
                                 
-                                if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
-                                    df_app_sku = df_approved[df_approved['Артикул продавца'].isin(skus_in_group)].copy()
-                                    df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
-                                    sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                                # Логика для конкретного артикула
                                 else:
-                                    sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
-                            
-                            # Логика для конкретного артикула
-                            else:
-                                sku_orders = df_orders[df_orders['Артикул продавца'] == selected_sku_chart].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                                    sku_orders = df_orders[df_orders['Артикул продавца'] == selected_sku_chart].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                                    if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
+                                        df_app_sku = df_approved[df_approved['Артикул продавца'] == selected_sku_chart].copy()
+                                        df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                                        sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                                    else:
+                                        sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
+                                        
+                                sku_orders['Месяц_ДТ'] = pd.to_datetime(sku_orders['Месяц_ДТ'])
+                                sku_defects['Месяц_ДТ'] = pd.to_datetime(sku_defects['Месяц_ДТ'])
                                 
-                                if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
-                                    df_app_sku = df_approved[df_approved['Артикул продавца'] == selected_sku_chart].copy()
-                                    df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
-                                    sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
-                                else:
-                                    sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
-                                    
-                            sku_orders['Месяц_ДТ'] = pd.to_datetime(sku_orders['Месяц_ДТ'])
-                            sku_defects['Месяц_ДТ'] = pd.to_datetime(sku_defects['Месяц_ДТ'])
-                            
-                            monthly_df = pd.merge(sku_orders, sku_defects, on='Месяц_ДТ', how='outer').fillna(0).sort_values('Месяц_ДТ')
-                            monthly_df['Месяц_Стр'] = monthly_df['Месяц_ДТ'].dt.strftime('%b %Y')
-                            monthly_df['PPM'] = np.where(monthly_df['Чистые_заказы'] > 0, (monthly_df['Брак'] / monthly_df['Чистые_заказы']) * 1000000, 0).astype(int)
-                            
-                            fig = go.Figure()
-                            fig.add_trace(go.Bar(x=monthly_df['Месяц_Стр'], y=monthly_df['Чистые_заказы'], name='Заказы', marker_color='#3b82f6', yaxis='y'))
-                            fig.add_trace(go.Scatter(x=monthly_df['Месяц_Стр'], y=monthly_df['PPM'], name='PPM', mode='lines+markers', line=dict(color='#ef4444', width=3), yaxis='y2'))
-                            fig.add_hline(y=10000, line_dash="dot", line_color="#f59e0b", annotation_text="Предел 10 000", yref='y2')
-                            
-                            fig.update_layout(
-                                title=f"Аналитика: {selected_sku_chart}",
-                                xaxis=dict(title="Месяц"),
-                                yaxis=dict(title="Кол-во заказов", side='left', showgrid=False),
-                                yaxis2=dict(title="Уровень PPM", side='right', overlaying='y', showgrid=True),
-                                legend=dict(x=0.01, y=0.99),
-                                hovermode="x unified",
-                                margin=dict(l=0, r=0, t=40, b=0)
-                            )
-                            fig.update_layout(height=430, margin=dict(l=0, r=0, t=40, b=0))
-                            st.plotly_chart(fig, use_container_width=True)
+                                monthly_df = pd.merge(sku_orders, sku_defects, on='Месяц_ДТ', how='outer').fillna(0).sort_values('Месяц_ДТ')
+                                monthly_df['Месяц_Стр'] = monthly_df['Месяц_ДТ'].dt.strftime('%b %Y')
+                                monthly_df['PPM'] = np.where(monthly_df['Чистые_заказы'] > 0, (monthly_df['Брак'] / monthly_df['Чистые_заказы']) * 1000000, 0).astype(int)
+                                
+                                fig = go.Figure()
+                                fig.add_trace(go.Bar(x=monthly_df['Месяц_Стр'], y=monthly_df['Чистые_заказы'], name='Заказы', marker_color='#3b82f6', yaxis='y'))
+                                fig.add_trace(go.Scatter(x=monthly_df['Месяц_Стр'], y=monthly_df['PPM'], name='PPM', mode='lines+markers', line=dict(color='#ef4444', width=3), yaxis='y2'))
+                                fig.add_hline(y=10000, line_dash="dot", line_color="#f59e0b", annotation_text="Предел 10 000", yref='y2')
+                                
+                                fig.update_layout(
+                                    height=420, # Сжали график по высоте, чтобы он был вровень с таблицей
+                                    xaxis=dict(title="Месяц"),
+                                    yaxis=dict(title="Кол-во заказов", side='left', showgrid=False),
+                                    yaxis2=dict(title="Уровень PPM", side='right', overlaying='y', showgrid=True),
+                                    legend=dict(x=0.01, y=0.99),
+                                    hovermode="x unified",
+                                    margin=dict(l=0, r=0, t=10, b=0) # Убрали лишние отступы
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
 
                         # --- 5. РЕКЛАМАЦИЯ ---
                         st.markdown("---")
