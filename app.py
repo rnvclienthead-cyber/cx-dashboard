@@ -1038,24 +1038,55 @@ elif page == "📊 Отчет производства":
                     st.info("Данных для матрицы пока нет.")
 
                 st.markdown("---")
-                st.markdown("### 📦 Проблемные Инвойсы (Топ-15)")
+                st.markdown("### 📦 Проблемные поставки и инвойсы (Топ-15)")
                 st.markdown("""<style>#vg-tooltip-element { font-family: sans-serif; font-size: 11px !important; line-height: 1.3 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important; border-radius: 6px !important; border: 1px solid #e0e0e0 !important; max-width: 600px !important; white-space: normal !important;} #vg-tooltip-element table tr { border-bottom: 1px solid #d1d5db; } #vg-tooltip-element table td { padding: 6px 8px !important; vertical-align: top; } #vg-tooltip-element table td.key { color: #6b7280; font-weight: 600; white-space: nowrap; }</style>""", unsafe_allow_html=True)
                 
                 if matrix_list:
-                    inv_grouped = []
-                    for inv, group in pd.DataFrame(matrix_list).groupby('Инвойс'):
-                        if inv == 'Не указан': continue
-                        supplies = ", ".join(sorted(list(set([str(x) for x in group['Номер поставки'] if str(x) != 'Не указан']))))
-                        all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in group['Артикул продавца'].value_counts().items()])
-                        inv_grouped.append({'Инвойс': inv, 'Дефекты': len(group), 'Поставки': supplies or "Не указана", 'Список Артикулов': all_skus})
+                    supply_grouped = []
+                    df_matrix_data = pd.DataFrame(matrix_list)
                     
-                    if inv_grouped:
-                        inv_chart = alt.Chart(pd.DataFrame(inv_grouped).sort_values('Дефекты', ascending=False).head(15)).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(x=alt.X('Инвойс:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)), y=alt.Y('Дефекты:Q', title='Количество дефектов'), color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None), tooltip=[alt.Tooltip('Инвойс:N', title='Инвойс'), alt.Tooltip('Дефекты:Q', title='Всего дефектов'), alt.Tooltip('Поставки:N', title='Поставки'), alt.Tooltip('Список Артикулов:N', title='Артикулы')]).properties(height=350)
-                        st.altair_chart(inv_chart, use_container_width=True)
-                    else: 
-                        st.info("Нет данных по инвойсам.")
+                    if 'Номер поставки' in df_matrix_data.columns:
+                        # Группируем по Номеру поставки
+                        for supply, group in df_matrix_data.groupby('Номер поставки'):
+                            if supply == 'Не указан' or pd.isna(supply) or not str(supply).strip(): 
+                                continue
+                            
+                            # Собираем уникальные инвойсы для этой поставки
+                            invoices = ", ".join(sorted(list(set([str(x) for x in group['Инвойс'] if str(x) != 'Не указан' and str(x).strip()]))))
+                            
+                            # Считаем, сколько каких артикулов было с браком в этой поставке
+                            all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in group['Артикул продавца'].value_counts().items()])
+                            
+                            supply_grouped.append({
+                                'Номер поставки': str(supply), 
+                                'Дефекты': len(group), 
+                                'Инвойсы': invoices if invoices else "Не указаны", 
+                                'Список Артикулов': all_skus
+                            })
+                        
+                        if supply_grouped:
+                            # Сортируем по количеству брака и берем топ-15
+                            df_supply = pd.DataFrame(supply_grouped).sort_values('Дефекты', ascending=False).head(15)
+                            
+                            supply_chart = alt.Chart(df_supply).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                                x=alt.X('Номер поставки:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)), 
+                                y=alt.Y('Дефекты:Q', title='Количество дефектов'), 
+                                color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None), 
+                                tooltip=[
+                                    alt.Tooltip('Номер поставки:N', title='Поставка'), 
+                                    alt.Tooltip('Дефекты:Q', title='Всего дефектов'), 
+                                    alt.Tooltip('Инвойсы:N', title='Инвойсы (связанные)'), 
+                                    alt.Tooltip('Список Артикулов:N', title='Артикулы')
+                                ]
+                            ).properties(height=350)
+                            
+                            st.altair_chart(supply_chart, use_container_width=True)
+                        else: 
+                            st.info("Нет данных по поставкам (или у всех дефектов не указан номер поставки).")
+                    else:
+                        st.info("Невозможно построить график: отсутствует колонка 'Номер поставки'.")
                 else: 
-                    st.info("Данных для инвойсов пока нет.")
+                    st.info("Данных для матрицы пока нет.")
 
             with tab_ppm:
                 st.info("💡 **Аналитика PPM**: Расчет идет только по заявкам, которые: 1) Имеют статус «Одобрено» 2) Размечены ИИ или вручную. Предел PPM установлен на 10 000 (1%).")
