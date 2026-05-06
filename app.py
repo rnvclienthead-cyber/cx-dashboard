@@ -489,8 +489,12 @@ elif page == "🧠 Обучение ИИ":
                             # 1. Приоритет ручному текстовому комментарию (если он есть)
                             if corr_col and pd.notna(row[corr_col]):
                                 val = str(row[corr_col]).strip()
-                                if val in CATEGORIES.values():
-                                    final_tags.append(val)
+                                # Разбиваем строку по точке с запятой или запятой
+                                split_vals = [v.strip() for v in re.split(r'[;,]', val) if v.strip()]
+                                for v in split_vals:
+                                    # Проверяем, есть ли такое значение в нашем словаре
+                                    if v in CATEGORIES.values():
+                                        final_tags.append(v)
                                     
                             # 2. Если ручного текста нет, ищем отметки 1/+/Да в колонках
                             if not final_tags:
