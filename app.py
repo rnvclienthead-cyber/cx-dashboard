@@ -381,34 +381,84 @@ elif page == "🧠 Обучение ИИ":
     if st.button("📥 Загрузить и обновить память", type="primary"):
         if f_import:
             with st.spinner("Анализируем структуру файла и разрешаем конфликты..."):
-                df_import = safe_read(f_import)
+                # УМНОЕ ЧТЕНИЕ ФАЙЛА
+                bytes_data = f_import.getvalue()
+                name = f_import.name.lower()
+                df_import = pd.DataFrame()
+                
+                try:
+                    if name.endswith(('.xlsx', '.xls')):
+                        eng = 'calamine' if name.endswith('.xlsx') else 'xlrd'
+                        try:
+                            df_import = pd.read_excel(io.BytesIO(bytes_data), engine=eng)
+                        except:
+                            df_import = pd.read_excel(io.BytesIO(bytes_data), engine='openpyxl')
+                    else:
+                        for enc in ['utf-8-sig', 'utf-8', 'windows-1251']:
+                            for sep in [';', '\t', ',']:
+                                try:
+                                    df_import = pd.read_csv(io.BytesIO(bytes_data), sep=sep, engine='python', encoding=enc)
+                                    if len(df_import.columns) > 1: break
+                                except: pass
+                                
+                    if not df_import.empty:
+                        # Проверка на сбитые заголовки (как в "Датасете для отзывов")
+                        if df_import.columns.astype(str).str.contains('Unnamed').sum() > 2:
+                            row0 = df_import.iloc[0].astype(str).str.lower()
+                            if any('текст' in s for s in row0.values):
+                                new_header = df_import.iloc[0]
+                                df_import = df_import[1:]
+                                df_import.columns = new_header
+                except Exception as e:
+                    st.error(f"⚠️ Ошибка чтения файла: {e}")
+
                 if not df_import.empty:
-                    text_cols = [c for c in df_import.columns if str(c).lower().strip() in ['текст отзыва', 'достоинства', 'недостатки', 'текст клиента', 'текст_клиента', 'user_comment', 'комментарий покупателя']]
-                    corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий'])), None)
-                    tag_col = next((c for c in df_import.columns if 'какой тег' in str(c).lower()), None)
-                    cat_columns = [c for c in df_import.columns if re.search(r'\d+', str(c)) and ('кат' in str(c).lower() or str(c).strip().isdigit())]
+                    # Ищем все возможные текстовые колонки (чтобы склеить Достоинства и Недостатки)
+                    text_cols = [c for c in df_import.columns if any(kw in str(c).lower() for kw in ['текст', 'достоинства', 'недостатки', 'comment', 'комментарий покупателя'])]
+                    
+                    # Ищем колонку с готовыми текстовыми решениями (как в "Лилиях")
+                    corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий']) and str(c).lower() not in [x.lower() for x in text_cols]), None)
                     
                     if not text_cols: 
                         st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
                     else:
                         new_memory_dict = {}
                         for idx, row in df_import.iterrows():
-                            parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() != 'nan' and str(row[tc]).strip()]
-                            combined_text = " ".join(parts)
+                            # Собираем текст
+                            parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() not in ['nan', 'none']]
+                            combined_text = " ".join(parts).strip()
                             if not combined_text: continue
                             
-                            final_tags = ""
-                            if corr_col and pd.notna(row[corr_col]) and str(row[corr_col]).strip().lower() != 'nan' and str(row[corr_col]).strip(): 
-                                final_tags = str(row[corr_col]).strip()
-                            elif cat_columns: 
-                                found_cats = [CATEGORIES[int(re.search(r'\d+', str(c)).group())] for c in cat_columns if re.search(r'\d+', str(c)) and int(re.search(r'\d+', str(c)).group()) in CATEGORIES and str(row[c]).strip().lower() in ['1', '1.0', 'v', '+', 'да', 'true']]
-                                if found_cats: final_tags = "; ".join(found_cats)
-                            elif tag_col and pd.notna(row[tag_col]):
-                                found_cats = [CATEGORIES[int(n)] for n in re.findall(r'\d+', str(row[tag_col])) if int(n) in CATEGORIES]
-                                if found_cats: final_tags = "; ".join(found_cats)
-                                
+                            final_tags = []
+                            
+                            # 1. Приоритет ручному текстовому комментарию (если он есть)
+                            if corr_col and pd.notna(row[corr_col]):
+                                val = str(row[corr_col]).strip()
+                                if val in CATEGORIES.values():
+                                    final_tags.append(val)
+                                    
+                            # 2. Если ручного текста нет, ищем отметки 1/+/Да в колонках
+                            if not final_tags:
+                                for col in df_import.columns:
+                                    col_str = str(col).lower()
+                                    cat_id = None
+                                    
+                                    # Обрабатываем колонки, которые просто названы цифрами (1.0, 2.0)
+                                    if isinstance(col, (int, float)):
+                                        cat_id = int(col)
+                                    else:
+                                        # Ищем слово Кат/Cat и цифру рядом
+                                        match = re.search(r'(?:кат|cat|категория)?\s*(\d+)', col_str)
+                                        if match:
+                                            cat_id = int(match.group(1))
+                                            
+                                    if cat_id and cat_id in CATEGORIES:
+                                        cell_val = str(row[col]).strip().lower()
+                                        if cell_val in ['1', '1.0', '+', 'true', 'да', 'v']:
+                                            final_tags.append(CATEGORIES[cat_id])
+                                            
                             if final_tags: 
-                                new_memory_dict[combined_text] = final_tags
+                                new_memory_dict[combined_text] = "; ".join(final_tags)
 
                         if new_memory_dict:
                             try:
@@ -430,7 +480,7 @@ elif page == "🧠 Обучение ИИ":
                             except Exception as e: 
                                 st.error(f"❌ Ошибка записи в Google Таблицу: {e}")
                         else: 
-                            st.warning("⚠️ Не найдено валидных тегов в файле.")
+                            st.warning("⚠️ Не найдено валидных тегов в файле. Проверьте, стоят ли '1' в колонках категорий.")
         else: 
             st.warning("Пожалуйста, загрузите файл.")
 
