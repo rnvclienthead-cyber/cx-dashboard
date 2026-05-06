@@ -11,3 +11,5 @@ matplotlib
 altair
 sqlalchemy
 psycopg2-binary
+requests
+SQLAlchemy
