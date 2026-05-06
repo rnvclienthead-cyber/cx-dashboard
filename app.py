@@ -182,17 +182,28 @@ def add_system_log(action, status, details=""):
         st.error(f"🚨 ОШИБКА ЗАПИСИ ЛОГА В ГУГЛ ТАБЛИЦУ: {e}")
 
 def update_db_row(srid, updates_dict):
-    """Принимает SRID и словарь изменений (напр. {'cat_1': True}) и пишет в PostgreSQL"""
     if not engine or not updates_dict: return False
+    
+    # Сохраняем в основную базу
     set_clauses = [f"{k} = :{k}" for k in updates_dict.keys()]
     sql = text(f"UPDATE wb_claims SET {', '.join(set_clauses)} WHERE srid = :srid")
-    params = {**updates_dict, "srid": srid}
+    
     try:
         with engine.begin() as conn:
-            conn.execute(sql, params)
+            conn.execute(sql, {**updates_dict, "srid": srid})
+            
+            # САМООБУЧЕНИЕ: Если была ручная корректировка, сохраняем её как опыт
+            if "correction" in updates_dict and updates_dict["correction"]:
+                # Достаем текст отзыва для этой заявки
+                claim_text = conn.execute(text("SELECT user_comment FROM wb_claims WHERE srid = :srid"), {"srid": srid}).scalar()
+                if claim_text:
+                    conn.execute(text("""
+                        INSERT INTO ai_knowledge_base (content, tags, source) 
+                        VALUES (:txt, :tgs, 'manual')
+                        ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags
+                    """), {"txt": claim_text, "tgs": updates_dict["correction"]})
         return True
     except Exception as e:
-        print(f"Ошибка записи в БД: {e}")
         return False
 
 # ==========================================
@@ -463,23 +474,18 @@ elif page == "🧠 Обучение ИИ":
 
                         if new_memory_dict:
                             try:
-                                client = get_gspread_client()
-                                sheet = client.open_by_key(SPREADSHEET_ID_MAIN)
-                                try: 
-                                    ws_mem = sheet.worksheet("Память_ИИ")
-                                except:
-                                    ws_mem = sheet.add_worksheet(title="Память_ИИ", rows="1000", cols="2")
-                                    ws_mem.append_row(["Контент", "Правильные теги"])
-                                    
-                                existing_records = ws_mem.get_all_records()
-                                combined_memory = {str(r.get('Контент', '')).strip(): str(r.get('Правильные теги', '')).strip() for r in existing_records if str(r.get('Контент', '')).strip()}
-                                combined_memory.update(new_memory_dict)
+                                # Сохраняем в SQL через UPSERT (если текст такой же - обновим тег)
+                                with engine.begin() as conn:
+                                    for txt, tgs in new_memory_dict.items():
+                                        conn.execute(text("""
+                                            INSERT INTO ai_knowledge_base (content, tags, source) 
+                                            VALUES (:txt, :tgs, 'training')
+                                            ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags
+                                        """), {"txt": txt, "tgs": tgs})
                                 
-                                ws_mem.clear()
-                                ws_mem.update('A1', [["Контент", "Правильные теги"]] + [[k, v] for k, v in combined_memory.items()])
-                                st.success(f"✅ База знаний успешно обновлена! Всего в памяти: {len(combined_memory)} примеров.")
+                                st.success(f":material/check_circle: Опыт успешно записан в SQL-базу! Всего добавлено: {len(new_memory_dict)} примеров.")
                             except Exception as e: 
-                                st.error(f"❌ Ошибка записи в Google Таблицу: {e}")
+                                st.error(f"Ошибка записи в SQL: {e}")
                         else: 
                             st.warning("⚠️ Не найдено валидных тегов в файле. Проверьте, стоят ли '1' в колонках категорий.")
         else: 
