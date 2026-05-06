@@ -379,8 +379,7 @@ async def fetch_ai_crosscheck(session, batch, engine):
     return []
 
 async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
-    # ❌ СТРОКА УДАЛЕНА: memory_records = get_memory_records()
-    results = []
+    # Теперь мы не копим список results = [], а пишем сразу в базу
     async with aiohttp.ClientSession() as session:
         batch = []
         for idx, row in df_to_tag.iterrows():
@@ -390,27 +389,47 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
                 current_tags = [str(c) for c in range(1, 14) if row.get(f'cat_{c}') == True]
                 tags_str = ", ".join(current_tags) if current_tags else "Нет тегов"
                 batch.append({"id": str(row['srid']), "text": f"Текст: {row.get('user_comment','')}. Текущие теги (ID): {tags_str}"})
-                
-            if len(batch) >= 10:
-                if mode == "tagging": 
-                    # ✅ ИЗМЕНЕНИЕ: Передаем engine вместо memory_records
-                    res = await fetch_ai_tags(session, batch, engine, model_choice)
-                else: 
-                    # ✅ ИЗМЕНЕНИЕ: Передаем engine вместо memory_records
-                    res = await fetch_ai_crosscheck(session, batch, engine)
-                if res: results.extend(res)
-                batch = []
-                
-        if batch:
-            if mode == "tagging": 
-                # ✅ ИЗМЕНЕНИЕ: Передаем engine
-                res = await fetch_ai_tags(session, batch, engine, model_choice)
-            else: 
-                # ✅ ИЗМЕНЕНИЕ: Передаем engine
-                res = await fetch_ai_crosscheck(session, batch, engine)
-            if res: results.extend(res)
             
-    return results
+            # Как только набрали пачку (например, 5 или 10)
+            if len(batch) >= 5: 
+                if mode == "tagging":
+                    res = await fetch_ai_tags(session, batch, engine, model_choice)
+                    # МГНОВЕННАЯ ЗАПИСЬ В БАЗУ
+                    if res:
+                        for item in res:
+                            srid = item.get('id')
+                            cats_array = item.get('category_ids', [])
+                            if srid and cats_array:
+                                updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
+                                update_db_row(srid, updates)
+                else:
+                    res = await fetch_ai_crosscheck(session, batch, engine)
+                    # МГНОВЕННАЯ ЗАПИСЬ (для Аудита)
+                    if res:
+                        for item in res:
+                            srid = item.get('id')
+                            updates = {'audit_status': str(item.get('audit', '')), 'audit_comment': str(item.get('comment', ''))}
+                            if srid: update_db_row(srid, updates)
+                
+                # Очищаем батч и идем дальше
+                batch = []
+        
+        # Не забываем обработать остатки, если они есть
+        if batch:
+            # (Здесь тот же блок записи, что и выше)
+            res = await (fetch_ai_tags(session, batch, engine, model_choice) if mode == "tagging" else fetch_ai_crosscheck(session, batch, engine))
+            if res:
+                for item in res:
+                    srid = item.get('id')
+                    if mode == "tagging":
+                        cats_array = item.get('category_ids', [])
+                        if srid and cats_array:
+                            updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
+                            update_db_row(srid, updates)
+                    else:
+                        if srid: update_db_row(srid, {'audit_status': str(item.get('audit', '')), 'audit_comment': str(item.get('comment', ''))})
+    
+    return True # Просто сигнализируем о завершении
 
 # ==========================================
 # ИНТЕРФЕЙС И НАВИГАЦИЯ
@@ -589,45 +608,19 @@ elif page == "🔬 ИИ Тегирование":
                 st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
                 
                 if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
-                    st.cache_data.clear()
+                    st.cache_data.clear() # Чистим кэш перед запуском
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    add_system_log("Запуск тегирования", "INFO", f"Строк: {total_rows}. Модель: {model_key}")
+                    add_system_log("Запуск тегирования", "INFO", f"Строк: {total_rows}")
                     
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     
-                    for i in range(0, total_rows, batch_size):
-                        chunk = df_unprocessed.iloc[i:i+batch_size]
-                        status_text.text(f"⏳ Прогресс: {int(((i + len(chunk)) / total_rows) * 100)}%")
-                        
-                        results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, mode="tagging"))
-                        
-                        tagged_srids = set()
-                        for res in results:
-                            if "error" in res: continue
-                            srid = res.get('id')
-                            cats_array = res.get('category_ids', [])
-                            
-                            if srid and cats_array:
-                                tagged_srids.add(srid)
-                                updates = {}
-                                for cat_val in cats_array:
-                                    cat_num_match = re.search(r'\d+', str(cat_val))
-                                    if cat_num_match: updates[f"cat_{cat_num_match.group()}"] = True
-                                if updates: update_db_row(srid, updates)
-                                
-                        progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
-                        add_system_log(
-                            "Тегирование: пачка обработана", 
-                            "INFO", 
-                            f"Обработано строк: {i + len(chunk)} из {total_rows}"
-                        )
+                    # Мы можем прогонять всё одним вызовом, так как внутри теперь есть моментальное сохранение
+                    loop.run_until_complete(run_ai_batch_processing(df_unprocessed, model_key, mode="tagging"))
                     
-                    st.success("✅ Тегирование успешно завершено!")
+                    st.success("✅ Тегирование завершено! Все данные сохранены пошагово.")
                     st.rerun()
-            else:
-                st.success("🎉 Все заявки в базе имеют первичную разметку!")
 
         with t2:
             st.subheader("Глубокая проверка (Аудит от Grok)")
