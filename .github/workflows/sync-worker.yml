@@ -28,6 +28,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: DEBUG - Show files and code
+        run: |
+          echo "=== СПИСОК ФАЙЛОВ В ПАПКЕ ==="
+          ls -la
+          echo "=== СОДЕРЖИМОЕ worker.py ПО СТРОКАМ ==="
+          cat -n worker.py
+
       - name: Run worker script
         # Передаем секреты из GitHub в переменные окружения ОС
         env:
