@@ -18,20 +18,89 @@ from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
-# --- ГЛОБАЛЬНЫЙ ТРЕКЕР СМЕНЫ СТРАНИЦ ---
-page = st.sidebar.radio("Навигация", [
-    "🤖 Робот-Синхронизатор", 
-    "🔬 ИИ Тегирование", 
-    "📝 Модерация", 
-    "🧠 Обучение ИИ", 
-    "📊 Отчет производства",
-    "⭐ Рейтинг товаров",
-    "📜 Системный Журнал"
-])
+# --- CSS Стили (Обновленные: Навигация + Старые стили) ---
+st.markdown("""
+    <style>
+    /* НАВИГАЦИЯ: Скрываем кружочки радио-кнопок */
+    [data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child { display: none !important; }
+    
+    /* НАВИГАЦИЯ: Стилизуем пункты под плоские кнопки */
+    [data-testid="stSidebar"] div[role="radiogroup"] > label {
+        background-color: transparent;
+        padding: 8px 12px;
+        border-radius: 6px;
+        margin-bottom: 2px;
+        color: #475569;
+        transition: all 0.2s ease;
+        cursor: pointer;
+    }
+    /* НАВИГАЦИЯ: Эффект наведения */
+    [data-testid="stSidebar"] div[role="radiogroup"] > label:hover { background-color: #f1f5f9; }
+    
+    /* НАВИГАЦИЯ: Активная кнопка */
+    [data-testid="stSidebar"] div[role="radiogroup"] > label[data-checked="true"] {
+        background-color: #eff6ff;
+        color: #2563eb;
+        font-weight: 600;
+    }
+    
+    /* НАВИГАЦИЯ: Заголовки групп */
+    [data-testid="stSidebar"] h3 {
+        padding-top: 1rem;
+        padding-bottom: 0.5rem;
+        font-size: 0.95rem;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
 
+    /* ВАШИ СТАРЫЕ СТИЛИ (Сохранены) */
+    [data-testid="stDataFrame"] { font-size: 11px !important; }
+    .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
+    .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
+    .media-row a { background: transparent !important; padding: 0 !important; margin: 0 !important; border: none !important; display: inline-flex; }
+    .photo-zoom { width: 140px !important; height: 140px !important; object-fit: cover !important; border-radius: 8px !important; transition: transform 0.3s ease; cursor: pointer; }
+    .photo-zoom:hover { transform: scale(4); z-index: 9999; position: relative; border-radius: 0px !important; box-shadow: 0 20px 50px rgba(0,0,0,0.8) !important; }
+    .video-link-btn { display: inline-block; padding: 8px 14px; background-color: #2563eb; color: white !important; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 13px; }
+    .video-link-btn:hover { background-color: #1d4ed8; }
+    .ai-tags-box { background-color: #f0fdf4; padding: 10px 14px; border-radius: 6px; font-size: 14px; color: #166534; margin-bottom: 15px; font-weight: 500; border-left: 4px solid #22c55e; }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- ГРУППИРОВКА И КРАСИВАЯ НАВИГАЦИЯ ---
+tech_menu = {
+    ":material/sync: Синхронизатор": "🤖 Робот-Синхронизатор",
+    ":material/science: ИИ Тегирование": "🔬 ИИ Тегирование",
+    ":material/rule_folder: Модерация": "📝 Модерация",
+    ":material/psychology: Обучение ИИ": "🧠 Обучение ИИ"
+}
+
+ops_menu = {
+    ":material/bar_chart: Отчет производства": "📊 Отчет производства",
+    ":material/star: Рейтинг товаров": "⭐ Рейтинг товаров",
+    ":material/receipt_long: Системный Журнал": "📜 Системный Журнал"
+}
+
+if 'active_menu_key' not in st.session_state:
+    st.session_state.active_menu_key = list(tech_menu.keys())[0]
+
+def nav_tech(): st.session_state.active_menu_key = st.session_state.tech_nav
+def nav_ops(): st.session_state.active_menu_key = st.session_state.ops_nav
+
+st.sidebar.markdown("### :material/settings_applications: Технический блок")
+t_idx = list(tech_menu.keys()).index(st.session_state.active_menu_key) if st.session_state.active_menu_key in tech_menu else None
+st.sidebar.radio("tech", list(tech_menu.keys()), index=t_idx, key="tech_nav", on_change=nav_tech, label_visibility="collapsed")
+
+st.sidebar.markdown("### :material/monitoring: Операционный блок")
+o_idx = list(ops_menu.keys()).index(st.session_state.active_menu_key) if st.session_state.active_menu_key in ops_menu else None
+st.sidebar.radio("ops", list(ops_menu.keys()), index=o_idx, key="ops_nav", on_change=nav_ops, label_visibility="collapsed")
+
+all_menus = {**tech_menu, **ops_menu}
+page = all_menus.get(st.session_state.active_menu_key, "🤖 Робот-Синхронизатор")
+
+# --- ГЛОБАЛЬНЫЙ ТРЕКЕР СМЕНЫ СТРАНИЦ ---
 if st.session_state.get('current_tab') != page:
     st.session_state.current_tab = page
-    # Удерживаем фокус на активной вкладке, сбрасываем триггеры окон
     st.session_state.matrix_key = int(time.time())
     st.session_state.show_detail_trigger = None
     st.session_state.last_click_id = None
@@ -47,7 +116,7 @@ try:
     DB_URL = st.secrets.get("DB_URL") 
     engine = create_engine(DB_URL) if DB_URL else None
 except Exception as e:
-    st.error(f"❌ Ошибка в Secrets: {e}")
+    st.error(f":material/warning: Ошибка в Secrets: {e}")
     st.stop()
 
 CATEGORIES = {
@@ -57,80 +126,6 @@ CATEGORIES = {
     10: "Габариты и Размер", 11: "Несоответствие описанию", 12: "Субъективное 'Не подошло'",
     13: "Следы использования / Б/У"
 }
-
-# --- CSS Стили (развернутые, без сжатия) ---
-st.markdown("""
-    <style>
-    [data-testid="stDataFrame"] { 
-        font-size: 11px !important; 
-    }
-    .detail-card { 
-        border: 1px solid #ddd; 
-        padding: 15px; 
-        border-radius: 8px; 
-        margin-bottom: 15px; 
-        background-color: #fcfcfc; 
-    }
-    .media-row { 
-        display: flex; 
-        flex-wrap: wrap; 
-        gap: 15px; 
-        margin-bottom: 10px; 
-    }
-    .media-row a { 
-        background: transparent !important; 
-        padding: 0 !important; 
-        margin: 0 !important; 
-        border: none !important; 
-        display: inline-flex; 
-    }
-    .photo-zoom { 
-        width: 140px !important; 
-        height: 140px !important; 
-        object-fit: cover !important; 
-        border-radius: 8px !important; 
-        transition: transform 0.3s ease, border-radius 0.3s ease; 
-        cursor: pointer; 
-        border: none !important; 
-        outline: none !important; 
-        background: transparent !important; 
-        background-color: transparent !important; 
-        padding: 0 !important; 
-        margin: 0 !important; 
-    }
-    .photo-zoom:hover { 
-        transform: scale(4); 
-        z-index: 9999; 
-        position: relative; 
-        border-radius: 0px !important; 
-        box-shadow: 0 20px 50px rgba(0,0,0,0.8) !important; 
-    }
-    .video-link-btn { 
-        display: inline-block; 
-        padding: 8px 14px; 
-        background-color: #2563eb; 
-        color: white !important; 
-        border-radius: 6px; 
-        text-decoration: none; 
-        font-weight: bold; 
-        font-size: 13px; 
-        transition: background-color 0.2s; 
-    }
-    .video-link-btn:hover { 
-        background-color: #1d4ed8; 
-    }
-    .ai-tags-box { 
-        background-color: #f0fdf4; 
-        padding: 10px 14px; 
-        border-radius: 6px; 
-        font-size: 14px; 
-        color: #166534; 
-        margin-bottom: 15px; 
-        font-weight: 500; 
-        border-left: 4px solid #22c55e; 
-    }
-    </style>
-""", unsafe_allow_html=True)
 
 # ==========================================
 # БАЗОВЫЕ ФУНКЦИИ 
