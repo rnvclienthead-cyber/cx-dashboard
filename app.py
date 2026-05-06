@@ -1111,28 +1111,45 @@ elif page == "📊 Отчет производства":
                         
                         st.info("💡 **Интерактив:** Кликните на любую строку в таблице, чтобы обновить график динамики ниже!")
                         
-                        # 3. ИНТЕРАКТИВНАЯ ТАБЛИЦА (Перехват клика)
-                        clicked_sku = None
-                        try:
-                            # on_select="rerun" заставляет страницу обновиться при клике на строку
-                            event = st.dataframe(
-                                styled_df, 
-                                use_container_width=True, 
-                                hide_index=True,
-                                on_select="rerun",
-                                selection_mode="single-row"
-                            )
-                            # Вытаскиваем артикул из строки, по которой кликнул пользователь
-                            if event.selection.rows:
-                                selected_row_idx = event.selection.rows[0]
-                                clicked_sku = display_df.iloc[selected_row_idx]['Артикул продавца']
-                        except TypeError:
-                            # Если версия Streamlit устарела и не поддерживает клики, выводим как обычно
-                            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                        # Разделяем экран на две колонки: 1 часть под таблицу, 2 части под график
+                        col_table, col_chart = st.columns([1, 2], gap="large")
                         
-                        ppm_alerts = ppm_df[ppm_df['PPM'] > 10000]
-                        if not ppm_alerts.empty:
-                            st.error(f"🚨 **Внимание!** Найдено проблемных товаров (PPM > 10 000): {len(ppm_alerts)} шт. В таблице они подсвечены красным.")
+                        clicked_sku = None
+
+                        with col_table:
+                            st.markdown("#### 📋 Список товаров")
+                            
+                            # Настраиваем компактное и чистое отображение таблицы
+                            try:
+                                event = st.dataframe(
+                                    styled_df, 
+                                    use_container_width=True, 
+                                    hide_index=True,
+                                    on_select="rerun",
+                                    selection_mode="single-row",
+                                    height=500, # Фиксируем высоту, чтобы не разъезжалось
+                                    column_config={
+                                        "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
+                                        "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
+                                        "Чистые_заказы": st.column_config.NumberColumn("Заказы", format="%d"),
+                                        # Убираем нули после запятой в штуках
+                                        "Одобренный брак (шт)": st.column_config.NumberColumn("Брак (шт)", format="%d"),
+                                        "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f"),
+                                        "PPM": st.column_config.NumberColumn("PPM", format="%d")
+                                    }
+                                )
+                                if event.selection.rows:
+                                    selected_row_idx = event.selection.rows[0]
+                                    clicked_sku = display_df.iloc[selected_row_idx]['Артикул продавца']
+                            except TypeError:
+                                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+                        with col_chart:
+                            # Селектбокс оставляем для ручного поиска, но синхронизируем с кликом
+                            chart_sku_list = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
+                            default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
+                            
+                            selected_sku_chart = st.selectbox("📊 Аналитика по объекту:", chart_sku_list, index=default_chart_idx)
                             
                         # --- 4. ГРАФИК ДИНАМИКИ ---
                         st.markdown("---")
@@ -1201,6 +1218,7 @@ elif page == "📊 Отчет производства":
                                 hovermode="x unified",
                                 margin=dict(l=0, r=0, t=40, b=0)
                             )
+                            fig.update_layout(height=430, margin=dict(l=0, r=0, t=40, b=0))
                             st.plotly_chart(fig, use_container_width=True)
 
                         # --- 5. РЕКЛАМАЦИЯ ---
