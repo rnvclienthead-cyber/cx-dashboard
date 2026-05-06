@@ -147,7 +147,7 @@ def fetch_and_save_logistics(url, doc_type):
     current_from = date_from
     total_saved = 0
     
-    error_counter = 0 # Счетчик фатальных ошибок
+        error_counter = 0 # Счетчик фатальных ошибок
         max_errors = 5
         
         while True:
