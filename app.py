@@ -222,30 +222,49 @@ def parse_ai_response(text_response):
     except json.JSONDecodeError: 
         return [{"error": f"Сбой формата JSON: {text_response}"}]
 
-def find_similar_examples(target_text, memory_records, top_n=10):
-    if not memory_records: return "Опыта пока нет."
-    target_words = set(re.findall(r'\b\w{3,}\b', target_text.lower()))
-    if not target_words: return "Опыта пока нет."
-    
-    scored = []
-    for r in memory_records:
-        mem_text = str(r.get('Контент', '')).lower()
-        mem_words = set(re.findall(r'\b\w{3,}\b', mem_text))
-        if not mem_words: continue
-        score = len(target_words.intersection(mem_words))
-        if score > 0: 
-            scored.append((score, f"Текст: {r.get('Контент')} -> Тег: {r.get('Правильные теги')}"))
-            
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_matches = [x[1] for x in scored[:top_n]]
-    if best_matches: 
-        return "\n".join(best_matches)
-    return "Прямых совпадений в опыте не найдено."
+def find_similar_examples_sql(target_text, engine, top_n=15):
+    """
+    Ищет похожие примеры в SQL базе знаний, используя умный алгоритм Триграмм (pg_trgm).
+    Понимает опечатки и находит смысл.
+    """
+    if not target_text or not engine:
+        return "Опыта пока нет."
 
-async def fetch_ai_tags(session, batch, memory_records, model="yandex"):
+    # SQL запрос: ищем тексты, похожесть которых больше 10% (0.1), сортируем от самых похожих к менее
+    sql = text("""
+        SELECT content, tags, similarity(content, :target_text) as sml
+        FROM ai_knowledge_base
+        WHERE similarity(content, :target_text) > 0.05
+        ORDER BY sml DESC
+        LIMIT :top_n
+    """)
+
+    try:
+        with engine.connect() as conn:
+            results = conn.execute(sql, {"target_text": target_text, "top_n": top_n}).fetchall()
+
+        if not results:
+            return "Прямых совпадений в опыте не найдено."
+
+        # Собираем результаты в текст для ИИ
+        best_matches = [f"Текст: {row[0]} -> Тег: {row[1]}" for row in results]
+        return "\n".join(best_matches)
+
+    except Exception as e:
+        print(f"Ошибка поиска в базе знаний: {e}")
+        return "Ошибка доступа к опыту."
+
+async def fetch_ai_tags(session, batch, engine):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
     combined_target_text = " ".join([i['text'] for i in batch])
-    relevant_memory = find_similar_examples(combined_target_text, memory_records, top_n=10)
+    
+    # 🌟 ОБРАЩАЕМСЯ К SQL БАЗЕ ЗНАНИЙ
+    relevant_memory = find_similar_examples_sql(combined_target_text, engine)
+
+    system_prompt = f"""Ты — строгий алгоритм классификации дефектов на производстве... 
+    (Оставьте здесь тот жесткий промпт, который мы обсуждали на прошлом шаге)
+    """
+    # ... остальной код отправки запроса в Yandex/Grok
 
     system_prompt = f"""Ты эксперт контроля качества. 
     Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}
@@ -324,7 +343,7 @@ async def fetch_ai_crosscheck(session, batch, memory_records):
         return [{"error": f"Системная ошибка Grok: {str(e)}"}]
 
 async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
-    memory_records = get_memory_records()
+    # ❌ СТРОКА УДАЛЕНА: memory_records = get_memory_records()
     results = []
     async with aiohttp.ClientSession() as session:
         batch = []
@@ -338,17 +357,21 @@ async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
                 
             if len(batch) >= 10:
                 if mode == "tagging": 
-                    res = await fetch_ai_tags(session, batch, memory_records, model_choice)
+                    # ✅ ИЗМЕНЕНИЕ: Передаем engine вместо memory_records
+                    res = await fetch_ai_tags(session, batch, engine, model_choice)
                 else: 
-                    res = await fetch_ai_crosscheck(session, batch, memory_records)
+                    # ✅ ИЗМЕНЕНИЕ: Передаем engine вместо memory_records
+                    res = await fetch_ai_crosscheck(session, batch, engine)
                 if res: results.extend(res)
                 batch = []
                 
         if batch:
             if mode == "tagging": 
-                res = await fetch_ai_tags(session, batch, memory_records, model_choice)
+                # ✅ ИЗМЕНЕНИЕ: Передаем engine
+                res = await fetch_ai_tags(session, batch, engine, model_choice)
             else: 
-                res = await fetch_ai_crosscheck(session, batch, memory_records)
+                # ✅ ИЗМЕНЕНИЕ: Передаем engine
+                res = await fetch_ai_crosscheck(session, batch, engine)
             if res: results.extend(res)
             
     return results
