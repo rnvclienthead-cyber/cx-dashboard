@@ -589,6 +589,7 @@ elif page == "🔬 ИИ Тегирование":
                 st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
                 
                 if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
+                    st.cache_data.clear()
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     add_system_log("Запуск тегирования", "INFO", f"Строк: {total_rows}. Модель: {model_key}")
@@ -617,6 +618,11 @@ elif page == "🔬 ИИ Тегирование":
                                 if updates: update_db_row(srid, updates)
                                 
                         progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
+                        add_system_log(
+                            "Тегирование: пачка обработана", 
+                            "INFO", 
+                            f"Обработано строк: {i + len(chunk)} из {total_rows}"
+                        )
                     
                     st.success("✅ Тегирование успешно завершено!")
                     st.rerun()
