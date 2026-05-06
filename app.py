@@ -1138,14 +1138,26 @@ elif page == "📊 Отчет производства":
                         st.markdown("---")
                         st.markdown("### 📈 Динамика PPM по месяцам")
                         
-                        chart_sku_list = ['[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
+                        # Добавили "[Все артикулы]" в самое начало списка
+                        chart_sku_list = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
                         default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
                         
                         selected_sku_chart = st.selectbox("Выберите артикул или Группу для графика:", chart_sku_list, index=default_chart_idx)
                         
                         if selected_sku_chart:
-                            # Логика для Групп
-                            if selected_sku_chart.startswith('[Вся Группа'):
+                            # Логика для "Все артикулы" (суммируем вообще всё)
+                            if selected_sku_chart == '[Все артикулы]':
+                                sku_orders = df_orders.groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                                
+                                if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
+                                    df_app_sku = df_approved.copy()
+                                    df_app_sku['Месяц_ДТ'] = df_app_sku['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                                    sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                                else:
+                                    sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
+                            
+                            # Логика для Групп ABC
+                            elif selected_sku_chart.startswith('[Вся Группа'):
                                 group_letter = selected_sku_chart[-2] # Достаем букву A, B или C
                                 skus_in_group = ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist()
                                 sku_orders = df_orders[df_orders['Артикул продавца'].isin(skus_in_group)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
@@ -1156,6 +1168,7 @@ elif page == "📊 Отчет производства":
                                     sku_defects = df_app_sku.groupby('Месяц_ДТ').size().reset_index(name='Брак')
                                 else:
                                     sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
+                            
                             # Логика для конкретного артикула
                             else:
                                 sku_orders = df_orders[df_orders['Артикул продавца'] == selected_sku_chart].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
