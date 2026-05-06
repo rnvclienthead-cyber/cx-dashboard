@@ -264,10 +264,19 @@ def find_similar_examples_sql(target_text, engine, top_n=15):
 async def fetch_ai_tags(session, batch, engine, model_choice="YandexGPT Lite"):
     # Собираем тексты пачки для ИИ
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
-    combined_target_text = " ".join([i['text'] for i in batch])
-
-    # 🌟 ОБРАЩАЕМСЯ К SQL БАЗЕ ЗНАНИЙ (Новая функция!)
-    relevant_memory = find_similar_examples_sql(combined_target_text, engine)
+    
+    # 🌟 Ищем опыт индивидуально для каждой заявки в пачке
+    memory_blocks = []
+    for item in batch:
+        # Ищем 2 лучших совпадения для конкретного текста
+        mem = find_similar_examples_sql(item['text'], engine, top_n=2)
+        if mem and "Прямых совпадений" not in mem:
+            memory_blocks.append(f"Опыт для текста '{item['text']}':\n{mem}")
+            
+    relevant_memory = "\n\n".join(memory_blocks) if memory_blocks else "Опыта пока нет."
+    
+    # БЕСПЛАТНАЯ ДИАГНОСТИКА: Выводим в консоль Streamlit, что именно ИИ берет из базы
+    print(f"\n--- 🧠 НАЙДЕННЫЙ ОПЫТ ИЗ БАЗЫ ---\n{relevant_memory}\n--------------------------")
 
     system_prompt = f"""Ты — строгий алгоритм классификации причин возврата товаров на маркетплейсе. Твоя единственная задача — сопоставлять новые тексты с исторической базой знаний.
 
@@ -599,11 +608,6 @@ elif page == "🔬 ИИ Тегирование":
                                     cat_num_match = re.search(r'\d+', str(cat_val))
                                     if cat_num_match: updates[f"cat_{cat_num_match.group()}"] = True
                                 if updates: update_db_row(srid, updates)
-
-                        # Принудительная разметка 12 категории для пропущенных
-                        for _, row in chunk.iterrows():
-                            if row['srid'] not in tagged_srids:
-                                update_db_row(row['srid'], {'cat_12': True})
                                 
                         progress_bar.progress(min(1.0, (i + len(chunk)) / total_rows))
                     
