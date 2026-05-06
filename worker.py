@@ -8,8 +8,8 @@ import os
 import time
 
 # --- НАСТРОЙКИ ---
-WB_API_KEY = os.getenv("WB_API_KEY", "ваш_локальный_ключ_для_тестов")
-DB_URL = os.getenv("DB_URL", "ваша_локальная_база_для_тестов")
+WB_API_KEY = os.getenv("WB_API_KEY", "").strip()
+DB_URL = os.getenv("DB_URL", "").strip()
 
 engine = create_engine(DB_URL)
 headers = {"Authorization": WB_API_KEY, "Content-Type": "application/json"}
@@ -147,42 +147,73 @@ def fetch_and_save_logistics(url, doc_type):
     current_from = date_from
     total_saved = 0
     
-    while True:
-        params = {"dateFrom": current_from, "flag": 0}
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=45)
-            if response.status_code == 429:
-                print("⚠️ Лимит запросов. Ждем 60 сек..."); time.sleep(60); continue
+    error_counter = 0 # Счетчик фатальных ошибок
+        max_errors = 5
+        
+        while True:
+            try:
+                # Обязательно timeout=30
+                response = requests.get(claims_url, headers=headers, params=params, timeout=30)
                 
-            res = response.json()
-            if not res or not isinstance(res, list): break
-            
-            chunk_data = []
-            for item in res:
-                srid = safe_str(item.get("srid"))
-                if not srid: continue
-                chunk_data.append({
-                    "srid": srid, "doc_type": doc_type, "dt": item.get("date"),
-                    "supplier_article": safe_str(item.get("supplierArticle") or item.get("saName")),
-                    "nm_id": safe_str(item.get("nmId")), "warehouse_name": item.get("warehouseName"),
-                    "category": item.get("category"), "subject": item.get("subject"),
-                    "brand": item.get("brand"), "is_cancel": item.get("isCancel", False),
-                    "last_change_date": item.get("lastChangeDate"), "income_id": safe_str(item.get("incomeID"))
-                })
-            
-            # СОХРАНЯЕМ СРАЗУ В БАЗУ, ЧТОБЫ НЕ ПОТЕРЯТЬ ПРИ ПАДЕНИИ
-            df_chunk = pd.DataFrame(chunk_data).drop_duplicates(subset=['srid'], keep='last')
-            sync_chunk_to_db(df_chunk)
-            total_saved += len(df_chunk)
-            print(f"✅ Сохранено в базу: {total_saved} строк...")
-            
-            last_change = res[-1].get("lastChangeDate")
-            if not last_change or last_change == current_from: break
-            current_from = last_change
-            time.sleep(3)
-            
-        except Exception as e:
-            print(f"⚠️ Ошибка скачивания: {e}. Перезапустите воркер для продолжения."); break
+                # СПАСИТЕЛЬНЫЙ БЛОК: Обработка лимитов WB
+                if response.status_code == 429:
+                    print(f"⚠️ WB просит подождать (Лимит 429). Спим 30 секунд...")
+                    time.sleep(30)
+                    continue
+                    
+                response.raise_for_status() # Проверка на ошибки 401, 500 и т.д.
+                res = response.json()
+                batch = res.get("claims", [])
+                
+                if not batch: 
+                    break # Данные закончились
+                
+                for item in batch:
+                    srid = str(item.get("srid", "")).strip()
+                    if not srid or srid == "None": continue
+                    
+                    raw_status = str(item.get("status", "")).strip()
+                    status_map = {'1': 'На рассмотрении', '2': 'Одобрено', '3': 'Отказ'}
+                    mapped = status_map.get(raw_status, raw_status)
+                    
+                    status_ex = item.get("status_description", "")
+                    if mapped in ['Архивная', 'None', '', 'Активная']:
+                        ex_lower = str(status_ex).lower()
+                        if 'возврат' in ex_lower or 'одобрено' in ex_lower: mapped = 'Одобрено'
+                        elif 'отклон' in ex_lower or 'отказ' in ex_lower: mapped = 'Отказ'
+                        elif 'рассмотр' in ex_lower: mapped = 'На рассмотрении'
+                    
+                    all_claims.append({
+                        "srid": srid,
+                        "claim_id": str(item.get("id", "")).strip(),
+                        "created_dt": item.get("dt"),
+                        "supplier_article": str(item.get("supplier_article") or item.get("article") or item.get("sa_name") or ""),
+                        "nm_id": str(item.get("nm_id", "")),
+                        "user_comment": item.get("user_comment", ""),
+                        "status": mapped,
+                        "status_ex": status_ex,
+                        "claim_type": item.get("claim_type"),
+                        "is_archive": archive == "true",
+                        "last_sync": datetime.now()
+                    })
+                
+                print(f"📦 Скачано претензий: {len(all_claims)}...")
+                
+                # Если WB отдал меньше 100 строк, значит это последняя страница
+                if len(batch) < 100: 
+                    break
+                    
+                params["offset"] += 100
+                error_counter = 0 # Сбрасываем счетчик ошибок при успешном ответе
+                time.sleep(2) # Базовая пауза, чтобы не злить WB
+                
+            except Exception as e:
+                error_counter += 1
+                print(f"⚠️ Системная ошибка претензий ({error_counter}/{max_errors}): {e}")
+                if error_counter >= max_errors:
+                    print("🚨 Слишком много ошибок подряд. Принудительно останавливаем скачивание.")
+                    break # Выходим из цикла, чтобы скрипт не висел 2 часа
+                time.sleep(10)
 
 # =========================================
 # 3. Orders
