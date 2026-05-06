@@ -1140,7 +1140,7 @@ elif page == "📊 Отчет производства":
                     
                     # --- ДВУХКОЛОНОЧНЫЙ ИНТЕРФЕЙС (МАСТЕР-ДЕТАЛЬ) ---
                     st.info("💡 **Интерактив:** Кликните на любую строку в таблице, чтобы график динамики показал данные именно по ней.")
-                    col_table, col_chart = st.columns([1.1, 2], gap="large") 
+                    col_table, col_chart = st.columns([1.4, 2], gap="large") 
                     clicked_sku = None
 
                     with col_table:
