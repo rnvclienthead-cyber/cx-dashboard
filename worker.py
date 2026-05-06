@@ -146,74 +146,74 @@ def fetch_and_save_logistics(url, doc_type):
     
     current_from = date_from
     total_saved = 0
+
+    error_counter = 0
+    max_errors = 5
     
-        error_counter = 0 # Счетчик фатальных ошибок
-        max_errors = 5
-        
-        while True:
-            try:
-                # Обязательно timeout=30
-                response = requests.get(claims_url, headers=headers, params=params, timeout=30)
+    while True:
+        try:
+        # Обязательно timeout=30
+        response = requests.get(claims_url, headers=headers, params=params, timeout=30)
+            
+            # СПАСИТЕЛЬНЫЙ БЛОК: Обработка лимитов WB
+            if response.status_code == 429:
+                print(f"⚠️ WB просит подождать (Лимит 429). Спим 30 секунд...")
+                time.sleep(30)
+                continue
                 
-                # СПАСИТЕЛЬНЫЙ БЛОК: Обработка лимитов WB
-                if response.status_code == 429:
-                    print(f"⚠️ WB просит подождать (Лимит 429). Спим 30 секунд...")
-                    time.sleep(30)
-                    continue
-                    
-                response.raise_for_status() # Проверка на ошибки 401, 500 и т.д.
-                res = response.json()
-                batch = res.get("claims", [])
+            response.raise_for_status() # Проверка на ошибки 401, 500 и т.д.
+            res = response.json()
+            batch = res.get("claims", [])
+            
+            if not batch: 
+                break # Данные закончились
+            
+            for item in batch:
+                srid = str(item.get("srid", "")).strip()
+                if not srid or srid == "None": continue
                 
-                if not batch: 
-                    break # Данные закончились
+                raw_status = str(item.get("status", "")).strip()
+                status_map = {'1': 'На рассмотрении', '2': 'Одобрено', '3': 'Отказ'}
+                mapped = status_map.get(raw_status, raw_status)
                 
-                for item in batch:
-                    srid = str(item.get("srid", "")).strip()
-                    if not srid or srid == "None": continue
-                    
-                    raw_status = str(item.get("status", "")).strip()
-                    status_map = {'1': 'На рассмотрении', '2': 'Одобрено', '3': 'Отказ'}
-                    mapped = status_map.get(raw_status, raw_status)
-                    
-                    status_ex = item.get("status_description", "")
-                    if mapped in ['Архивная', 'None', '', 'Активная']:
-                        ex_lower = str(status_ex).lower()
-                        if 'возврат' in ex_lower or 'одобрено' in ex_lower: mapped = 'Одобрено'
-                        elif 'отклон' in ex_lower or 'отказ' in ex_lower: mapped = 'Отказ'
-                        elif 'рассмотр' in ex_lower: mapped = 'На рассмотрении'
-                    
-                    all_claims.append({
-                        "srid": srid,
-                        "claim_id": str(item.get("id", "")).strip(),
-                        "created_dt": item.get("dt"),
-                        "supplier_article": str(item.get("supplier_article") or item.get("article") or item.get("sa_name") or ""),
-                        "nm_id": str(item.get("nm_id", "")),
-                        "user_comment": item.get("user_comment", ""),
-                        "status": mapped,
-                        "status_ex": status_ex,
-                        "claim_type": item.get("claim_type"),
-                        "is_archive": archive == "true",
-                        "last_sync": datetime.now()
-                    })
+                status_ex = item.get("status_description", "")
+                if mapped in ['Архивная', 'None', '', 'Активная']:
+                    ex_lower = str(status_ex).lower()
+                    if 'возврат' in ex_lower or 'одобрено' in ex_lower: mapped = 'Одобрено'
+                    elif 'отклон' in ex_lower or 'отказ' in ex_lower: mapped = 'Отказ'
+                    elif 'рассмотр' in ex_lower: mapped = 'На рассмотрении'
                 
-                print(f"📦 Скачано претензий: {len(all_claims)}...")
+                all_claims.append({
+                    "srid": srid,
+                    "claim_id": str(item.get("id", "")).strip(),
+                    "created_dt": item.get("dt"),
+                    "supplier_article": str(item.get("supplier_article") or item.get("article") or item.get("sa_name") or ""),
+                    "nm_id": str(item.get("nm_id", "")),
+                    "user_comment": item.get("user_comment", ""),
+                    "status": mapped,
+                    "status_ex": status_ex,
+                    "claim_type": item.get("claim_type"),
+                    "is_archive": archive == "true",
+                    "last_sync": datetime.now()
+                })
+            
+            print(f"📦 Скачано претензий: {len(all_claims)}...")
+            
+            # Если WB отдал меньше 100 строк, значит это последняя страница
+            if len(batch) < 100: 
+                break
                 
-                # Если WB отдал меньше 100 строк, значит это последняя страница
-                if len(batch) < 100: 
-                    break
-                    
-                params["offset"] += 100
-                error_counter = 0 # Сбрасываем счетчик ошибок при успешном ответе
-                time.sleep(2) # Базовая пауза, чтобы не злить WB
-                
-            except Exception as e:
-                error_counter += 1
-                print(f"⚠️ Системная ошибка претензий ({error_counter}/{max_errors}): {e}")
-                if error_counter >= max_errors:
-                    print("🚨 Слишком много ошибок подряд. Принудительно останавливаем скачивание.")
-                    break # Выходим из цикла, чтобы скрипт не висел 2 часа
-                time.sleep(10)
+            params["offset"] += 100
+            error_counter = 0 # Сбрасываем счетчик ошибок при успешном ответе
+            time.sleep(2) # Базовая пауза, чтобы не злить WB
+            
+        except Exception as e:
+            error_counter += 1
+            print(f"⚠️ Системная ошибка претензий ({error_counter}/{max_errors}): {e}")
+            if error_counter >= max_errors:
+                print("🚨 Слишком много ошибок подряд. Принудительно останавливаем скачивание.")
+                break # Выходим из цикла, чтобы скрипт не висел 2 часа
+            time.sleep(10)
 
 # =========================================
 # 3. Orders
