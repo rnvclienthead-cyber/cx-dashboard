@@ -1102,59 +1102,16 @@ elif page == "📊 Отчет производства":
                         
                         # 2. ПОДСВЕТКА БРАКА (Красный цвет для PPM > 10000)
                         def highlight_ppm(row):
-                            # Если PPM больше 10000 (1%), красим всю строку в красный
                             return ['background-color: #fee2e2; color: #991b1b' if row['PPM'] > 10000 else ''] * len(row)
                         
-                        # Применяем стили к нашей таблице
                         cols_to_show = ['Артикул продавца', 'ABC_Группа', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']
                         styled_df = display_df[cols_to_show].style.apply(highlight_ppm, axis=1)
                         
                         st.info("💡 **Интерактив:** Кликните на любую строку в таблице, чтобы обновить график динамики ниже!")
                         
-                        # Разделяем экран на две колонки: 1 часть под таблицу, 2 части под график
-                        col_table, col_chart = st.columns([1, 2], gap="large")
-                        
-                        clicked_sku = None
-
-                        with col_table:
-                            st.markdown("#### 📋 Список товаров")
-                            
-                            # Настраиваем компактное и чистое отображение таблицы
-                            try:
-                                event = st.dataframe(
-                                    styled_df, 
-                                    use_container_width=True, 
-                                    hide_index=True,
-                                    on_select="rerun",
-                                    selection_mode="single-row",
-                                    height=500, # Фиксируем высоту, чтобы не разъезжалось
-                                    column_config={
-                                        "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
-                                        "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
-                                        "Чистые_заказы": st.column_config.NumberColumn("Заказы", format="%d"),
-                                        # Убираем нули после запятой в штуках
-                                        "Одобренный брак (шт)": st.column_config.NumberColumn("Брак (шт)", format="%d"),
-                                        "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f"),
-                                        "PPM": st.column_config.NumberColumn("PPM", format="%d")
-                                    }
-                                )
-                                if event.selection.rows:
-                                    selected_row_idx = event.selection.rows[0]
-                                    clicked_sku = display_df.iloc[selected_row_idx]['Артикул продавца']
-                            except TypeError:
-                                st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-                        with col_chart:
-                            # Селектбокс оставляем для ручного поиска, но синхронизируем с кликом
-                            chart_sku_list = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
-                            default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
-                            
-                            selected_sku_chart = st.selectbox("📊 Аналитика по объекту:", chart_sku_list, index=default_chart_idx)
-                            
                         # --- 4. ДВУХКОЛОНОЧНЫЙ ИНТЕРФЕЙС (МАСТЕР-ДЕТАЛЬ) ---
                         st.markdown("---")
                         
-                        # Разделяем экран на две колонки
                         col_table, col_chart = st.columns([1.1, 2], gap="large") 
                         
                         clicked_sku = None
@@ -1162,7 +1119,6 @@ elif page == "📊 Отчет производства":
                         with col_table:
                             st.markdown("#### 📋 Список товаров")
                             
-                            # Настраиваем компактное и чистое отображение таблицы
                             try:
                                 event = st.dataframe(
                                     styled_df, 
@@ -1170,7 +1126,7 @@ elif page == "📊 Отчет производства":
                                     hide_index=True,
                                     on_select="rerun",
                                     selection_mode="single-row",
-                                    height=470, # Фиксируем высоту
+                                    height=470,
                                     column_config={
                                         "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
                                         "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
@@ -1192,11 +1148,9 @@ elif page == "📊 Отчет производства":
                             chart_sku_list = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + ppm_df['Артикул продавца'].tolist()
                             default_chart_idx = chart_sku_list.index(clicked_sku) if clicked_sku in chart_sku_list else 0
                             
-                            # Селектбокс синхронизирован с кликом по таблице
                             selected_sku_chart = st.selectbox("Аналитика по объекту:", chart_sku_list, index=default_chart_idx, label_visibility="collapsed")
                             
                             if selected_sku_chart:
-                                # Логика для "Все артикулы"
                                 if selected_sku_chart == '[Все артикулы]':
                                     sku_orders = df_orders.groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
                                     if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
@@ -1206,7 +1160,6 @@ elif page == "📊 Отчет производства":
                                     else:
                                         sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
                                 
-                                # Логика для Групп ABC
                                 elif selected_sku_chart.startswith('[Вся Группа'):
                                     group_letter = selected_sku_chart[-2]
                                     skus_in_group = ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist()
@@ -1218,7 +1171,6 @@ elif page == "📊 Отчет производства":
                                     else:
                                         sku_defects = pd.DataFrame(columns=['Месяц_ДТ', 'Брак'])
                                 
-                                # Логика для конкретного артикула
                                 else:
                                     sku_orders = df_orders[df_orders['Артикул продавца'] == selected_sku_chart].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
                                     if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
@@ -1241,19 +1193,20 @@ elif page == "📊 Отчет производства":
                                 fig.add_hline(y=10000, line_dash="dot", line_color="#f59e0b", annotation_text="Предел 10 000", yref='y2')
                                 
                                 fig.update_layout(
-                                    height=420, # Сжали график по высоте, чтобы он был вровень с таблицей
+                                    height=420,
                                     xaxis=dict(title="Месяц"),
                                     yaxis=dict(title="Кол-во заказов", side='left', showgrid=False),
                                     yaxis2=dict(title="Уровень PPM", side='right', overlaying='y', showgrid=True),
                                     legend=dict(x=0.01, y=0.99),
                                     hovermode="x unified",
-                                    margin=dict(l=0, r=0, t=10, b=0) # Убрали лишние отступы
+                                    margin=dict(l=0, r=0, t=10, b=0)
                                 )
                                 st.plotly_chart(fig, use_container_width=True)
 
                         # --- 5. РЕКЛАМАЦИЯ ---
                         st.markdown("---")
                         st.markdown("### 📝 Генерация рекламации на завод")
+                        ppm_alerts = ppm_df[ppm_df['PPM'] > 10000]
                         selected_sku_claim = st.selectbox("Выберите проблемный артикул для подготовки письма:", ppm_alerts['Артикул продавца'].tolist() if not ppm_alerts.empty else ppm_df['Артикул продавца'].tolist())
                         
                         if selected_sku_claim and not df_approved.empty:
