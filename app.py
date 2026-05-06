@@ -254,93 +254,107 @@ def find_similar_examples_sql(target_text, engine, top_n=15):
         print(f"Ошибка поиска в базе знаний: {e}")
         return "Ошибка доступа к опыту."
 
-async def fetch_ai_tags(session, batch, engine):
+async def fetch_ai_tags(session, batch, engine, model_choice="YandexGPT Lite"):
+    # Собираем тексты пачки для ИИ
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
     combined_target_text = " ".join([i['text'] for i in batch])
-    
-    # 🌟 ОБРАЩАЕМСЯ К SQL БАЗЕ ЗНАНИЙ
+
+    # 🌟 ОБРАЩАЕМСЯ К SQL БАЗЕ ЗНАНИЙ (Новая функция!)
     relevant_memory = find_similar_examples_sql(combined_target_text, engine)
 
-    system_prompt = f"""Ты — строгий алгоритм классификации дефектов на производстве... 
-    (Оставьте здесь тот жесткий промпт, который мы обсуждали на прошлом шаге)
-    """
-    # ... остальной код отправки запроса в Yandex/Grok
+    # Строгий промпт
+    system_prompt = f"""Ты — строгий алгоритм классификации дефектов на производстве. Твоя единственная задача — сопоставлять новые тексты с исторической базой знаний.
 
-    system_prompt = f"""Ты эксперт контроля качества. 
-    Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}
-    ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект (рейтинг 4-5) - СТРОГО Категория 12.
-    ВОТ ПРИМЕРЫ ПОХОЖИХ СИТУАЦИЙ ИЗ БАЗЫ: {relevant_memory}
-    ИНСТРУКЦИЯ: Верни ТОЛЬКО массив category_ids (цифры подходящих категорий). Никакого текста!
-    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "category_ids": [1, 5]}}]}}"""
+ДОСТУПНЫЕ КАТЕГОРИИ (ID: Название):
+{json.dumps(CATEGORIES, ensure_ascii=False, indent=2)}
 
-    if "yandex" in model:
+ЖЕСТКИЕ ПРАВИЛА:
+1. ПРИОРИТЕТ БАЗЫ ЗНАНИЙ: Ниже приведены примеры из нашей исторической базы. Если новый текст похож на пример из базы, ты ОБЯЗАН использовать те же теги, что и в примере. Запрещено придумывать новые интерпретации, если есть прецедент.
+2. ПРАВИЛО 12: Если клиент хвалит товар, но отмечает мелкий дефект (оценка 4-5) - СТРОГО Категория 12.
+3. НЕСКОЛЬКО ДЕФЕКТОВ: Если клиент описывает разные проблемы (например, не хватает болтов И помята коробка), ты должен выдать массив из нескольких ID.
+
+--- ИСТОРИЧЕСКАЯ БАЗА ЗНАНИЙ (ОПЫТ) ---
+{relevant_memory}
+----------------------------------------
+
+ИНСТРУКЦИЯ ПО ВЫВОДУ:
+Ты должен вернуть ТОЛЬКО массив category_ids (цифры подходящих категорий). Никакого текста, никаких рассуждений.
+ОТВЕТЬ СТРОГО В ЭТОМ JSON ФОРМАТЕ: {{"results": [{{"id": "...", "category_ids": [1, 5]}}]}}"""
+
+    # Логика отправки в зависимости от выбора модели
+    if "Yandex" in model_choice:
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
-        yandex_model_name = "yandexgpt-lite" if model == "yandex-lite" else "yandexgpt"
+        # Выбираем Lite или Pro
+        model_uri = f"gpt://{FOLDER_ID}/yandexgpt/latest" if "Pro" in model_choice else f"gpt://{FOLDER_ID}/yandexgpt-lite/latest"
+        
         payload = {
-            "modelUri": f"gpt://{FOLDER_ID}/{yandex_model_name}/latest", 
-            "completionOptions": {"temperature": 0.1, "maxTokens": 2000}, 
+            "modelUri": model_uri,
+            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
             "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
         }
         try:
             async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                if resp.status == 200: 
+                if resp.status == 200:
                     res = await resp.json()
                     return parse_ai_response(res['result']['alternatives'][0]['message']['text'])
-                else: 
-                    return [{"error": f"Ошибка Яндекса ({resp.status})"}]
-        except Exception as e: 
-            return [{"error": f"Системная ошибка Яндекса: {str(e)}"}]
+        except Exception as e:
+            print(f"Ошибка Yandex: {e}")
 
-    elif model == "grok":
+    elif "Grok" in model_choice:
         url = "https://api.x.ai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "grok-beta", 
-            "temperature": 0.1, 
+            "model": "grok-beta",
+            "temperature": 0.1,
             "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
         }
         try:
             async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                if resp.status == 200: 
+                if resp.status == 200:
                     res = await resp.json()
                     return parse_ai_response(res['choices'][0]['message']['content'])
-                else: 
-                    return [{"error": f"Ошибка Grok ({resp.status})"}]
-        except Exception as e: 
-            return [{"error": f"Системная ошибка Grok: {str(e)}"}]
+        except Exception as e:
+            print(f"Ошибка Grok: {e}")
+
     return []
 
-async def fetch_ai_crosscheck(session, batch, memory_records):
+
+async def fetch_ai_crosscheck(session, batch, engine):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
     combined_target_text = " ".join([i['text'] for i in batch])
-    relevant_memory = find_similar_examples(combined_target_text, memory_records, top_n=10)
 
-    system_prompt = f"""Ты строгий аудитор. Проверь теги первой нейросети. 
-    Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}
-    ПРИМЕРЫ ПРАВИЛЬНЫХ РЕШЕНИЙ: {relevant_memory}
-    ИНСТРУКЦИЯ:
-    1. audit: Если старые теги верны, напиши "ОК". Если ошибка, напиши "ОШИБКА".
-    2. comment: Если нашел ошибку, напиши почему (кратко). Если ОК, оставь пустым.
-    3. category_ids: Массив ПРАВИЛЬНЫХ цифр категорий.
-    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "audit": "ОК", "comment": "", "category_ids": [1]}}]}}"""
-    
+    # 🌟 ОБРАЩАЕМСЯ К SQL БАЗЕ ЗНАНИЙ (Новая функция!)
+    relevant_memory = find_similar_examples_sql(combined_target_text, engine)
+
+    system_prompt = f"""Ты — строгий аудитор. Твоя задача — проверить правильность тегов, которые поставила другая нейросеть.
+
+ДОСТУПНЫЕ КАТЕГОРИИ (ID: Название):
+{json.dumps(CATEGORIES, ensure_ascii=False, indent=2)}
+
+--- ИСТОРИЧЕСКАЯ БАЗА ЗНАНИЙ (ОПЫТ) ---
+{relevant_memory}
+----------------------------------------
+
+ПРАВИЛО: Если текущие теги противоречат опыту из базы, ты должен исправить их, записав правильный тег в поле `correction`.
+ОТВЕТЬ СТРОГО В ЭТОМ JSON ФОРМАТЕ: {{"results": [{{"id": "...", "audit_status": "Согласен", "audit_comment": "", "correction": ""}}]}}"""
+
     url = "https://api.x.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "grok-beta", 
-        "temperature": 0.1, 
+        "model": "grok-beta",
+        "temperature": 0.1,
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
     }
     try:
         async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-            if resp.status == 200: 
+            if resp.status == 200:
                 res = await resp.json()
                 return parse_ai_response(res['choices'][0]['message']['content'])
-            else: 
-                return [{"error": f"Ошибка API Grok ({resp.status})"}]
-    except Exception as e: 
-        return [{"error": f"Системная ошибка Grok: {str(e)}"}]
+    except Exception as e:
+        print(f"Ошибка Grok (Аудит): {e}")
+
+    return []
 
 async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
     # ❌ СТРОКА УДАЛЕНА: memory_records = get_memory_records()
