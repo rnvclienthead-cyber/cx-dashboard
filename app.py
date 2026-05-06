@@ -868,36 +868,36 @@ elif page == "📊 Отчет производства":
         return df_temp
 
     @st.cache_data(ttl=120)
-def load_cached_orders():
-    # Загружаем сырые данные по заказам (артикул, дата заказа, дата отмены)
-    query = """
-        SELECT dt, supplier_article AS "Артикул продавца", cancel_dt 
-        FROM wb_orders
-    """
-    try: 
-        df_ord = pd.read_sql(query, engine)
-        
-        if df_ord.empty:
-            return pd.DataFrame()
+    def load_cached_orders():
+        # Загружаем сырые данные по заказам (артикул, дата заказа, дата отмены)
+        query = """
+            SELECT dt, supplier_article AS "Артикул продавца", cancel_dt 
+            FROM wb_orders
+        """
+        try: 
+            df_ord = pd.read_sql(query, engine)
+            
+            if df_ord.empty:
+                return pd.DataFrame()
 
-        # Очистка артикулов
-        df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
-        df_ord = df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
-        
-        # Приводим дату к началу месяца для группировки
-        df_ord['Месяц_ДТ'] = pd.to_datetime(df_ord['dt']).dt.to_period('M').dt.to_timestamp()
-        
-        # МАСТЕР-ФУНКЦИЯ ПОДСЧЕТА:
-        # Оставляем только те строки, у которых cancel_dt отсутствует (пустое значение/NaT)
-        valid_orders = df_ord[pd.isna(df_ord['cancel_dt'])]
-        
-        # Суммируем оставшиеся (чистые) строки по Месяцу и Артикулу
-        final_orders = valid_orders.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Чистые_заказы')
-        
-        return final_orders
-    except Exception as e: 
-        print(f"Ошибка загрузки заказов: {e}")
-        return pd.DataFrame()
+            # Очистка артикулов
+            df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
+            df_ord = df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
+            
+            # Приводим дату к началу месяца для группировки
+            df_ord['Месяц_ДТ'] = pd.to_datetime(df_ord['dt']).dt.to_period('M').dt.to_timestamp()
+            
+            # МАСТЕР-ФУНКЦИЯ ПОДСЧЕТА:
+            # Оставляем только те строки, у которых cancel_dt отсутствует (пустое значение/NaT)
+            valid_orders = df_ord[pd.isna(df_ord['cancel_dt'])]
+            
+            # Суммируем оставшиеся (чистые) строки по Месяцу и Артикулу
+            final_orders = valid_orders.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Чистые_заказы')
+            
+            return final_orders
+        except Exception as e: 
+            print(f"Ошибка загрузки заказов: {e}")
+            return pd.DataFrame()
 
     try:
         with st.spinner("📊 Загрузка и анализ данных..."):
