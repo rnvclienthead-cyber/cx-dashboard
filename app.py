@@ -1048,7 +1048,10 @@ elif page == "📊 Отчет производства":
                     if 'Номер поставки' in df_matrix_data.columns:
                         # Группируем по Номеру поставки
                         for supply, group in df_matrix_data.groupby('Номер поставки'):
-                            if supply == 'Не указан' or pd.isna(supply) or not str(supply).strip(): 
+                            
+                            # ИСКЛЮЧАЕМ пустые значения и системные нули
+                            clean_supply = str(supply).strip()
+                            if clean_supply in ['Не указан', '', '0', '0.0'] or pd.isna(supply): 
                                 continue
                             
                             # Собираем уникальные инвойсы для этой поставки
@@ -1058,7 +1061,7 @@ elif page == "📊 Отчет производства":
                             all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in group['Артикул продавца'].value_counts().items()])
                             
                             supply_grouped.append({
-                                'Номер поставки': str(supply), 
+                                'Номер поставки': clean_supply, 
                                 'Дефекты': len(group), 
                                 'Инвойсы': invoices if invoices else "Не указаны", 
                                 'Список Артикулов': all_skus
