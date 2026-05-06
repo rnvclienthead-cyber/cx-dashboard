@@ -414,10 +414,10 @@ elif page == "🧠 Обучение ИИ":
 
                 if not df_import.empty:
                     # Ищем все возможные текстовые колонки (чтобы склеить Достоинства и Недостатки)
-                    text_cols = [c for c in df_import.columns if any(kw in str(c).lower() for kw in ['текст', 'достоинства', 'недостатки', 'comment', 'комментарий покупателя'])]
+                    text_cols = [str(c) for c in df_import.columns if any(kw in str(c).lower() for kw in ['текст', 'достоинства', 'недостатки', 'comment', 'комментарий покупателя'])]
                     
                     # Ищем колонку с готовыми текстовыми решениями (как в "Лилиях")
-                    corr_col = next((c for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий']) and str(c).lower() not in [x.lower() for x in text_cols]), None)
+                    corr_col = next((str(c) for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий']) and str(c).lower() not in [str(x).lower() for x in text_cols]), None)
                     
                     if not text_cols: 
                         st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
