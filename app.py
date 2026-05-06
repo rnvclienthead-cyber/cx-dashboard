@@ -169,17 +169,24 @@ def get_memory_records():
         return []
 
 def add_system_log(action, status, details=""):
+    if not engine:
+        return
+    
+    sql = text("""
+        INSERT INTO system_logs (action, status, details) 
+        VALUES (:action, :status, :details)
+    """)
+    
     try:
-        sheet = get_gspread_client().open_by_key(SPREADSHEET_ID_MAIN)
-        try: 
-            ws_log = sheet.worksheet("Логи")
-        except gspread.exceptions.WorksheetNotFound:
-            ws_log = sheet.add_worksheet(title="Логи", rows="1000", cols="4")
-            ws_log.append_row(["Дата и Время", "Действие", "Статус", "Детали"])
-        now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        ws_log.append_row([now, action, status, details])
-    except Exception as e: 
-        st.error(f"🚨 ОШИБКА ЗАПИСИ ЛОГА В ГУГЛ ТАБЛИЦУ: {e}")
+        with engine.begin() as conn:
+            conn.execute(sql, {
+                "action": action, 
+                "status": status, 
+                "details": details
+            })
+    except Exception as e:
+        # Если база упала, выводим ошибку хотя бы в консоль сервера
+        print(f"🚨 КРИТИЧЕСКАЯ ОШИБКА SQL-ЛОГИРОВАНИЯ: {e}")
 
 def update_db_row(srid, updates_dict):
     if not engine or not updates_dict: return False
@@ -968,8 +975,9 @@ elif page == "📊 Отчет производства":
                     else:
                         st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
                     
-                    df_temp = df_temp.merge(df_inv_unique[cols_to_merge], on='Номер поставки_clean', how='left')
-                    df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
+                    # Мы уже сделали мерж выше через inv_grouped, эти строки просто лишние и вызывают ошибку
+                    if 'Номер поставки_clean' in df_temp.columns:
+                        df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
         except Exception as e: 
             print(f"Ошибка загрузки инвойсов: {e}")
             
@@ -1394,18 +1402,35 @@ elif page == "⭐ Рейтинг товаров":
     st.markdown("Мы настроим воркер на ежедневный сбор оценок, чтобы вы могли видеть падения рейтинга в реальном времени и сопоставлять их с данными PPM.")
         
 elif page == "📜 Системный Журнал":
-    st.title("📜 Системный Журнал (Черный ящик)")
-    st.markdown("Здесь сохраняется хронология всех процессов.")
+    st.title("📜 Системный Журнал (SQL Edition)")
+    st.markdown("Здесь сохраняется хронология процессов напрямую из базы данных.")
+    
     if st.button("🔄 Обновить журнал"): 
         st.rerun()
-    try:
-        records = get_gspread_client().open_by_key(SPREADSHEET_ID_MAIN).worksheet("Логи").get_all_records()
-        if records:
-            df_logs = pd.DataFrame(records).iloc[::-1].reset_index(drop=True)
-            def color_status(val): 
-                return f"color: {'green' if val == 'SUCCESS' else 'red' if val == 'ERROR' else 'orange' if val == 'WARNING' else 'blue'}; font-weight: bold;"
-            st.dataframe(df_logs.style.applymap(color_status, subset=['Статус']), use_container_width=True, height=600)
-        else: 
-            st.info("Журнал пуст.")
-    except: 
-        st.warning("Лист 'Логи' еще не создан.")
+
+    if engine:
+        try:
+            # Читаем последние 200 записей
+            query = "SELECT created_at as \"Дата\", action as \"Действие\", status as \"Статус\", details as \"Детали\" FROM system_logs ORDER BY created_at DESC LIMIT 200"
+            df_logs = pd.read_sql(query, engine)
+
+            if not df_logs.empty:
+                # Форматируем дату для удобства
+                df_logs['Дата'] = pd.to_datetime(df_logs['Дата']).dt.strftime('%d.%m.%Y %H:%M:%S')
+
+                def color_status(val):
+                    color = '#22c55e' if val == 'INFO' or val == 'SUCCESS' else '#ef4444' if 'ERR' in str(val) else '#f59e0b'
+                    return f'color: {color}; font-weight: bold;'
+
+                st.dataframe(
+                    df_logs.style.map(color_status, subset=['Статус']), 
+                    width="stretch", 
+                    height=600,
+                    hide_index=True
+                )
+            else:
+                st.info("Журнал пуст. Все события будут появляться здесь после запуска тегирования.")
+        except Exception as e:
+            st.error(f"Ошибка чтения логов из SQL: {e}")
+    else:
+        st.warning("База данных не подключена. Проверьте DB_URL.")
