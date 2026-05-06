@@ -1067,7 +1067,8 @@ elif page == "📊 Отчет производства":
                     months_ru = {1: 'Янв', 2: 'Фев', 3: 'Мар', 4: 'Апр', 5: 'Май', 6: 'Июн', 
                                  7: 'Июл', 8: 'Авг', 9: 'Сен', 10: 'Окт', 11: 'Ноя', 12: 'Дек'}
                     
-                    df_orders['Месяц_ДТ'] = pd.to_datetime(df_orders['dt']).dt.to_period('M').dt.to_timestamp()
+                    # ИСПРАВЛЕНИЕ: Берем сразу 'Месяц_ДТ', так как сырого 'dt' в этой таблице уже нет
+                    df_orders['Месяц_ДТ'] = pd.to_datetime(df_orders['Месяц_ДТ'])
                     df_orders['Месяц_Стр'] = df_orders['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_orders['Месяц_ДТ'].dt.year.astype(str)
                     
                     df_approved = df_filtered[df_filtered['Размечено'] == True].copy()
@@ -1173,13 +1174,11 @@ elif page == "📊 Отчет производства":
                             st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
                     with col_chart:
-                        # Если кликнули в таблице — показываем этот артикул, иначе показываем то, что выбрано в фильтре
                         plot_skus = [clicked_sku] if clicked_sku else active_skus
                         chart_title = f"📉 Динамика: {clicked_sku}" if clicked_sku else ("📉 Динамика: Все артикулы" if '[Все артикулы]' in selected_articles or not selected_articles else "📉 Динамика: Выбранные объекты")
                         
                         st.markdown(f"#### {chart_title}")
                         
-                        # Группируем данные ТОЛЬКО для выбранных артикулов (для графика берем данные за всё время, даже если таблица отфильтрована по месяцу, чтобы видеть тренд)
                         sku_orders = df_orders[df_orders['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
                         sku_defects = df_approved[df_approved['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ').size().reset_index(name='Брак')
                         
