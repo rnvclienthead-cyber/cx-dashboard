@@ -424,8 +424,14 @@ elif page == "🧠 Обучение ИИ":
                     else:
                         new_memory_dict = {}
                         for idx, row in df_import.iterrows():
-                            # Собираем текст
-                            parts = [str(row[tc]).strip() for tc in text_cols if pd.notna(row[tc]) and str(row[tc]).strip().lower() not in ['nan', 'none']]
+                            # Собираем текст, игнорируя ошибки типов
+                            parts = []
+                            for tc in text_cols:
+                                if tc in row and pd.notna(row[tc]):
+                                    cell_val = str(row[tc]).strip()
+                                    if cell_val.lower() not in ['nan', 'none', '']:
+                                        parts.append(cell_val)
+                            
                             combined_text = " ".join(parts).strip()
                             if not combined_text: continue
                             
