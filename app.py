@@ -594,8 +594,9 @@ elif page == "🔬 ИИ Тегирование":
                         chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
                         
                         # 2. ВОЗВРАЩАЕМ СТАРУЮ ХИТРОСТЬ: Делаем короткие REF_ID
+                        # Это защитит нас от того, что ИИ перепутает сложный SRID
                         chunk['temp_id'] = [f"REF_{x}" for x in range(len(chunk))]
-                        srid_map = dict(zip(chunk['temp_id'], chunk['srid'])) 
+                        srid_map = dict(zip(chunk['temp_id'], chunk['srid'])) # Словарь REF -> настоящий SRID
                         
                         # Формируем данные для отправки с короткими ID
                         batch_to_send = []
@@ -615,7 +616,7 @@ elif page == "🔬 ИИ Тегирование":
                         # 4. Сохраняем в SQL и пишем подробности в SQL-журнал
                         if results:
                             saved_count = 0
-                            batch_details = [] 
+                            batch_details = [] # Список для формирования TEXT в колонку details
                             
                             for res in results:
                                 if "error" in res:
@@ -637,6 +638,7 @@ elif page == "🔬 ИИ Тегирование":
                                 if real_srid and cats_array:
                                     updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
                                     if updates:
+                                        # Пытаемся обновить строку в БД
                                         if update_db_row(real_srid, updates):
                                             saved_count += 1
                                             batch_details.append(f"✅ SRID {real_srid}: теги {cats_array}")
@@ -645,8 +647,10 @@ elif page == "🔬 ИИ Тегирование":
                                 else:
                                     batch_details.append(f"❓ ПРОПУСК: SRID для {clean_temp_id} не найден в маппинге")
                             
+                            # Формируем итоговый текст для колонки details в system_logs
                             full_log_text = f"Пачка обработана: {saved_count} из {len(chunk)} сохранены.\n" + "\n".join(batch_details)
                             
+                            # Пишем в SQL через твой add_system_log
                             if saved_count > 0:
                                 add_system_log(f"Пачка {i}", "SUCCESS", full_log_text)
                             else:
@@ -654,12 +658,14 @@ elif page == "🔬 ИИ Тегирование":
                         else:
                             add_system_log(f"Пачка {i}", "ERROR", "ИИ вернул пустой результат (результаты отсутствуют)")
 
-                        # === ДОБАВЛЕН БЛОК ОБНОВЛЕНИЯ ПРОГРЕССА ===
+                        # ==========================================
+                        # === ВОТ ОНО: ОБНОВЛЕНИЕ ПРОГРЕСС-БАРА ===
+                        # ==========================================
                         current_processed = min(total_rows, i + len(chunk))
                         progress_percent = current_processed / total_rows
                         progress_bar.progress(progress_percent)
                         status_text.text(f"⏳ Прогресс: {int(progress_percent * 100)}% ({current_processed} из {total_rows})")
-                        # =========================================
+                        # ==========================================
 
                     st.success("✅ Тегирование успешно завершено! Проверьте отчет производства.")
                     st.rerun()
