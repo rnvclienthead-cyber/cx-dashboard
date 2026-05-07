@@ -422,8 +422,9 @@ async def run_ai_batch_processing(df_to_tag, model_choice, memory_string="", mod
 
 @st.cache_data(ttl=120) 
 def load_cached_hybrid_data():
-    # УБРАЛИ JOIN с wb_claims и скачивание ссылок на фото.
-    # Это разгрузит память и ускорит запрос в несколько раз!
+    # Идеальный баланс: 
+    # 1. Нет тяжелых фото
+    # 2. SQL фильтрует сам, но использует TRIM() для защиты от лишних пробелов (спасает Апрель и Май)
     query = """
         SELECT 
             v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
@@ -431,9 +432,20 @@ def load_cached_hybrid_data():
             v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
             v."Корректировка", v."Номер поставки"
         FROM view_cx_dashboard v
+        WHERE LOWER(TRIM(CAST(v."Решение по возврату покупателю" AS TEXT))) IN ('одобрено', '2', '2.0', 'да', 'true')
+           OR LOWER(TRIM(CAST(v."Статус товара" AS TEXT))) IN ('одобрено', '2', '2.0', 'да', 'true')
     """
-    df_temp = pd.read_sql(query, engine)
-    
+    df_temp = pd.DataFrame()
+    try:
+        df_temp = pd.read_sql(query, engine)
+    except Exception as e:
+        print(f"Ошибка SQL: {e}")
+        return df_temp
+        
+    if df_temp.empty: 
+        return df_temp
+
+    # --- Быстрая косметика в Pandas (данных теперь мало, отработает за миллисекунды) ---
     date_col = next((c for c in df_temp.columns if 'оформления заявки' in str(c).lower()), None)
     
     if date_col:
@@ -442,13 +454,7 @@ def load_cached_hybrid_data():
     else:
         df_temp['Дата_ДТ'] = pd.NaT
         
-    # СТАРАЯ НАДЕЖНАЯ ФИЛЬТРАЦИЯ (Апрель и Май теперь не пропадут!)
-    valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
-    df_temp = df_temp[
-        df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
-        df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
-    ]
-    
+    # Дополнительная страховка: чистим артикулы
     df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
     df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
 
@@ -458,9 +464,12 @@ def load_cached_hybrid_data():
     df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
         
     try:
+        # Инвойсы
         inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
         if inv_id:
-            df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
+            client = get_gspread_client()
+            df_inv = pd.DataFrame(client.open_by_key(inv_id).get_worksheet(0).get_all_records())
+            
             if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
                 df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
                 
@@ -475,16 +484,12 @@ def load_cached_hybrid_data():
                 
                 if inv_col:
                     df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
-                    inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
-                        'Номер поставки_clean'
-                    )['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
+                    inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby('Номер поставки_clean')['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
                     
                     if 'Инвойс' in df_temp.columns: 
                         df_temp = df_temp.drop(columns=['Инвойс'])
                     
                     df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
-                else:
-                    st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
                 
                 if 'Номер поставки_clean' in df_temp.columns:
                     df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
@@ -495,23 +500,26 @@ def load_cached_hybrid_data():
 
 @st.cache_data(ttl=120)
 def load_cached_orders():
+    # ОПТИМИЗАЦИЯ: Фильтрация отмен и группировка по месяцам перенесена в SQL!
     query = """
-        SELECT dt, supplier_article AS "Артикул продавца", cancel_dt 
+        SELECT 
+            TRIM(supplier_article) AS "Артикул продавца", 
+            DATE_TRUNC('month', dt) AS "Месяц_ДТ",
+            COUNT(*) AS "Чистые_заказы"
         FROM wb_orders
+        WHERE cancel_dt IS NULL
+          AND supplier_article IS NOT NULL 
+          AND TRIM(supplier_article) != ''
+        GROUP BY 1, 2
     """
     try: 
-        df_ord = pd.read_sql(query, engine)
+        final_orders = pd.read_sql(query, engine)
         
-        if df_ord.empty:
+        if final_orders.empty:
             return pd.DataFrame()
 
-        df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
-        df_ord = df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
-        
-        df_ord['Месяц_ДТ'] = pd.to_datetime(df_ord['dt']).dt.to_period('M').dt.to_timestamp()
-        
-        valid_orders = df_ord[pd.isna(df_ord['cancel_dt'])]
-        final_orders = valid_orders.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Чистые_заказы')
+        # SQL отдает дату, просто убедимся, что Pandas понимает её как datetime
+        final_orders['Месяц_ДТ'] = pd.to_datetime(final_orders['Месяц_ДТ'])
         
         return final_orders
     except Exception as e: 
