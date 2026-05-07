@@ -620,53 +620,50 @@ elif page == "🔬 ИИ Тегирование":
                         
                         results = loop.run_until_complete(send_batch())
                         
-                        # 4. Сохраняем в SQL
+                        # 4. Сохраняем в SQL и пишем подробности в SQL-журнал
                         if results:
                             saved_count = 0
+                            batch_details = [] # Список для формирования TEXT в колонку details
                             
-                            # ДИАГНОСТИКА НА ЭКРАН: Смотрим, что реально вернул ИИ
-                            with log_container:
-                                with st.expander(f"Ответ ИИ (Пачка {i}-{i+len(chunk)})"):
-                                    st.json(results)
-                                    st.write(f"Словарь маппинга: {srid_map}")
-                                    
                             for res in results:
-                                if "error" in res: continue
+                                if "error" in res:
+                                    batch_details.append(f"❌ Ошибка ИИ: {res.get('error')}")
+                                    continue
                                 
-                                # ЖЕСТКАЯ ОЧИСТКА ID
+                                # Очистка ID
                                 raw_id = str(res.get('id', '')).upper()
                                 num_match = re.search(r'\d+', raw_id)
                                 
                                 if not num_match: 
+                                    batch_details.append(f"⚠️ Сбой ID: ИИ вернул '{raw_id}' без цифр")
                                     continue 
                                     
-                                # Восстанавливаем эталонный формат ключа
                                 clean_temp_id = f"REF_{num_match.group()}"
                                 cats_array = res.get('category_ids', [])
-                                
-                                # Ищем настоящий SRID по восстановленному ключу
                                 real_srid = srid_map.get(clean_temp_id)
                                 
                                 if real_srid and cats_array:
                                     updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
                                     if updates:
-                                        is_success = update_db_row(real_srid, updates)
-                                        if is_success:
+                                        # Пытаемся обновить строку в БД
+                                        if update_db_row(real_srid, updates):
                                             saved_count += 1
-                                            
-                            with log_container:
-                                st.success(f"Пачка {i}-{i+len(chunk)}: Записано в базу {saved_count} строк.")
-                        
-                        # Обновляем прогресс
-                        current_processed = i + len(chunk)
-                        progress_percent = min(1.0, current_processed / total_rows)
-                        progress_bar.progress(progress_percent)
-                        status_text.text(f"⏳ Прогресс: {int(progress_percent * 100)}% ({current_processed} из {total_rows})")
-
-                    st.success("✅ Тегирование успешно завершено! Проверьте отчет производства.")
-                    st.rerun()
-            else:
-                st.success("🎉 Все заявки в базе имеют первичную разметку!")
+                                            batch_details.append(f"✅ SRID {real_srid}: теги {cats_array}")
+                                        else:
+                                            batch_details.append(f"🚨 ОШИБКА SQL: SRID {real_srid} не обновлен")
+                                else:
+                                    batch_details.append(f"❓ ПРОПУСК: SRID для {clean_temp_id} не найден в маппинге")
+                            
+                            # Формируем итоговый текст для колонки details в system_logs
+                            full_log_text = f"Пачка обработана: {saved_count} из {len(chunk)} сохранены.\n" + "\n".join(batch_details)
+                            
+                            # Пишем в SQL через твой add_system_log
+                            if saved_count > 0:
+                                add_system_log(f"Пачка {i}", "SUCCESS", full_log_text)
+                            else:
+                                add_system_log(f"Пачка {i}", "WARNING", full_log_text)
+                        else:
+                            add_system_log(f"Пачка {i}", "ERROR", "ИИ вернул пустой результат (результаты отсутствуют)")
 
         with t2:
             st.subheader("Глубокая проверка (Аудит от Grok)")
