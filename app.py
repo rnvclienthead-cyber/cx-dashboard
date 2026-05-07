@@ -216,12 +216,10 @@ def update_db_row(srid, updates_dict):
 # ==========================================
 # ИИ ДВИЖОК
 # ==========================================
-def parse_ai_response(text_response):
+def parse_ai_response(text):
     try:
-        # Агрессивная очистка как в твоем старом коде
-        clean_text = re.sub(r'```json|```', '', str(text_response)).strip()
-        
-        # Обрезаем всё, что до первой скобки и после последней
+        clean_text = re.sub(r'```json|```', '', str(text)).strip()
+        # Защита от мусора до/после JSON
         start = min([i for i in [clean_text.find('['), clean_text.find('{')] if i >= 0] or [0])
         end = max(clean_text.rfind(']'), clean_text.rfind('}')) + 1
         if start >= 0 and end > 0:
@@ -230,10 +228,9 @@ def parse_ai_response(text_response):
         parsed = json.loads(clean_text)
         if isinstance(parsed, dict): return parsed.get('results', [])
         elif isinstance(parsed, list): return parsed
-        else: return []
+        else: return [{"error": f"Неожиданный формат: {type(parsed)}"}]
     except Exception as e:
-        print(f"🚨 ОШИБКА ПАРСЕРА: {e}\nТекст: {text_response}")
-        return []
+        return [{"error": f"Сбой формата JSON: {str(e)} | Ответ ИИ: {text}"}]
         
 def find_similar_examples_sql(target_text, engine, top_n=15):
     """
