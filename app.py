@@ -1232,6 +1232,7 @@ elif page == "⚠️ Уровень PPM":
     import numpy as np
     import plotly.graph_objects as go
     from datetime import datetime
+    from sqlalchemy import text
 
     try:
         # --- ФУНКЦИЯ ОБНОВЛЕНИЯ ABC В SQL ---
@@ -1256,11 +1257,19 @@ elif page == "⚠️ Уровень PPM":
             # 1. Загружаем Историю PPM (Янв-Мар)
             df_hist = pd.DataFrame()
             try:
+                # ИСПРАВЛЕНИЕ: Точное переименование source -> Source
                 df_hist = pd.read_sql("SELECT article, month_date, defects, orders, source FROM historical_ppm", engine)
                 if not df_hist.empty:
-                    df_hist.rename(columns={'article': 'Артикул', 'month_date': 'Месяц_ДТ', 'defects': 'Брак', 'orders': 'Заказы'}, inplace=True)
+                    df_hist.rename(columns={
+                        'article': 'Артикул', 
+                        'month_date': 'Месяц_ДТ', 
+                        'defects': 'Брак', 
+                        'orders': 'Заказы',
+                        'source': 'Source'  # ВОТ ЗДЕСЬ БЫЛА ОШИБКА РЕГИСТРА
+                    }, inplace=True)
                     df_hist['Месяц_ДТ'] = pd.to_datetime(df_hist['Месяц_ДТ'])
-            except: pass
+            except Exception as e: 
+                st.warning(f"Не удалось загрузить историю PPM: {e}")
 
             # 2. Загружаем Классификацию (ABC-XYZ) из новой SQL таблицы
             df_abc = pd.DataFrame()
@@ -1268,7 +1277,8 @@ elif page == "⚠️ Уровень PPM":
                 df_abc = pd.read_sql("SELECT article, class_abc, class_xyz FROM product_classification", engine)
                 if not df_abc.empty:
                     df_abc.rename(columns={'article': 'Артикул', 'class_abc': 'ABC_Группа', 'class_xyz': 'Класс XYZ'}, inplace=True)
-            except: pass
+            except Exception as e: 
+                st.warning(f"Не удалось загрузить классы ABC: {e}")
 
         # --- ЗАГРУЗЧИК ---
         with st.expander(":material/upload_file: Обновить справочник ABC-XYZ", expanded=False):
