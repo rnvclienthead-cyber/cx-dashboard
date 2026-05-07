@@ -186,7 +186,8 @@ def update_db_row(srid, updates_dict):
             conn.execute(sql, {**updates_dict, "srid": srid})
             
             # САМООБУЧЕНИЕ: Если была ручная корректировка, сохраняем её как опыт
-            if "correction" in updates_dict and updates_dict["correction"]:
+            # ВАЖНО: Исключаем системные статусы, чтобы ИИ не выучил их как теги
+            if "correction" in updates_dict and updates_dict["correction"] and updates_dict["correction"] not in ["Подтверждено", "Нет тегов"]:
                 # Достаем текст отзыва для этой заявки
                 claim_text = conn.execute(text("SELECT user_comment FROM wb_claims WHERE srid = :srid"), {"srid": srid}).scalar()
                 if claim_text:
