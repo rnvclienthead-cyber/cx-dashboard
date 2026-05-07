@@ -12,7 +12,7 @@ import io
 import zipfile
 import urllib.request
 import base64
-import streamlit.components.v1 as components
+import streamlit.components.v1 as componentsаа
 import time
 from sqlalchemy import create_engine, text
 
@@ -1306,33 +1306,32 @@ elif page == "⚠️ Уровень PPM":
             
             st.markdown("### :material/tune: Настройки отображения")
             f1, f2 = st.columns(2)
+            
+            # Фильтр месяцев (только для таблицы)
             sel_months = f1.multiselect("📅 Период для таблицы:", options=available_months, default=available_months[-1:])
             
-            # Синхронизация выбора через сессию
-            if "selected_sku_ppm" not in st.session_state:
-                st.session_state.selected_sku_ppm = '[Все артикулы]'
-
-            # Находим индекс для selectbox
-            default_index = 0
+            # Мультифильтр для объектов (для таблицы И графика)
             all_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + sku_options
-            if st.session_state.selected_sku_ppm in all_options:
-                default_index = all_options.index(st.session_state.selected_sku_ppm)
+            sel_skus = f2.multiselect("📦 Объекты (Таблица + График):", options=all_options, default=['[Все артикулы]'])
 
-            sel_sku = f2.selectbox("📦 Выбор товара:", options=all_options, index=default_index, key="sku_selector")
-            st.session_state.selected_sku_ppm = sel_sku
-
-            # Логика фильтрации
-            if sel_sku == '[Все артикулы]':
-                filtered_sku_df = df_total.copy()
-            elif sel_sku.startswith('[Вся Группа'):
-                g = sel_sku.replace('[Вся Группа ', '').replace(']', '')
-                filtered_sku_df = df_total[df_total['ABC_Группа'] == g].copy()
+            # --- СИНХРОННАЯ ФИЛЬТРАЦИЯ ---
+            active_skus = set()
+            if not sel_skus or '[Все артикулы]' in sel_skus:
+                active_skus.update(sku_options)
             else:
-                filtered_sku_df = df_total[df_total['Артикул'] == sel_sku].copy()
+                for item in sel_skus:
+                    if item.startswith('[Вся Группа'):
+                        g = item.replace('[Вся Группа ', '').replace(']', '')
+                        active_skus.update(df_total[df_total['ABC_Группа'] == g]['Артикул'].tolist())
+                    else:
+                        active_skus.add(item)
+            
+            filtered_sku_df = df_total[df_total['Артикул'].isin(active_skus)].copy()
 
-            table_df = filtered_sku_df[filtered_sku_df['Месяц_Стр'].isin(sel_months)].copy()
+            # Датафрейм для таблицы (с учетом месяцев)
+            table_df = filtered_sku_df[filtered_sku_df['Месяц_Стр'].isin(sel_months)].copy() if sel_months else filtered_sku_df.copy()
 
-            # Подготовка таблицы
+            # Агрегация таблицы
             table_agg = table_df.groupby(['Артикул', 'ABC_Группа', 'Класс XYZ']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
             table_agg['PPM'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 1000000, 0).astype(int)
             table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
@@ -1351,7 +1350,7 @@ elif page == "⚠️ Уровень PPM":
                 st.markdown("#### :material/table_rows: Артикулы")
                 def highlight(row): return ['background-color: #fee2e2; color: #991b1b' if row.get('PPM',0) > 10000 else ''] * len(row)
                 
-                # ИНТЕРАКТИВ И ПЕРЕИМЕНОВАНИЕ СТОЛБЦОВ
+                # ИНТЕРАКТИВ И КОРОТКИЕ ЗАГОЛОВКИ
                 selection = st.dataframe(
                     table_agg.style.apply(highlight, axis=1), 
                     use_container_width=True, hide_index=True, height=450,
@@ -1367,26 +1366,36 @@ elif page == "⚠️ Уровень PPM":
                     }
                 )
 
-                # Обработка выбора строки
-                if selection.selection.rows:
-                    selected_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул']
-                    if st.session_state.selected_sku_ppm != selected_sku:
-                        st.session_state.selected_sku_ppm = selected_sku
-                        st.rerun()
+                clicked_sku = None
+                if hasattr(selection, 'selection') and selection.selection.rows:
+                    clicked_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул']
 
             with col_chart:
-                if not filtered_sku_df.empty:
-                    latest = filtered_sku_df['Месяц_ДТ'].max()
+                # ЛОГИКА ГРАФИКА: Либо кликнутый артикул, либо сводка по всем выбранным в мультифильтре
+                if clicked_sku:
+                    chart_base_df = filtered_sku_df[filtered_sku_df['Артикул'] == clicked_sku].copy()
+                    chart_title = f"Динамика: {clicked_sku}"
+                else:
+                    chart_base_df = filtered_sku_df.copy()
+                    if not sel_skus or '[Все артикулы]' in sel_skus:
+                        chart_title = "Динамика: Все артикулы (Сводно)"
+                    elif len(active_skus) == 1:
+                        chart_title = f"Динамика: {list(active_skus)[0]}"
+                    else:
+                        chart_title = "Динамика: Выбранные объекты (Сводно)"
+
+                if not chart_base_df.empty:
+                    latest = chart_base_df['Месяц_ДТ'].max()
                     start = latest - pd.DateOffset(months=11)
-                    chart_agg = filtered_sku_df[filtered_sku_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
+                    chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
                     chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                     chart_agg = chart_agg.sort_values('Месяц_ДТ')
 
-                    # ДИНАМИЧЕСКИЙ ЛИМИТ ОСИ (20к или выше)
+                    # ДИНАМИЧЕСКИЙ ЛИМИТ ОСИ (до 20к по умолчанию)
                     max_val = chart_agg['PPM'].max() if not chart_agg.empty else 0
                     y_limit = max(20000, max_val * 1.15)
 
-                    st.markdown(f"#### :material/monitoring: Динамика: {st.session_state.selected_sku_ppm}")
+                    st.markdown(f"#### :material/monitoring: {chart_title}")
                     fig = go.Figure()
                     for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
                         curr = chart_agg[chart_agg['Source'] == src]
