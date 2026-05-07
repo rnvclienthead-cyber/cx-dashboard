@@ -1235,7 +1235,6 @@ elif page == "⚠️ Уровень PPM":
     from sqlalchemy import text
 
     try:
-        # --- ФУНКЦИЯ ОБНОВЛЕНИЯ ABC В SQL ---
         def update_abc_in_sql(df_to_upload):
             if engine and not df_to_upload.empty:
                 try:
@@ -1254,7 +1253,6 @@ elif page == "⚠️ Уровень PPM":
             df_sys = load_cached_hybrid_data()
             df_orders_sys = load_cached_orders()
             
-            # 1. Загрузка истории (historical_ppm)
             df_hist = pd.DataFrame()
             try:
                 df_hist = pd.read_sql("SELECT article, month_date, defects, orders, source FROM historical_ppm", engine)
@@ -1263,7 +1261,6 @@ elif page == "⚠️ Уровень PPM":
                     df_hist['Месяц_ДТ'] = pd.to_datetime(df_hist['Месяц_ДТ'])
             except Exception as e: st.warning(f"История недоступна: {e}")
 
-            # 2. Загрузка классификации (product_classification)
             df_abc = pd.DataFrame()
             try:
                 df_abc = pd.read_sql("SELECT article, class_abc, class_xyz FROM product_classification", engine)
@@ -1271,7 +1268,6 @@ elif page == "⚠️ Уровень PPM":
                     df_abc.rename(columns={'article':'Артикул', 'class_abc':'ABC_Группа', 'class_xyz':'Класс XYZ'}, inplace=True)
             except Exception as e: st.warning(f"Справочник ABC недоступен: {e}")
 
-        # --- ЗАГРУЗЧИК ---
         with st.expander(":material/upload_file: Обновить справочник ABC-XYZ", expanded=False):
             abc_file = st.file_uploader("Загрузить XLSX/CSV", type=['csv', 'xlsx', 'xls'], label_visibility="collapsed")
             if abc_file:
@@ -1283,7 +1279,6 @@ elif page == "⚠️ Уровень PPM":
                             st.rerun()
 
         if not df_orders_sys.empty:
-            # Подготовка системных данных
             df_sys['Размечено'] = df_sys.apply(lambda r: any(str(r.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14)), axis=1)
             df_app_sys = df_sys[df_sys['Размечено'] == True].copy()
             if not df_app_sys.empty:
@@ -1294,7 +1289,6 @@ elif page == "⚠️ Уровень PPM":
             sys_metrics.rename(columns={'Артикул продавца':'Артикул', 'Чистые_заказы':'Заказы'}, inplace=True)
             sys_metrics['Source'] = 'System'
 
-            # Объединение
             df_total = pd.concat([df_hist, sys_metrics], ignore_index=True)
             if not df_abc.empty:
                 df_total = pd.merge(df_total, df_abc, on='Артикул', how='left')
@@ -1306,24 +1300,28 @@ elif page == "⚠️ Уровень PPM":
             months_ru = {1:'Янв', 2:'Фев', 3:'Мар', 4:'Апр', 5:'Май', 6:'Июн', 7:'Июл', 8:'Авг', 9:'Сен', 10:'Окт', 11:'Ноя', 12:'Дек'}
             df_total['Месяц_Стр'] = df_total['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_total['Месяц_ДТ'].dt.year.astype(str)
 
-            # --- ФИЛЬТРЫ ---
-            available_months = df_total.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=True)['Месяц_Стр'].tolist()
+            # --- ПАНЕЛЬ ФИЛЬТРОВ ---
             sku_options = sorted(df_total['Артикул'].unique().tolist())
+            available_months = df_total.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=True)['Месяц_Стр'].tolist()
             
             st.markdown("### :material/tune: Настройки отображения")
             f1, f2 = st.columns(2)
             sel_months = f1.multiselect("📅 Период для таблицы:", options=available_months, default=available_months[-1:])
             
-            # Состояние для синхронизации клика и селекта
+            # Синхронизация выбора через сессию
             if "selected_sku_ppm" not in st.session_state:
                 st.session_state.selected_sku_ppm = '[Все артикулы]'
-            
-            sel_sku = f2.selectbox("📦 Выбор товара:", ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + sku_options, 
-                                   index=0 if st.session_state.selected_sku_ppm == '[Все артикулы]' else (sku_options.index(st.session_state.selected_sku_ppm)+4 if st.session_state.selected_sku_ppm in sku_options else 0),
-                                   key="sku_selector")
 
-            # --- ЛОГИКА ФИЛЬТРАЦИИ ---
-            current_sku = sel_sku
+            # Находим индекс для selectbox
+            default_index = 0
+            all_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + sku_options
+            if st.session_state.selected_sku_ppm in all_options:
+                default_index = all_options.index(st.session_state.selected_sku_ppm)
+
+            sel_sku = f2.selectbox("📦 Выбор товара:", options=all_options, index=default_index, key="sku_selector")
+            st.session_state.selected_sku_ppm = sel_sku
+
+            # Логика фильтрации
             if sel_sku == '[Все артикулы]':
                 filtered_sku_df = df_total.copy()
             elif sel_sku.startswith('[Вся Группа'):
@@ -1334,12 +1332,13 @@ elif page == "⚠️ Уровень PPM":
 
             table_df = filtered_sku_df[filtered_sku_df['Месяц_Стр'].isin(sel_months)].copy()
 
-            # --- ТАБЛИЦА ---
+            # Подготовка таблицы
             table_agg = table_df.groupby(['Артикул', 'ABC_Группа', 'Класс XYZ']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
             table_agg['PPM'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 1000000, 0).astype(int)
             table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
             table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
+            # Метрики
             st.markdown("### :material/analytics: Сводка")
             m1, m2, m3 = st.columns(3)
             m1.metric("Группа A", len(table_agg[table_agg['ABC_Группа'] == 'A']))
@@ -1352,44 +1351,42 @@ elif page == "⚠️ Уровень PPM":
                 st.markdown("#### :material/table_rows: Артикулы")
                 def highlight(row): return ['background-color: #fee2e2; color: #991b1b' if row.get('PPM',0) > 10000 else ''] * len(row)
                 
-                # ИНТЕРАКТИВ: Обработка клика
+                # ИНТЕРАКТИВ И ПЕРЕИМЕНОВАНИЕ СТОЛБЦОВ
                 selection = st.dataframe(
                     table_agg.style.apply(highlight, axis=1), 
                     use_container_width=True, hide_index=True, height=450,
                     on_select="rerun", selection_mode="single-row",
                     column_config={
-                        "Заказы": st.column_config.NumberColumn(format="%d"),
-                        "Брак": st.column_config.NumberColumn(format="%d"),
-                        "%": st.column_config.NumberColumn(format="%.2f"),
-                        "PPM": st.column_config.NumberColumn(format="%d")
+                        "Артикул": st.column_config.TextColumn("Артикул", width="medium"),
+                        "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
+                        "Класс XYZ": st.column_config.TextColumn("XYZ", width="small"),
+                        "Заказы": st.column_config.NumberColumn("Заказы", format="%d", width="small"),
+                        "Брак": st.column_config.NumberColumn("Брак", format="%d", width="small"),
+                        "%": st.column_config.NumberColumn("%", format="%.2f", width="small"),
+                        "PPM": st.column_config.NumberColumn("PPM", format="%d", width="small")
                     }
                 )
 
+                # Обработка выбора строки
                 if selection.selection.rows:
-                    selected_row_index = selection.selection.rows[0]
-                    clicked_sku = table_agg.iloc[selected_row_index]['Артикул']
-                    if st.session_state.selected_sku_ppm != clicked_sku:
-                        st.session_state.selected_sku_ppm = clicked_sku
+                    selected_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул']
+                    if st.session_state.selected_sku_ppm != selected_sku:
+                        st.session_state.selected_sku_ppm = selected_sku
                         st.rerun()
 
             with col_chart:
-                # Фильтруем данные для графика (динамика за 12 мес)
-                # Если кликнули в таблице, график строится по кликнутому SKU
-                final_plot_df = filtered_sku_df.copy()
-                title_label = sel_sku
-                
-                if not final_plot_df.empty:
-                    latest = final_plot_df['Месяц_ДТ'].max()
+                if not filtered_sku_df.empty:
+                    latest = filtered_sku_df['Месяц_ДТ'].max()
                     start = latest - pd.DateOffset(months=11)
-                    chart_agg = final_plot_df[final_plot_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
+                    chart_agg = filtered_sku_df[filtered_sku_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
                     chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                     chart_agg = chart_agg.sort_values('Месяц_ДТ')
 
-                    # ДИНАМИЧЕСКИЙ ЛИМИТ ОСИ (Пункт 2 вашего запроса)
-                    max_ppm_in_data = chart_agg['PPM'].max() if not chart_agg.empty else 0
-                    y_limit = max(20000, max_ppm_in_data * 1.15)
+                    # ДИНАМИЧЕСКИЙ ЛИМИТ ОСИ (20к или выше)
+                    max_val = chart_agg['PPM'].max() if not chart_agg.empty else 0
+                    y_limit = max(20000, max_val * 1.15)
 
-                    st.markdown(f"#### :material/monitoring: Динамика: {title_label}")
+                    st.markdown(f"#### :material/monitoring: Динамика: {st.session_state.selected_sku_ppm}")
                     fig = go.Figure()
                     for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
                         curr = chart_agg[chart_agg['Source'] == src]
@@ -1402,8 +1399,8 @@ elif page == "⚠️ Уровень PPM":
                     fig.update_layout(
                         height=420, margin=dict(l=0, r=0, t=20, b=0),
                         legend=dict(orientation="h", y=1.15),
-                        yaxis=dict(title="PPM", range=[0, y_limit]),
-                        yaxis2=dict(overlaying='y', side='right', title="Заказы"),
+                        yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
+                        yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
                         hovermode="x unified"
                     )
                     st.plotly_chart(fig, use_container_width=True)
