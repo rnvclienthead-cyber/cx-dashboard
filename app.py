@@ -568,6 +568,8 @@ elif page == "🔬 ИИ Тегирование":
         
         with t1:
             st.subheader("Разметка новых заявок (Только ID)")
+            
+            # Проверяем, есть ли вообще заявки без тегов
             if not df_unprocessed.empty:
                 total_rows = len(df_unprocessed)
                 col1, col2 = st.columns(2)
@@ -575,6 +577,10 @@ elif page == "🔬 ИИ Тегирование":
                 model_choice = col2.radio("Модель:", ["YandexGPT Lite (Дешево)", "YandexGPT Pro (Умнее)", "Grok (xAI)"], key="mod_tag")
                 
                 model_key = "yandex-lite" if "Lite" in model_choice else "yandex-pro" if "Pro" in model_choice else "grok"
+                
+                # --- ВОССТАНОВЛЕНО: Блок аналитики и расчета стоимости ---
+                est_cost = total_rows * (0.08 if model_key == "yandex-lite" else 0.40 if model_key == "yandex-pro" else 0.50)
+                st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
                 
                 if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
                     st.cache_data.clear() 
@@ -585,7 +591,6 @@ elif page == "🔬 ИИ Тегирование":
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     
-                    # --- ВОТ ЭТОТ ЦИКЛ И ЕСТЬ РЕШЕНИЕ (ШАГ 3) ---
                     for i in range(0, total_rows, batch_size):
                         chunk = df_unprocessed.iloc[i:i+batch_size]
                         
@@ -594,36 +599,37 @@ elif page == "🔬 ИИ Тегирование":
                         for _, row in chunk.iterrows():
                             t_text = str(row.get('user_comment',''))
                             if t_text:
-                                # Ищем в SQL похожие примеры именно для этого текста
                                 mem = find_similar_examples_sql(t_text, engine, top_n=2)
                                 if mem and "Прямых совпадений" not in mem:
                                     memory_list.append(mem)
                         
-                        # Склеиваем найденный опыт в одну строку для промпта
                         chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
                         
-                        # 2. Запускаем обработку пачки, передавая ей "память"
-                        # Убедись, что функция run_ai_batch_processing теперь принимает memory_string
+                        # 2. Запускаем обработку пачки
                         results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, memory_string=chunk_memory, mode="tagging"))
                         
-                        # 3. Сохраняем результаты в базу сразу после каждой пачки
+                        # 3. Сохраняем результаты в базу
                         if results:
                             for res in results:
                                 if "error" in res: continue
                                 srid = res.get('id')
                                 cats_array = res.get('category_ids', [])
                                 if srid and cats_array:
-                                    # Формируем словарь обновлений (ставим True для выбранных категорий)
                                     updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
                                     update_db_row(srid, updates)
 
-                        # Обновляем визуальный прогресс (чтобы вебсокет не закрывался)
-                        progress_percent = min(1.0, (i + len(chunk)) / total_rows)
+                        # --- ВОССТАНОВЛЕНО: Проценты и количество в прогресс-баре ---
+                        current_processed = i + len(chunk)
+                        progress_percent = min(1.0, current_processed / total_rows)
                         progress_bar.progress(progress_percent)
-                        status_text.text(f"⏳ Обработано: {i + len(chunk)} из {total_rows}")
+                        status_text.text(f"⏳ Прогресс: {int(progress_percent * 100)}% ({current_processed} из {total_rows})")
 
                     st.success("✅ Тегирование успешно завершено!")
                     st.rerun()
+                    
+            else:
+                # --- ВОССТАНОВЛЕНО: Сообщение, когда нет доступных заявок ---
+                st.success("🎉 Все заявки в базе имеют первичную разметку!")
 
         with t2:
             st.subheader("Глубокая проверка (Аудит от Grok)")
