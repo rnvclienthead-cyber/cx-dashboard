@@ -1249,6 +1249,9 @@ elif page == "⚠️ Уровень PPM":
                     return False
             return False
 
+        # ==========================================
+        # 1. ТЯЖЕЛАЯ ЧАСТЬ (Выполняется 1 раз при входе)
+        # ==========================================
         with st.spinner("Синхронизация данных..."):
             df_sys = load_cached_hybrid_data()
             df_orders_sys = load_cached_orders()
@@ -1300,121 +1303,115 @@ elif page == "⚠️ Уровень PPM":
             months_ru = {1:'Янв', 2:'Фев', 3:'Мар', 4:'Апр', 5:'Май', 6:'Июн', 7:'Июл', 8:'Авг', 9:'Сен', 10:'Окт', 11:'Ноя', 12:'Дек'}
             df_total['Месяц_Стр'] = df_total['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_total['Месяц_ДТ'].dt.year.astype(str)
 
-            # --- ПАНЕЛЬ ФИЛЬТРОВ ---
             sku_options = sorted(df_total['Артикул'].unique().tolist())
             available_months = df_total.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=True)['Месяц_Стр'].tolist()
-            
-            st.markdown("### :material/tune: Настройки отображения")
-            f1, f2 = st.columns(2)
-            
-            # Фильтр месяцев (только для таблицы)
-            sel_months = f1.multiselect("📅 Период для таблицы:", options=available_months, default=available_months[-1:])
-            
-            # Мультифильтр для объектов (для таблицы И графика)
-            all_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + sku_options
-            sel_skus = f2.multiselect("📦 Объекты (Таблица + График):", options=all_options, default=['[Все артикулы]'])
 
-            # --- СИНХРОННАЯ ФИЛЬТРАЦИЯ ---
-            active_skus = set()
-            if not sel_skus or '[Все артикулы]' in sel_skus:
-                active_skus.update(sku_options)
-            else:
-                for item in sel_skus:
-                    if item.startswith('[Вся Группа'):
-                        g = item.replace('[Вся Группа ', '').replace(']', '')
-                        active_skus.update(df_total[df_total['ABC_Группа'] == g]['Артикул'].tolist())
-                    else:
-                        active_skus.add(item)
-            
-            filtered_sku_df = df_total[df_total['Артикул'].isin(active_skus)].copy()
-
-            # Датафрейм для таблицы (с учетом месяцев)
-            table_df = filtered_sku_df[filtered_sku_df['Месяц_Стр'].isin(sel_months)].copy() if sel_months else filtered_sku_df.copy()
-
-            # Агрегация таблицы
-            table_agg = table_df.groupby(['Артикул', 'ABC_Группа', 'Класс XYZ']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
-            table_agg['PPM'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 1000000, 0).astype(int)
-            table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
-            table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
-
-            # Метрики
-            st.markdown("### :material/analytics: Сводка")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Группа A", len(table_agg[table_agg['ABC_Группа'] == 'A']))
-            m2.metric("Группа B", len(table_agg[table_agg['ABC_Группа'] == 'B']))
-            m3.metric("Группа C", len(table_agg[table_agg['ABC_Группа'] == 'C']))
-
-            col_table, col_chart = st.columns([2.5, 2], gap="large") 
-
-            with col_table:
-                st.markdown("#### :material/table_rows: Артикулы")
-                def highlight(row): return ['background-color: #fee2e2; color: #991b1b' if row.get('PPM',0) > 10000 else ''] * len(row)
+            # ==========================================
+            # 2. ИНТЕРАКТИВНЫЙ ФРАГМЕНТ (Перезапускается только он)
+            # ==========================================
+            @st.fragment
+            def render_ppm_dashboard(df_full, skus, months):
+                st.markdown("### :material/tune: Настройки отображения")
+                f1, f2 = st.columns(2)
                 
-                # ИНТЕРАКТИВ И КОРОТКИЕ ЗАГОЛОВКИ
-                selection = st.dataframe(
-                    table_agg.style.apply(highlight, axis=1), 
-                    use_container_width=True, hide_index=True, height=450,
-                    on_select="rerun", selection_mode="single-row",
-                    column_config={
-                        "Артикул": st.column_config.TextColumn("Артикул", width="medium"),
-                        "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
-                        "Класс XYZ": st.column_config.TextColumn("XYZ", width="small"),
-                        "Заказы": st.column_config.NumberColumn("Заказы", format="%d", width="small"),
-                        "Брак": st.column_config.NumberColumn("Брак", format="%d", width="small"),
-                        "%": st.column_config.NumberColumn("%", format="%.2f", width="small"),
-                        "PPM": st.column_config.NumberColumn("PPM", format="%d", width="small")
-                    }
-                )
+                sel_months = f1.multiselect("📅 Период для таблицы:", options=months, default=months[-1:])
+                all_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + skus
+                sel_skus = f2.multiselect("📦 Объекты (Таблица + График):", options=all_options, default=['[Все артикулы]'])
 
-                clicked_sku = None
-                if hasattr(selection, 'selection') and selection.selection.rows:
-                    clicked_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул']
-
-            with col_chart:
-                # ЛОГИКА ГРАФИКА: Либо кликнутый артикул, либо сводка по всем выбранным в мультифильтре
-                if clicked_sku:
-                    chart_base_df = filtered_sku_df[filtered_sku_df['Артикул'] == clicked_sku].copy()
-                    chart_title = f"Динамика: {clicked_sku}"
+                active_skus = set()
+                if not sel_skus or '[Все артикулы]' in sel_skus:
+                    active_skus.update(skus)
                 else:
-                    chart_base_df = filtered_sku_df.copy()
-                    if not sel_skus or '[Все артикулы]' in sel_skus:
-                        chart_title = "Динамика: Все артикулы (Сводно)"
-                    elif len(active_skus) == 1:
-                        chart_title = f"Динамика: {list(active_skus)[0]}"
-                    else:
-                        chart_title = "Динамика: Выбранные объекты (Сводно)"
+                    for item in sel_skus:
+                        if item.startswith('[Вся Группа'):
+                            g = item.replace('[Вся Группа ', '').replace(']', '')
+                            active_skus.update(df_full[df_full['ABC_Группа'] == g]['Артикул'].tolist())
+                        else:
+                            active_skus.add(item)
+                
+                filtered_sku_df = df_full[df_full['Артикул'].isin(active_skus)].copy()
+                table_df = filtered_sku_df[filtered_sku_df['Месяц_Стр'].isin(sel_months)].copy() if sel_months else filtered_sku_df.copy()
 
-                if not chart_base_df.empty:
-                    latest = chart_base_df['Месяц_ДТ'].max()
-                    start = latest - pd.DateOffset(months=11)
-                    chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
-                    chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
-                    chart_agg = chart_agg.sort_values('Месяц_ДТ')
+                table_agg = table_df.groupby(['Артикул', 'ABC_Группа', 'Класс XYZ']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
+                table_agg['PPM'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 1000000, 0).astype(int)
+                table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
+                table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
-                    # ДИНАМИЧЕСКИЙ ЛИМИТ ОСИ (до 20к по умолчанию)
-                    max_val = chart_agg['PPM'].max() if not chart_agg.empty else 0
-                    y_limit = max(20000, max_val * 1.15)
+                st.markdown("### :material/analytics: Сводка")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Группа A", len(table_agg[table_agg['ABC_Группа'] == 'A']))
+                m2.metric("Группа B", len(table_agg[table_agg['ABC_Группа'] == 'B']))
+                m3.metric("Группа C", len(table_agg[table_agg['ABC_Группа'] == 'C']))
 
-                    st.markdown(f"#### :material/monitoring: {chart_title}")
-                    fig = go.Figure()
-                    for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
-                        curr = chart_agg[chart_agg['Source'] == src]
-                        if not curr.empty:
-                            fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=curr['PPM'], textposition='outside'))
+                col_table, col_chart = st.columns([2.5, 2], gap="large") 
+
+                with col_table:
+                    st.markdown("#### :material/table_rows: Артикулы")
+                    def highlight(row): return ['background-color: #fee2e2; color: #991b1b' if row.get('PPM',0) > 10000 else ''] * len(row)
                     
-                    fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
-                    fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
-                    
-                    fig.update_layout(
-                        height=420, margin=dict(l=0, r=0, t=20, b=0),
-                        legend=dict(orientation="h", y=1.15),
-                        yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
-                        yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
-                        hovermode="x unified"
+                    # Благодаря фрагменту, on_select перезапускает ТОЛЬКО этот фрагмент
+                    selection = st.dataframe(
+                        table_agg.style.apply(highlight, axis=1), 
+                        use_container_width=True, hide_index=True, height=450,
+                        on_select="rerun", selection_mode="single-row",
+                        column_config={
+                            "Артикул": st.column_config.TextColumn("Артикул", width="medium"),
+                            "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
+                            "Класс XYZ": st.column_config.TextColumn("XYZ", width="small"),
+                            "Заказы": st.column_config.NumberColumn("Заказы", format="%d", width="small"),
+                            "Брак": st.column_config.NumberColumn("Брак", format="%d", width="small"),
+                            "%": st.column_config.NumberColumn("%", format="%.2f", width="small"),
+                            "PPM": st.column_config.NumberColumn("PPM", format="%d", width="small")
+                        }
                     )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Нет данных для графика")
+
+                    clicked_sku = None
+                    if hasattr(selection, 'selection') and selection.selection.rows:
+                        clicked_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул']
+
+                with col_chart:
+                    if clicked_sku:
+                        chart_base_df = filtered_sku_df[filtered_sku_df['Артикул'] == clicked_sku].copy()
+                        chart_title = f"Динамика: {clicked_sku}"
+                    else:
+                        chart_base_df = filtered_sku_df.copy()
+                        if not sel_skus or '[Все артикулы]' in sel_skus: chart_title = "Динамика: Все артикулы (Сводно)"
+                        elif len(active_skus) == 1: chart_title = f"Динамика: {list(active_skus)[0]}"
+                        else: chart_title = "Динамика: Выбранные объекты (Сводно)"
+
+                    if not chart_base_df.empty:
+                        latest = chart_base_df['Месяц_ДТ'].max()
+                        start = latest - pd.DateOffset(months=11)
+                        chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
+                        chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
+                        chart_agg = chart_agg.sort_values('Месяц_ДТ')
+
+                        max_val = chart_agg['PPM'].max() if not chart_agg.empty else 0
+                        y_limit = max(20000, max_val * 1.15)
+
+                        st.markdown(f"#### :material/monitoring: {chart_title}")
+                        fig = go.Figure()
+                        for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
+                            curr = chart_agg[chart_agg['Source'] == src]
+                            if not curr.empty:
+                                fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=curr['PPM'], textposition='outside'))
+                        
+                        fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
+                        fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
+                        
+                        fig.update_layout(
+                            height=420, margin=dict(l=0, r=0, t=20, b=0),
+                            legend=dict(orientation="h", y=1.15),
+                            yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
+                            yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
+                            hovermode="x unified"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("Нет данных для графика")
+
+            # Вызов созданного фрагмента
+            render_ppm_dashboard(df_total, sku_options, available_months)
 
     except Exception as e:
         st.error(f"Ошибка PPM: {e}")
