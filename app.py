@@ -623,16 +623,22 @@ elif page == "🔬 ИИ Тегирование":
                         # 4. Сохраняем в SQL
                         if results:
                             saved_count = 0
+                            
+                            # ДИАГНОСТИКА НА ЭКРАН: Смотрим, что реально вернул ИИ
+                            with log_container:
+                                with st.expander(f"Ответ ИИ (Пачка {i}-{i+len(chunk)})"):
+                                    st.json(results)
+                                    st.write(f"Словарь маппинга: {srid_map}")
+                                    
                             for res in results:
                                 if "error" in res: continue
                                 
-                                # ЖЕСТКАЯ ОЧИСТКА ID: Вытаскиваем только цифры из ответа ИИ
+                                # ЖЕСТКАЯ ОЧИСТКА ID
                                 raw_id = str(res.get('id', '')).upper()
-                                # Ищем цифры в ответе (например, из "REF_5" или "id: 5" вытащит "5")
                                 num_match = re.search(r'\d+', raw_id)
                                 
                                 if not num_match: 
-                                    continue # Если ИИ вообще не вернул цифру, пропускаем
+                                    continue 
                                     
                                 # Восстанавливаем эталонный формат ключа
                                 clean_temp_id = f"REF_{num_match.group()}"
@@ -644,24 +650,12 @@ elif page == "🔬 ИИ Тегирование":
                                 if real_srid and cats_array:
                                     updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
                                     if updates:
-                                        # Добавим принт для отладки, чтобы видеть, что именно уходит в базу
-                                        print(f"Попытка записи: SRID={real_srid}, Теги={updates}")
-                                        
-                                        # Проверяем, вернул ли SQL успешный статус
                                         is_success = update_db_row(real_srid, updates)
                                         if is_success:
                                             saved_count += 1
-                                        else:
-                                            print(f"🚨 Ошибка SQL при записи SRID {real_srid}")
-                                
-                                if real_srid and cats_array:
-                                    updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
-                                    if updates:
-                                        update_db_row(real_srid, updates)
-                                        saved_count += 1
-                                        
+                                            
                             with log_container:
-                                st.write(f"Пачка {i}-{i+len(chunk)}: Успешно записано в базу {saved_count} строк.")
+                                st.success(f"Пачка {i}-{i+len(chunk)}: Записано в базу {saved_count} строк.")
                         
                         # Обновляем прогресс
                         current_processed = i + len(chunk)
