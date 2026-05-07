@@ -1238,8 +1238,20 @@ elif page == "⚠️ Уровень PPM":
             df = load_cached_hybrid_data()
             df_orders = load_cached_orders()
 
+        # --- НОВОЕ: ЗАГРУЗКА МАТРИЦЫ ABC-XYZ ---
+        st.markdown("### 📥 Справочник ABC-XYZ")
+        st.write("Загрузите ваш файл матрицы (с колонками 'Артикул', 'Класс ABC', 'Класс XYZ'). Если файл не загружен, ABC-анализ рассчитается автоматически.")
+        abc_file = st.file_uploader("Загрузить файл ABC-XYZ (CSV / Excel)", type=['csv', 'xlsx', 'xls'])
+        df_abc = pd.DataFrame()
+        if abc_file:
+            df_abc = safe_read(abc_file)
+            if not df_abc.empty and 'Артикул' in df_abc.columns:
+                st.success(f"✅ Матрица загружена! Найдено артикулов: {len(df_abc)}")
+            else:
+                st.error("❌ Ошибка: В файле не найдена колонка 'Артикул'. Убедитесь, что названия колонок верные.")
+
         if not df_orders.empty and 'Артикул продавца' in df_orders.columns:
-            # Готовим те же данные, что и в основном отчете
+            # --- ПОДГОТОВКА ДАТ ДЛЯ ФИЛЬТРА ---
             df_filtered = df.copy()
             def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14))
             if not df_filtered.empty:
@@ -1273,18 +1285,37 @@ elif page == "⚠️ Уровень PPM":
             # --- 1. АВТОМАТИЧЕСКИЙ ABC-АНАЛИЗ И ПОДСЧЕТ БРАКА ---
             filt_orders['Чистые_заказы'] = pd.to_numeric(filt_orders.get('Чистые_заказы', 0), errors='coerce').fillna(0)
             orders_total = filt_orders.groupby('Артикул продавца')['Чистые_заказы'].sum().reset_index()
-            orders_total = orders_total.sort_values('Чистые_заказы', ascending=False)
             
-            total_sum = orders_total['Чистые_заказы'].sum()
-            if total_sum > 0:
-                orders_total['cum_perc'] = orders_total['Чистые_заказы'].cumsum() / total_sum
-                orders_total['ABC_Группа'] = pd.cut(orders_total['cum_perc'], bins=[0, 0.8, 0.95, 1.1], labels=['A', 'B', 'C'], right=True)
+            # --- ИНТЕГРАЦИЯ ФАЙЛА ABC-XYZ ---
+            if not df_abc.empty and 'Артикул' in df_abc.columns and 'Класс ABC' in df_abc.columns:
+                df_abc['Артикул'] = df_abc['Артикул'].astype(str).str.strip()
+                orders_total['Артикул продавца'] = orders_total['Артикул продавца'].astype(str).str.strip()
+                
+                # Джойним данные по Артикулу
+                orders_total = pd.merge(orders_total, df_abc[['Артикул', 'Класс ABC', 'Класс XYZ']], left_on='Артикул продавца', right_on='Артикул', how='left')
+                orders_total.rename(columns={'Класс ABC': 'ABC_Группа'}, inplace=True)
+                
+                # Если каких-то артикулов нет в файле, ставим заглушку
+                orders_total['ABC_Группа'] = orders_total['ABC_Группа'].fillna('Без класса')
+                
+                if 'Класс XYZ' in orders_total.columns:
+                    orders_total['Класс XYZ'] = orders_total['Класс XYZ'].fillna('-')
+                else:
+                    orders_total['Класс XYZ'] = '-'
             else:
-                orders_total['ABC_Группа'] = 'C'
+                # Резервный автоматический расчет, если файл не загружен
+                orders_total = orders_total.sort_values('Чистые_заказы', ascending=False)
+                total_sum = orders_total['Чистые_заказы'].sum()
+                if total_sum > 0:
+                    orders_total['cum_perc'] = orders_total['Чистые_заказы'].cumsum() / total_sum
+                    orders_total['ABC_Группа'] = pd.cut(orders_total['cum_perc'], bins=[0, 0.8, 0.95, 1.1], labels=['A', 'B', 'C'], right=True)
+                else:
+                    orders_total['ABC_Группа'] = 'C'
+                orders_total['Класс XYZ'] = '-'
                 
             defects_total = filt_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)') if not filt_approved.empty else pd.DataFrame(columns=['Артикул продавца', 'Одобренный брак (шт)'])
             
-            ppm_df = pd.merge(orders_total[['Артикул продавца', 'Чистые_заказы', 'ABC_Группа']], defects_total, on='Артикул продавца', how='left').fillna(0)
+            ppm_df = pd.merge(orders_total[['Артикул продавца', 'Чистые_заказы', 'ABC_Группа', 'Класс XYZ']], defects_total, on='Артикул продавца', how='left').fillna(0)
             ppm_df['PPM'] = np.where(ppm_df['Чистые_заказы'] > 0, (ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 1000000, 0).astype(int)
             ppm_df['Доля брака, %'] = np.where(ppm_df['Чистые_заказы'] > 0, round((ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 100, 2), 0)
 
@@ -1299,7 +1330,8 @@ elif page == "⚠️ Уровень PPM":
             else:
                 for item in selected_articles:
                     if item.startswith('[Вся Группа'):
-                        group_letter = item[-2]
+                        # Улучшенное вытаскивание буквы группы, чтобы работали даже классы вроде "Без класса"
+                        group_letter = item.replace('[Вся Группа ', '').replace(']', '')
                         active_skus.update(ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist())
                     else:
                         active_skus.add(item)
@@ -1324,7 +1356,7 @@ elif page == "⚠️ Уровень PPM":
                 def highlight_ppm(row):
                     return ['background-color: #fee2e2; color: #991b1b' if row['PPM'] > 10000 else ''] * len(row)
                 
-                cols_to_show = ['Артикул продавца', 'ABC_Группа', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']
+                cols_to_show = ['Артикул продавца', 'ABC_Группа', 'Класс XYZ', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']
                 styled_df = display_df[cols_to_show].style.apply(highlight_ppm, axis=1)
                 
                 try:
@@ -1338,8 +1370,9 @@ elif page == "⚠️ Уровень PPM":
                         column_config={
                             "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
                             "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
+                            "Класс XYZ": st.column_config.TextColumn("XYZ", width="small"),
                             "Чистые_заказы": st.column_config.NumberColumn("Заказы", format="%d"),
-                            "Одобренный брак (шт)": st.column_config.NumberColumn("Брак (шт)", format="%d"),
+                            "Одобренный брак (шт)": st.column_config.NumberColumn("Брак", format="%d"),
                             "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f"),
                             "PPM": st.column_config.NumberColumn("PPM", format="%d")
                         }
