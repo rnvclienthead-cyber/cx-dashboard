@@ -559,8 +559,7 @@ elif page == "🔬 ИИ Тегирование":
         t1, t2 = st.tabs(["1️⃣ Первичная разметка", "2️⃣ Перекрестная проверка (Grok)"])
         
         with t1:
-            st.subheader("Разметка новых заявок (Кардинальное решение 🚀)")
-            
+            st.subheader("Разметка новых заявок (Только ID)")
             if not df_unprocessed.empty:
                 total_rows = len(df_unprocessed)
                 col1, col2 = st.columns(2)
@@ -572,124 +571,92 @@ elif page == "🔬 ИИ Тегирование":
                 st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
                 
                 if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
-                    st.cache_data.clear()
+                    st.cache_data.clear() 
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     log_container = st.container()
+                    add_system_log("Запуск тегирования", "INFO", f"Строк: {total_rows}")
                     
-                    add_system_log("Запуск", "INFO", f"Кардинальный режим. Строк: {total_rows}")
-                    
-                    # === НЕУБИВАЕМЫЙ ДВИЖОК БЕЗ JSON ===
-                    async def radical_processor(chunk, memory):
-                        srid_map = {}
-                        content_lines = []
-                        
-                        # 1. Готовим данные
-                        for i, (_, row) in enumerate(chunk.iterrows()):
-                            temp_id = f"REF_{i}"
-                            srid_map[temp_id] = str(row['srid'])
-                            text = str(row.get('user_comment', '')).replace('\n', ' ')
-                            content_lines.append(f"{temp_id} | Артикул: {row.get('supplier_article', '')} | Текст: {text}")
-                            
-                        content = "\n".join(content_lines)
-                        
-                        # ПРОМПТ БЕЗ JSON
-                        sys_prompt = f"""Ты строгий алгоритм классификации.
-Категории: {json.dumps(CATEGORIES, ensure_ascii=False)}
-
-ОПЫТ (Используй обязательно):
-{memory}
-
-ОТВЕЧАЙ СТРОГО ТЕКСТОМ. Никакого JSON, никаких объяснений. Формат ответа:
-REF_0: 1, 5
-REF_1: 12"""
-
-                        raw_text = ""
-                        
-                        # 2. Стучимся в API
-                        async with aiohttp.ClientSession() as session:
-                            if "yandex" in model_key:
-                                uri = f"gpt://{FOLDER_ID}/yandexgpt/latest" if "pro" in model_key else f"gpt://{FOLDER_ID}/yandexgpt-lite/latest"
-                                url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
-                                headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
-                                payload = {"modelUri": uri, "completionOptions": {"temperature": 0.1, "maxTokens": 1000}, "messages": [{"role": "system", "text": sys_prompt}, {"role": "user", "text": content}]}
-                                
-                                try:
-                                    async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                                        if resp.status == 200:
-                                            r = await resp.json()
-                                            raw_text = r['result']['alternatives'][0]['message']['text']
-                                        else: raw_text = f"API ОШИБКА: {resp.status} - {await resp.text()}"
-                                except Exception as e: raw_text = f"СИСТЕМНАЯ ОШИБКА: {e}"
-                            else:
-                                url = "https://api.x.ai/v1/chat/completions"
-                                headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-                                payload = {"model": "grok-beta", "temperature": 0.1, "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": content}]}
-                                
-                                try:
-                                    async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                                        if resp.status == 200:
-                                            r = await resp.json()
-                                            raw_text = r['choices'][0]['message']['content']
-                                        else: raw_text = f"API ОШИБКА: {resp.status}"
-                                except Exception as e: raw_text = f"СИСТЕМНАЯ ОШИБКА: {e}"
-
-                        # 3. ПАРСИМ ТЕКСТ РЕГУЛЯРКАМИ (Бронебойный метод)
-                        success_updates = {}
-                        for line in raw_text.split('\n'):
-                            match = re.search(r'(REF_\d+)[:\-]?\s*([\d,\s]+)', line.upper())
-                            if match:
-                                real_srid = srid_map.get(match.group(1))
-                                if real_srid:
-                                    cats = [int(c.strip()) for c in match.group(2).split(',') if c.strip().isdigit()]
-                                    if cats: success_updates[real_srid] = cats
-                                    
-                        return success_updates, raw_text
-
-                    # === ГЛАВНЫЙ ЦИКЛ ===
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     
                     for i in range(0, total_rows, batch_size):
-                        chunk = df_unprocessed.iloc[i:i+batch_size]
+                        chunk = df_unprocessed.iloc[i:i+batch_size].copy()
                         
-                        # Ищем опыт в SQL
-                        mem_list = []
+                        # 1. Готовим "шпаргалку" из БД для пачки
+                        memory_list = []
                         for _, row in chunk.iterrows():
-                            txt = str(row.get('user_comment', ''))
-                            if txt:
-                                mem = find_similar_examples_sql(txt, engine, top_n=2)
-                                if mem and "Прямых совпадений" not in mem: mem_list.append(mem)
-                        chunk_mem = "\n".join(set(mem_list)) if mem_list else "Нет опыта."
+                            t_text = str(row.get('user_comment',''))
+                            if t_text:
+                                mem = find_similar_examples_sql(t_text, engine, top_n=2)
+                                if mem and "Прямых совпадений" not in mem:
+                                    memory_list.append(mem)
+                        chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
                         
-                        # Вызываем функцию
-                        updates, raw_response = loop.run_until_complete(radical_processor(chunk, chunk_mem))
+                        # 2. ВОЗВРАЩАЕМ СТАРУЮ ХИТРОСТЬ: Делаем короткие REF_ID
+                        # Это защитит нас от того, что ИИ перепутает сложный SRID
+                        chunk['temp_id'] = [f"REF_{x}" for x in range(len(chunk))]
+                        srid_map = dict(zip(chunk['temp_id'], chunk['srid'])) # Словарь REF -> настоящий SRID
                         
-                        # Сохраняем в SQL
-                        saved_count = 0
-                        for srid, cats in updates.items():
-                            upd_dict = {f"cat_{c}": True for c in cats if 1 <= c <= 13}
-                            if upd_dict and update_db_row(srid, upd_dict):
-                                saved_count += 1
+                        # Формируем данные для отправки с короткими ID
+                        batch_to_send = []
+                        for _, row in chunk.iterrows():
+                            batch_to_send.append({
+                                "id": row['temp_id'], 
+                                "text": f"Артикул: {row.get('supplier_article','')}. Текст: {row.get('user_comment','')}"
+                            })
+                        
+                        # 3. Отправляем в ИИ
+                        async def send_batch():
+                            async with aiohttp.ClientSession() as session:
+                                return await fetch_ai_tags(session, batch_to_send, chunk_memory, model_key)
+                        
+                        results = loop.run_until_complete(send_batch())
+                        
+                        # 4. Сохраняем в SQL и пишем подробности в SQL-журнал
+                        if results:
+                            saved_count = 0
+                            batch_details = [] # Список для формирования TEXT в колонку details
+                            
+                            for res in results:
+                                if "error" in res:
+                                    batch_details.append(f"❌ Ошибка ИИ: {res.get('error')}")
+                                    continue
                                 
-                        # ВЫВОДИМ СЫРОЙ ОТВЕТ НА ЭКРАН!
-                        with log_container:
-                            with st.expander(f"Пачка {i} — Успешно {saved_count} из {len(chunk)}"):
-                                st.text("Что прислал ИИ:")
-                                st.code(raw_response)
+                                # Очистка ID
+                                raw_id = str(res.get('id', '')).upper()
+                                num_match = re.search(r'\d+', raw_id)
                                 
-                        # Лог в БД
-                        if "ОШИБКА" in raw_response: add_system_log(f"Пачка {i}", "ERROR", raw_response)
-                        else: add_system_log(f"Пачка {i}", "SUCCESS", f"Записано {saved_count} строк")
-
-                        # Двигаем прогресс
-                        current = min(total_rows, i + len(chunk))
-                        progress_bar.progress(current / total_rows)
-                        status_text.text(f"⏳ Прогресс: {current} из {total_rows}")
-                        
-                    st.success("✅ Тегирование завершено! Проверьте отчет производства.")
-            else:
-                st.success("🎉 Все заявки размечены!")
+                                if not num_match: 
+                                    batch_details.append(f"⚠️ Сбой ID: ИИ вернул '{raw_id}' без цифр")
+                                    continue 
+                                    
+                                clean_temp_id = f"REF_{num_match.group()}"
+                                cats_array = res.get('category_ids', [])
+                                real_srid = srid_map.get(clean_temp_id)
+                                
+                                if real_srid and cats_array:
+                                    updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
+                                    if updates:
+                                        # Пытаемся обновить строку в БД
+                                        if update_db_row(real_srid, updates):
+                                            saved_count += 1
+                                            batch_details.append(f"✅ SRID {real_srid}: теги {cats_array}")
+                                        else:
+                                            batch_details.append(f"🚨 ОШИБКА SQL: SRID {real_srid} не обновлен")
+                                else:
+                                    batch_details.append(f"❓ ПРОПУСК: SRID для {clean_temp_id} не найден в маппинге")
+                            
+                            # Формируем итоговый текст для колонки details в system_logs
+                            full_log_text = f"Пачка обработана: {saved_count} из {len(chunk)} сохранены.\n" + "\n".join(batch_details)
+                            
+                            # Пишем в SQL через твой add_system_log
+                            if saved_count > 0:
+                                add_system_log(f"Пачка {i}", "SUCCESS", full_log_text)
+                            else:
+                                add_system_log(f"Пачка {i}", "WARNING", full_log_text)
+                        else:
+                            add_system_log(f"Пачка {i}", "ERROR", "ИИ вернул пустой результат (результаты отсутствуют)")
 
         with t2:
             st.subheader("Глубокая проверка (Аудит от Grok)")
