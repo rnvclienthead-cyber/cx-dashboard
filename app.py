@@ -1231,6 +1231,7 @@ elif page == "⚠️ Уровень PPM":
     
     import numpy as np
     import plotly.graph_objects as go
+    from datetime import datetime
 
     try:
         # --- ФУНКЦИЯ ОБНОВЛЕНИЯ ABC В SQL ---
@@ -1238,12 +1239,9 @@ elif page == "⚠️ Уровень PPM":
             if engine and not df_to_upload.empty:
                 try:
                     with engine.begin() as conn:
-                        # Очищаем старую классификацию перед заливкой новой
                         conn.execute(text("TRUNCATE TABLE product_classification"))
-                        # Подготовка данных
                         df_to_upload = df_to_upload[['Артикул', 'Класс ABC', 'Класс XYZ']].copy()
                         df_to_upload.columns = ['article', 'class_abc', 'class_xyz']
-                        # Загрузка
                         df_to_upload.to_sql('product_classification', conn, if_exists='append', index=False)
                     return True
                 except Exception as e:
@@ -1255,7 +1253,7 @@ elif page == "⚠️ Уровень PPM":
             df_sys = load_cached_hybrid_data()
             df_orders_sys = load_cached_orders()
             
-            # Загружаем Историю PPM
+            # 1. Загружаем Историю PPM (Янв-Мар)
             df_hist = pd.DataFrame()
             try:
                 df_hist = pd.read_sql("SELECT article, month_date, defects, orders, source FROM historical_ppm", engine)
@@ -1264,7 +1262,7 @@ elif page == "⚠️ Уровень PPM":
                     df_hist['Месяц_ДТ'] = pd.to_datetime(df_hist['Месяц_ДТ'])
             except: pass
 
-            # Загружаем Классификацию ABC-XYZ
+            # 2. Загружаем Классификацию (ABC-XYZ) из новой SQL таблицы
             df_abc = pd.DataFrame()
             try:
                 df_abc = pd.read_sql("SELECT article, class_abc, class_xyz FROM product_classification", engine)
@@ -1272,22 +1270,19 @@ elif page == "⚠️ Уровень PPM":
                     df_abc.rename(columns={'article': 'Артикул', 'class_abc': 'ABC_Группа', 'class_xyz': 'Класс XYZ'}, inplace=True)
             except: pass
 
-        # --- КОМПАКТНЫЙ ЗАГРУЗЧИК ABC-XYZ ---
+        # --- ЗАГРУЗЧИК ---
         with st.expander(":material/upload_file: Обновить справочник ABC-XYZ", expanded=False):
-            st.write("Загрузите новый файл. Он полностью заменит текущую классификацию в базе данных.")
-            abc_file = st.file_uploader("Выбрать XLSX/CSV файл", type=['csv', 'xlsx', 'xls'], label_visibility="collapsed")
+            abc_file = st.file_uploader("Загрузить XLSX/CSV", type=['csv', 'xlsx', 'xls'], label_visibility="collapsed")
             if abc_file:
                 df_new_abc = safe_read(abc_file)
                 if not df_new_abc.empty and 'Артикул' in df_new_abc.columns:
-                    if st.button("💾 Сохранить новую классификацию в БД"):
+                    if st.button("💾 Сохранить классификацию в SQL базу"):
                         if update_abc_in_sql(df_new_abc):
-                            st.success("✅ Справочник обновлен! Обновите страницу.")
+                            st.success("✅ База данных product_classification обновлена!")
                             st.rerun()
-                else:
-                    st.error("В файле должна быть колонка 'Артикул'")
 
         if not df_orders_sys.empty:
-            # Подготовка системных данных
+            # Подготовка системных данных (Апрель+)
             df_sys['Размечено'] = df_sys.apply(lambda r: any(str(r.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14)), axis=1)
             df_app_sys = df_sys[df_sys['Размечено'] == True].copy()
             if not df_app_sys.empty:
@@ -1298,13 +1293,13 @@ elif page == "⚠️ Уровень PPM":
             sys_metrics.rename(columns={'Артикул продавца': 'Артикул', 'Чистые_заказы': 'Заказы'}, inplace=True)
             sys_metrics['Source'] = 'System'
 
-            # Объединяем Историю и Систему
+            # Полный набор данных
             df_total = pd.concat([df_hist, sys_metrics], ignore_index=True)
             
-            # ПРИКЛЕИВАЕМ КЛАССЫ ABC-XYZ ИЗ БАЗЫ
+            # Приклеиваем справочник ABC
             if not df_abc.empty:
                 df_total = pd.merge(df_total, df_abc, on='Артикул', how='left')
-                df_total['ABC_Группа'] = df_total['ABC_Группа'].fillna('Без класса')
+                df_total['ABC_Группа'] = df_total['ABC_Группа'].fillna('C')
                 df_total['Класс XYZ'] = df_total['Класс XYZ'].fillna('-')
             else:
                 df_total['ABC_Группа'] = 'Без справочника'
@@ -1313,80 +1308,90 @@ elif page == "⚠️ Уровень PPM":
             months_ru = {1: 'Янв', 2: 'Фев', 3: 'Мар', 4: 'Апр', 5: 'Май', 6: 'Июн', 7: 'Июл', 8: 'Авг', 9: 'Сен', 10: 'Окт', 11: 'Ноя', 12: 'Дек'}
             df_total['Месяц_Стр'] = df_total['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_total['Месяц_ДТ'].dt.year.astype(str)
 
-            # --- ФИЛЬТРЫ ---
+            # --- ПАНЕЛЬ ФИЛЬТРОВ ---
             available_months = df_total.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=True)['Месяц_Стр'].tolist()
-            st.markdown("### :material/tune: Настройки графика и фильтры")
-            c1, c2 = st.columns(2)
-            
-            # ИСПРАВЛЕНИЕ: Выбираем все месяцы по умолчанию
-            sel_months = c1.multiselect("📅 Период:", options=available_months, default=available_months)
-            
             sku_options = sorted(df_total['Артикул'].unique().tolist())
-            sel_sku = c2.selectbox("📦 Выбор товара:", ['[Все артикулы]'] + sku_options)
+            
+            st.markdown("### :material/tune: Фильтры для таблицы и метрик")
+            f1, f2 = st.columns(2)
+            sel_months = f1.multiselect("📅 Период для сводки:", options=available_months, default=available_months[-1:])
+            sel_sku = f2.selectbox("📦 Выбор товара или группы:", ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + sku_options)
 
-            plot_df = df_total[df_total['Месяц_Стр'].isin(sel_months)].copy()
-            if sel_sku != '[Все артикулы]':
-                plot_df = plot_df[plot_df['Артикул'] == sel_sku]
+            # --- ЛОГИКА ФИЛЬТРАЦИИ ---
+            # 1. Сначала фильтруем по товару/группе (влияет и на таблицу, и на график)
+            if sel_sku == '[Все артикулы]':
+                filtered_by_sku = df_total.copy()
+            elif sel_sku.startswith('[Вся Группа'):
+                target_group = sel_sku.replace('[Вся Группа ', '').replace(']', '')
+                filtered_by_sku = df_total[df_total['ABC_Группа'] == target_group].copy()
+            else:
+                filtered_by_sku = df_total[df_total['Артикул'] == sel_sku].copy()
+
+            # 2. Для таблицы и метрик дополнительно фильтруем по месяцам
+            table_df = filtered_by_sku[filtered_by_sku['Месяц_Стр'].isin(sel_months)].copy() if sel_months else filtered_by_sku.copy()
 
             # --- ТАБЛИЦА АГРЕГАЦИИ ---
-            table_agg = plot_df.groupby(['Артикул', 'ABC_Группа', 'Класс XYZ']).agg({'Брак': 'sum', 'Заказы': 'sum'}).reset_index()
+            table_agg = table_df.groupby(['Артикул', 'ABC_Группа', 'Класс XYZ']).agg({'Брак': 'sum', 'Заказы': 'sum'}).reset_index()
             table_agg['PPM'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 1000000, 0).astype(int)
             table_agg['Доля брака, %'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
             
-            # ИСПРАВЛЕНИЕ: Сортировка (сначала A, B, C, затем по убыванию PPM)
+            # Правильная сортировка: Группа (A,B,C), затем PPM (Desc)
             table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
-            # ИСПРАВЛЕНИЕ: Метрики
-            st.markdown("### :material/analytics: Статистика по фильтрам")
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Группа A (Выбрано)", len(table_agg[table_agg['ABC_Группа'] == 'A']))
-            col_b.metric("Группа B (Выбрано)", len(table_agg[table_agg['ABC_Группа'] == 'B']))
-            col_c.metric("Группа C (Выбрано)", len(table_agg[table_agg['ABC_Группа'] == 'C']))
+            # Метрики
+            st.markdown("### :material/analytics: Статистика за выбранный период")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Группа A", len(table_agg[table_agg['ABC_Группа'] == 'A']))
+            m2.metric("Группа B", len(table_agg[table_agg['ABC_Группа'] == 'B']))
+            m3.metric("Группа C", len(table_agg[table_agg['ABC_Группа'] == 'C']))
             st.markdown("---")
 
-            # --- ВЫВОД ТАБЛИЦЫ И ГРАФИКА ---
             col_table, col_chart = st.columns([2.5, 2], gap="large") 
 
             with col_table:
                 st.markdown("#### :material/table_rows: Сводная таблица")
-                
-                # ИСПРАВЛЕНИЕ: Подкрашивание
                 def highlight_ppm(row):
                     return ['background-color: #fee2e2; color: #991b1b' if row.get('PPM', 0) > 10000 else ''] * len(row)
                 
                 styled_df = table_agg.style.apply(highlight_ppm, axis=1)
-
                 st.dataframe(
                     styled_df, use_container_width=True, hide_index=True, height=450,
                     column_config={
                         "Артикул": st.column_config.TextColumn("Артикул", width="medium"),
                         "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
                         "Класс XYZ": st.column_config.TextColumn("XYZ", width="small"),
-                        "Заказы": st.column_config.NumberColumn("Заказы", format="%d", width="small"),
-                        "Брак": st.column_config.NumberColumn("Брак", format="%d", width="small"),
-                        "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f", width="small"),
-                        "PPM": st.column_config.NumberColumn("PPM", format="%d", width="small")
+                        "Заказы": st.column_config.NumberColumn("Заказы", format="%d"),
+                        "Брак": st.column_config.NumberColumn("Брак", format="%d"),
+                        "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f"),
+                        "PPM": st.column_config.NumberColumn("PPM", format="%d")
                     }
                 )
 
             with col_chart:
-                st.markdown("#### :material/monitoring: Динамика PPM")
+                st.markdown("#### :material/monitoring: Динамика (Последние 12 мес.)")
                 
-                # ИСПРАВЛЕНИЕ: Правильная агрегация графика
-                chart_data = plot_df.groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак': 'sum', 'Заказы': 'sum'}).reset_index()
-                chart_data['PPM'] = np.where(chart_data['Заказы'] > 0, (chart_data['Брак'] / chart_data['Заказы']) * 1000000, 0).astype(int)
-                chart_data = chart_data.sort_values('Месяц_ДТ')
-                
-                fig = go.Figure()
-                for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
-                    curr = chart_data[chart_data['Source'] == src]
-                    if not curr.empty:
-                        fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=curr['PPM'].astype(int), textposition='outside'))
-                
-                fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%", annotation_position="top left")
-                fig.add_trace(go.Scatter(x=chart_data['Месяц_Стр'], y=chart_data['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
-                fig.update_layout(height=400, margin=dict(l=0, r=0, t=20, b=0), legend=dict(orientation="h", y=1.1), yaxis2=dict(overlaying='y', side='right'))
-                st.plotly_chart(fig, use_container_width=True)
+                # ЛОГИКА ГРАФИКА: Последние 12 месяцев от текущей даты в базе
+                if not filtered_by_sku.empty:
+                    latest_date = filtered_by_sku['Месяц_ДТ'].max()
+                    start_date = latest_date - pd.DateOffset(months=11)
+                    
+                    chart_df = filtered_by_sku[filtered_by_sku['Месяц_ДТ'] >= start_date].copy()
+                    chart_agg = chart_df.groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак': 'sum', 'Заказы': 'sum'}).reset_index()
+                    chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
+                    chart_agg = chart_agg.sort_values('Месяц_ДТ')
+                    
+                    fig = go.Figure()
+                    for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
+                        curr = chart_agg[chart_agg['Source'] == src]
+                        if not curr.empty:
+                            fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=curr['PPM'].astype(int), textposition='outside'))
+                    
+                    fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
+                    fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
+                    fig.update_layout(height=400, margin=dict(l=0, r=0, t=20, b=0), legend=dict(orientation="h", y=1.1), yaxis=dict(title="PPM"), yaxis2=dict(overlaying='y', side='right', title="Заказы"))
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Нет данных для отображения графика.")
 
     except Exception as e:
         st.error(f"Ошибка PPM: {e}")
