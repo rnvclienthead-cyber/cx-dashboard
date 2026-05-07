@@ -264,62 +264,7 @@ def find_similar_examples_sql(target_text, engine, top_n=15):
         print(f"Ошибка поиска в базе знаний: {e}")
         return "Ошибка доступа к опыту."
 
-async def fetch_ai_tags(session, batch, memory_string, model_choice="YandexGPT Lite"):
-    # Собираем тексты пачки для ИИ
-    content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
-
-    system_prompt = f"""Ты — строгий алгоритм классификации причин возврата товаров на маркетплейсе. Твоя единственная задача — сопоставлять новые тексты с исторической базой знаний.
-
-ДОСТУПНЫЕ КАТЕГОРИИ (ID: Название):
-{json.dumps(CATEGORIES, ensure_ascii=False, indent=2)}
-
-ЖЕСТКИЕ ПРАВИЛА:
-1. ПРИОРИТЕТ ОПЫТА: Ниже приведены эталонные примеры из нашей базы знаний. Если смысл нового текста совпадает с примером, ты ОБЯЗАН использовать те же ID категорий, что и в примере.
-2. ПРАВИЛО 12 (СУБЪЕКТИВНЫЙ ВОЗВРАТ): Категорию 12 "Субъективное 'Не подошло'" ставь ТОЛЬКО если клиент пишет: "не подошел цвет/размер", "передумал", "просто возврат", "ошибся при заказе". То есть, когда физического брака или ошибки продавца НЕТ.
-3. НЕСКОЛЬКО ДЕФЕКТОВ: Если клиент описывает разные проблемы, выдай массив из нескольких ID (например: [1, 5]).
-
---- ИСТОРИЧЕСКАЯ БАЗА ЗНАНИЙ (ОПЫТ) ---
-{memory_string}
-----------------------------------------
-
-ВНИМАНИЕ: Твой ответ будет обрабатывать скрипт. Не пиши ничего, кроме чистого JSON массива!
-ОТВЕТЬ СТРОГО В ЭТОМ JSON ФОРМАТЕ: {{"results": [{{"id": "...", "category_ids": [1]}}]}}"""
-
-    # Логика отправки API (Yandex/Grok) остается такой же, как была в твоем рабочем коде
-    if "Yandex" in model_choice:
-        url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
-        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
-        model_uri = f"gpt://{FOLDER_ID}/yandexgpt/latest" if "Pro" in model_choice else f"gpt://{FOLDER_ID}/yandexgpt-lite/latest"
-        payload = {
-            "modelUri": model_uri,
-            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
-            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
-        }
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                if resp.status == 200:
-                    res = await resp.json()
-                    return parse_ai_response(res['result']['alternatives'][0]['message']['text'])
-        except Exception as e:
-            print(f"Ошибка Yandex: {e}")
-
-    elif "Grok" in model_choice:
-        url = "https://api.x.ai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "grok-beta",
-            "temperature": 0.1,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
-        }
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                if resp.status == 200:
-                    res = await resp.json()
-                    return parse_ai_response(res['choices'][0]['message']['content'])
-        except Exception as e:
-            print(f"Ошибка Grok: {e}")
-
-    return []
+fetch_ai_tags
 
 async def fetch_ai_crosscheck(session, batch, engine):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
