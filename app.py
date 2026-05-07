@@ -955,37 +955,37 @@ elif page == "📝 Модерация":
                             if update_db_row(srid, {"correction": "Подтверждено"}):
                                 st.rerun()
 
-              with col_media:
-                    # НОВАЯ ЛОГИКА: Запрашиваем медиа только для этой строки
-                    raw_photos, raw_videos = get_media_for_srid(srid)
-                    media_raw = raw_photos + " " + raw_videos
-                    
-                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', media_raw)
-                    if urls:
-                        videos, row_photos = [], []
-                        for u in urls[:10]: 
-                            clean_url = u.strip()
-                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                            if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                            else: row_photos.append(clean_url)
+                  with col_media:
+                        # НОВАЯ ЛОГИКА: Запрашиваем медиа только для этой строки
+                        raw_photos, raw_videos = get_media_for_srid(srid)
+                        media_raw = raw_photos + " " + raw_videos
                         
-                        if row_photos:
-                            # Встроенный CSS для красивого зума + защита от блокировок WB
-                            html_imgs = '<style>.mod-zoom { transition: transform 0.2s ease; cursor: pointer; border-radius: 8px; object-fit: cover; } .mod-zoom:hover { transform: scale(2.5); z-index: 9999; position: relative; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }</style>'
-                            html_imgs += '<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">'
-                            for p in row_photos[:6]:
-                                html_imgs += f'<a href="{p}" target="_blank" rel="noreferrer noopener"><img src="{p}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer"></a>'
-                            html_imgs += '</div>'
-                            st.markdown(html_imgs, unsafe_allow_html=True)
-                        
-                        if videos:
-                            for v_idx, v_url in enumerate(videos):
-                                if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
-            
-            st.markdown("---")
-            render_pagination(total_pages, key_prefix="bottom")
-        else: 
-            st.success("🎉 Очередь пуста! Все обращения проверены.")
+                        urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', media_raw)
+                        if urls:
+                            videos, row_photos = [], []
+                            for u in urls[:10]: 
+                                clean_url = u.strip()
+                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                                if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
+                                else: row_photos.append(clean_url)
+                            
+                            if row_photos:
+                                # Встроенный CSS для красивого зума + защита от блокировок WB
+                                html_imgs = '<style>.mod-zoom { transition: transform 0.2s ease; cursor: pointer; border-radius: 8px; object-fit: cover; } .mod-zoom:hover { transform: scale(2.5); z-index: 9999; position: relative; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }</style>'
+                                html_imgs += '<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">'
+                                for p in row_photos[:6]:
+                                    html_imgs += f'<a href="{p}" target="_blank" rel="noreferrer noopener"><img src="{p}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer"></a>'
+                                html_imgs += '</div>'
+                                st.markdown(html_imgs, unsafe_allow_html=True)
+                            
+                            if videos:
+                                for v_idx, v_url in enumerate(videos):
+                                    if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
+                
+                st.markdown("---")
+                render_pagination(total_pages, key_prefix="bottom")
+            else: 
+                st.success("🎉 Очередь пуста! Все обращения проверены.")
 
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
