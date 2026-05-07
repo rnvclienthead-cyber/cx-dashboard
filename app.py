@@ -217,36 +217,24 @@ def update_db_row(srid, updates_dict):
 # ИИ ДВИЖОК
 # ==========================================
 def parse_ai_response(text_response):
-    print(f"\n--- ОТВЕТ ИИ ---\n{text_response}\n----------------")
     try:
-        clean_text = text_response.replace('```json', '').replace('```', '').strip()
+        # Агрессивная очистка как в твоем старом коде
+        clean_text = re.sub(r'```json|```', '', str(text_response)).strip()
         
-        # Ищем либо начало объекта {, либо начало массива [
-        start_obj = clean_text.find('{')
-        start_arr = clean_text.find('[')
-        
-        # Определяем, что началось раньше (объект или массив), чтобы правильно вырезать JSON
-        if start_arr != -1 and (start_obj == -1 or start_arr < start_obj):
-            start_idx = start_arr
-            end_idx = clean_text.rfind(']') + 1
-        else:
-            start_idx = start_obj
-            end_idx = clean_text.rfind('}') + 1
-
-        if start_idx != -1 and end_idx != -1:
-            clean_text = clean_text[start_idx:end_idx]
+        # Обрезаем всё, что до первой скобки и после последней
+        start = min([i for i in [clean_text.find('['), clean_text.find('{')] if i >= 0] or [0])
+        end = max(clean_text.rfind(']'), clean_text.rfind('}')) + 1
+        if start >= 0 and end > 0:
+            clean_text = clean_text[start:end]
             
         parsed = json.loads(clean_text)
-        if isinstance(parsed, dict): 
-            return parsed.get('results', [])
-        elif isinstance(parsed, list): 
-            return parsed
-        else: 
-            return []
+        if isinstance(parsed, dict): return parsed.get('results', [])
+        elif isinstance(parsed, list): return parsed
+        else: return []
     except Exception as e:
-        print(f"🚨 ОШИБКА РАСШИФРОВКИ JSON: {e}")
+        print(f"🚨 ОШИБКА ПАРСЕРА: {e}\nТекст: {text_response}")
         return []
-
+        
 def find_similar_examples_sql(target_text, engine, top_n=15):
     """
     Ищет похожие примеры в SQL базе знаний, используя умный алгоритм Триграмм (pg_trgm).
@@ -579,8 +567,6 @@ elif page == "🔬 ИИ Тегирование":
         
         with t1:
             st.subheader("Разметка новых заявок (Только ID)")
-            
-            # Проверяем, есть ли вообще заявки без тегов
             if not df_unprocessed.empty:
                 total_rows = len(df_unprocessed)
                 col1, col2 = st.columns(2)
@@ -588,8 +574,6 @@ elif page == "🔬 ИИ Тегирование":
                 model_choice = col2.radio("Модель:", ["YandexGPT Lite (Дешево)", "YandexGPT Pro (Умнее)", "Grok (xAI)"], key="mod_tag")
                 
                 model_key = "yandex-lite" if "Lite" in model_choice else "yandex-pro" if "Pro" in model_choice else "grok"
-                
-                # --- ВОССТАНОВЛЕНО: Блок аналитики и расчета стоимости ---
                 est_cost = total_rows * (0.08 if model_key == "yandex-lite" else 0.40 if model_key == "yandex-pro" else 0.50)
                 st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
                 
@@ -597,15 +581,16 @@ elif page == "🔬 ИИ Тегирование":
                     st.cache_data.clear() 
                     progress_bar = st.progress(0)
                     status_text = st.empty()
+                    log_container = st.container()
                     add_system_log("Запуск тегирования", "INFO", f"Строк: {total_rows}")
                     
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     
                     for i in range(0, total_rows, batch_size):
-                        chunk = df_unprocessed.iloc[i:i+batch_size]
+                        chunk = df_unprocessed.iloc[i:i+batch_size].copy()
                         
-                        # 1. Готовим индивидуальный опыт (память) для этой пачки
+                        # 1. Готовим "шпаргалку" из БД для пачки
                         memory_list = []
                         for _, row in chunk.iterrows():
                             t_text = str(row.get('user_comment',''))
@@ -613,33 +598,58 @@ elif page == "🔬 ИИ Тегирование":
                                 mem = find_similar_examples_sql(t_text, engine, top_n=2)
                                 if mem and "Прямых совпадений" not in mem:
                                     memory_list.append(mem)
-                        
                         chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
                         
-                        # 2. Запускаем обработку пачки
-                        results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, memory_string=chunk_memory, mode="tagging"))
+                        # 2. ВОЗВРАЩАЕМ СТАРУЮ ХИТРОСТЬ: Делаем короткие REF_ID
+                        # Это защитит нас от того, что ИИ перепутает сложный SRID
+                        chunk['temp_id'] = [f"REF_{x}" for x in range(len(chunk))]
+                        srid_map = dict(zip(chunk['temp_id'], chunk['srid'])) # Словарь REF -> настоящий SRID
                         
-                        # 3. Сохраняем результаты в базу
+                        # Формируем данные для отправки с короткими ID
+                        batch_to_send = []
+                        for _, row in chunk.iterrows():
+                            batch_to_send.append({
+                                "id": row['temp_id'], 
+                                "text": f"Артикул: {row.get('supplier_article','')}. Текст: {row.get('user_comment','')}"
+                            })
+                        
+                        # 3. Отправляем в ИИ
+                        async def send_batch():
+                            async with aiohttp.ClientSession() as session:
+                                return await fetch_ai_tags(session, batch_to_send, chunk_memory, model_key)
+                        
+                        results = loop.run_until_complete(send_batch())
+                        
+                        # 4. Сохраняем в SQL
                         if results:
+                            saved_count = 0
                             for res in results:
                                 if "error" in res: continue
-                                srid = res.get('id')
+                                
+                                temp_id = str(res.get('id', ''))
                                 cats_array = res.get('category_ids', [])
-                                if srid and cats_array:
+                                
+                                # Ищем настоящий SRID по короткому REF_
+                                real_srid = srid_map.get(temp_id)
+                                
+                                if real_srid and cats_array:
                                     updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
-                                    update_db_row(srid, updates)
-
-                        # --- ВОССТАНОВЛЕНО: Проценты и количество в прогресс-баре ---
+                                    if updates:
+                                        update_db_row(real_srid, updates)
+                                        saved_count += 1
+                                        
+                            with log_container:
+                                st.write(f"Пачка {i}-{i+len(chunk)}: Успешно записано в базу {saved_count} строк.")
+                        
+                        # Обновляем прогресс
                         current_processed = i + len(chunk)
                         progress_percent = min(1.0, current_processed / total_rows)
                         progress_bar.progress(progress_percent)
                         status_text.text(f"⏳ Прогресс: {int(progress_percent * 100)}% ({current_processed} из {total_rows})")
 
-                    st.success("✅ Тегирование успешно завершено!")
+                    st.success("✅ Тегирование успешно завершено! Проверьте отчет производства.")
                     st.rerun()
-                    
             else:
-                # --- ВОССТАНОВЛЕНО: Сообщение, когда нет доступных заявок ---
                 st.success("🎉 Все заявки в базе имеют первичную разметку!")
 
         with t2:
