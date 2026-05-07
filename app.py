@@ -268,22 +268,9 @@ def find_similar_examples_sql(target_text, engine, top_n=15):
         print(f"Ошибка поиска в базе знаний: {e}")
         return "Ошибка доступа к опыту."
 
-async def fetch_ai_tags(session, batch, engine, model_choice="YandexGPT Lite"):
+async def fetch_ai_tags(session, batch, memory_string, model_choice="YandexGPT Lite"):
     # Собираем тексты пачки для ИИ
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
-    
-    # 🌟 Ищем опыт индивидуально для каждой заявки в пачке
-    memory_blocks = []
-    for item in batch:
-        # Ищем 2 лучших совпадения для конкретного текста
-        mem = find_similar_examples_sql(item['text'], engine, top_n=2)
-        if mem and "Прямых совпадений" not in mem:
-            memory_blocks.append(f"Опыт для текста '{item['text']}':\n{mem}")
-            
-    relevant_memory = "\n\n".join(memory_blocks) if memory_blocks else "Опыта пока нет."
-    
-    # БЕСПЛАТНАЯ ДИАГНОСТИКА: Выводим в консоль Streamlit, что именно ИИ берет из базы
-    print(f"\n--- 🧠 НАЙДЕННЫЙ ОПЫТ ИЗ БАЗЫ ---\n{relevant_memory}\n--------------------------")
 
     system_prompt = f"""Ты — строгий алгоритм классификации причин возврата товаров на маркетплейсе. Твоя единственная задача — сопоставлять новые тексты с исторической базой знаний.
 
@@ -294,22 +281,19 @@ async def fetch_ai_tags(session, batch, engine, model_choice="YandexGPT Lite"):
 1. ПРИОРИТЕТ ОПЫТА: Ниже приведены эталонные примеры из нашей базы знаний. Если смысл нового текста совпадает с примером, ты ОБЯЗАН использовать те же ID категорий, что и в примере.
 2. ПРАВИЛО 12 (СУБЪЕКТИВНЫЙ ВОЗВРАТ): Категорию 12 "Субъективное 'Не подошло'" ставь ТОЛЬКО если клиент пишет: "не подошел цвет/размер", "передумал", "просто возврат", "ошибся при заказе". То есть, когда физического брака или ошибки продавца НЕТ.
 3. НЕСКОЛЬКО ДЕФЕКТОВ: Если клиент описывает разные проблемы, выдай массив из нескольких ID (например: [1, 5]).
-4. ЕСЛИ НЕТ ОПЫТА: Если в базе знаний нет похожего примера, определи категорию самостоятельно по логике текста.
 
 --- ИСТОРИЧЕСКАЯ БАЗА ЗНАНИЙ (ОПЫТ) ---
-{relevant_memory}
+{memory_string}
 ----------------------------------------
 
 ВНИМАНИЕ: Твой ответ будет обрабатывать скрипт. Не пиши ничего, кроме чистого JSON массива!
 ОТВЕТЬ СТРОГО В ЭТОМ JSON ФОРМАТЕ: {{"results": [{{"id": "...", "category_ids": [1]}}]}}"""
 
-    # Логика отправки в зависимости от выбора модели
+    # Логика отправки API (Yandex/Grok) остается такой же, как была в твоем рабочем коде
     if "Yandex" in model_choice:
         url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
-        # Выбираем Lite или Pro
         model_uri = f"gpt://{FOLDER_ID}/yandexgpt/latest" if "Pro" in model_choice else f"gpt://{FOLDER_ID}/yandexgpt-lite/latest"
-        
         payload = {
             "modelUri": model_uri,
             "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
@@ -340,7 +324,6 @@ async def fetch_ai_tags(session, batch, engine, model_choice="YandexGPT Lite"):
             print(f"Ошибка Grok: {e}")
 
     return []
-
 
 async def fetch_ai_crosscheck(session, batch, engine):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
@@ -378,58 +361,46 @@ async def fetch_ai_crosscheck(session, batch, engine):
 
     return []
 
-async def run_ai_batch_processing(df_to_tag, model_choice, mode="tagging"):
-    # Теперь мы не копим список results = [], а пишем сразу в базу
+async def run_ai_batch_processing(df_to_tag, model_choice, memory_string="", mode="tagging"):
+    results = []
     async with aiohttp.ClientSession() as session:
         batch = []
         for idx, row in df_to_tag.iterrows():
+            # Формируем данные для батча в зависимости от режима
             if mode == "tagging":
-                batch.append({"id": str(row['srid']), "text": f"Артикул: {row.get('supplier_article','')}. Текст: {row.get('user_comment','')}"})
+                batch.append({
+                    "id": str(row['srid']), 
+                    "text": f"Артикул: {row.get('supplier_article','')}. Текст: {row.get('user_comment','')}"
+                })
             else:
                 current_tags = [str(c) for c in range(1, 14) if row.get(f'cat_{c}') == True]
                 tags_str = ", ".join(current_tags) if current_tags else "Нет тегов"
-                batch.append({"id": str(row['srid']), "text": f"Текст: {row.get('user_comment','')}. Текущие теги (ID): {tags_str}"})
+                batch.append({
+                    "id": str(row['srid']), 
+                    "text": f"Текст: {row.get('user_comment','')}. Текущие теги (ID): {tags_str}"
+                })
             
-            # Как только набрали пачку (например, 5 или 10)
-            if len(batch) >= 5: 
-                if mode == "tagging":
-                    res = await fetch_ai_tags(session, batch, engine, model_choice)
-                    # МГНОВЕННАЯ ЗАПИСЬ В БАЗУ
-                    if res:
-                        for item in res:
-                            srid = item.get('id')
-                            cats_array = item.get('category_ids', [])
-                            if srid and cats_array:
-                                updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
-                                update_db_row(srid, updates)
-                else:
-                    res = await fetch_ai_crosscheck(session, batch, engine)
-                    # МГНОВЕННАЯ ЗАПИСЬ (для Аудита)
-                    if res:
-                        for item in res:
-                            srid = item.get('id')
-                            updates = {'audit_status': str(item.get('audit', '')), 'audit_comment': str(item.get('comment', ''))}
-                            if srid: update_db_row(srid, updates)
-                
-                # Очищаем батч и идем дальше
+            # Обработка накопленной пачки
+            if len(batch) >= 10:
+                if mode == "tagging": 
+                    res = await fetch_ai_tags(session, batch, memory_string, model_choice)
+                else: 
+                    # Для аудита оставляем передачу engine, так как там логика не менялась
+                    res = await fetch_ai_crosscheck(session, batch, engine) 
+                if res: 
+                    results.extend(res)
                 batch = []
-        
-        # Не забываем обработать остатки, если они есть
+                
+        # Обработка остатков в батче
         if batch:
-            # (Здесь тот же блок записи, что и выше)
-            res = await (fetch_ai_tags(session, batch, engine, model_choice) if mode == "tagging" else fetch_ai_crosscheck(session, batch, engine))
-            if res:
-                for item in res:
-                    srid = item.get('id')
-                    if mode == "tagging":
-                        cats_array = item.get('category_ids', [])
-                        if srid and cats_array:
-                            updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
-                            update_db_row(srid, updates)
-                    else:
-                        if srid: update_db_row(srid, {'audit_status': str(item.get('audit', '')), 'audit_comment': str(item.get('comment', ''))})
-    
-    return True # Просто сигнализируем о завершении
+            if mode == "tagging": 
+                res = await fetch_ai_tags(session, batch, memory_string, model_choice)
+            else: 
+                res = await fetch_ai_crosscheck(session, batch, engine)
+            if res: 
+                results.extend(res)
+            
+    return results
 
 # ==========================================
 # ИНТЕРФЕЙС И НАВИГАЦИЯ
@@ -604,11 +575,9 @@ elif page == "🔬 ИИ Тегирование":
                 model_choice = col2.radio("Модель:", ["YandexGPT Lite (Дешево)", "YandexGPT Pro (Умнее)", "Grok (xAI)"], key="mod_tag")
                 
                 model_key = "yandex-lite" if "Lite" in model_choice else "yandex-pro" if "Pro" in model_choice else "grok"
-                est_cost = total_rows * (0.08 if model_key == "yandex-lite" else 0.40 if model_key == "yandex-pro" else 0.50)
-                st.info(f"📊 **Аналитика:** Найдено **{total_rows}** строк без тегов.\n💰 **Предварительный расход:** ~{est_cost:.2f} руб.")
                 
                 if st.button("🚀 ЗАПУСТИТЬ ТЕГИРОВАНИЕ", type="primary"):
-                    st.cache_data.clear() # Чистим кэш перед запуском
+                    st.cache_data.clear() 
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     add_system_log("Запуск тегирования", "INFO", f"Строк: {total_rows}")
@@ -616,10 +585,44 @@ elif page == "🔬 ИИ Тегирование":
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     
-                    # Мы можем прогонять всё одним вызовом, так как внутри теперь есть моментальное сохранение
-                    loop.run_until_complete(run_ai_batch_processing(df_unprocessed, model_key, mode="tagging"))
-                    
-                    st.success("✅ Тегирование завершено! Все данные сохранены пошагово.")
+                    # --- ВОТ ЭТОТ ЦИКЛ И ЕСТЬ РЕШЕНИЕ (ШАГ 3) ---
+                    for i in range(0, total_rows, batch_size):
+                        chunk = df_unprocessed.iloc[i:i+batch_size]
+                        
+                        # 1. Готовим индивидуальный опыт (память) для этой пачки
+                        memory_list = []
+                        for _, row in chunk.iterrows():
+                            t_text = str(row.get('user_comment',''))
+                            if t_text:
+                                # Ищем в SQL похожие примеры именно для этого текста
+                                mem = find_similar_examples_sql(t_text, engine, top_n=2)
+                                if mem and "Прямых совпадений" not in mem:
+                                    memory_list.append(mem)
+                        
+                        # Склеиваем найденный опыт в одну строку для промпта
+                        chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
+                        
+                        # 2. Запускаем обработку пачки, передавая ей "память"
+                        # Убедись, что функция run_ai_batch_processing теперь принимает memory_string
+                        results = loop.run_until_complete(run_ai_batch_processing(chunk, model_key, memory_string=chunk_memory, mode="tagging"))
+                        
+                        # 3. Сохраняем результаты в базу сразу после каждой пачки
+                        if results:
+                            for res in results:
+                                if "error" in res: continue
+                                srid = res.get('id')
+                                cats_array = res.get('category_ids', [])
+                                if srid and cats_array:
+                                    # Формируем словарь обновлений (ставим True для выбранных категорий)
+                                    updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
+                                    update_db_row(srid, updates)
+
+                        # Обновляем визуальный прогресс (чтобы вебсокет не закрывался)
+                        progress_percent = min(1.0, (i + len(chunk)) / total_rows)
+                        progress_bar.progress(progress_percent)
+                        status_text.text(f"⏳ Обработано: {i + len(chunk)} из {total_rows}")
+
+                    st.success("✅ Тегирование успешно завершено!")
                     st.rerun()
 
         with t2:
