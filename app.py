@@ -878,100 +878,100 @@ elif page == "📝 Модерация":
             st.success("🎉 Очередь пуста! Все обращения проверены.")
 
 @st.cache_data(ttl=120) 
-    def load_cached_hybrid_data():
-        query = """
-            SELECT 
-                v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
-                v."Артикул продавца", v."Комментарий покупателя", v."Решение по возврату покупателю", v."Статус товара",
-                v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
-                v."Корректировка", v."Номер поставки", c.photos AS db_photos, c.video_paths AS db_videos
-            FROM view_cx_dashboard v
-            LEFT JOIN wb_claims c ON v."SRID" = c.srid
-        """
-        df_temp = pd.read_sql(query, engine)
+def load_cached_hybrid_data():
+    query = """
+        SELECT 
+            v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
+            v."Артикул продавца", v."Комментарий покупателя", v."Решение по возврату покупателю", v."Статус товара",
+            v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
+            v."Корректировка", v."Номер поставки", c.photos AS db_photos, c.video_paths AS db_videos
+        FROM view_cx_dashboard v
+        LEFT JOIN wb_claims c ON v."SRID" = c.srid
+    """
+    df_temp = pd.read_sql(query, engine)
+    
+    date_col = next((c for c in df_temp.columns if 'оформления заявки' in str(c).lower()), None)
+    
+    if date_col:
+        df_temp['Дата_ДТ'] = pd.to_datetime(df_temp[date_col], errors='coerce')
+        df_temp[date_col] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
+    else:
+        df_temp['Дата_ДТ'] = pd.NaT
         
-        date_col = next((c for c in df_temp.columns if 'оформления заявки' in str(c).lower()), None)
-        
-        if date_col:
-            df_temp['Дата_ДТ'] = pd.to_datetime(df_temp[date_col], errors='coerce')
-            df_temp[date_col] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
-        else:
-            df_temp['Дата_ДТ'] = pd.NaT
-            
-        valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
-        df_temp = df_temp[
-            df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
-            df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
-        ]
-        
-        df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
-        df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
+    valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
+    df_temp = df_temp[
+        df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
+        df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
+    ]
+    
+    df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
+    df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
 
-        if 'Номер поставки' not in df_temp.columns:
-            df_temp['Номер поставки'] = 'Не указан'
+    if 'Номер поставки' not in df_temp.columns:
+        df_temp['Номер поставки'] = 'Не указан'
+    
+    df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
         
-        df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
-            
-        try:
-            inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
-            if inv_id:
-                df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
-                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
-                    df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+    try:
+        inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
+        if inv_id:
+            df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
+            if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
+                df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+                
+            if not df_inv.empty and 'Номер поставки' in df_inv.columns:
+                df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
+                
+                df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                df_inv.columns = df_inv.columns.str.strip()
+                
+                inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
+                
+                if inv_col:
+                    df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
+                    inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
+                        'Номер поставки_clean'
+                    )['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
                     
-                if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
+                    if 'Инвойс' in df_temp.columns: 
+                        df_temp = df_temp.drop(columns=['Инвойс'])
                     
-                    df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                    df_inv.columns = df_inv.columns.str.strip()
-                    
-                    inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
-                    
-                    if inv_col:
-                        df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
-                        inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
-                            'Номер поставки_clean'
-                        )['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
-                        
-                        if 'Инвойс' in df_temp.columns: 
-                            df_temp = df_temp.drop(columns=['Инвойс'])
-                        
-                        df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
-                    else:
-                        st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
-                    
-                    if 'Номер поставки_clean' in df_temp.columns:
-                        df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
-        except Exception as e: 
-            print(f"Ошибка загрузки инвойсов: {e}")
-            
-        return df_temp
+                    df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
+                else:
+                    st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
+                
+                if 'Номер поставки_clean' in df_temp.columns:
+                    df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
+    except Exception as e: 
+        print(f"Ошибка загрузки инвойсов: {e}")
+        
+    return df_temp
 
-    @st.cache_data(ttl=120)
-    def load_cached_orders():
-        query = """
-            SELECT dt, supplier_article AS "Артикул продавца", cancel_dt 
-            FROM wb_orders
-        """
-        try: 
-            df_ord = pd.read_sql(query, engine)
-            
-            if df_ord.empty:
-                return pd.DataFrame()
-
-            df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
-            df_ord = df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
-            
-            df_ord['Месяц_ДТ'] = pd.to_datetime(df_ord['dt']).dt.to_period('M').dt.to_timestamp()
-            
-            valid_orders = df_ord[pd.isna(df_ord['cancel_dt'])]
-            final_orders = valid_orders.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Чистые_заказы')
-            
-            return final_orders
-        except Exception as e: 
-            print(f"Ошибка загрузки заказов: {e}")
+@st.cache_data(ttl=120)
+def load_cached_orders():
+    query = """
+        SELECT dt, supplier_article AS "Артикул продавца", cancel_dt 
+        FROM wb_orders
+    """
+    try: 
+        df_ord = pd.read_sql(query, engine)
+        
+        if df_ord.empty:
             return pd.DataFrame()
+
+        df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
+        df_ord = df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
+        
+        df_ord['Месяц_ДТ'] = pd.to_datetime(df_ord['dt']).dt.to_period('M').dt.to_timestamp()
+        
+        valid_orders = df_ord[pd.isna(df_ord['cancel_dt'])]
+        final_orders = valid_orders.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Чистые_заказы')
+        
+        return final_orders
+    except Exception as e: 
+        print(f"Ошибка загрузки заказов: {e}")
+        return pd.DataFrame()
 
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
