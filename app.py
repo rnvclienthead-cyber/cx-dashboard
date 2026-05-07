@@ -626,11 +626,33 @@ elif page == "🔬 ИИ Тегирование":
                             for res in results:
                                 if "error" in res: continue
                                 
-                                temp_id = str(res.get('id', ''))
+                                # ЖЕСТКАЯ ОЧИСТКА ID: Вытаскиваем только цифры из ответа ИИ
+                                raw_id = str(res.get('id', '')).upper()
+                                # Ищем цифры в ответе (например, из "REF_5" или "id: 5" вытащит "5")
+                                num_match = re.search(r'\d+', raw_id)
+                                
+                                if not num_match: 
+                                    continue # Если ИИ вообще не вернул цифру, пропускаем
+                                    
+                                # Восстанавливаем эталонный формат ключа
+                                clean_temp_id = f"REF_{num_match.group()}"
                                 cats_array = res.get('category_ids', [])
                                 
-                                # Ищем настоящий SRID по короткому REF_
-                                real_srid = srid_map.get(temp_id)
+                                # Ищем настоящий SRID по восстановленному ключу
+                                real_srid = srid_map.get(clean_temp_id)
+                                
+                                if real_srid and cats_array:
+                                    updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
+                                    if updates:
+                                        # Добавим принт для отладки, чтобы видеть, что именно уходит в базу
+                                        print(f"Попытка записи: SRID={real_srid}, Теги={updates}")
+                                        
+                                        # Проверяем, вернул ли SQL успешный статус
+                                        is_success = update_db_row(real_srid, updates)
+                                        if is_success:
+                                            saved_count += 1
+                                        else:
+                                            print(f"🚨 Ошибка SQL при записи SRID {real_srid}")
                                 
                                 if real_srid and cats_array:
                                     updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
