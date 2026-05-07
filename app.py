@@ -1331,6 +1331,109 @@ elif page == "⚠️ Уровень PPM":
                         group_letter = item.replace('[Вся Группа ', '').replace(']', '')
                         active_skus.update(ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist())
                     else:
+                        active_skus.add(item)
+            active_skus = list(active_skus)
+            display_df = ppm_df[ppm_df['Артикул продавца'].isin(active_skus)].sort_values(by=['PPM', 'ABC_Группа'], ascending=[False, True])
+
+            # --- ЗАПОЛНЯЕМ СТАТИСТИКУ (НАВЕРХУ) ---
+            with stats_container:
+                st.markdown("### :material/analytics: Статистика по фильтрам")
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Группа A (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'A']))
+                col_b.metric("Группа B (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'B']))
+                col_c.metric("Группа C (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'C']))
+                st.markdown("---")
+
+            # --- ТАБЛИЦА И ГРАФИК (Новые пропорции ширины: 2.5 к 2) ---
+            col_table, col_chart = st.columns([2.5, 2], gap="large") 
+            clicked_sku = None
+
+            with col_table:
+                st.markdown("#### :material/table_rows: Список товаров")
+                def highlight_ppm(row):
+                    return ['background-color: #fee2e2; color: #991b1b' if row['PPM'] > 10000 else ''] * len(row)
+                
+                cols_to_show = ['Артикул продавца', 'ABC_Группа', 'Класс XYZ', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']
+                styled_df = display_df[cols_to_show].style.apply(highlight_ppm, axis=1)
+                
+                try:
+                    # Настройка ширины колонок и правильного форматирования цифр
+                    event = st.dataframe(
+                        styled_df, 
+                        use_container_width=True, 
+                        hide_index=True, 
+                        on_select="rerun", 
+                        selection_mode="single-row", 
+                        height=470,
+                        column_config={
+                            "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
+                            "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
+                            "Класс XYZ": st.column_config.TextColumn("XYZ", width="small"),
+                            "Чистые_заказы": st.column_config.NumberColumn("Заказы", format="%d", width="small"),
+                            "Одобренный брак (шт)": st.column_config.NumberColumn("Брак", format="%d", width="small"),
+                            "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f", width="small"),
+                            "PPM": st.column_config.NumberColumn("PPM", format="%d", width="small")
+                        }
+                    )
+                    if event.selection.rows:
+                        clicked_sku = display_df.iloc[event.selection.rows[0]]['Артикул продавца']
+                except TypeError:
+                    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            with col_chart:
+                plot_skus = [clicked_sku] if clicked_sku else active_skus
+                chart_title = f"📉 Динамика: {clicked_sku}" if clicked_sku else "📉 Динамика"
+                st.markdown(f"#### :material/monitoring: {chart_title}")
+                
+                sku_orders = df_orders[df_orders['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                sku_defects = df_approved[df_approved['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                monthly_df = pd.merge(sku_orders, sku_defects, on='Месяц_ДТ', how='outer').fillna(0).sort_values('Месяц_ДТ')
+                
+                if not monthly_df.empty:
+                    monthly_df['Месяц_Стр'] = monthly_df['Месяц_ДТ'].dt.month.map(months_ru) + " " + monthly_df['Месяц_ДТ'].dt.year.astype(str)
+                    monthly_df['PPM'] = np.where(monthly_df['Чистые_заказы'] > 0, (monthly_df['Брак'] / monthly_df['Чистые_заказы']) * 1000000, 0).astype(int)
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(x=monthly_df['Месяц_Стр'], y=monthly_df['Чистые_заказы'], name='Заказы', marker_color='#3b82f6', yaxis='y'))
+                    fig.add_trace(go.Scatter(x=monthly_df['Месяц_Стр'], y=monthly_df['PPM'], name='PPM', mode='lines+markers', line=dict(color='#ef4444', width=3), yaxis='y2'))
+                    fig.add_hline(y=10000, line_dash="dot", line_color="#f59e0b", annotation_text="Предел", yref='y2')
+                    fig.update_layout(height=420, xaxis=dict(title="Месяц"), yaxis=dict(title="Заказы", side='left'), yaxis2=dict(title="PPM", side='right', overlaying='y', showgrid=True), hovermode="x unified", margin=dict(l=0, r=0, t=10, b=0), legend=dict(x=0.01, y=0.99))
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # --- РЕКЛАМАЦИЯ ---
+            st.markdown("---")
+            st.markdown("### :material/mail: Генерация рекламации на завод")
+            ppm_alerts = display_df[display_df['PPM'] > 10000]
+            selected_sku_claim = st.selectbox("Проблемный артикул:", ppm_alerts['Артикул продавца'].tolist() if not ppm_alerts.empty else display_df['Артикул продавца'].tolist())
+            
+            if selected_sku_claim and not df_approved.empty:
+                sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
+                all_photos_claim = []
+                for _, r in sku_defects.iterrows():
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', str(r.get('db_photos', '')).replace('nan', ''))
+                    for u in urls:
+                        clean_url = u.replace("']", "").replace("'", "").replace('"', '').strip()
+                        if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                        if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos_claim.append(clean_url)
+                
+                all_photos_claim = list(set(all_photos_claim))[:15]
+                c_ppm = display_df[display_df['Артикул продавца'] == selected_sku_claim]['PPM'].values[0]
+                c_prc = display_df[display_df['Артикул продавца'] == selected_sku_claim]['Доля брака, %'].values[0]
+                c_qty = display_df[display_df['Артикул продавца'] == selected_sku_claim]['Одобренный брак (шт)'].values[0]
+                
+                claim_text = f"Здравствуйте!\n\nИнформируем вас о превышении допустимого уровня брака (Артикул: {selected_sku_claim}).\nPPM: {c_ppm} ({c_prc:.2f}%).\nБрак: {int(c_qty)} ед.\n"
+                if all_photos_claim: claim_text += "\nФото:\n" + "\n".join(all_photos_claim)
+                
+                st.text_area("Готовое письмо:", value=claim_text, height=200)
+                
+                if all_photos_claim:
+                    if st.button(":material/download: Скачать фото", type="primary"):
+                        with st.spinner("Сбор..."):
+                            components.html(f'<a id="dl_c" href="data:application/zip;base64,{base64.b64encode(create_images_zip(all_photos_claim)).decode()}" download="Рекламация_{selected_sku_claim}.zip"></a><script>document.getElementById("dl_c").click();</script>', width=0, height=0)
+        else: 
+            st.warning("⚠️ Нет данных о заказах.")
+    except Exception as e:
+        st.error(f"Ошибка данных PPM: {e}")
 
 elif page == "⭐ Рейтинг товаров":
     st.title("⭐ Мониторинг Рейтинга (В разработке)")
