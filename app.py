@@ -1175,6 +1175,9 @@ elif page == "📊 Отчет производства":
             c4.metric("Точность ИИ", f"{accuracy}%")
             st.markdown("---")
             
+    except Exception as e:
+        st.error(f"Ошибка Отчета: {e}")
+            
 elif page == "⚠️ Уровень PPM":
     st.title("⚠️ Аналитика PPM и Рекламации")
     
