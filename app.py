@@ -18,43 +18,28 @@ from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
-# --- CSS Стили (Обновленные: Навигация + Старые стили) ---
 st.markdown("""
     <style>
-    /* НАВИГАЦИЯ: Скрываем кружочки радио-кнопок */
-    [data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child { display: none !important; }
-    
-    /* НАВИГАЦИЯ: Стилизуем пункты под плоские кнопки */
-    [data-testid="stSidebar"] div[role="radiogroup"] > label {
-        background-color: transparent;
+    /* НАВИГАЦИЯ: Стилизуем кнопки под плоские пункты меню */
+    div[data-testid="stSidebar"] button {
+        justify-content: flex-start;
+        text-align: left;
         padding: 8px 12px;
         border-radius: 6px;
-        margin-bottom: 2px;
+        border: none;
+        background-color: transparent;
         color: #475569;
+        font-weight: 500;
         transition: all 0.2s ease;
-        cursor: pointer;
+        margin-bottom: 2px;
     }
-    /* НАВИГАЦИЯ: Эффект наведения */
-    [data-testid="stSidebar"] div[role="radiogroup"] > label:hover { background-color: #f1f5f9; }
-    
-    /* НАВИГАЦИЯ: Активная кнопка */
-    [data-testid="stSidebar"] div[role="radiogroup"] > label[data-checked="true"] {
-        background-color: #eff6ff;
-        color: #2563eb;
-        font-weight: 600;
-    }
-    
-    /* НАВИГАЦИЯ: Заголовки групп */
-    [data-testid="stSidebar"] h3 {
-        padding-top: 1rem;
-        padding-bottom: 0.5rem;
-        font-size: 0.95rem;
-        color: #64748b;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+    div[data-testid="stSidebar"] button:hover { background-color: #f1f5f9; color: #0f172a; }
+    div[data-testid="stSidebar"] button[kind="primary"] {
+        background-color: #eff6ff !important;
+        color: #2563eb !important;
+        font-weight: 600 !important;
     }
 
-    /* ВАШИ СТАРЫЕ СТИЛИ (Сохранены) */
     [data-testid="stDataFrame"] { font-size: 11px !important; }
     .detail-card { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background-color: #fcfcfc; }
     .media-row { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 10px; }
@@ -67,44 +52,45 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- ГРУППИРОВКА И КРАСИВАЯ НАВИГАЦИЯ ---
+# --- ИСПРАВЛЕННАЯ СТАБИЛЬНАЯ НАВИГАЦИЯ ---
 tech_menu = {
-    ":material/sync: Синхронизатор": "🤖 Робот-Синхронизатор",
-    ":material/science: ИИ Тегирование": "🔬 ИИ Тегирование",
-    ":material/rule_folder: Модерация": "📝 Модерация",
-    ":material/psychology: Обучение ИИ": "🧠 Обучение ИИ"
+    "Синхронизатор": ("🤖 Робот-Синхронизатор", "🤖"),
+    "ИИ Тегирование": ("🔬 ИИ Тегирование", "🔬"),
+    "Модерация": ("📝 Модерация", "📝"),
+    "Обучение ИИ": ("🧠 Обучение ИИ", "🧠"),
+    "Системный Журнал": ("📜 Системный Журнал", "📜") # Пункт 6
 }
 
 ops_menu = {
-    ":material/bar_chart: Отчет производства": "📊 Отчет производства",
-    ":material/star: Рейтинг товаров": "⭐ Рейтинг товаров",
-    ":material/receipt_long: Системный Журнал": "📜 Системный Журнал"
+    "Отчет производства": ("📊 Отчет производства", "📊"),
+    "Уровень PPM": ("⚠️ Уровень PPM", "⚠️"), # Пункт 7
+    "Рейтинг товаров": ("⭐ Рейтинг товаров", "⭐")
 }
 
-if 'active_menu_key' not in st.session_state:
-    st.session_state.active_menu_key = list(tech_menu.keys())[0]
+if 'active_tab' not in st.session_state:
+    st.session_state.active_tab = "🤖 Робот-Синхронизатор"
 
-def nav_tech(): st.session_state.active_menu_key = st.session_state.tech_nav
-def nav_ops(): st.session_state.active_menu_key = st.session_state.ops_nav
+st.sidebar.markdown("### ⚙️ Технический блок")
+for key, (page_name, icon) in tech_menu.items():
+    is_active = st.session_state.active_tab == page_name
+    if st.sidebar.button(f"{icon} {key}", key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
+        st.session_state.active_tab = page_name
+        st.rerun()
 
-st.sidebar.markdown("### :material/settings_applications: Технический блок")
-t_idx = list(tech_menu.keys()).index(st.session_state.active_menu_key) if st.session_state.active_menu_key in tech_menu else None
-st.sidebar.radio("tech", list(tech_menu.keys()), index=t_idx, key="tech_nav", on_change=nav_tech, label_visibility="collapsed")
+st.sidebar.markdown("### 📈 Операционный блок")
+for key, (page_name, icon) in ops_menu.items():
+    is_active = st.session_state.active_tab == page_name
+    if st.sidebar.button(f"{icon} {key}", key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
+        st.session_state.active_tab = page_name
+        st.rerun()
 
-st.sidebar.markdown("### :material/monitoring: Операционный блок")
-o_idx = list(ops_menu.keys()).index(st.session_state.active_menu_key) if st.session_state.active_menu_key in ops_menu else None
-st.sidebar.radio("ops", list(ops_menu.keys()), index=o_idx, key="ops_nav", on_change=nav_ops, label_visibility="collapsed")
+page = st.session_state.active_tab
 
-all_menus = {**tech_menu, **ops_menu}
-page = all_menus.get(st.session_state.active_menu_key, "🤖 Робот-Синхронизатор")
-
-# --- ГЛОБАЛЬНЫЙ ТРЕКЕР СМЕНЫ СТРАНИЦ ---
 if st.session_state.get('current_tab') != page:
     st.session_state.current_tab = page
     st.session_state.matrix_key = int(time.time())
     st.session_state.show_detail_trigger = None
     st.session_state.last_click_id = None
-# ---------------------------------------
 
 try:
     YANDEX_API_KEY = st.secrets["YANDEX_API_KEY"]
@@ -213,6 +199,21 @@ def update_db_row(srid, updates_dict):
     except Exception as e:
         return False
 
+def create_images_zip(urls):
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for i, url in enumerate(urls):
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    img_data = response.read()
+                    ext = ".jpg"
+                    if ".png" in url.lower(): ext = ".png"
+                    elif ".jpeg" in url.lower(): ext = ".jpeg"
+                    zip_file.writestr(f"photo_{i+1}{ext}", img_data)
+            except Exception: pass
+    return zip_buffer.getvalue()
+
 # ==========================================
 # ИИ ДВИЖОК
 # ==========================================
@@ -317,39 +318,47 @@ async def fetch_ai_tags(session, batch, memory_string, model="yandex"):
             return [{"error": f"Системная ошибка Grok: {str(e)}"}]
     return []
 
-async def fetch_ai_crosscheck(session, batch, engine):
+async def fetch_ai_crosscheck(session, batch, engine, model="grok"):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
     combined_target_text = " ".join([i['text'] for i in batch])
-
-    # 🌟 ОБРАЩАЕМСЯ К SQL БАЗЕ ЗНАНИЙ (Новая функция!)
     relevant_memory = find_similar_examples_sql(combined_target_text, engine)
 
     system_prompt = f"""Ты — строгий аудитор. Твоя задача — проверить правильность тегов, которые поставила другая нейросеть.
-
-ДОСТУПНЫЕ КАТЕГОРИИ (ID: Название):
-{json.dumps(CATEGORIES, ensure_ascii=False, indent=2)}
-
---- ИСТОРИЧЕСКАЯ БАЗА ЗНАНИЙ (ОПЫТ) ---
+ДОСТУПНЫЕ КАТЕГОРИИ: {json.dumps(CATEGORIES, ensure_ascii=False)}
+--- ОПЫТ ---
 {relevant_memory}
-----------------------------------------
+ПРАВИЛО: Если текущие теги противоречат опыту, исправь их, записав тег в `correction`.
+ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "audit_status": "Согласен", "audit_comment": "", "correction": ""}}]}}"""
 
-ПРАВИЛО: Если текущие теги противоречат опыту из базы, ты должен исправить их, записав правильный тег в поле `correction`.
-ОТВЕТЬ СТРОГО В ЭТОМ JSON ФОРМАТЕ: {{"results": [{{"id": "...", "audit_status": "Согласен", "audit_comment": "", "correction": ""}}]}}"""
-
-    url = "https://api.x.ai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "grok-beta",
-        "temperature": 0.1,
-        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
-    }
-    try:
-        async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-            if resp.status == 200:
-                res = await resp.json()
-                return parse_ai_response(res['choices'][0]['message']['content'])
-    except Exception as e:
-        print(f"Ошибка Grok (Аудит): {e}")
+    if "yandex" in model:
+        url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
+        yandex_model_name = "yandexgpt-lite" if model == "yandex-lite" else "yandexgpt"
+        payload = {
+            "modelUri": f"gpt://{FOLDER_ID}/{yandex_model_name}/latest",
+            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
+            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
+        }
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    return parse_ai_response(res['result']['alternatives'][0]['message']['text'])
+        except Exception as e: print(f"Ошибка Yandex Аудит: {e}")
+        
+    elif model == "grok":
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "grok-beta", "temperature": 0.1,
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
+        }
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    return parse_ai_response(res['choices'][0]['message']['content'])
+        except Exception as e: print(f"Ошибка Grok Аудит: {e}")
 
     return []
 
@@ -378,7 +387,7 @@ async def run_ai_batch_processing(df_to_tag, model_choice, memory_string="", mod
                     res = await fetch_ai_tags(session, batch, memory_string, model_choice)
                 else: 
                     # Для аудита оставляем передачу engine, так как там логика не менялась
-                    res = await fetch_ai_crosscheck(session, batch, engine) 
+                    res = await fetch_ai_crosscheck(session, batch, engine, model_choice) 
                 if res: 
                     results.extend(res)
                 batch = []
@@ -540,11 +549,12 @@ elif page == "🔬 ИИ Тегирование":
     st.title("🔬 ИИ Тегирование и Проверка")
     
     if engine:
-        # Загружаем данные напрямую из PostgreSQL
+        # ПУНКТ 4: Исключаем те, что ИИ не смог распознать
         query_unprocessed = """
             SELECT srid, supplier_article, user_comment 
             FROM wb_claims 
             WHERE NOT (cat_1 OR cat_2 OR cat_3 OR cat_4 OR cat_5 OR cat_6 OR cat_7 OR cat_8 OR cat_9 OR cat_10 OR cat_11 OR cat_12 OR cat_13)
+            AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
         """
         df_unprocessed = pd.read_sql(query_unprocessed, engine)
         
@@ -635,15 +645,17 @@ elif page == "🔬 ИИ Тегирование":
                                 cats_array = res.get('category_ids', [])
                                 real_srid = srid_map.get(clean_temp_id)
                                 
-                                if real_srid and cats_array:
-                                    updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
-                                    if updates:
-                                        # Пытаемся обновить строку в БД
-                                        if update_db_row(real_srid, updates):
-                                            saved_count += 1
-                                            batch_details.append(f"✅ SRID {real_srid}: теги {cats_array}")
-                                        else:
-                                            batch_details.append(f"🚨 ОШИБКА SQL: SRID {real_srid} не обновлен")
+                                if real_srid:
+                                    if cats_array:
+                                        updates = {f"cat_{re.search(r'\d+', str(c)).group()}": True for c in cats_array if re.search(r'\d+', str(c))}
+                                        if updates:
+                                            if update_db_row(real_srid, updates):
+                                                saved_count += 1
+                                                batch_details.append(f"✅ SRID {real_srid}: теги {cats_array}")
+                                    else:
+                                        # ПУНКТ 4: Если тегов нет, помечаем как "Пропущено", чтобы не зацикливалось!
+                                        update_db_row(real_srid, {"audit_status": "Пропущено ИИ"})
+                                        batch_details.append(f"⚠️ SRID {real_srid}: ИИ не смог определить теги (Пропущено)")
                                 else:
                                     batch_details.append(f"❓ ПРОПУСК: SRID для {clean_temp_id} не найден в маппинге")
                             
@@ -673,12 +685,15 @@ elif page == "🔬 ИИ Тегирование":
                 st.success("🎉 Все заявки в базе имеют первичную разметку!")
 
         with t2:
-            st.subheader("Глубокая проверка (Аудит от Grok)")
+            st.subheader("Глубокая проверка (Аудит)")
             if not df_audit.empty:
                 total_audit_rows = len(df_audit)
-                batch_size_audit = st.slider("Размер пачки для аудита", 5, 50, 10, key="batch_audit")
-                st.info(f"Найдено строк для проверки: **{total_audit_rows}**")
-
+                col1, col2 = st.columns(2)
+                batch_size_audit = col1.slider("Размер пачки для аудита", 5, 50, 10, key="batch_audit")
+                # ПУНКТ 5: Выбор ИИ
+                model_audit = col2.radio("Модель аудитора:", ["YandexGPT Lite", "YandexGPT Pro", "Grok (xAI)"], key="mod_audit")
+                model_audit_key = "yandex-lite" if "Lite" in model_audit else "yandex-pro" if "Pro" in model_audit else "grok"
+                
                 if st.button("🕵️‍♂️ ЗАПУСТИТЬ АУДИТ", type="primary"):
                     progress_bar_audit = st.progress(0)
                     status_text_audit = st.empty()
@@ -690,7 +705,8 @@ elif page == "🔬 ИИ Тегирование":
                         chunk = df_audit.iloc[i:i+batch_size_audit]
                         status_text_audit.text(f"⏳ Аудит: {int(((i + len(chunk)) / total_audit_rows) * 100)}%")
                         
-                        results = loop.run_until_complete(run_ai_batch_processing(chunk, "grok", mode="crosscheck"))
+                        # Передаем выбранную модель!
+                        results = loop.run_until_complete(run_ai_batch_processing(chunk, model_audit_key, mode="crosscheck"))
                         
                         for res in results:
                             if "error" in res: continue
@@ -717,7 +733,7 @@ elif page == "🔬 ИИ Тегирование":
                 st.success("🎉 Все размеченные заявки проверены аудитором!")
 
 elif page == "📝 Модерация":
-    st.title("📋 Модерация (Ручная проверка через Supabase)")
+    st.title("📋 Модерация (Ручная проверка)"))
 
     @st.dialog("Просмотр видео")
     def play_video_modal(url): 
@@ -752,20 +768,30 @@ elif page == "📝 Модерация":
                     st.rerun()
 
     if engine:
-        st.markdown("### 🔍 Фильтр обращений")
-        filter_mode = st.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора (Кросс-проверка)"], horizontal=True)
+        st.markdown("### 🔍 Фильтры обращений")
+        c1, c2 = st.columns(2)
+        filter_mode = c1.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора"], horizontal=True)
         
-        # БРОНЕБОЙНЫЙ ЗАПРОС: Избегаем дублирования колонок, чтобы Pandas не обрезал ссылки!
+        # ПУНКТ 1: Добавляем фильтр по категориям
+        cat_options = ["Все категории"] + list(CATEGORIES.values())
+        selected_cat_filter = c2.selectbox("Фильтр по категории ИИ:", cat_options)
+        
         query = """
             SELECT *
             FROM view_cx_dashboard
             WHERE ("1" OR "2" OR "3" OR "4" OR "5" OR "6" OR "7" OR "8" OR "9" OR "10" OR "11" OR "12" OR "13")
             AND ("Корректировка" IS NULL OR "Корректировка" = '')
         """
-        if filter_mode == "С замечаниями от Аудитора (Кросс-проверка)":
-            query += " AND UPPER(\"Аудит\") LIKE '%ОШИБКА%'"
-            
+        if filter_mode == "С замечаниями от Аудитора": query += " AND UPPER(\"Аудит\") LIKE '%ОШИБКА%'"
+        
         to_review = pd.read_sql(query, engine)
+        reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
+        
+        # ПРИМЕНЯЕМ ФИЛЬТР КАТЕГОРИИ
+        if selected_cat_filter != "Все категории" and not to_review.empty:
+            cat_id_str = str(reverse_cats.get(selected_cat_filter.lower()))
+            if cat_id_str in to_review.columns:
+                to_review = to_review[to_review[cat_id_str].astype(str).str.lower().isin(['1', '1.0', '+', 'true', 'да'])]
         
         if not to_review.empty:
             total_items = len(to_review)
@@ -797,19 +823,25 @@ elif page == "📝 Модерация":
                     ai_text = ", ".join(ai_selected) if ai_selected else "Категории не определены"
                     st.markdown(f'<div class="ai-tags-box">🤖 <b>Выбор ИИ:</b> {ai_text}</div>', unsafe_allow_html=True)
                     
-                    selected_cats = st.multiselect("Выберите правильные категории:", options=cats_list, default=[], key=f"ms_{srid}")
+                    selected_cats = st.multiselect("Выберите правильные категории (если ИИ ошибся):", options=cats_list, default=[], key=f"ms_{srid}")
                     
-                    if st.button("💾 Сохранить решение", key=f"btn_{srid}", type="primary"):
-                        if selected_cats:
-                            updates = {f"cat_{i}": False for i in range(1, 14)}
-                            for cat_name in selected_cats:
-                                cat_num = reverse_cats.get(cat_name.strip().lower())
-                                if cat_num: updates[f"cat_{cat_num}"] = True
-                            updates["correction"] = "; ".join(selected_cats)
-                            
-                            if update_db_row(srid, updates):
-                                st.success("Сохранено в БД!")
-                                time.sleep(0.5)
+                    btn_col1, btn_col2 = st.columns(2)
+                    with btn_col1:
+                        if st.button("💾 Исправить", key=f"btn_{srid}", type="primary"):
+                            if selected_cats:
+                                updates = {f"cat_{i}": False for i in range(1, 14)}
+                                for cat_name in selected_cats:
+                                    cat_num = reverse_cats.get(cat_name.strip().lower())
+                                    if cat_num: updates[f"cat_{cat_num}"] = True
+                                updates["correction"] = "; ".join(selected_cats)
+                                if update_db_row(srid, updates):
+                                    st.rerun()
+
+                    with btn_col2:
+                        # ПУНКТ 2: Кнопка быстрого подтверждения
+                        if st.button("✅ Подтвердить (Без изменений)", key=f"ok_{srid}"):
+                            # Помечаем как подтверждено, чтобы ушло из очереди
+                            if update_db_row(srid, {"correction": "Подтверждено"}):
                                 st.rerun()
 
                 with col_media:
@@ -1142,308 +1174,211 @@ elif page == "📊 Отчет производства":
             c4.metric("Точность ИИ", f"{accuracy}%")
             st.markdown("---")
             
-            tab_matrix, tab_ppm = st.tabs(["🧮 Тепловая Матрица Производства", "⚠️ Расчет PPM и Рекламации"])
+elif page == "⚠️ Уровень PPM":
+    st.title("⚠️ Аналитика PPM и Рекламации")
+    
+    with st.spinner("Загрузка данных для PPM..."):
+        try:
+            df_filtered = load_cached_hybrid_data() # Загружаем гибридные данные
+            df_orders = load_cached_orders()
+        except Exception as e:
+            st.error(f"Ошибка загрузки данных: {e}")
+            df_filtered = pd.DataFrame()
+            df_orders = pd.DataFrame()
+
+    st.info("💡 **Аналитика PPM**: Расчет идет только по заявкам, которые: 1) Имеют статус «Одобрено» 2) Размечены ИИ или вручную. Предел PPM установлен на 10 000 (1%).")
+    
+    import numpy as np
+    import plotly.graph_objects as go
+    
+    try:
+        if not df_orders.empty and 'Артикул продавца' in df_orders.columns:
+            # --- ПОДГОТОВКА ДАТ ДЛЯ ФИЛЬТРА ---
+            months_ru = {1: 'Янв', 2: 'Фев', 3: 'Мар', 4: 'Апр', 5: 'Май', 6: 'Июн', 
+                         7: 'Июл', 8: 'Авг', 9: 'Сен', 10: 'Окт', 11: 'Ноя', 12: 'Дек'}
             
-            with tab_matrix:
-                st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
-                matrix_list = []
-                for i in range(1, 14):
-                    cat_col = str(i)
-                    if cat_col in df_filtered.columns:
-                        temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да'])]
-                        for _, r in temp.iterrows():
-                            matrix_list.append({
-                                'Артикул продавца': str(r.get('Артикул продавца', 'Без артикула')).strip(),
-                                'Причина': f"{i}. {CATEGORIES[i]}",
-                                'ID': i,
-                                'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
-                                'Номер поставки': str(r.get('Номер поставки_ОРИГИНАЛ', 'Не указан')).strip()
-                            })
+            # Берем сразу 'Месяц_ДТ'
+            df_orders['Месяц_ДТ'] = pd.to_datetime(df_orders['Месяц_ДТ'])
+            df_orders['Месяц_Стр'] = df_orders['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_orders['Месяц_ДТ'].dt.year.astype(str)
+            
+            # ВНИМАНИЕ: Здесь нужно вычислить колонку 'Размечено', так как мы вызываем сырой load_cached_hybrid_data
+            def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14))
+            df_filtered['Размечено'] = df_filtered.apply(has_tags, axis=1)
+            
+            df_approved = df_filtered[df_filtered['Размечено'] == True].copy()
+            if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
+                df_approved['Месяц_ДТ'] = df_approved['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                df_approved['Месяц_Стр'] = df_approved['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_approved['Месяц_ДТ'].dt.year.astype(str)
+            else:
+                df_approved['Месяц_ДТ'] = pd.NaT
+                df_approved['Месяц_Стр'] = 'Неизвестно'
 
-                if matrix_list:
-                    df_matrix = pd.DataFrame(matrix_list)
-                    pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул продавца']).fillna(0).astype(int)
-                    pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
-                    reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
-                    df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул продавца', value_name='Дефекты')
-                    df_melt['Артикул_Метка'] = df_melt['Артикул продавца'] 
-                    df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
-                    df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
+            # Сортируем доступные месяцы от новых к старым
+            available_months = df_orders.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=False)['Месяц_Стр'].tolist()
 
-                    import altair as alt
-                    click_selector = alt.selection_point(name='cell_click', fields=['Артикул_Метка', 'Причина_Метка'])
-                    base = alt.Chart(df_melt).encode(x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000, orient='bottom')), y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending')))
-                    rects = base.mark_rect(stroke='white', strokeWidth=1).encode(color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None), tooltip=[alt.Tooltip('Артикул продавца:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')])
-                    text = base.mark_text(baseline='middle', fontSize=11).encode(text='Текст:N', color=alt.condition(alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2), alt.value('white'), alt.value('black')))
-                    final_chart = alt.layer(rects, text).properties(height=max(400, len(pivot) * 35 + 100)).add_params(click_selector)
-                    
-                    event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun", key=f"prod_matrix_{st.session_state.matrix_key}")
-                    
-                    try:
-                        if event and hasattr(event, "selection"):
-                            sel = event.selection.get("cell_click", [])
-                            if sel and len(sel) > 0:
-                                sku_clicked = sel[0].get('Артикул_Метка')
-                                reason_clicked = sel[0].get('Причина_Метка')
-                                if sku_clicked and reason_clicked:
-                                    current_click_id = f"{sku_clicked}_{reason_clicked}"
-                                    if current_click_id != st.session_state.get('last_click_id'):
-                                        st.session_state.last_click_id = current_click_id
-                                        st.session_state.show_detail_trigger = {'sku': sku_clicked.split(' [')[0], 'reason': reason_clicked.split(' [')[0], 'df': df_filtered, 'id': int(reason_clicked.split('.')[0])}
-                                        st.session_state.matrix_key += 1
-                                        st.rerun()
-                    except Exception as e: 
-                        st.error(f"Ошибка системы перехвата клика: {e}")
-                    
-                    if st.session_state.get('show_detail_trigger'):
-                        t = st.session_state.show_detail_trigger
-                        show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
+            # --- ГЛОБАЛЬНАЯ ПАНЕЛЬ ФИЛЬТРОВ ---
+            st.markdown("### 🎛 Панель управления")
+            f_col1, f_col2 = st.columns(2)
+            
+            selected_months = f_col1.multiselect("📅 Период (Месяцы):", options=available_months, default=[], help="Оставьте пустым для отображения за всё время")
+            
+            # Применяем фильтр дат
+            filt_orders = df_orders[df_orders['Месяц_Стр'].isin(selected_months)] if selected_months else df_orders
+            filt_approved = df_approved[df_approved['Месяц_Стр'].isin(selected_months)] if selected_months else df_approved
+
+            # --- 1. АВТОМАТИЧЕСКИЙ ABC-АНАЛИЗ И ПОДСЧЕТ БРАКА ---
+            filt_orders['Чистые_заказы'] = pd.to_numeric(filt_orders.get('Чистые_заказы', 0), errors='coerce').fillna(0)
+            orders_total = filt_orders.groupby('Артикул продавца')['Чистые_заказы'].sum().reset_index()
+            orders_total = orders_total.sort_values('Чистые_заказы', ascending=False)
+            
+            total_sum = orders_total['Чистые_заказы'].sum()
+            if total_sum > 0:
+                orders_total['cum_perc'] = orders_total['Чистые_заказы'].cumsum() / total_sum
+                orders_total['ABC_Группа'] = pd.cut(orders_total['cum_perc'], bins=[0, 0.8, 0.95, 1.1], labels=['A', 'B', 'C'], right=True)
+            else:
+                orders_total['ABC_Группа'] = 'C'
                 
-                else: 
-                    st.info("Данных для матрицы пока нет.")
+            defects_total = filt_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)') if not filt_approved.empty else pd.DataFrame(columns=['Артикул продавца', 'Одобренный брак (шт)'])
+            
+            ppm_df = pd.merge(orders_total[['Артикул продавца', 'Чистые_заказы', 'ABC_Группа']], defects_total, on='Артикул продавца', how='left').fillna(0)
+            ppm_df['PPM'] = np.where(ppm_df['Чистые_заказы'] > 0, (ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 1000000, 0).astype(int)
+            ppm_df['Доля брака, %'] = np.where(ppm_df['Чистые_заказы'] > 0, round((ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 100, 2), 0)
 
-                st.markdown("---")
-                st.markdown("### 📦 Проблемные поставки и инвойсы (Топ-15)")
-                st.markdown("""<style>#vg-tooltip-element { font-family: sans-serif; font-size: 11px !important; line-height: 1.3 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important; border-radius: 6px !important; border: 1px solid #e0e0e0 !important; max-width: 600px !important; white-space: normal !important;} #vg-tooltip-element table tr { border-bottom: 1px solid #d1d5db; } #vg-tooltip-element table td { padding: 6px 8px !important; vertical-align: top; } #vg-tooltip-element table td.key { color: #6b7280; font-weight: 600; white-space: nowrap; }</style>""", unsafe_allow_html=True)
+            # --- ФИЛЬТР ПО АРТИКУЛАМ / ГРУППАМ ---
+            all_skus = ppm_df['Артикул продавца'].tolist()
+            article_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + all_skus
+            selected_articles = f_col2.multiselect("📦 Объекты (Группы или Артикулы):", options=article_options, default=['[Все артикулы]'])
+
+            # Распаковка выбранных объектов в список конкретных артикулов
+            active_skus = set()
+            if not selected_articles or '[Все артикулы]' in selected_articles:
+                active_skus.update(all_skus)
+            else:
+                for item in selected_articles:
+                    if item.startswith('[Вся Группа'):
+                        group_letter = item[-2]
+                        active_skus.update(ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist())
+                    else:
+                        active_skus.add(item)
+            active_skus = list(active_skus)
+
+            # Формируем итоговую таблицу для отображения
+            display_df = ppm_df[ppm_df['Артикул продавца'].isin(active_skus)].sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
+
+            st.markdown("---")
+            st.markdown("### 🗂 Статистика по выбранным фильтрам")
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Группа A (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'A']))
+            col_b.metric("Группа B (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'B']))
+            col_c.metric("Группа C (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'C']))
+            
+            # --- ДВУХКОЛОНОЧНЫЙ ИНТЕРФЕЙС (МАСТЕР-ДЕТАЛЬ) ---
+            st.info("💡 **Интерактив:** Кликните на любую строку в таблице, чтобы график динамики показал данные именно по ней.")
+            col_table, col_chart = st.columns([1.4, 2], gap="large") 
+            clicked_sku = None
+
+            with col_table:
+                st.markdown("#### 📋 Список товаров")
+                def highlight_ppm(row):
+                    return ['background-color: #fee2e2; color: #991b1b' if row['PPM'] > 10000 else ''] * len(row)
                 
-                if matrix_list:
-                    supply_grouped = []
-                    df_matrix_data = pd.DataFrame(matrix_list)
-                    
-                    if 'Номер поставки' in df_matrix_data.columns:
-                        # Группируем по Номеру поставки
-                        for supply, group in df_matrix_data.groupby('Номер поставки'):
-                            
-                            # ИСКЛЮЧАЕМ пустые значения и системные нули
-                            clean_supply = str(supply).strip()
-                            if clean_supply in ['Не указан', '', '0', '0.0'] or pd.isna(supply): 
-                                continue
-                            
-                            # Собираем уникальные инвойсы для этой поставки
-                            invoices = ", ".join(sorted(list(set([str(x) for x in group['Инвойс'] if str(x) != 'Не указан' and str(x).strip()]))))
-                            
-                            # Считаем, сколько каких артикулов было с браком в этой поставке
-                            all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in group['Артикул продавца'].value_counts().items()])
-                            
-                            supply_grouped.append({
-                                'Номер поставки': clean_supply, 
-                                'Дефекты': len(group), 
-                                'Инвойсы': invoices if invoices else "Не указаны", 
-                                'Список Артикулов': all_skus
-                            })
-                        
-                        if supply_grouped:
-                            # Сортируем по количеству брака и берем топ-15
-                            df_supply = pd.DataFrame(supply_grouped).sort_values('Дефекты', ascending=False).head(15)
-                            
-                            supply_chart = alt.Chart(df_supply).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-                                x=alt.X('Номер поставки:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)), 
-                                y=alt.Y('Дефекты:Q', title='Количество дефектов'), 
-                                color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None), 
-                                tooltip=[
-                                    alt.Tooltip('Номер поставки:N', title='Поставка'), 
-                                    alt.Tooltip('Дефекты:Q', title='Всего дефектов'), 
-                                    alt.Tooltip('Инвойсы:N', title='Инвойсы (связанные)'), 
-                                    alt.Tooltip('Список Артикулов:N', title='Артикулы')
-                                ]
-                            ).properties(height=350)
-                            
-                            st.altair_chart(supply_chart, use_container_width=True)
-                        else: 
-                            st.info("Нет данных по поставкам (или у всех дефектов не указан номер поставки).")
-                    else:
-                        st.info("Невозможно построить график: отсутствует колонка 'Номер поставки'.")
-                else: 
-                    st.info("Данных для матрицы пока нет.")
-
-            with tab_ppm:
-                st.info("💡 **Аналитика PPM**: Расчет идет только по заявкам, которые: 1) Имеют статус «Одобрено» 2) Размечены ИИ или вручную. Предел PPM установлен на 10 000 (1%).")
-                import numpy as np
-                import plotly.graph_objects as go
+                cols_to_show = ['Артикул продавца', 'ABC_Группа', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']
+                styled_df = display_df[cols_to_show].style.apply(highlight_ppm, axis=1)
                 
-                if not df_orders.empty and 'Артикул продавца' in df_orders.columns:
-                    # --- ПОДГОТОВКА ДАТ ДЛЯ ФИЛЬТРА ---
-                    months_ru = {1: 'Янв', 2: 'Фев', 3: 'Мар', 4: 'Апр', 5: 'Май', 6: 'Июн', 
-                                 7: 'Июл', 8: 'Авг', 9: 'Сен', 10: 'Окт', 11: 'Ноя', 12: 'Дек'}
+                try:
+                    event = st.dataframe(
+                        styled_df, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        on_select="rerun",
+                        selection_mode="single-row",
+                        height=470,
+                        column_config={
+                            "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
+                            "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
+                            "Чистые_заказы": st.column_config.NumberColumn("Заказы", format="%d"),
+                            "Одобренный брак (шт)": st.column_config.NumberColumn("Брак (шт)", format="%d"),
+                            "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f"),
+                            "PPM": st.column_config.NumberColumn("PPM", format="%d")
+                        }
+                    )
+                    if event.selection.rows:
+                        clicked_sku = display_df.iloc[event.selection.rows[0]]['Артикул продавца']
+                except TypeError:
+                    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            with col_chart:
+                plot_skus = [clicked_sku] if clicked_sku else active_skus
+                chart_title = f"📉 Динамика: {clicked_sku}" if clicked_sku else ("📉 Динамика: Все артикулы" if '[Все артикулы]' in selected_articles or not selected_articles else "📉 Динамика: Выбранные объекты")
+                
+                st.markdown(f"#### {chart_title}")
+                
+                sku_orders = df_orders[df_orders['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
+                sku_defects = df_approved[df_approved['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ').size().reset_index(name='Брак')
+                
+                sku_orders['Месяц_ДТ'] = pd.to_datetime(sku_orders['Месяц_ДТ'])
+                sku_defects['Месяц_ДТ'] = pd.to_datetime(sku_defects['Месяц_ДТ'])
+                
+                monthly_df = pd.merge(sku_orders, sku_defects, on='Месяц_ДТ', how='outer').fillna(0).sort_values('Месяц_ДТ')
+                
+                if not monthly_df.empty:
+                    monthly_df['Месяц_Стр'] = monthly_df['Месяц_ДТ'].dt.month.map(months_ru) + " " + monthly_df['Месяц_ДТ'].dt.year.astype(str)
+                    monthly_df['PPM'] = np.where(monthly_df['Чистые_заказы'] > 0, (monthly_df['Брак'] / monthly_df['Чистые_заказы']) * 1000000, 0).astype(int)
                     
-                    # ИСПРАВЛЕНИЕ: Берем сразу 'Месяц_ДТ', так как сырого 'dt' в этой таблице уже нет
-                    df_orders['Месяц_ДТ'] = pd.to_datetime(df_orders['Месяц_ДТ'])
-                    df_orders['Месяц_Стр'] = df_orders['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_orders['Месяц_ДТ'].dt.year.astype(str)
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(x=monthly_df['Месяц_Стр'], y=monthly_df['Чистые_заказы'], name='Заказы', marker_color='#3b82f6', yaxis='y'))
+                    fig.add_trace(go.Scatter(x=monthly_df['Месяц_Стр'], y=monthly_df['PPM'], name='PPM', mode='lines+markers', line=dict(color='#ef4444', width=3), yaxis='y2'))
+                    fig.add_hline(y=10000, line_dash="dot", line_color="#f59e0b", annotation_text="Предел 10 000", yref='y2')
                     
-                    df_approved = df_filtered[df_filtered['Размечено'] == True].copy()
-                    if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
-                        df_approved['Месяц_ДТ'] = df_approved['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
-                        df_approved['Месяц_Стр'] = df_approved['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_approved['Месяц_ДТ'].dt.year.astype(str)
-                    else:
-                        df_approved['Месяц_ДТ'] = pd.NaT
-                        df_approved['Месяц_Стр'] = 'Неизвестно'
+                    fig.update_layout(
+                        height=420,
+                        xaxis=dict(title="Месяц"),
+                        yaxis=dict(title="Кол-во заказов", side='left', showgrid=False),
+                        yaxis2=dict(title="Уровень PPM", side='right', overlaying='y', showgrid=True),
+                        legend=dict(x=0.01, y=0.99),
+                        hovermode="x unified",
+                        margin=dict(l=0, r=0, t=10, b=0)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Нет данных для графика.")
 
-                    # Сортируем доступные месяцы от новых к старым
-                    available_months = df_orders.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=False)['Месяц_Стр'].tolist()
-
-                    # --- ГЛОБАЛЬНАЯ ПАНЕЛЬ ФИЛЬТРОВ ---
-                    st.markdown("### 🎛 Панель управления")
-                    f_col1, f_col2 = st.columns(2)
-                    
-                    selected_months = f_col1.multiselect("📅 Период (Месяцы):", options=available_months, default=[], help="Оставьте пустым для отображения за всё время")
-                    
-                    # Применяем фильтр дат
-                    filt_orders = df_orders[df_orders['Месяц_Стр'].isin(selected_months)] if selected_months else df_orders
-                    filt_approved = df_approved[df_approved['Месяц_Стр'].isin(selected_months)] if selected_months else df_approved
-
-                    # --- 1. АВТОМАТИЧЕСКИЙ ABC-АНАЛИЗ И ПОДСЧЕТ БРАКА ---
-                    filt_orders['Чистые_заказы'] = pd.to_numeric(filt_orders.get('Чистые_заказы', 0), errors='coerce').fillna(0)
-                    orders_total = filt_orders.groupby('Артикул продавца')['Чистые_заказы'].sum().reset_index()
-                    orders_total = orders_total.sort_values('Чистые_заказы', ascending=False)
-                    
-                    total_sum = orders_total['Чистые_заказы'].sum()
-                    if total_sum > 0:
-                        orders_total['cum_perc'] = orders_total['Чистые_заказы'].cumsum() / total_sum
-                        orders_total['ABC_Группа'] = pd.cut(orders_total['cum_perc'], bins=[0, 0.8, 0.95, 1.1], labels=['A', 'B', 'C'], right=True)
-                    else:
-                        orders_total['ABC_Группа'] = 'C'
-                        
-                    defects_total = filt_approved.groupby('Артикул продавца').size().reset_index(name='Одобренный брак (шт)') if not filt_approved.empty else pd.DataFrame(columns=['Артикул продавца', 'Одобренный брак (шт)'])
-                    
-                    ppm_df = pd.merge(orders_total[['Артикул продавца', 'Чистые_заказы', 'ABC_Группа']], defects_total, on='Артикул продавца', how='left').fillna(0)
-                    ppm_df['PPM'] = np.where(ppm_df['Чистые_заказы'] > 0, (ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 1000000, 0).astype(int)
-                    ppm_df['Доля брака, %'] = np.where(ppm_df['Чистые_заказы'] > 0, round((ppm_df['Одобренный брак (шт)'] / ppm_df['Чистые_заказы']) * 100, 2), 0)
-
-                    # --- ФИЛЬТР ПО АРТИКУЛАМ / ГРУППАМ ---
-                    all_skus = ppm_df['Артикул продавца'].tolist()
-                    article_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + all_skus
-                    selected_articles = f_col2.multiselect("📦 Объекты (Группы или Артикулы):", options=article_options, default=['[Все артикулы]'])
-
-                    # Распаковка выбранных объектов в список конкретных артикулов
-                    active_skus = set()
-                    if not selected_articles or '[Все артикулы]' in selected_articles:
-                        active_skus.update(all_skus)
-                    else:
-                        for item in selected_articles:
-                            if item.startswith('[Вся Группа'):
-                                group_letter = item[-2]
-                                active_skus.update(ppm_df[ppm_df['ABC_Группа'] == group_letter]['Артикул продавца'].tolist())
-                            else:
-                                active_skus.add(item)
-                    active_skus = list(active_skus)
-
-                    # Формируем итоговую таблицу для отображения
-                    display_df = ppm_df[ppm_df['Артикул продавца'].isin(active_skus)].sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
-
-                    st.markdown("---")
-                    st.markdown("### 🗂 Статистика по выбранным фильтрам")
-                    col_a, col_b, col_c = st.columns(3)
-                    col_a.metric("Группа A (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'A']))
-                    col_b.metric("Группа B (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'B']))
-                    col_c.metric("Группа C (Выбрано)", len(display_df[display_df['ABC_Группа'] == 'C']))
-                    
-                    # --- ДВУХКОЛОНОЧНЫЙ ИНТЕРФЕЙС (МАСТЕР-ДЕТАЛЬ) ---
-                    st.info("💡 **Интерактив:** Кликните на любую строку в таблице, чтобы график динамики показал данные именно по ней.")
-                    col_table, col_chart = st.columns([1.4, 2], gap="large") 
-                    clicked_sku = None
-
-                    with col_table:
-                        st.markdown("#### 📋 Список товаров")
-                        def highlight_ppm(row):
-                            return ['background-color: #fee2e2; color: #991b1b' if row['PPM'] > 10000 else ''] * len(row)
-                        
-                        cols_to_show = ['Артикул продавца', 'ABC_Группа', 'Чистые_заказы', 'Одобренный брак (шт)', 'Доля брака, %', 'PPM']
-                        styled_df = display_df[cols_to_show].style.apply(highlight_ppm, axis=1)
-                        
-                        try:
-                            event = st.dataframe(
-                                styled_df, 
-                                use_container_width=True, 
-                                hide_index=True,
-                                on_select="rerun",
-                                selection_mode="single-row",
-                                height=470,
-                                column_config={
-                                    "Артикул продавца": st.column_config.TextColumn("Артикул", width="medium"),
-                                    "ABC_Группа": st.column_config.TextColumn("ABC", width="small"),
-                                    "Чистые_заказы": st.column_config.NumberColumn("Заказы", format="%d"),
-                                    "Одобренный брак (шт)": st.column_config.NumberColumn("Брак (шт)", format="%d"),
-                                    "Доля брака, %": st.column_config.NumberColumn("%", format="%.2f"),
-                                    "PPM": st.column_config.NumberColumn("PPM", format="%d")
-                                }
-                            )
-                            if event.selection.rows:
-                                clicked_sku = display_df.iloc[event.selection.rows[0]]['Артикул продавца']
-                        except TypeError:
-                            st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-                    with col_chart:
-                        plot_skus = [clicked_sku] if clicked_sku else active_skus
-                        chart_title = f"📉 Динамика: {clicked_sku}" if clicked_sku else ("📉 Динамика: Все артикулы" if '[Все артикулы]' in selected_articles or not selected_articles else "📉 Динамика: Выбранные объекты")
-                        
-                        st.markdown(f"#### {chart_title}")
-                        
-                        sku_orders = df_orders[df_orders['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ')['Чистые_заказы'].sum().reset_index()
-                        sku_defects = df_approved[df_approved['Артикул продавца'].isin(plot_skus)].groupby('Месяц_ДТ').size().reset_index(name='Брак')
-                        
-                        sku_orders['Месяц_ДТ'] = pd.to_datetime(sku_orders['Месяц_ДТ'])
-                        sku_defects['Месяц_ДТ'] = pd.to_datetime(sku_defects['Месяц_ДТ'])
-                        
-                        monthly_df = pd.merge(sku_orders, sku_defects, on='Месяц_ДТ', how='outer').fillna(0).sort_values('Месяц_ДТ')
-                        
-                        if not monthly_df.empty:
-                            monthly_df['Месяц_Стр'] = monthly_df['Месяц_ДТ'].dt.month.map(months_ru) + " " + monthly_df['Месяц_ДТ'].dt.year.astype(str)
-                            monthly_df['PPM'] = np.where(monthly_df['Чистые_заказы'] > 0, (monthly_df['Брак'] / monthly_df['Чистые_заказы']) * 1000000, 0).astype(int)
+            # --- РЕКЛАМАЦИЯ ---
+            st.markdown("---")
+            st.markdown("### 📝 Генерация рекламации на завод")
+            ppm_alerts = display_df[display_df['PPM'] > 10000]
+            selected_sku_claim = st.selectbox("Выберите проблемный артикул для подготовки письма:", ppm_alerts['Артикул продавца'].tolist() if not ppm_alerts.empty else display_df['Артикул продавца'].tolist())
+            
+            if selected_sku_claim and not df_approved.empty:
+                sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
+                all_photos_claim = []
+                for _, r in sku_defects.iterrows():
+                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', str(r.get('db_photos', '')).replace('nan', ''))
+                    for u in urls:
+                        clean_url = u.replace("']", "").replace("'", "").replace('"', '').strip()
+                        if clean_url.startswith("//"): clean_url = "https:" + clean_url
+                        if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos_claim.append(clean_url)
                             
-                            fig = go.Figure()
-                            fig.add_trace(go.Bar(x=monthly_df['Месяц_Стр'], y=monthly_df['Чистые_заказы'], name='Заказы', marker_color='#3b82f6', yaxis='y'))
-                            fig.add_trace(go.Scatter(x=monthly_df['Месяц_Стр'], y=monthly_df['PPM'], name='PPM', mode='lines+markers', line=dict(color='#ef4444', width=3), yaxis='y2'))
-                            fig.add_hline(y=10000, line_dash="dot", line_color="#f59e0b", annotation_text="Предел 10 000", yref='y2')
-                            
-                            fig.update_layout(
-                                height=420,
-                                xaxis=dict(title="Месяц"),
-                                yaxis=dict(title="Кол-во заказов", side='left', showgrid=False),
-                                yaxis2=dict(title="Уровень PPM", side='right', overlaying='y', showgrid=True),
-                                legend=dict(x=0.01, y=0.99),
-                                hovermode="x unified",
-                                margin=dict(l=0, r=0, t=10, b=0)
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("Нет данных для графика.")
-
-                    # --- РЕКЛАМАЦИЯ ---
-                    st.markdown("---")
-                    st.markdown("### 📝 Генерация рекламации на завод")
-                    ppm_alerts = display_df[display_df['PPM'] > 10000]
-                    selected_sku_claim = st.selectbox("Выберите проблемный артикул для подготовки письма:", ppm_alerts['Артикул продавца'].tolist() if not ppm_alerts.empty else display_df['Артикул продавца'].tolist())
-                    
-                    if selected_sku_claim and not df_approved.empty:
-                        sku_defects = df_approved[df_approved['Артикул продавца'] == selected_sku_claim]
-                        all_photos_claim = []
-                        for _, r in sku_defects.iterrows():
-                            urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', str(r.get('db_photos', '')).replace('nan', ''))
-                            for u in urls:
-                                clean_url = u.replace("']", "").replace("'", "").replace('"', '').strip()
-                                if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                                if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos_claim.append(clean_url)
-                                    
-                        all_photos_claim = list(set(all_photos_claim))[:15]
-                        
-                        c_ppm = display_df[display_df['Артикул продавца'] == selected_sku_claim]['PPM'].values[0]
-                        c_prc = display_df[display_df['Артикул продавца'] == selected_sku_claim]['Доля брака, %'].values[0]
-                        c_qty = display_df[display_df['Артикул продавца'] == selected_sku_claim]['Одобренный брак (шт)'].values[0]
-                        
-                        claim_text = f"Здравствуйте!\n\nИнформируем вас о превышении допустимого уровня брака по товару (Артикул: {selected_sku_claim}).\nУровень PPM составляет {c_ppm} ({c_prc}% от всех заказов за период).\nВсего зафиксировано и подтверждено брака: {int(c_qty)} ед. (статус заявки - 'Одобрено').\n\nПросим провести внутреннюю проверку на производстве и устранить причину дефектов.\n"
-                        if all_photos_claim: 
-                            claim_text += "\nСсылки на фотографии брака для подтверждения:\n" + "\n".join(all_photos_claim)
-                        st.text_area("Готовое письмо:", value=claim_text, height=300)
-                        
-                        if all_photos_claim:
-                            if st.button("📥 Скачать архив с фото для завода", key="dl_claim_photos", type="primary"):
-                                with st.spinner("Сбор фото..."):
-                                    components.html(f'<a id="dl_c" href="data:application/zip;base64,{base64.b64encode(create_images_zip(all_photos_claim)).decode()}" download="Рекламация_{selected_sku_claim}.zip"></a><script>document.getElementById("dl_c").click();</script>', width=0, height=0)
-                else: 
-                    st.warning("⚠️ Нет данных о заказах. Сначала запустите синхронизацию.")
+                all_photos_claim = list(set(all_photos_claim))[:15]
+                
+                c_ppm = display_df[display_df['Артикул продавца'] == selected_sku_claim]['PPM'].values[0]
+                c_prc = display_df[display_df['Артикул продавца'] == selected_sku_claim]['Доля брака, %'].values[0]
+                c_qty = display_df[display_df['Артикул продавца'] == selected_sku_claim]['Одобренный брак (шт)'].values[0]
+                
+                claim_text = f"Здравствуйте!\n\nИнформируем вас о превышении допустимого уровня брака по товару (Артикул: {selected_sku_claim}).\nУровень PPM составляет {c_ppm} ({c_prc}% от всех заказов за период).\nВсего зафиксировано и подтверждено брака: {int(c_qty)} ед. (статус заявки - 'Одобрено').\n\nПросим провести внутреннюю проверку на производстве и устранить причину дефектов.\n"
+                if all_photos_claim: 
+                    claim_text += "\nСсылки на фотографии брака для подтверждения:\n" + "\n".join(all_photos_claim)
+                st.text_area("Готовое письмо:", value=claim_text, height=300)
+                
+                if all_photos_claim:
+                    if st.button("📥 Скачать архив с фото для завода", key="dl_claim_photos", type="primary"):
+                        with st.spinner("Сбор фото..."):
+                            components.html(f'<a id="dl_c" href="data:application/zip;base64,{base64.b64encode(create_images_zip(all_photos_claim)).decode()}" download="Рекламация_{selected_sku_claim}.zip"></a><script>document.getElementById("dl_c").click();</script>', width=0, height=0)
+        else: 
+            st.warning("⚠️ Нет данных о заказах. Сначала запустите синхронизацию.")
 
     except Exception as e: 
-        st.error(f"Ошибка Отчета: {e}")
+        st.error(f"Ошибка аналитики PPM: {e}")
 
 elif page == "⭐ Рейтинг товаров":
     st.title("⭐ Мониторинг Рейтинга (В разработке)")
