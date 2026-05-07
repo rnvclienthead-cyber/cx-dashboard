@@ -408,35 +408,8 @@ async def run_ai_batch_processing(df_to_tag, model_choice, memory_string="", mod
 # ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
 
-@st.cache_data(ttl=600) # Кэш инвойсов живет 10 минут
-def load_invoices_data():
-    """Отдельная быстрая загрузка инвойсов из Google Sheets"""
-    try:
-        inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
-        if not inv_id: return pd.DataFrame()
-        
-        client = get_gspread_client()
-        df_inv = pd.DataFrame(client.open_by_key(inv_id).get_worksheet(0).get_all_records())
-        
-        if not df_inv.empty:
-            # Ищем колонку с инвойсами гибко, как было в вашем коде
-            inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
-            if inv_col and 'supplyID' in df_inv.columns:
-                df_inv = df_inv.rename(columns={inv_col: 'Инвойс', 'supplyID': 'Номер поставки'})
-                df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                
-                # Группируем инвойсы по поставкам
-                inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby('Номер поставки_clean')['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
-                return inv_grouped
-    except Exception as e:
-        print(f"Ошибка загрузки инвойсов: {e}")
-    return pd.DataFrame()
-
-
-@st.cache_data(ttl=300) # Кэш базы живет 5 минут
+@st.cache_data(ttl=120) 
 def load_cached_hybrid_data():
-    """Загрузка основных данных с фильтрацией на стороне SQL"""
-    # 1. SQL-запрос с фильтром WHERE (база сама отсекает лишнее)
     query = """
         SELECT 
             v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
@@ -445,40 +418,65 @@ def load_cached_hybrid_data():
             v."Корректировка", v."Номер поставки", c.photos AS db_photos, c.video_paths AS db_videos
         FROM view_cx_dashboard v
         LEFT JOIN wb_claims c ON v."SRID" = c.srid
-        WHERE LOWER(CAST(v."Решение по возврату покупателю" AS TEXT)) IN ('одобрено', '2', '2.0', 'да', 'true')
-           OR LOWER(CAST(v."Статус товара" AS TEXT)) IN ('одобрено', '2', '2.0', 'да', 'true')
     """
+    df_temp = pd.read_sql(query, engine)
     
-    df_temp = pd.DataFrame()
-    try:
-        df_temp = pd.read_sql(query, engine)
-    except Exception as e:
-        print(f"Ошибка SQL: {e}")
-        return df_temp
-        
-    if df_temp.empty: return df_temp
-
-    # 2. Быстрая обработка в Pandas
-    date_col = 'Дата и время оформления заявки на возврат'
-    if date_col in df_temp.columns:
+    date_col = next((c for c in df_temp.columns if 'оформления заявки' in str(c).lower()), None)
+    
+    if date_col:
         df_temp['Дата_ДТ'] = pd.to_datetime(df_temp[date_col], errors='coerce')
         df_temp[date_col] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
     else:
         df_temp['Дата_ДТ'] = pd.NaT
-
+        
+    valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
+    df_temp = df_temp[
+        df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
+        df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
+    ]
+    
     df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
     df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
 
-    df_temp['Номер поставки'] = df_temp['Номер поставки'].fillna('Не указан')
+    if 'Номер поставки' not in df_temp.columns:
+        df_temp['Номер поставки'] = 'Не указан'
+    
     df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
-
-    # 3. Подтягиваем инвойсы (из другой функции, чтобы не блокировать кэш)
-    df_inv_grouped = load_invoices_data()
-    if not df_inv_grouped.empty:
-        df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-        df_temp = df_temp.merge(df_inv_grouped, on='Номер поставки_clean', how='left')
-        df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
-
+        
+    try:
+        inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
+        if inv_id:
+            df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
+            if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
+                df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+                
+            if not df_inv.empty and 'Номер поставки' in df_inv.columns:
+                df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
+                
+                df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                df_inv.columns = df_inv.columns.str.strip()
+                
+                inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
+                
+                if inv_col:
+                    df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
+                    inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
+                        'Номер поставки_clean'
+                    )['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
+                    
+                    if 'Инвойс' in df_temp.columns: 
+                        df_temp = df_temp.drop(columns=['Инвойс'])
+                    
+                    df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
+                else:
+                    st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
+                
+                if 'Номер поставки_clean' in df_temp.columns:
+                    df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
+    except Exception as e: 
+        print(f"Ошибка загрузки инвойсов: {e}")
+        
     return df_temp
 
 @st.cache_data(ttl=120)
