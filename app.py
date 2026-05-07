@@ -877,6 +877,102 @@ elif page == "📝 Модерация":
         else: 
             st.success("🎉 Очередь пуста! Все обращения проверены.")
 
+@st.cache_data(ttl=120) 
+    def load_cached_hybrid_data():
+        query = """
+            SELECT 
+                v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
+                v."Артикул продавца", v."Комментарий покупателя", v."Решение по возврату покупателю", v."Статус товара",
+                v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
+                v."Корректировка", v."Номер поставки", c.photos AS db_photos, c.video_paths AS db_videos
+            FROM view_cx_dashboard v
+            LEFT JOIN wb_claims c ON v."SRID" = c.srid
+        """
+        df_temp = pd.read_sql(query, engine)
+        
+        date_col = next((c for c in df_temp.columns if 'оформления заявки' in str(c).lower()), None)
+        
+        if date_col:
+            df_temp['Дата_ДТ'] = pd.to_datetime(df_temp[date_col], errors='coerce')
+            df_temp[date_col] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
+        else:
+            df_temp['Дата_ДТ'] = pd.NaT
+            
+        valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
+        df_temp = df_temp[
+            df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
+            df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
+        ]
+        
+        df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
+        df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
+
+        if 'Номер поставки' not in df_temp.columns:
+            df_temp['Номер поставки'] = 'Не указан'
+        
+        df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
+            
+        try:
+            inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
+            if inv_id:
+                df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
+                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
+                    df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
+                    
+                if not df_inv.empty and 'Номер поставки' in df_inv.columns:
+                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
+                    
+                    df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+                    df_inv.columns = df_inv.columns.str.strip()
+                    
+                    inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
+                    
+                    if inv_col:
+                        df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
+                        inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
+                            'Номер поставки_clean'
+                        )['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
+                        
+                        if 'Инвойс' in df_temp.columns: 
+                            df_temp = df_temp.drop(columns=['Инвойс'])
+                        
+                        df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
+                    else:
+                        st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
+                    
+                    if 'Номер поставки_clean' in df_temp.columns:
+                        df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
+        except Exception as e: 
+            print(f"Ошибка загрузки инвойсов: {e}")
+            
+        return df_temp
+
+    @st.cache_data(ttl=120)
+    def load_cached_orders():
+        query = """
+            SELECT dt, supplier_article AS "Артикул продавца", cancel_dt 
+            FROM wb_orders
+        """
+        try: 
+            df_ord = pd.read_sql(query, engine)
+            
+            if df_ord.empty:
+                return pd.DataFrame()
+
+            df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
+            df_ord = df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
+            
+            df_ord['Месяц_ДТ'] = pd.to_datetime(df_ord['dt']).dt.to_period('M').dt.to_timestamp()
+            
+            valid_orders = df_ord[pd.isna(df_ord['cancel_dt'])]
+            final_orders = valid_orders.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Чистые_заказы')
+            
+            return final_orders
+        except Exception as e: 
+            print(f"Ошибка загрузки заказов: {e}")
+            return pd.DataFrame()
+
 elif page == "📊 Отчет производства":
     st.title("📊 Отчет производства")
     
@@ -886,26 +982,10 @@ elif page == "📊 Отчет производства":
     if 'prev_sku' not in st.session_state: st.session_state.prev_sku = None
     if 'prev_date' not in st.session_state: st.session_state.prev_date = None
 
-    def create_images_zip(urls):
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for i, url in enumerate(urls):
-                try:
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=3) as response:
-                        img_data = response.read()
-                        ext = ".jpg"
-                        if ".png" in url.lower(): ext = ".png"
-                        elif ".jpeg" in url.lower(): ext = ".jpeg"
-                        zip_file.writestr(f"photo_{i+1}{ext}", img_data)
-                except Exception: pass
-        return zip_buffer.getvalue()
-
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
         st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
         
-        # ИСПРАВЛЕНИЕ: Добавлен .str.lower() для безошибочного совпадения True/true
         details = filtered_df[(filtered_df['Артикул продавца'] == sku) & (filtered_df[str(reason_id)].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да']))]
         
         if not details.empty:
@@ -945,8 +1025,6 @@ elif page == "📊 Отчет производства":
 
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
-                        
-                        # Вывод очищенного инвойса (Даты мы отсюда удалили)
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки_ОРИГИНАЛ', '---')}")
                         
                         if row_photos:
@@ -958,7 +1036,6 @@ elif page == "📊 Отчет производства":
 
                     with media_col:
                         if row_photos:
-                            # Возвращаем HTML-рендеринг для работы CSS-класса photo-zoom
                             html_imgs = '<div class="media-row">'
                             for p in row_photos[:6]:
                                 html_imgs += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
@@ -977,130 +1054,9 @@ elif page == "📊 Отчет производства":
             st.session_state.last_click_id = None
             st.rerun()
 
-    @st.cache_data(ttl=120) 
-    def load_cached_hybrid_data():
-        query = """
-            SELECT 
-                v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
-                v."Артикул продавца", v."Комментарий покупателя", v."Решение по возврату покупателю", v."Статус товара",
-                v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
-                v."Корректировка", v."Номер поставки", c.photos AS db_photos, c.video_paths AS db_videos
-            FROM view_cx_dashboard v
-            LEFT JOIN wb_claims c ON v."SRID" = c.srid
-        """
-        df_temp = pd.read_sql(query, engine)
-        
-        # --- БРОНЕБОЙНАЯ СТАНДАРТИЗАЦИЯ ДАТЫ ---
-        # Ищем колонку по ключевым словам, игнорируя то, как база передала регистр
-        date_col = next((c for c in df_temp.columns if 'оформления заявки' in str(c).lower()), None)
-        
-        if date_col:
-            df_temp['Дата_ДТ'] = pd.to_datetime(df_temp[date_col], errors='coerce')
-            df_temp[date_col] = df_temp['Дата_ДТ'].dt.strftime('%d.%m.%Y %H:%M').fillna('Не указана')
-        else:
-            df_temp['Дата_ДТ'] = pd.NaT  # Заглушка, если колонки вообще нет
-            
-        # ЖЕСТКИЙ ФИЛЬТР: Сюда можно добавить новые статусы, если найдешь их через SQL!
-        
-        # ЖЕСТКИЙ ФИЛЬТР: Сюда можно добавить новые статусы, если найдешь их через SQL!
-        valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
-        df_temp = df_temp[
-            df_temp['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
-            df_temp['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
-        ]
-        
-        df_temp['Артикул продавца'] = df_temp['Артикул продавца'].astype(str).str.strip()
-        df_temp = df_temp[~df_temp['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
-
-        if 'Номер поставки' not in df_temp.columns:
-            df_temp['Номер поставки'] = 'Не указан'
-        
-        # Сохраняем оригинальный номер для отображения
-        df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
-            
-        try:
-            inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
-            if inv_id:
-                df_inv = pd.DataFrame(get_gspread_client().open_by_key(inv_id).get_worksheet(0).get_all_records())
-                if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
-                    df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
-                    
-                if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                    # ИСПРАВЛЕНИЕ: Жесткая вырезка .0 через .str.replace()
-                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                    df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
-                    
-                    # СТРОГАЯ ОЧИСТКА ИНВОЙСОВ + АГРЕГАЦИЯ ТОЛЬКО ПО ПОСТАВКЕ
-                    df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                    
-                    # Убиваем все невидимые пробелы в названиях колонок
-                    df_inv.columns = df_inv.columns.str.strip()
-                    
-                    # Умный поиск колонки с инвойсом
-                    inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
-                    
-                    if inv_col:
-                        # Переименовываем для стандарта
-                        df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
-                        
-                        # МАГИЯ АГРЕГАЦИИ: Так как артикула в таблице нет, группируем инвойсы только по Поставке!
-                        # Если на 1 поставку есть 2 инвойса, они склеятся в строку "INV-1, INV-2"
-                        inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby(
-                            'Номер поставки_clean'
-                        )['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
-                        
-                        if 'Инвойс' in df_temp.columns: 
-                            df_temp = df_temp.drop(columns=['Инвойс'])
-                        
-                        # Мержим по одному ключу - Номеру поставки
-                        df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
-                    else:
-                        st.warning(f"🚨 В таблице Инвойсов не найдена колонка 'Инвойс'. Доступные колонки: {df_inv.columns.tolist()}")
-                    
-                    # Мы уже сделали мерж выше через inv_grouped, эти строки просто лишние и вызывают ошибку
-                    if 'Номер поставки_clean' in df_temp.columns:
-                        df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
-        except Exception as e: 
-            print(f"Ошибка загрузки инвойсов: {e}")
-            
-        return df_temp
-
-    @st.cache_data(ttl=120)
-    def load_cached_orders():
-        # Загружаем сырые данные по заказам (артикул, дата заказа, дата отмены)
-        query = """
-            SELECT dt, supplier_article AS "Артикул продавца", cancel_dt 
-            FROM wb_orders
-        """
-        try: 
-            df_ord = pd.read_sql(query, engine)
-            
-            if df_ord.empty:
-                return pd.DataFrame()
-
-            # Очистка артикулов
-            df_ord['Артикул продавца'] = df_ord['Артикул продавца'].astype(str).str.strip()
-            df_ord = df_ord[~df_ord['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
-            
-            # Приводим дату к началу месяца для группировки
-            df_ord['Месяц_ДТ'] = pd.to_datetime(df_ord['dt']).dt.to_period('M').dt.to_timestamp()
-            
-            # МАСТЕР-ФУНКЦИЯ ПОДСЧЕТА:
-            # Оставляем только те строки, у которых cancel_dt отсутствует (пустое значение/NaT)
-            valid_orders = df_ord[pd.isna(df_ord['cancel_dt'])]
-            
-            # Суммируем оставшиеся (чистые) строки по Месяцу и Артикулу
-            final_orders = valid_orders.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Чистые_заказы')
-            
-            return final_orders
-        except Exception as e: 
-            print(f"Ошибка загрузки заказов: {e}")
-            return pd.DataFrame()
-
     try:
         with st.spinner("📊 Загрузка и анализ данных..."):
             df = load_cached_hybrid_data()
-            df_orders = load_cached_orders()
 
         if not df.empty:
             if 'Инвойс' not in df.columns: df['Инвойс'] = 'Не указан'
@@ -1116,7 +1072,6 @@ elif page == "📊 Отчет производства":
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'Не указан'])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
             
-            # --- УМНЫЙ ФИЛЬТР ДАТ (МЕСЯЦЫ) ---
             months_ru = {1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель', 5: 'Май', 6: 'Июнь', 
                          7: 'Июль', 8: 'Август', 9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'}
             today_date = datetime.now()
@@ -1131,14 +1086,10 @@ elif page == "📊 Отчет производства":
                 period_options.append(f"{months_ru[m]} {y}")
             period_options.append("За всё время")
 
-            # 1. Фильтр Даты (Выпадающий список)
             selected_month = f_col1.selectbox("Период (Дата заявки):", period_options, index=0)
-            # 2. Фильтр Артикула
             selected_sku = f_col2.selectbox("Артикул:", sku_list)
-            # 3. Фильтр Инвойса
             selected_inv = f_col3.selectbox("Инвойс / Поставка:", inv_list)
             
-            # Проверяем изменения любого из трех фильтров
             if st.session_state.prev_inv != selected_inv or st.session_state.prev_sku != selected_sku or st.session_state.prev_date != selected_month:
                 st.session_state.show_detail_trigger = None
                 st.session_state.last_click_id = None
@@ -1149,14 +1100,12 @@ elif page == "📊 Отчет производства":
             
             df_filtered = df.copy()
             
-            # Применяем фильтр по месяцу
             if selected_month != "За всё время":
                 month_name, year_str = selected_month.split(' ')
                 selected_m = list(months_ru.keys())[list(months_ru.values()).index(month_name)]
                 selected_y = int(year_str)
                 df_filtered = df_filtered[(df_filtered['Дата_ДТ'].dt.month == selected_m) & (df_filtered['Дата_ДТ'].dt.year == selected_y)]
 
-            # Применяем текстовые фильтры
             if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
             if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
 
@@ -1175,41 +1124,134 @@ elif page == "📊 Отчет производства":
             c4.metric("Точность ИИ", f"{accuracy}%")
             st.markdown("---")
             
-    except Exception as e:
-        st.error(f"Ошибка Отчета: {e}")
+            st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
+            matrix_list = []
+            for i in range(1, 14):
+                cat_col = str(i)
+                if cat_col in df_filtered.columns:
+                    temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да'])]
+                    for _, r in temp.iterrows():
+                        matrix_list.append({
+                            'Артикул продавца': str(r.get('Артикул продавца', 'Без артикула')).strip(),
+                            'Причина': f"{i}. {CATEGORIES[i]}",
+                            'ID': i,
+                            'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
+                            'Номер поставки': str(r.get('Номер поставки_ОРИГИНАЛ', 'Не указан')).strip()
+                        })
+
+            if matrix_list:
+                df_matrix = pd.DataFrame(matrix_list)
+                pivot = pd.crosstab(df_matrix['Причина'], df_matrix['Артикул продавца']).fillna(0).astype(int)
+                pivot['ID'] = [int(x.split('.')[0]) for x in pivot.index]
+                reason_totals = pivot.drop(columns=['ID']).sum(axis=1).to_dict()
+                df_melt = pivot.reset_index().melt(id_vars=['Причина', 'ID'], var_name='Артикул продавца', value_name='Дефекты')
+                df_melt['Артикул_Метка'] = df_melt['Артикул продавца'] 
+                df_melt['Причина_Метка'] = df_melt['Причина'].apply(lambda x: f"{x} [{reason_totals.get(x, 0)}]")
+                df_melt['Текст'] = df_melt['Дефекты'].apply(lambda x: str(x) if x > 0 else "")
+
+                import altair as alt
+                click_selector = alt.selection_point(name='cell_click', fields=['Артикул_Метка', 'Причина_Метка'])
+                base = alt.Chart(df_melt).encode(x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000, orient='bottom')), y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending')))
+                rects = base.mark_rect(stroke='white', strokeWidth=1).encode(color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None), tooltip=[alt.Tooltip('Артикул продавца:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')])
+                text = base.mark_text(baseline='middle', fontSize=11).encode(text='Текст:N', color=alt.condition(alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2), alt.value('white'), alt.value('black')))
+                final_chart = alt.layer(rects, text).properties(height=max(400, len(pivot) * 35 + 100)).add_params(click_selector)
+                
+                event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun", key=f"prod_matrix_{st.session_state.matrix_key}")
+                
+                try:
+                    if event and hasattr(event, "selection"):
+                        sel = event.selection.get("cell_click", [])
+                        if sel and len(sel) > 0:
+                            sku_clicked = sel[0].get('Артикул_Метка')
+                            reason_clicked = sel[0].get('Причина_Метка')
+                            if sku_clicked and reason_clicked:
+                                current_click_id = f"{sku_clicked}_{reason_clicked}"
+                                if current_click_id != st.session_state.get('last_click_id'):
+                                    st.session_state.last_click_id = current_click_id
+                                    st.session_state.show_detail_trigger = {'sku': sku_clicked.split(' [')[0], 'reason': reason_clicked.split(' [')[0], 'df': df_filtered, 'id': int(reason_clicked.split('.')[0])}
+                                    st.session_state.matrix_key += 1
+                                    st.rerun()
+                except Exception as e: 
+                    st.error(f"Ошибка системы перехвата клика: {e}")
+                
+                if st.session_state.get('show_detail_trigger'):
+                    t = st.session_state.show_detail_trigger
+                    show_matrix_details(t['sku'], t['reason'], t['df'], t['id'])
             
+            else: 
+                st.info("Данных для матрицы пока нет.")
+
+            st.markdown("---")
+            st.markdown("### 📦 Проблемные поставки и инвойсы (Топ-15)")
+            st.markdown("""<style>#vg-tooltip-element { font-family: sans-serif; font-size: 11px !important; line-height: 1.3 !important; box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important; border-radius: 6px !important; border: 1px solid #e0e0e0 !important; max-width: 600px !important; white-space: normal !important;} #vg-tooltip-element table tr { border-bottom: 1px solid #d1d5db; } #vg-tooltip-element table td { padding: 6px 8px !important; vertical-align: top; } #vg-tooltip-element table td.key { color: #6b7280; font-weight: 600; white-space: nowrap; }</style>""", unsafe_allow_html=True)
+            
+            if matrix_list:
+                supply_grouped = []
+                df_matrix_data = pd.DataFrame(matrix_list)
+                
+                if 'Номер поставки' in df_matrix_data.columns:
+                    for supply, group in df_matrix_data.groupby('Номер поставки'):
+                        clean_supply = str(supply).strip()
+                        if clean_supply in ['Не указан', '', '0', '0.0'] or pd.isna(supply): 
+                            continue
+                        invoices = ", ".join(sorted(list(set([str(x) for x in group['Инвойс'] if str(x) != 'Не указан' and str(x).strip()]))))
+                        all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in group['Артикул продавца'].value_counts().items()])
+                        supply_grouped.append({
+                            'Номер поставки': clean_supply, 
+                            'Дефекты': len(group), 
+                            'Инвойсы': invoices if invoices else "Не указаны", 
+                            'Список Артикулов': all_skus
+                        })
+                    
+                    if supply_grouped:
+                        df_supply = pd.DataFrame(supply_grouped).sort_values('Дефекты', ascending=False).head(15)
+                        supply_chart = alt.Chart(df_supply).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                            x=alt.X('Номер поставки:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)), 
+                            y=alt.Y('Дефекты:Q', title='Количество дефектов'), 
+                            color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None), 
+                            tooltip=[
+                                alt.Tooltip('Номер поставки:N', title='Поставка'), 
+                                alt.Tooltip('Дефекты:Q', title='Всего дефектов'), 
+                                alt.Tooltip('Инвойсы:N', title='Инвойсы (связанные)'), 
+                                alt.Tooltip('Список Артикулов:N', title='Артикулы')
+                            ]
+                        ).properties(height=350)
+                        st.altair_chart(supply_chart, use_container_width=True)
+                    else: 
+                        st.info("Нет данных по поставкам (или у всех дефектов не указан номер поставки).")
+                else:
+                    st.info("Невозможно построить график: отсутствует колонка 'Номер поставки'.")
+            else: 
+                st.info("Данных для матрицы пока нет.")
+    except Exception as e: 
+        st.error(f"Ошибка Отчета: {e}")
+
 elif page == "⚠️ Уровень PPM":
     st.title("⚠️ Аналитика PPM и Рекламации")
     
-    with st.spinner("Загрузка данных для PPM..."):
-        try:
-            df_filtered = load_cached_hybrid_data() # Загружаем гибридные данные
-            df_orders = load_cached_orders()
-        except Exception as e:
-            st.error(f"Ошибка загрузки данных: {e}")
-            df_filtered = pd.DataFrame()
-            df_orders = pd.DataFrame()
-
     st.info("💡 **Аналитика PPM**: Расчет идет только по заявкам, которые: 1) Имеют статус «Одобрено» 2) Размечены ИИ или вручную. Предел PPM установлен на 10 000 (1%).")
-    
     import numpy as np
     import plotly.graph_objects as go
-    
+
     try:
+        with st.spinner("Загрузка данных для PPM..."):
+            df = load_cached_hybrid_data()
+            df_orders = load_cached_orders()
+
         if not df_orders.empty and 'Артикул продавца' in df_orders.columns:
-            # --- ПОДГОТОВКА ДАТ ДЛЯ ФИЛЬТРА ---
+            # Готовим те же данные, что и в основном отчете
+            df_filtered = df.copy()
+            def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14))
+            if not df_filtered.empty:
+                df_filtered['Размечено'] = df_filtered.apply(has_tags, axis=1)
+
             months_ru = {1: 'Янв', 2: 'Фев', 3: 'Мар', 4: 'Апр', 5: 'Май', 6: 'Июн', 
                          7: 'Июл', 8: 'Авг', 9: 'Сен', 10: 'Окт', 11: 'Ноя', 12: 'Дек'}
             
-            # Берем сразу 'Месяц_ДТ'
             df_orders['Месяц_ДТ'] = pd.to_datetime(df_orders['Месяц_ДТ'])
             df_orders['Месяц_Стр'] = df_orders['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_orders['Месяц_ДТ'].dt.year.astype(str)
             
-            # ВНИМАНИЕ: Здесь нужно вычислить колонку 'Размечено', так как мы вызываем сырой load_cached_hybrid_data
-            def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14))
-            df_filtered['Размечено'] = df_filtered.apply(has_tags, axis=1)
-            
-            df_approved = df_filtered[df_filtered['Размечено'] == True].copy()
+            df_approved = df_filtered[df_filtered.get('Размечено', False) == True].copy()
             if not df_approved.empty and 'Дата_ДТ' in df_approved.columns:
                 df_approved['Месяц_ДТ'] = df_approved['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
                 df_approved['Месяц_Стр'] = df_approved['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_approved['Месяц_ДТ'].dt.year.astype(str)
@@ -1217,7 +1259,6 @@ elif page == "⚠️ Уровень PPM":
                 df_approved['Месяц_ДТ'] = pd.NaT
                 df_approved['Месяц_Стр'] = 'Неизвестно'
 
-            # Сортируем доступные месяцы от новых к старым
             available_months = df_orders.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=False)['Месяц_Стр'].tolist()
 
             # --- ГЛОБАЛЬНАЯ ПАНЕЛЬ ФИЛЬТРОВ ---
@@ -1226,7 +1267,6 @@ elif page == "⚠️ Уровень PPM":
             
             selected_months = f_col1.multiselect("📅 Период (Месяцы):", options=available_months, default=[], help="Оставьте пустым для отображения за всё время")
             
-            # Применяем фильтр дат
             filt_orders = df_orders[df_orders['Месяц_Стр'].isin(selected_months)] if selected_months else df_orders
             filt_approved = df_approved[df_approved['Месяц_Стр'].isin(selected_months)] if selected_months else df_approved
 
@@ -1253,7 +1293,6 @@ elif page == "⚠️ Уровень PPM":
             article_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + all_skus
             selected_articles = f_col2.multiselect("📦 Объекты (Группы или Артикулы):", options=article_options, default=['[Все артикулы]'])
 
-            # Распаковка выбранных объектов в список конкретных артикулов
             active_skus = set()
             if not selected_articles or '[Все артикулы]' in selected_articles:
                 active_skus.update(all_skus)
@@ -1266,7 +1305,6 @@ elif page == "⚠️ Уровень PPM":
                         active_skus.add(item)
             active_skus = list(active_skus)
 
-            # Формируем итоговую таблицу для отображения
             display_df = ppm_df[ppm_df['Артикул продавца'].isin(active_skus)].sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
             st.markdown("---")
@@ -1380,9 +1418,8 @@ elif page == "⚠️ Уровень PPM":
                             components.html(f'<a id="dl_c" href="data:application/zip;base64,{base64.b64encode(create_images_zip(all_photos_claim)).decode()}" download="Рекламация_{selected_sku_claim}.zip"></a><script>document.getElementById("dl_c").click();</script>', width=0, height=0)
         else: 
             st.warning("⚠️ Нет данных о заказах. Сначала запустите синхронизацию.")
-
-    except Exception as e: 
-        st.error(f"Ошибка аналитики PPM: {e}")
+    except Exception as e:
+        st.error(f"Ошибка загрузки данных PPM: {e}")
 
 elif page == "⭐ Рейтинг товаров":
     st.title("⭐ Мониторинг Рейтинга (В разработке)")
