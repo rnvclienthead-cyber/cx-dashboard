@@ -217,21 +217,32 @@ def update_db_row(srid, updates_dict):
 # ИИ ДВИЖОК
 # ==========================================
 def parse_ai_response(text_response):
-    print(f"\n--- ОТВЕТ ИИ ---\n{text_response}\n----------------") # Выведет ответ прямо в консоль Streamlit Cloud
+    print(f"\n--- ОТВЕТ ИИ ---\n{text_response}\n----------------")
     try:
-        # Убираем возможный мусор от нейросети
         clean_text = text_response.replace('```json', '').replace('```', '').strip()
         
-        # Пытаемся найти начало и конец JSON
-        start_idx = clean_text.find('{')
-        end_idx = clean_text.rfind('}') + 1
+        # Ищем либо начало объекта {, либо начало массива [
+        start_obj = clean_text.find('{')
+        start_arr = clean_text.find('[')
+        
+        # Определяем, что началось раньше (объект или массив), чтобы правильно вырезать JSON
+        if start_arr != -1 and (start_obj == -1 or start_arr < start_obj):
+            start_idx = start_arr
+            end_idx = clean_text.rfind(']') + 1
+        else:
+            start_idx = start_obj
+            end_idx = clean_text.rfind('}') + 1
+
         if start_idx != -1 and end_idx != -1:
             clean_text = clean_text[start_idx:end_idx]
             
         parsed = json.loads(clean_text)
-        if isinstance(parsed, dict): return parsed.get('results', [])
-        elif isinstance(parsed, list): return parsed
-        else: return []
+        if isinstance(parsed, dict): 
+            return parsed.get('results', [])
+        elif isinstance(parsed, list): 
+            return parsed
+        else: 
+            return []
     except Exception as e:
         print(f"🚨 ОШИБКА РАСШИФРОВКИ JSON: {e}")
         return []
