@@ -264,7 +264,58 @@ def find_similar_examples_sql(target_text, engine, top_n=15):
         print(f"Ошибка поиска в базе знаний: {e}")
         return "Ошибка доступа к опыту."
 
-fetch_ai_tags
+async def fetch_ai_tags(session, batch, memory_string, model="yandex"):
+    content_lines = []
+    for i in batch:
+        content_lines.append(f"ID {i['id']}: {i['text']}")
+    content = "\n".join(content_lines)
+
+    system_prompt = f"""Ты эксперт контроля качества. 
+    Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}
+    ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект (рейтинг 4-5) - СТРОГО Категория 12.
+    ВОТ ПРИМЕРЫ ПОХОЖИХ СИТУАЦИЙ ИЗ БАЗЫ:
+    {memory_string}
+    
+    ИНСТРУКЦИЯ: Верни ТОЛЬКО массив category_ids (цифры подходящих категорий). Никакого текста!
+    ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "category_ids": [1, 5]}}]}}"""
+
+    if "yandex" in model:
+        url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "x-folder-id": FOLDER_ID}
+        yandex_model_name = "yandexgpt-lite" if model == "yandex-lite" else "yandexgpt"
+        payload = {
+            "modelUri": f"gpt://{FOLDER_ID}/{yandex_model_name}/latest",
+            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
+            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
+        }
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    return parse_ai_response(res['result']['alternatives'][0]['message']['text'])
+                else: 
+                    return [{"error": f"Ошибка Яндекса ({resp.status}): {await resp.text()}"}]
+        except Exception as e: 
+            return [{"error": f"Системная ошибка Яндекса: {str(e)}"}]
+
+    elif model == "grok":
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "grok-beta",
+            "temperature": 0.1,
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
+        }
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    return parse_ai_response(res['choices'][0]['message']['content'])
+                else: 
+                    return [{"error": f"Ошибка Grok ({resp.status}): {await resp.text()}"}]
+        except Exception as e: 
+            return [{"error": f"Системная ошибка Grok: {str(e)}"}]
+    return []
 
 async def fetch_ai_crosscheck(session, batch, engine):
     content = "\n".join([f"ID {i['id']}: {i['text']}" for i in batch])
