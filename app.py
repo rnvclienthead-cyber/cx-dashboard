@@ -1388,23 +1388,35 @@ elif page == "Уровень PPM":
                 table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
                 table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
-                # --- ИЗМЕНЕНИЯ ЗДЕСЬ: ДОБАВЛЕНЫ КРАСНЫЕ ЦИФРЫ ---
                 st.markdown("### :material/analytics: Сводка")
                 m1, m2, m3 = st.columns(3)
                 
+                # --- ИЗМЕНЕННЫЙ БЛОК: Кастомные метрики с красными числами ---
+                def render_metric(label, total, bad):
+                    bad_html = f'<span style="color: #ef4444; margin-left: 12px;">{bad}</span>' if bad > 0 else ''
+                    return f"""
+                    <div style="display: flex; flex-direction: column; margin-bottom: 1rem;">
+                        <span style="font-size: 14px; color: rgb(97, 100, 107); margin-bottom: 0.25rem;">{label}</span>
+                        <div style="font-size: 2.25rem; font-weight: 600; line-height: 1.2; display: flex; align-items: center;">
+                            <span style="color: rgb(49, 51, 63);">{total}</span>{bad_html}
+                        </div>
+                    </div>
+                    """
+                
                 a_tot = len(table_agg[table_agg['ABC_Группа'] == 'A'])
                 a_bad = len(table_agg[(table_agg['ABC_Группа'] == 'A') & (table_agg['PPM'] > 10000)])
-                m1.metric("Группа A", a_tot, delta=str(a_bad) if a_bad > 0 else None, delta_color="inverse")
+                m1.markdown(render_metric("Группа A", a_tot, a_bad), unsafe_allow_html=True)
                 
                 b_tot = len(table_agg[table_agg['ABC_Группа'] == 'B'])
                 b_bad = len(table_agg[(table_agg['ABC_Группа'] == 'B') & (table_agg['PPM'] > 10000)])
-                m2.metric("Группа B", b_tot, delta=str(b_bad) if b_bad > 0 else None, delta_color="inverse")
+                m2.markdown(render_metric("Группа B", b_tot, b_bad), unsafe_allow_html=True)
                 
                 c_tot = len(table_agg[table_agg['ABC_Группа'] == 'C'])
                 c_bad = len(table_agg[(table_agg['ABC_Группа'] == 'C') & (table_agg['PPM'] > 10000)])
-                m3.metric("Группа C", c_tot, delta=str(c_bad) if c_bad > 0 else None, delta_color="inverse")
-                # -----------------------------------------------
+                m3.markdown(render_metric("Группа C", c_tot, c_bad), unsafe_allow_html=True)
+                # -------------------------------------------------------------
 
+                # --- ВОТ ЗДЕСЬ СОЗДАЮТСЯ КОЛОНКИ ДЛЯ ТАБЛИЦЫ И ГРАФИКА ---
                 col_table, col_chart = st.columns([2.5, 2], gap="large") 
 
                 with col_table:
