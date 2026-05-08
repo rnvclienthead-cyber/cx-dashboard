@@ -1388,12 +1388,6 @@ elif page == "Уровень PPM":
                 table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
                 table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
-                st.markdown("### :material/analytics: Сводка")
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Группа A", len(table_agg[table_agg['ABC_Группа'] == 'A']))
-                m2.metric("Группа B", len(table_agg[table_agg['ABC_Группа'] == 'B']))
-                m3.metric("Группа C", len(table_agg[table_agg['ABC_Группа'] == 'C']))
-
                 # --- ИЗМЕНЕННЫЙ БЛОК: Кастомные метрики с красными числами ---
                 def render_metric(label, total, bad):
                     bad_html = f'<span style="color: #ef4444; margin-left: 12px;">{bad}</span>' if bad > 0 else ''
