@@ -1277,8 +1277,8 @@ elif page == "Отчет производства":
     except Exception as e: 
         st.error(f"Ошибка Отчета: {e}")
 
-elif page == "⚠️ Уровень PPM":
-    st.title("⚠️ Аналитика PPM и Рекламации")
+elif page == "Уровень PPM":
+    st.title("Аналитика PPM и Рекламации")
     
     with st.spinner("Загрузка данных для PPM..."):
         try:
