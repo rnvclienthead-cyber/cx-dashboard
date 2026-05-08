@@ -54,7 +54,7 @@ st.markdown("""
 
 # --- ИСПРАВЛЕННАЯ СТАБИЛЬНАЯ НАВИГАЦИЯ С MATERIAL ICONS ---
 tech_menu = {
-    "Синхронизатор": ("Робот-Синхронизатор", ":material/database_sync:"),
+    "Синхронизатор": ("Робот-Синхронизатор", ":material/cloud_sync:"),
     "ИИ Тегирование": ("ИИ Тегирование", ":material/biotech:"),
     "Модерация": ("Модерация", ":material/fact_check:"),
     "Обучение ИИ": ("Обучение ИИ", ":material/psychology:"),
@@ -63,8 +63,8 @@ tech_menu = {
 
 ops_menu = {
     "Отчет производства": ("Отчет производства", ":material/insights:"),
-    "Уровень PPM": ("Уровень PPM", ":material/report_problem:"),
-    "Рейтинг товаров": ("Рейтинг товаров", ":material/star_rate:")
+    "Уровень PPM": ("Уровень PPM", ":material/warning:"),
+    "Рейтинг товаров": ("Рейтинг товаров", ":material/star:")
 }
 
 if 'active_tab' not in st.session_state:
@@ -73,14 +73,16 @@ if 'active_tab' not in st.session_state:
 st.sidebar.markdown("### :material/settings: Технический блок")
 for key, (page_name, icon) in tech_menu.items():
     is_active = st.session_state.active_tab == page_name
-    if st.sidebar.button(f"{icon} {key}", key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
+    # ИСПОЛЬЗУЕМ параметр icon= вместо добавления в текст
+    if st.sidebar.button(key, icon=icon, key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
         st.session_state.active_tab = page_name
         st.rerun()
 
 st.sidebar.markdown("### :material/trending_up: Операционный блок")
 for key, (page_name, icon) in ops_menu.items():
     is_active = st.session_state.active_tab == page_name
-    if st.sidebar.button(f"{icon} {key}", key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
+    # ИСПОЛЬЗУЕМ параметр icon= вместо добавления в текст
+    if st.sidebar.button(key, icon=icon, key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
         st.session_state.active_tab = page_name
         st.rerun()
 
