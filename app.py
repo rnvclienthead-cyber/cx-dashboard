@@ -1443,12 +1443,17 @@ elif page == "Уровень PPM":
                         latest = chart_base_df['Месяц_ДТ'].max()
                         start = latest - pd.DateOffset(months=11)
                         
-                        # Агрегация для графика теперь сработает идеально
+                        # Агрегация для графика
                         chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
                         
-                        # ---> ДОБАВЬТЕ ЭТУ СТРОЧКУ <---
                         # Оставляем на графике только данные с начала 2026 года
                         chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
+
+                        # --- ИСПРАВЛЕНИЕ: ПРИОРИТЕТ ДАННЫХ И УДАЛЕНИЕ ДУБЛЕЙ ---
+                        # Сортируем так, чтобы 'System' всегда был выше 'External' (по алфавиту S > E)
+                        chart_agg = chart_agg.sort_values(by=['Месяц_ДТ', 'Source'], ascending=[True, False])
+                        # Удаляем дубль месяца, оставляя самую верхнюю запись (System, если он есть)
+                        chart_agg = chart_agg.drop_duplicates(subset=['Месяц_ДТ'], keep='first')
 
                         chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                         chart_agg = chart_agg.sort_values('Месяц_ДТ')
