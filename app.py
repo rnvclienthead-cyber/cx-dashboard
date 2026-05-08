@@ -1287,6 +1287,17 @@ elif page == "Уровень PPM":
 
     try:
         def update_abc_in_sql(df_to_upload):
+            if engine and not df_to_upload.empty:
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("TRUNCATE TABLE product_classification"))
+                        df_to_upload = df_to_upload[['Артикул', 'Класс ABC', 'Класс XYZ']].copy()
+                        df_to_upload.columns = ['article', 'class_abc', 'class_xyz']
+                        df_to_upload.to_sql('product_classification', conn, if_exists='append', index=False)
+                    return True
+                except Exception as e:
+                    st.error(f"Ошибка сохранения в БД: {e}")
+                    return False
             return False
 
         # ==========================================
@@ -1383,13 +1394,13 @@ elif page == "Уровень PPM":
                 m2.metric("Группа B", len(table_agg[table_agg['ABC_Группа'] == 'B']))
                 m3.metric("Группа C", len(table_agg[table_agg['ABC_Группа'] == 'C']))
 
+                # --- ВОТ ЗДЕСЬ СОЗДАЮТСЯ КОЛОНКИ ДЛЯ ТАБЛИЦЫ И ГРАФИКА ---
                 col_table, col_chart = st.columns([2.5, 2], gap="large") 
 
                 with col_table:
                     st.markdown("#### :material/table_rows: Артикулы")
                     def highlight(row): return ['background-color: #fee2e2; color: #991b1b' if row.get('PPM',0) > 10000 else ''] * len(row)
                     
-                    # Благодаря фрагменту, on_select перезапускает ТОЛЬКО этот фрагмент
                     selection = st.dataframe(
                         table_agg.style.apply(highlight, axis=1), 
                         use_container_width=True, hide_index=True, height=450,
@@ -1409,72 +1420,72 @@ elif page == "Уровень PPM":
                     if hasattr(selection, 'selection') and selection.selection.rows:
                         clicked_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул']
 
-            with col_chart:
-                if clicked_sku:
-                    chart_base_df = filtered_sku_df[filtered_sku_df['Артикул'] == clicked_sku].copy()
-                    chart_title = f"Динамика: {clicked_sku}"
-                else:
-                    chart_base_df = filtered_sku_df.copy()
-                    if not sel_skus or '[Все артикулы]' in sel_skus: chart_title = "Динамика: Все артикулы (Сводно)"
-                    elif len(active_skus) == 1: chart_title = f"Динамика: {list(active_skus)[0]}"
-                    else: chart_title = "Динамика: Выбранные объекты (Сводно)"
+                with col_chart:
+                    if clicked_sku:
+                        chart_base_df = filtered_sku_df[filtered_sku_df['Артикул'] == clicked_sku].copy()
+                        chart_title = f"Динамика: {clicked_sku}"
+                    else:
+                        chart_base_df = filtered_sku_df.copy()
+                        if not sel_skus or '[Все артикулы]' in sel_skus: chart_title = "Динамика: Все артикулы (Сводно)"
+                        elif len(active_skus) == 1: chart_title = f"Динамика: {list(active_skus)[0]}"
+                        else: chart_title = "Динамика: Выбранные объекты (Сводно)"
 
-                if not chart_base_df.empty:
-                    latest = chart_base_df['Месяц_ДТ'].max()
-                    start = latest - pd.DateOffset(months=11)
-                    chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
-                    
-                    # 1. УБИРАЕМ ДЕКАБРЬ: жестко фильтруем все, что было до 2026 года
-                    chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
+                    if not chart_base_df.empty:
+                        latest = chart_base_df['Месяц_ДТ'].max()
+                        start = latest - pd.DateOffset(months=11)
+                        chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
+                        
+                        # 1. УБИРАЕМ ДЕКАБРЬ: жестко фильтруем все, что было до 2026 года
+                        chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
 
-                    # 2. ОДИН СТОЛБЕЦ НА МЕСЯЦ: если есть живая Система (с заказами), она вытесняет Историю
-                    chart_agg['Priority'] = np.where((chart_agg['Source'] == 'System') & (chart_agg['Заказы'] > 0), 2, np.where(chart_agg['Source'] == 'External', 1, 0))
-                    chart_agg = chart_agg.sort_values(by=['Месяц_ДТ', 'Priority'], ascending=[True, False])
-                    chart_agg = chart_agg.drop_duplicates(subset=['Месяц_ДТ'], keep='first')
+                        # 2. ОДИН СТОЛБЕЦ НА МЕСЯЦ: если есть живая Система (с заказами), она вытесняет Историю
+                        chart_agg['Priority'] = np.where((chart_agg['Source'] == 'System') & (chart_agg['Заказы'] > 0), 2, np.where(chart_agg['Source'] == 'External', 1, 0))
+                        chart_agg = chart_agg.sort_values(by=['Месяц_ДТ', 'Priority'], ascending=[True, False])
+                        chart_agg = chart_agg.drop_duplicates(subset=['Месяц_ДТ'], keep='first')
 
-                    chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
-                    chart_agg = chart_agg.sort_values('Месяц_ДТ')
+                        chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
+                        chart_agg = chart_agg.sort_values('Месяц_ДТ')
 
-                    max_val = chart_agg['PPM'].max() if not chart_agg.empty else 0
-                    y_limit = max(20000, max_val * 1.15)
+                        max_val = chart_agg['PPM'].max() if not chart_agg.empty else 0
+                        y_limit = max(20000, max_val * 1.15)
 
-                    st.markdown(f"#### :material/monitoring: {chart_title}")
-                    fig = go.Figure()
-                    for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
-                        curr = chart_agg[chart_agg['Source'] == src].copy() # Добавлен .copy(), чтобы не было предупреждений Pandas
-                        if not curr.empty:
-                            # 3. УБИРАЕМ НУЛИ: если PPM = 0, текст не выводится
-                            text_labels = curr['PPM'].apply(lambda x: str(x) if x > 0 else "")
-                            fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=text_labels, textposition='outside'))
-                    
-                    fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
-                    fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
-                    
-                    fig.update_layout(
-                        # 4. OVERLAY: центрирует столбцы, убирая пустые пробелы
-                        barmode='overlay',
-                        xaxis=dict(
-                            type='category', 
-                            categoryorder='array', 
-                            categoryarray=chart_agg['Месяц_Стр'].unique(), 
-                            showgrid=False
-                        ),
-                        height=420, margin=dict(l=0, r=0, t=20, b=0),
-                        legend=dict(orientation="h", y=1.15),
-                        yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
-                        yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
-                        hovermode="x unified"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Нет данных для графика")
+                        st.markdown(f"#### :material/monitoring: {chart_title}")
+                        fig = go.Figure()
+                        for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
+                            curr = chart_agg[chart_agg['Source'] == src].copy()
+                            if not curr.empty:
+                                # 3. УБИРАЕМ НУЛИ: если PPM = 0, текст не выводится
+                                text_labels = curr['PPM'].apply(lambda x: str(x) if x > 0 else "")
+                                fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=text_labels, textposition='outside'))
+                        
+                        fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
+                        fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
+                        
+                        fig.update_layout(
+                            # 4. OVERLAY: центрирует столбцы, убирая пустые пробелы
+                            barmode='overlay',
+                            xaxis=dict(
+                                type='category', 
+                                categoryorder='array', 
+                                categoryarray=chart_agg['Месяц_Стр'].unique(), 
+                                showgrid=False
+                            ),
+                            height=420, margin=dict(l=0, r=0, t=20, b=0),
+                            legend=dict(orientation="h", y=1.15),
+                            yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
+                            yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
+                            hovermode="x unified"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("Нет данных для графика")
 
             # Вызов созданного фрагмента
             render_ppm_dashboard(df_total, sku_options, available_months)
 
     except Exception as e:
         st.error(f"Ошибка PPM: {e}")
-
+        
 elif page == "Рейтинг товаров":
     st.title(":material/star_rate: Мониторинг Рейтинга (В разработке)")
     st.info("Здесь будет отображаться динамика рейтинга товаров (звезды) на основе данных из API Wildberries.")
