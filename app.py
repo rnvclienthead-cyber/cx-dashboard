@@ -1460,9 +1460,9 @@ elif page == "Уровень PPM":
                                 fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=curr['PPM'], textposition='outside'))
                         
                         fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
-                        fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
                         
-                        # --- ИСПРАВЛЕНИЕ 4: Жесткая фиксация оси X для Plotly ---
+                        # Линия заказов удалена!
+                        
                         fig.update_layout(
                             barmode='group',
                             xaxis=dict(
@@ -1474,7 +1474,7 @@ elif page == "Уровень PPM":
                             height=420, margin=dict(l=0, r=0, t=20, b=0),
                             legend=dict(orientation="h", y=1.15),
                             yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
-                            yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
+                            # Вторая ось Y удалена!
                             hovermode="x unified"
                         )
                         st.plotly_chart(fig, use_container_width=True)
