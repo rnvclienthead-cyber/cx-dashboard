@@ -1388,7 +1388,9 @@ elif page == "Уровень PPM":
                 table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
                 table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
-                # --- ИЗМЕНЕННЫЙ БЛОК: Кастомные метрики с красными числами ---
+                # --- ИСПРАВЛЕННЫЙ БЛОК: Создаем колонки m1, m2, m3 ---
+                m1, m2, m3 = st.columns(3)
+
                 def render_metric(label, total, bad):
                     bad_html = f'<span style="color: #ef4444; margin-left: 12px;">{bad}</span>' if bad > 0 else ''
                     return f"""
