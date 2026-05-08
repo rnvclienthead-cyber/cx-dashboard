@@ -1014,30 +1014,42 @@ elif page == "Модерация":
                                 st.rerun()
 
                 with col_media:
-                    # НОВАЯ ЛОГИКА: Запрашиваем медиа только для этой строки
+                    # НОВАЯ ЛОГИКА: Запрашиваем медиа и разделяем пары превью|оригинал
                     raw_photos, raw_videos = get_media_for_srid(srid)
-                    media_raw = raw_photos + " " + raw_videos
                     
-                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', media_raw)
-                    if urls:
-                        videos, row_photos = [], []
-                        for u in urls[:10]: 
-                            clean_url = u.strip()
-                            if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                            if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                            else: row_photos.append(clean_url)
+                    # Обработка фото (делим строку на группы "превью|оригинал")
+                    photo_groups = raw_photos.split()
+                    # Обработка видео
+                    video_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', raw_videos)
+                    
+                    if photo_groups:
+                        # Используем твои стили .mod-zoom
+                        html_imgs = '<style>.mod-zoom { transition: transform 0.2s ease; cursor: pointer; border-radius: 8px; object-fit: cover; } .mod-zoom:hover { transform: scale(2.5); z-index: 9999; position: relative; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }</style>'
+                        html_imgs += '<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">'
                         
-                        if row_photos:
-                            html_imgs = '<style>.mod-zoom { transition: transform 0.2s ease; cursor: pointer; border-radius: 8px; object-fit: cover; } .mod-zoom:hover { transform: scale(2.5); z-index: 9999; position: relative; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }</style>'
-                            html_imgs += '<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">'
-                            for p in row_photos[:6]:
-                                html_imgs += f'<a href="{p}" target="_blank" rel="noreferrer noopener"><img src="{p}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer"></a>'
-                            html_imgs += '</div>'
-                            st.markdown(html_imgs, unsafe_allow_html=True)
-                        
-                        if videos:
-                            for v_idx, v_url in enumerate(videos):
-                                if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): play_video_modal(v_url)
+                        for group in photo_groups[:6]:
+                            # Если есть разделитель |, делим. Если нет - используем ссылку как есть
+                            if "|" in group:
+                                s3_url, wb_url = group.split("|", 1)
+                            else:
+                                s3_url = wb_url = group
+                            
+                            # Оборачиваем превью (s3) в ссылку на оригинал (wb)
+                            html_imgs += f'''
+                                <div style="text-align: center; width: 130px;">
+                                    <a href="{wb_url}" target="_blank" rel="noreferrer noopener">
+                                        <img src="{s3_url}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer">
+                                    </a>
+                                    <a href="{wb_url}" download target="_blank" style="text-decoration:none; font-size:10px; color:#3498db; display:block; margin-top:5px;">📥 Оригинал</a>
+                                </div>
+                            '''
+                        html_imgs += '</div>'
+                        st.markdown(html_imgs, unsafe_allow_html=True)
+                    
+                    if video_urls:
+                        for v_idx, v_url in enumerate(video_urls):
+                            if st.button("🎥 Видео", key=f"vid_{srid}_{v_idx}"): 
+                                play_video_modal(v_url)
                 
             st.markdown("---")
             render_pagination(total_pages, key_prefix="bottom")
@@ -1056,22 +1068,21 @@ elif page == "Отчет производства":
         details = filtered_df[(filtered_df['Артикул продавца'] == sku) & (filtered_df[str(reason_id)].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да']))]
         
         if not details.empty:
-            all_photos = []
+            # 1. Собираем только ОРИГИНАЛЬНЫЕ ссылки для скачивания архивом
+            all_original_photos = []
             for _, r in details.iterrows():
-                p_raw, v_raw = get_media_for_srid(r['SRID'])
-                m_raw = p_raw + " " + v_raw
-                urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', m_raw)
-                for u in urls:
-                    clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                    if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                    if not any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): all_photos.append(clean_url)
+                p_raw, _ = get_media_for_srid(r['SRID'])
+                for group in p_raw.split():
+                    wb_url = group.split("|")[-1] # Всегда берем последний элемент (оригинал)
+                    if wb_url.startswith("//"): wb_url = "https:" + wb_url
+                    all_original_photos.append(wb_url)
             
-            if all_photos:
-                if st.button(f"📥 Скачать ВСЕ фото ({len(all_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
-                    with st.spinner("Сбор фото и архивация..."):
-                        zip_all = create_images_zip(all_photos)
+            if all_original_photos:
+                if st.button(f"📥 Скачать ВСЕ ОРИГИНАЛЫ ({len(all_original_photos)} шт.)", type="primary", key=f"dl_all_{sku}_{reason_id}"):
+                    with st.spinner("Сбор оригинальных фото..."):
+                        zip_all = create_images_zip(all_original_photos)
                         b64 = base64.b64encode(zip_all).decode()
-                        components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ALL.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
+                        components.html(f'<a id="dl" href="data:application/zip;base64,{b64}" download="{sku}_{reason_id}_ORIGINALS.zip"></a><script>document.getElementById("dl").click();</script>', width=0, height=0)
             
             st.markdown("---")
             for _, r in details.iterrows():
@@ -1079,32 +1090,29 @@ elif page == "Отчет производства":
                     st.markdown('<div class="detail-card">', unsafe_allow_html=True)
                     c1, media_col = st.columns([1.2, 1])
                     
-                    row_photos, videos = [], []
-                    
                     p_raw, v_raw = get_media_for_srid(r['SRID'])
-                    m_raw = p_raw + " " + v_raw
-                    
-                    urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', m_raw)
-                    for u in urls:
-                        clean_url = u.replace("']", "").replace("'", "").replace('"', '')
-                        if clean_url.startswith("//"): clean_url = "https:" + clean_url
-                        if any(ext in clean_url.lower() for ext in ['.mp4', '.mov', '.avi']): videos.append(clean_url)
-                        else: row_photos.append(clean_url)
+                    photo_groups = p_raw.split()
+                    video_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,]+', v_raw)
 
                     with c1:
                         st.write(f"💬 **Текст клиента:**\n{r.get('Комментарий покупателя', '---')}")
                         st.write(f"🧾 **Инвойс:** {r.get('Инвойс', '---')} | **Поставка:** {r.get('Номер поставки_ОРИГИНАЛ', '---')}")
                     
                     with media_col:
-                        if row_photos:
+                        if photo_groups:
                             html_imgs = '<div class="media-row">'
-                            for p in row_photos[:6]:
-                                html_imgs += f'<a href="{p}" target="_blank"><img src="{p}" class="photo-zoom"></a>'
+                            for group in photo_groups[:6]:
+                                if "|" in group:
+                                    s3_url, wb_url = group.split("|", 1)
+                                else:
+                                    s3_url = wb_url = group
+                                # Превью из S3, переход по клику на WB
+                                html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom"></a>'
                             html_imgs += '</div>'
                             st.markdown(html_imgs, unsafe_allow_html=True)
                             
-                        if videos:
-                            for v_idx, v_url in enumerate(videos): 
+                        if video_urls:
+                            for v_idx, v_url in enumerate(video_urls): 
                                 st.markdown(f'<a href="{v_url}" target="_blank" class="video-link-btn">🎥 Видео {v_idx+1}</a>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
         else: 
