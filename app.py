@@ -63,7 +63,7 @@ tech_menu = {
 
 ops_menu = {
     "Отчет производства": ("Отчет производства", ":material/insights:"),
-    "Уровень PPM": ("Уровень PPM", ":material/warning:"),
+    "Уровень ": ("Уровень ", ":material/warning:"),
     "Рейтинг товаров": ("Рейтинг товаров", ":material/star:")
 }
 
@@ -1307,12 +1307,21 @@ elif page == "Уровень PPM":
             df_sys = load_cached_hybrid_data()
             df_orders_sys = load_cached_orders()
             
+            # --- ИСПРАВЛЕНИЕ 1: Жесткая нормализация дат заказов ---
+            if not df_orders_sys.empty:
+                df_orders_sys['Месяц_ДТ'] = pd.to_datetime(df_orders_sys['Месяц_ДТ'], utc=True).dt.tz_localize(None).dt.to_period('M').dt.to_timestamp()
+                # Страховка: группируем заказы, чтобы точно не было дублей ключей
+                df_orders_sys = df_orders_sys.groupby(['Артикул продавца', 'Месяц_ДТ'])['Чистые_заказы'].sum().reset_index()
+
             df_hist = pd.DataFrame()
             try:
                 df_hist = pd.read_sql("SELECT article, month_date, defects, orders, source FROM historical_ppm", engine)
                 if not df_hist.empty:
                     df_hist.rename(columns={'article':'Артикул', 'month_date':'Месяц_ДТ', 'defects':'Брак', 'orders':'Заказы', 'source':'Source'}, inplace=True)
-                    df_hist['Месяц_ДТ'] = pd.to_datetime(df_hist['Месяц_ДТ'])
+                    # --- ИСПРАВЛЕНИЕ 2: Нормализация исторических дат ---
+                    df_hist['Месяц_ДТ'] = pd.to_datetime(df_hist['Месяц_ДТ'], utc=True).dt.tz_localize(None).dt.to_period('M').dt.to_timestamp()
+                    # Схлопываем случайные дубли за один месяц
+                    df_hist = df_hist.groupby(['Артикул', 'Месяц_ДТ', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
             except Exception as e: st.warning(f"История недоступна: {e}")
 
             df_abc = pd.DataFrame()
@@ -1336,7 +1345,8 @@ elif page == "Уровень PPM":
             df_sys['Размечено'] = df_sys.apply(lambda r: any(str(r.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14)), axis=1)
             df_app_sys = df_sys[df_sys['Размечено'] == True].copy()
             if not df_app_sys.empty:
-                df_app_sys['Месяц_ДТ'] = df_app_sys['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                # --- ИСПРАВЛЕНИЕ 3: Нормализация дат новых обращений ---
+                df_app_sys['Месяц_ДТ'] = pd.to_datetime(df_app_sys['Дата_ДТ'], utc=True).dt.tz_localize(None).dt.to_period('M').dt.to_timestamp()
             
             sys_metrics = df_app_sys.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Брак') if not df_app_sys.empty else pd.DataFrame(columns=['Артикул продавца', 'Месяц_ДТ', 'Брак'])
             sys_metrics = pd.merge(df_orders_sys, sys_metrics, on=['Артикул продавца', 'Месяц_ДТ'], how='left').fillna(0)
@@ -1358,7 +1368,7 @@ elif page == "Уровень PPM":
             available_months = df_total.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=True)['Месяц_Стр'].tolist()
 
             # ==========================================
-            # 2. ИНТЕРАКТИВНЫЙ ФРАГМЕНТ (Перезапускается только он)
+            # 2. ИНТЕРАКТИВНЫЙ ФРАГМЕНТ
             # ==========================================
             @st.fragment
             def render_ppm_dashboard(df_full, skus, months):
@@ -1400,7 +1410,6 @@ elif page == "Уровень PPM":
                     st.markdown("#### :material/table_rows: Артикулы")
                     def highlight(row): return ['background-color: #fee2e2; color: #991b1b' if row.get('PPM',0) > 10000 else ''] * len(row)
                     
-                    # Благодаря фрагменту, on_select перезапускает ТОЛЬКО этот фрагмент
                     selection = st.dataframe(
                         table_agg.style.apply(highlight, axis=1), 
                         use_container_width=True, hide_index=True, height=450,
@@ -1433,6 +1442,8 @@ elif page == "Уровень PPM":
                     if not chart_base_df.empty:
                         latest = chart_base_df['Месяц_ДТ'].max()
                         start = latest - pd.DateOffset(months=11)
+                        
+                        # Агрегация для графика теперь сработает идеально
                         chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
                         chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                         chart_agg = chart_agg.sort_values('Месяц_ДТ')
@@ -1442,6 +1453,7 @@ elif page == "Уровень PPM":
 
                         st.markdown(f"#### :material/monitoring: {chart_title}")
                         fig = go.Figure()
+                        
                         for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
                             curr = chart_agg[chart_agg['Source'] == src]
                             if not curr.empty:
@@ -1450,7 +1462,15 @@ elif page == "Уровень PPM":
                         fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
                         fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
                         
+                        # --- ИСПРАВЛЕНИЕ 4: Жесткая фиксация оси X для Plotly ---
                         fig.update_layout(
+                            barmode='group',
+                            xaxis=dict(
+                                type='category',
+                                categoryorder='array',
+                                categoryarray=chart_agg['Месяц_Стр'].unique(),
+                                showgrid=False
+                            ),
                             height=420, margin=dict(l=0, r=0, t=20, b=0),
                             legend=dict(orientation="h", y=1.15),
                             yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
