@@ -532,44 +532,72 @@ def load_cached_orders():
         print(f"Ошибка загрузки заказов: {e}")
         return pd.DataFrame()
 
+import pytz # Если библиотека не установлена, используйте timedelta(hours=3)
+from datetime import timedelta
+
 if page == "Робот-Синхронизатор":
     st.title(":material/database: Статус Базы Данных (Supabase)")
-    st.info("Сбор логистики и обращений теперь работает автоматически (через скрипт `worker.py` на GitHub).")
+    st.info("Сбор логистики и обращений работает автоматически через GitHub Actions.")
     
     if engine:
         try:
             with engine.connect() as conn:
-                # 1. Считаем общее количество (ИСПРАВЛЕНО: Заказы теперь берутся из wb_orders)
+                # 1. Считаем общее количество
                 claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar() or 0
                 orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_orders")).scalar() or 0
                 sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar() or 0
                 
-                # 2. Считаем дельту за сегодня (ИСПРАВЛЕНО: Привязка к часовому поясу МСК)
-                # Используем DATE(NOW() AT TIME ZONE 'Europe/Moscow') чтобы точно поймать начало дня
-                claims_new = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE DATE(created_dt) = DATE(NOW() AT TIME ZONE 'Europe/Moscow')")).scalar() or 0
-                orders_new = conn.execute(text("SELECT COUNT(*) FROM wb_orders WHERE DATE(dt) = DATE(NOW() AT TIME ZONE 'Europe/Moscow')")).scalar() or 0
-                sales_new = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND DATE(dt) = DATE(NOW() AT TIME ZONE 'Europe/Moscow')")).scalar() or 0
+                # 2. Находим время последнего успешного завершения воркера
+                last_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
                 
-                # 3. Узнаем точное время последнего успешного обновления
-                last_sync = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
-                
+                # Инициализируем дельты нулями
+                claims_delta, orders_delta, sales_delta = 0, 0, 0
+                sync_time_str = "Нет данных"
+
+                if last_sync_raw:
+                    # Корректировка времени на Московское (UTC+3)
+                    # Если last_sync_raw без часового пояса, просто прибавляем 3 часа
+                    last_sync_msk = last_sync_raw + timedelta(hours=3)
+                    sync_time_str = last_sync_msk.strftime('%d.%m.%Y в %H:%M')
+                    
+                    # 3. Считаем, сколько записей было затронуто именно в этот запуск (по точному времени)
+                    claims_delta = conn.execute(
+                        text("SELECT COUNT(*) FROM wb_claims WHERE last_sync = :ts"), 
+                        {"ts": last_sync_raw}
+                    ).scalar() or 0
+                    
+                    # Для заказов и продаж (если в них тоже есть колонка last_sync, иначе используем дату)
+                    # Если в wb_orders нет last_sync, оставим фильтр по дате или уберем дельту
+                    try:
+                        orders_delta = conn.execute(
+                            text("SELECT COUNT(*) FROM wb_orders WHERE last_sync = :ts"), 
+                            {"ts": last_sync_raw}
+                        ).scalar() or 0
+                    except:
+                        orders_delta = 0 # Если колонки нет в этой таблице
+
+            # Визуализация метрик
             c1, c2, c3 = st.columns(3)
             
-            c1.metric("Всего Обращений в БД", claims_count, delta=f"{claims_new} за сегодня" if claims_new > 0 else None)
-            c2.metric("Строк Заказов (ORDER)", orders_count, delta=f"{orders_new} за сегодня" if orders_new > 0 else None)
-            c3.metric("Строк Продаж (SALE)", sales_count, delta=f"{sales_new} за сегодня" if sales_new > 0 else None)
+            c1.metric(
+                "Всего Обращений в БД", 
+                f"{claims_count:,}".replace(',', ' '), 
+                delta=f"+{claims_delta} в последнем пакете" if claims_delta > 0 else None
+            )
+            c2.metric(
+                "Строк Заказов (ORDER)", 
+                f"{orders_count:,}".replace(',', ' '), 
+                delta=f"+{orders_delta} новых" if orders_delta > 0 else None
+            )
+            c3.metric(
+                "Строк Продаж (SALE)", 
+                f"{sales_count:,}".replace(',', ' ')
+            )
             
-            # Выводим время последнего обновления
-            if last_sync:
-                sync_time_str = last_sync.strftime('%d.%m.%Y в %H:%M')
-                st.success(f"✅ База данных подключена. Последнее обновление данных: **{sync_time_str}**")
-            else:
-                st.success("✅ База данных подключена и работает штатно.")
-                
-            st.markdown("💡 *Синхронизация происходит автоматически. При необходимости её можно запустить вручную во вкладке **Actions** на GitHub.*")
+            st.success(f"✅ Последняя синхронизация (МСК): **{sync_time_str}**")
             
         except Exception as e: 
-            st.error(f"⚠️ Ошибка подключения к базе данных: {e}")
+            st.error(f"⚠️ Ошибка получения метрик: {e}")
     else: 
         st.warning("⚠️ База данных не подключена. Проверьте DB_URL.")
 
