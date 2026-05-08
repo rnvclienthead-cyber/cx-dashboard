@@ -1388,13 +1388,23 @@ elif page == "Уровень PPM":
                 table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
                 table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
+                # --- ИЗМЕНЕНИЯ ЗДЕСЬ: ДОБАВЛЕНЫ КРАСНЫЕ ЦИФРЫ ---
                 st.markdown("### :material/analytics: Сводка")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Группа A", len(table_agg[table_agg['ABC_Группа'] == 'A']))
-                m2.metric("Группа B", len(table_agg[table_agg['ABC_Группа'] == 'B']))
-                m3.metric("Группа C", len(table_agg[table_agg['ABC_Группа'] == 'C']))
+                
+                a_tot = len(table_agg[table_agg['ABC_Группа'] == 'A'])
+                a_bad = len(table_agg[(table_agg['ABC_Группа'] == 'A') & (table_agg['PPM'] > 10000)])
+                m1.metric("Группа A", a_tot, delta=str(a_bad) if a_bad > 0 else None, delta_color="inverse")
+                
+                b_tot = len(table_agg[table_agg['ABC_Группа'] == 'B'])
+                b_bad = len(table_agg[(table_agg['ABC_Группа'] == 'B') & (table_agg['PPM'] > 10000)])
+                m2.metric("Группа B", b_tot, delta=str(b_bad) if b_bad > 0 else None, delta_color="inverse")
+                
+                c_tot = len(table_agg[table_agg['ABC_Группа'] == 'C'])
+                c_bad = len(table_agg[(table_agg['ABC_Группа'] == 'C') & (table_agg['PPM'] > 10000)])
+                m3.metric("Группа C", c_tot, delta=str(c_bad) if c_bad > 0 else None, delta_color="inverse")
+                # -----------------------------------------------
 
-                # --- ВОТ ЗДЕСЬ СОЗДАЮТСЯ КОЛОНКИ ДЛЯ ТАБЛИЦЫ И ГРАФИКА ---
                 col_table, col_chart = st.columns([2.5, 2], gap="large") 
 
                 with col_table:
@@ -1435,13 +1445,13 @@ elif page == "Уровень PPM":
                         start = latest - pd.DateOffset(months=11)
                         chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
                         
-                        # 1. УБИРАЕМ ДЕКАБРЬ: оставляем только данные за 2026 год
+                        # 1. УБИРАЕМ ДЕКАБРЬ: жестко фильтруем все, что было до 2026 года
                         chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
 
-                        # 2. ЖЕСТКОЕ ПРАВИЛО: До апреля берем только Историю, с апреля - только Систему
-                        mask_hist = (chart_agg['Source'] == 'External') & (chart_agg['Месяц_ДТ'] < '2026-04-01')
-                        mask_sys = (chart_agg['Source'] == 'System') & (chart_agg['Месяц_ДТ'] >= '2026-04-01')
-                        chart_agg = chart_agg[mask_hist | mask_sys]
+                        # 2. ОДИН СТОЛБЕЦ НА МЕСЯЦ: если есть живая Система (с заказами), она вытесняет Историю
+                        chart_agg['Priority'] = np.where((chart_agg['Source'] == 'System') & (chart_agg['Заказы'] > 0), 2, np.where(chart_agg['Source'] == 'External', 1, 0))
+                        chart_agg = chart_agg.sort_values(by=['Месяц_ДТ', 'Priority'], ascending=[True, False])
+                        chart_agg = chart_agg.drop_duplicates(subset=['Месяц_ДТ'], keep='first')
 
                         chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                         chart_agg = chart_agg.sort_values('Месяц_ДТ')
