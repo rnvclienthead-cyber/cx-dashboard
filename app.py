@@ -532,21 +532,40 @@ def load_cached_orders():
 
 if page == "🤖 Робот-Синхронизатор":
     st.title("🤖 Статус Базы Данных (Supabase)")
-    st.info("Сбор логистики и претензий теперь работает автоматически (через скрипт `worker.py`). Streamlit больше не зависает.")
+    st.info("Сбор логистики и обращений теперь работает автоматически (через скрипт `worker.py` на GitHub).")
     
     if engine:
         try:
             with engine.connect() as conn:
-                claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar()
-                orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar()
-                sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar()
+                # 1. Считаем общее количество
+                claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar() or 0
+                orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar() or 0
+                sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar() or 0
+                
+                # 2. Считаем дельту (новые записи, добавленные сегодня)
+                claims_new = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE created_dt >= CURRENT_DATE")).scalar() or 0
+                orders_new = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER' AND dt >= CURRENT_DATE")).scalar() or 0
+                sales_new = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND dt >= CURRENT_DATE")).scalar() or 0
+                
+                # 3. Узнаем точное время последнего успешного обновления (берем из колонки last_sync)
+                last_sync = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
                 
             c1, c2, c3 = st.columns(3)
-            c1.metric("Всего Претензий в БД", claims_count)
-            c2.metric("Строк Заказов (ORDER)", orders_count)
-            c3.metric("Строк Продаж (SALE)", sales_count)
-            st.success("✅ База данных подключена и работает штатно.")
-            st.markdown("💡 *Чтобы загрузить свежие данные с Wildberries, запустите `worker.py`.*")
+            
+            # Параметр delta автоматически рисует зеленые/красные индикаторы в Streamlit
+            c1.metric("Всего Обращений в БД", claims_count, delta=f"{claims_new} за сегодня" if claims_new > 0 else None)
+            c2.metric("Строк Заказов (ORDER)", orders_count, delta=f"{orders_new} за сегодня" if orders_new > 0 else None)
+            c3.metric("Строк Продаж (SALE)", sales_count, delta=f"{sales_new} за сегодня" if sales_new > 0 else None)
+            
+            # Выводим время последнего обновления
+            if last_sync:
+                sync_time_str = last_sync.strftime('%d.%m.%Y в %H:%M')
+                st.success(f"✅ База данных подключена. Последнее обновление данных: **{sync_time_str}**")
+            else:
+                st.success("✅ База данных подключена и работает штатно.")
+                
+            st.markdown("💡 *Синхронизация происходит автоматически. При необходимости её можно запустить вручную во вкладке **Actions** на GitHub.*")
+            
         except Exception as e: 
             st.error(f"⚠️ Ошибка подключения к базе данных: {e}")
     else: 
