@@ -1445,6 +1445,11 @@ elif page == "Уровень PPM":
                         
                         # Агрегация для графика теперь сработает идеально
                         chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
+                        
+                        # ---> ДОБАВЬТЕ ЭТУ СТРОЧКУ <---
+                        # Оставляем на графике только данные с начала 2026 года
+                        chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
+
                         chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                         chart_agg = chart_agg.sort_values('Месяц_ДТ')
 
@@ -1455,9 +1460,19 @@ elif page == "Уровень PPM":
                         fig = go.Figure()
                         
                         for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
-                            curr = chart_agg[chart_agg['Source'] == src]
+                            curr = chart_agg[chart_agg['Source'] == src].copy()
                             if not curr.empty:
-                                fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=curr['PPM'], textposition='outside'))
+                                # Превращаем нули в пустые строки, чтобы они не рисовались на графике
+                                text_labels = curr['PPM'].apply(lambda x: str(x) if x > 0 else "")
+                                
+                                fig.add_trace(go.Bar(
+                                    x=curr['Месяц_Стр'], 
+                                    y=curr['PPM'], 
+                                    name=nm, 
+                                    marker_color=clr, 
+                                    text=text_labels, 
+                                    textposition='outside'
+                                ))
                         
                         fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
                         
