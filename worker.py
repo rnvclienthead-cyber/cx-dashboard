@@ -45,7 +45,10 @@ def create_and_upload_thumbnail(wb_image_url):
     """Скачивает фото с WB, сжимает его и загружает в S3 бакет"""
     if not wb_image_url or not wb_image_url.startswith('http'): 
         return wb_image_url
-    if not s3_client: # Если S3 не настроен - возвращаем оригинал
+        
+    # Проверка: видит ли воркер ключи вообще?
+    if not S3_ACCESS_KEY or not S3_SECRET_KEY:
+        print("    ⚠️ ПРОПУСК: Воркер не видит ключи S3_ACCESS_KEY или S3_SECRET_KEY из GitHub Secrets!")
         return wb_image_url
 
     try:
@@ -56,11 +59,9 @@ def create_and_upload_thumbnail(wb_image_url):
         if image.mode in ("RGBA", "P"): 
             image = image.convert("RGB")
             
-        # Сжимаем (макс 400x400 пикселей)
         image.thumbnail((400, 400))
         
         buffer = io.BytesIO()
-        # Качество 70 (вес падает в 10-20 раз, визуально почти без изменений)
         image.save(buffer, format="JPEG", optimize=True, quality=70)
         buffer.seek(0)
         
@@ -73,12 +74,13 @@ def create_and_upload_thumbnail(wb_image_url):
             ExtraArgs={'ContentType': 'image/jpeg'}
         )
         
-        # Формируем прямую ссылку (для Яндекс.Облака)
-        return f"https://{BUCKET_NAME}.storage.yandexcloud.net/{file_name}"
+        new_url = f"https://{BUCKET_NAME}.storage.yandexcloud.net/{file_name}"
+        print(f"    ✅ Успех: Фото сжато и загружено в Яндекс -> {file_name}")
+        return new_url
         
     except Exception as e:
-        print(f"⚠️ Ошибка обработки фото {wb_image_url}: {e}")
-        return wb_image_url # В случае сбоя возвращаем оригинальную ссылку
+        print(f"    ❌ Ошибка обработки фото {wb_image_url}: {e}")
+        return wb_image_url # В случае сбоя возвращаем оригинал WB
 
 # =========================================
 # 1. СИНХРОНИЗАЦИЯ ПРЕТЕНЗИЙ
