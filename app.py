@@ -1449,12 +1449,20 @@ elif page == "Уровень PPM":
                         # Оставляем на графике только данные с начала 2026 года
                         chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
 
-                        # --- ИСПРАВЛЕНИЕ: ПРИОРИТЕТ ДАННЫХ И УДАЛЕНИЕ ДУБЛЕЙ ---
-                        # Сортируем так, чтобы 'System' всегда был выше 'External' (по алфавиту S > E)
-                        chart_agg = chart_agg.sort_values(by=['Месяц_ДТ', 'Source'], ascending=[True, False])
-                        # Удаляем дубль месяца, оставляя самую верхнюю запись (System, если он есть)
+                        # --- УМНОЕ ИСПРАВЛЕНИЕ ПРИОРИТЕТОВ ---
+                        # Присваиваем приоритет (2 - живая Система, 1 - История, 0 - пустая Система)
+                        conditions = [
+                            (chart_agg['Source'] == 'System') & (chart_agg['Заказы'] > 0),
+                            (chart_agg['Source'] == 'External')
+                        ]
+                        chart_agg['Priority'] = np.select(conditions, [2, 1], default=0)
+
+                        # Сортируем так, чтобы сверху оказался самый высокий приоритет
+                        chart_agg = chart_agg.sort_values(by=['Месяц_ДТ', 'Priority'], ascending=[True, False])
+                        # Удаляем дубли, оставляя "победителя" для каждого месяца
                         chart_agg = chart_agg.drop_duplicates(subset=['Месяц_ДТ'], keep='first')
 
+                        # Считаем итоговый PPM и возвращаем сортировку по дате для графика
                         chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                         chart_agg = chart_agg.sort_values('Месяц_ДТ')
 
