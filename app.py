@@ -1388,31 +1388,46 @@ elif page == "Уровень PPM":
                 table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
                 table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
-                # --- ИСПРАВЛЕННЫЙ БЛОК: Создаем колонки m1, m2, m3 ---
+                # --- ВАРИАНТ 2: Нативные метрики Streamlit (Чистый стиль) ---
                 m1, m2, m3 = st.columns(3)
 
-                def render_metric(label, total, bad):
-                    bad_html = f'<span style="color: #ef4444; margin-left: 12px;">{bad}</span>' if bad > 0 else ''
-                    return f"""
-                    <div style="display: flex; flex-direction: column; margin-bottom: 1rem;">
-                        <span style="font-size: 14px; color: rgb(97, 100, 107); margin-bottom: 0.25rem;">{label}</span>
-                        <div style="font-size: 2.25rem; font-weight: 600; line-height: 1.2; display: flex; align-items: center;">
-                            <span style="color: rgb(49, 51, 63);">{total}</span>{bad_html}
-                        </div>
-                    </div>
-                    """
-                
+                # Расчет данных для каждой группы
                 a_tot = len(table_agg[table_agg['ABC_Группа'] == 'A'])
                 a_bad = len(table_agg[(table_agg['ABC_Группа'] == 'A') & (table_agg['PPM'] > 10000)])
-                m1.markdown(render_metric("Группа A", a_tot, a_bad), unsafe_allow_html=True)
                 
                 b_tot = len(table_agg[table_agg['ABC_Группа'] == 'B'])
                 b_bad = len(table_agg[(table_agg['ABC_Группа'] == 'B') & (table_agg['PPM'] > 10000)])
-                m2.markdown(render_metric("Группа B", b_tot, b_bad), unsafe_allow_html=True)
                 
                 c_tot = len(table_agg[table_agg['ABC_Группа'] == 'C'])
                 c_bad = len(table_agg[(table_agg['ABC_Группа'] == 'C') & (table_agg['PPM'] > 10000)])
-                m3.markdown(render_metric("Группа C", c_tot, c_bad), unsafe_allow_html=True)
+
+                # Отрисовка в колонках
+                with m1:
+                    st.metric(
+                        label="Группа A", 
+                        value=f"{a_tot} SKU", 
+                        delta=f"{a_bad} проблемных", 
+                        delta_color="inverse" # Сделает дельту красной
+                    )
+                    st.caption(f"Доля брака: {round(a_bad/a_tot*100 if a_tot > 0 else 0)}%")
+                
+                with m2:
+                    st.metric(
+                        label="Группа B", 
+                        value=f"{b_tot} SKU", 
+                        delta=f"{b_bad} проблемных", 
+                        delta_color="inverse"
+                    )
+                    st.caption(f"Доля брака: {round(b_bad/b_tot*100 if b_tot > 0 else 0)}%")
+                
+                with m3:
+                    st.metric(
+                        label="Группа C", 
+                        value=f"{c_tot} SKU", 
+                        delta=f"{c_bad} проблемных", 
+                        delta_color="inverse"
+                    )
+                    st.caption(f"Доля брака: {round(c_bad/c_tot*100 if c_tot > 0 else 0)}%")
                 # -------------------------------------------------------------
 
                 # --- ВОТ ЗДЕСЬ СОЗДАЮТСЯ КОЛОНКИ ДЛЯ ТАБЛИЦЫ И ГРАФИКА ---
