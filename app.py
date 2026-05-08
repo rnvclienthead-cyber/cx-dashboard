@@ -539,22 +539,22 @@ if page == "Робот-Синхронизатор":
     if engine:
         try:
             with engine.connect() as conn:
-                # 1. Считаем общее количество
+                # 1. Считаем общее количество (ИСПРАВЛЕНО: Заказы теперь берутся из wb_orders)
                 claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar() or 0
-                orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER'")).scalar() or 0
+                orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_orders")).scalar() or 0
                 sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar() or 0
                 
-                # 2. Считаем дельту (новые записи, добавленные сегодня)
-                claims_new = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE created_dt >= CURRENT_DATE")).scalar() or 0
-                orders_new = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='ORDER' AND dt >= CURRENT_DATE")).scalar() or 0
-                sales_new = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND dt >= CURRENT_DATE")).scalar() or 0
+                # 2. Считаем дельту за сегодня (ИСПРАВЛЕНО: Привязка к часовому поясу МСК)
+                # Используем DATE(NOW() AT TIME ZONE 'Europe/Moscow') чтобы точно поймать начало дня
+                claims_new = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE DATE(created_dt) = DATE(NOW() AT TIME ZONE 'Europe/Moscow')")).scalar() or 0
+                orders_new = conn.execute(text("SELECT COUNT(*) FROM wb_orders WHERE DATE(dt) = DATE(NOW() AT TIME ZONE 'Europe/Moscow')")).scalar() or 0
+                sales_new = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND DATE(dt) = DATE(NOW() AT TIME ZONE 'Europe/Moscow')")).scalar() or 0
                 
-                # 3. Узнаем точное время последнего успешного обновления (берем из колонки last_sync)
+                # 3. Узнаем точное время последнего успешного обновления
                 last_sync = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
                 
             c1, c2, c3 = st.columns(3)
             
-            # Параметр delta автоматически рисует зеленые/красные индикаторы в Streamlit
             c1.metric("Всего Обращений в БД", claims_count, delta=f"{claims_new} за сегодня" if claims_new > 0 else None)
             c2.metric("Строк Заказов (ORDER)", orders_count, delta=f"{orders_new} за сегодня" if orders_new > 0 else None)
             c3.metric("Строк Продаж (SALE)", sales_count, delta=f"{sales_new} за сегодня" if sales_new > 0 else None)
