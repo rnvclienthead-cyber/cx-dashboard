@@ -1409,7 +1409,7 @@ elif page == "Уровень PPM":
                     if hasattr(selection, 'selection') and selection.selection.rows:
                         clicked_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул']
 
-                with col_chart:
+            with col_chart:
                 if clicked_sku:
                     chart_base_df = filtered_sku_df[filtered_sku_df['Артикул'] == clicked_sku].copy()
                     chart_title = f"Динамика: {clicked_sku}"
