@@ -531,8 +531,7 @@ def load_cached_orders():
     except Exception as e: 
         print(f"Ошибка загрузки заказов: {e}")
         return pd.DataFrame()
-
-import pytz # Если библиотека не установлена, используйте timedelta(hours=3)
+    
 from datetime import timedelta
 
 if page == "Робот-Синхронизатор":
