@@ -1023,26 +1023,19 @@ elif page == "Модерация":
                     video_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', raw_videos)
                     
                     if photo_groups:
-                        # Используем твои стили .mod-zoom
+                        # Стили пишем без лишних отступов в начале строк
                         html_imgs = '<style>.mod-zoom { transition: transform 0.2s ease; cursor: pointer; border-radius: 8px; object-fit: cover; } .mod-zoom:hover { transform: scale(2.5); z-index: 9999; position: relative; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }</style>'
                         html_imgs += '<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">'
                         
                         for group in photo_groups[:6]:
-                            # Если есть разделитель |, делим. Если нет - используем ссылку как есть
                             if "|" in group:
                                 s3_url, wb_url = group.split("|", 1)
                             else:
                                 s3_url = wb_url = group
                             
-                            # Оборачиваем превью (s3) в ссылку на оригинал (wb)
-                            html_imgs += f'''
-                                <div style="text-align: center; width: 130px;">
-                                    <a href="{wb_url}" target="_blank" rel="noreferrer noopener">
-                                        <img src="{s3_url}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer">
-                                    </a>
-                                    <a href="{wb_url}" download target="_blank" style="text-decoration:none; font-size:10px; color:#3498db; display:block; margin-top:5px;">📥 Оригинал</a>
-                                </div>
-                            '''
+                            # ВАЖНО: Вся f-строка должна быть либо в одну линию, либо без пробелов в начале каждой строки
+                            html_imgs += f'<div style="text-align: center; width: 130px;"><a href="{wb_url}" target="_blank" rel="noreferrer noopener"><img src="{s3_url}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer"></a><a href="{wb_url}" download target="_blank" style="text-decoration:none; font-size:10px; color:#3498db; display:block; margin-top:5px;">📥 Оригинал</a></div>'
+                        
                         html_imgs += '</div>'
                         st.markdown(html_imgs, unsafe_allow_html=True)
                     
