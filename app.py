@@ -52,32 +52,32 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- ИСПРАВЛЕННАЯ СТАБИЛЬНАЯ НАВИГАЦИЯ ---
+# --- ИСПРАВЛЕННАЯ СТАБИЛЬНАЯ НАВИГАЦИЯ С MATERIAL ICONS ---
 tech_menu = {
-    "Синхронизатор": ("🤖 Робот-Синхронизатор", "🤖"),
-    "ИИ Тегирование": ("🔬 ИИ Тегирование", "🔬"),
-    "Модерация": ("📝 Модерация", "📝"),
-    "Обучение ИИ": ("🧠 Обучение ИИ", "🧠"),
-    "Системный Журнал": ("📜 Системный Журнал", "📜") # Пункт 6
+    "Синхронизатор": ("Робот-Синхронизатор", ":material/database_sync:"),
+    "ИИ Тегирование": ("ИИ Тегирование", ":material/biotech:"),
+    "Модерация": ("Модерация", ":material/fact_check:"),
+    "Обучение ИИ": ("Обучение ИИ", ":material/psychology:"),
+    "Системный Журнал": ("Системный Журнал", ":material/receipt_long:")
 }
 
 ops_menu = {
-    "Отчет производства": ("📊 Отчет производства", "📊"),
-    "Уровень PPM": ("⚠️ Уровень PPM", "⚠️"), # Пункт 7
-    "Рейтинг товаров": ("⭐ Рейтинг товаров", "⭐")
+    "Отчет производства": ("Отчет производства", ":material/insights:"),
+    "Уровень PPM": ("Уровень PPM", ":material/report_problem:"),
+    "Рейтинг товаров": ("Рейтинг товаров", ":material/star_rate:")
 }
 
 if 'active_tab' not in st.session_state:
-    st.session_state.active_tab = "🤖 Робот-Синхронизатор"
+    st.session_state.active_tab = "Робот-Синхронизатор"
 
-st.sidebar.markdown("### ⚙️ Технический блок")
+st.sidebar.markdown("### :material/settings: Технический блок")
 for key, (page_name, icon) in tech_menu.items():
     is_active = st.session_state.active_tab == page_name
     if st.sidebar.button(f"{icon} {key}", key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
         st.session_state.active_tab = page_name
         st.rerun()
 
-st.sidebar.markdown("### 📈 Операционный блок")
+st.sidebar.markdown("### :material/trending_up: Операционный блок")
 for key, (page_name, icon) in ops_menu.items():
     is_active = st.session_state.active_tab == page_name
     if st.sidebar.button(f"{icon} {key}", key=f"nav_{key}", type="primary" if is_active else "secondary", use_container_width=True):
@@ -530,8 +530,8 @@ def load_cached_orders():
         print(f"Ошибка загрузки заказов: {e}")
         return pd.DataFrame()
 
-if page == "🤖 Робот-Синхронизатор":
-    st.title("🤖 Статус Базы Данных (Supabase)")
+if page == "Робот-Синхронизатор":
+    st.title(":material/database: Статус Базы Данных (Supabase)")
     st.info("Сбор логистики и обращений теперь работает автоматически (через скрипт `worker.py` на GitHub).")
     
     if engine:
@@ -571,9 +571,9 @@ if page == "🤖 Робот-Синхронизатор":
     else: 
         st.warning("⚠️ База данных не подключена. Проверьте DB_URL.")
 
-elif page == "🧠 Обучение ИИ":
-    st.title("🧠 База знаний ИИ (Умный импорт)")
-    st.markdown("Загрузите исторический файл с проверенными отзывами. Робот всё поймет, расшифрует теги и загрузит в свою память (Google Sheets).")
+elif page == "Обучение ИИ":
+    st.title(":material/psychology: База знаний ИИ (Умный импорт)")
+    st.markdown("Загрузите исторический файл с проверенными отзывами. Робот всё поймет, расшифрует теги и загрузит в свою память")
     f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
 
     if st.button("📥 Загрузить и обновить память", type="primary"):
@@ -687,8 +687,8 @@ elif page == "🧠 Обучение ИИ":
         else: 
             st.warning("Пожалуйста, загрузите файл.")
 
-elif page == "🔬 ИИ Тегирование":
-    st.title("🔬 ИИ Тегирование и Проверка")
+elif page == "ИИ Тегирование":
+    st.title(":material/biotech: ИИ Тегирование и Проверка")
     
     if engine:
         # ПУНКТ 4: Исключаем те, что ИИ не смог распознать
@@ -708,7 +708,7 @@ elif page == "🔬 ИИ Тегирование":
         """
         df_audit = pd.read_sql(query_audit, engine)
         
-        t1, t2 = st.tabs(["1️⃣ Первичная разметка", "2️⃣ Перекрестная проверка (Grok)"])
+        t1, t2 = st.tabs([":material/label: Первичная разметка", ":material/rule: Перекрестная проверка (Grok)"])
         
         with t1:
             st.subheader("Разметка новых заявок (Только ID)")
@@ -874,8 +874,8 @@ elif page == "🔬 ИИ Тегирование":
             else:
                 st.success("🎉 Все размеченные заявки проверены аудитором!")
 
-elif page == "📝 Модерация":
-    st.title("📋 Модерация (Ручная проверка)")
+elif page == "Модерация":
+    st.title(":material/fact_check: Модерация (Ручная проверка)")
 
     @st.dialog("Просмотр видео")
     def play_video_modal(url): 
@@ -1015,8 +1015,8 @@ elif page == "📝 Модерация":
         else: 
             st.success("🎉 Очередь пуста! Все обращения проверены.")
 
-elif page == "📊 Отчет производства":
-    st.title("📊 Отчет производства")
+elif page == "Отчет производства":
+    st.title(":material/insights: Отчет производства")
     
     import altair as alt 
     
@@ -1247,7 +1247,7 @@ elif page == "📊 Отчет производства":
     except Exception as e: 
         st.error(f"Ошибка Отчета: {e}")
 
-elif page == "⚠️ Уровень PPM":
+elif page == "Уровень PPM":
     st.title(":material/report_problem: Уровень PPM и Классификация")
     
     import numpy as np
@@ -1437,14 +1437,13 @@ elif page == "⚠️ Уровень PPM":
     except Exception as e:
         st.error(f"Ошибка PPM: {e}")
 
-elif page == "⭐ Рейтинг товаров":
-    st.title("⭐ Мониторинг Рейтинга (В разработке)")
+elif page == "Рейтинг товаров":
+    st.title(":material/star_rate: Мониторинг Рейтинга (В разработке)")
     st.info("Здесь будет отображаться динамика рейтинга товаров (звезды) на основе данных из API Wildberries.")
     st.markdown("Мы настроим воркер на ежедневный сбор оценок, чтобы вы могли видеть падения рейтинга в реальном времени и сопоставлять их с данными PPM.")
         
-elif page == "📜 Системный Журнал":
-    st.title("📜 Системный Журнал (SQL Edition)")
-    st.markdown("Здесь сохраняется хронология процессов напрямую из базы данных.")
+elif page == "Системный Журнал":
+    st.title(":material/receipt_long: Системный Журнал (SQL Edition)")
     
     if st.button("🔄 Обновить журнал"): 
         st.rerun()
