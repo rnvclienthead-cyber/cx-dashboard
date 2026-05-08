@@ -42,9 +42,7 @@ def safe_str(val):
     return str(val).strip()
 
 def create_and_upload_thumbnail(wb_image_url):
-    """Скачивает фото с WB, сжимает его и загружает в S3 бакет"""
-    if not wb_image_url or not wb_image_url.startswith('http'): 
-        return wb_image_url
+    if not wb_image_url or not wb_image_url.startswith('http'): return wb_image_url
         
     # Проверка: видит ли воркер ключи вообще?
     if not S3_ACCESS_KEY or not S3_SECRET_KEY:
@@ -52,31 +50,27 @@ def create_and_upload_thumbnail(wb_image_url):
         return wb_image_url
 
     try:
-        response = requests.get(wb_image_url, timeout=10)
+        response = requests.get(wb_image_url, timeout=15)
         response.raise_for_status()
         
         image = Image.open(io.BytesIO(response.content))
-        if image.mode in ("RGBA", "P"): 
-            image = image.convert("RGB")
+        if image.mode in ("RGBA", "P"): image = image.convert("RGB")
             
-        image.thumbnail((400, 400))
-        
+        # Настройки высокого качества
+        image.thumbnail((1000, 1000))
         buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", optimize=True, quality=70)
+        image.save(buffer, format="JPEG", optimize=True, quality=90)
         buffer.seek(0)
         
         file_name = f"previews/{uuid.uuid4().hex}.jpg"
+        s3_client.upload_fileobj(buffer, BUCKET_NAME, file_name, ExtraArgs={'ContentType': 'image/jpeg'})
         
-        s3_client.upload_fileobj(
-            buffer, 
-            BUCKET_NAME, 
-            file_name,
-            ExtraArgs={'ContentType': 'image/jpeg'}
-        )
-        
-        new_url = f"https://{BUCKET_NAME}.storage.yandexcloud.net/{file_name}"
-        print(f"    ✅ Успех: Фото сжато и загружено в Яндекс -> {file_name}")
-        return new_url
+        s3_url = f"https://{BUCKET_NAME}.storage.yandexcloud.net/{file_name}"
+        # Возвращаем связку для базы
+        return f"{s3_url}|{wb_image_url}"
+    except Exception as e:
+        print(f" Ошибка: {e}")
+        return wb_image_url
         
     except Exception as e:
         print(f"    ❌ Ошибка обработки фото {wb_image_url}: {e}")
