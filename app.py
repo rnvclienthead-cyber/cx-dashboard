@@ -1390,7 +1390,10 @@ elif page == "Уровень PPM":
 
                 st.markdown("### :material/analytics: Сводка")
                 m1, m2, m3 = st.columns(3)
-                
+                m1.metric("Группа A", len(table_agg[table_agg['ABC_Группа'] == 'A']))
+                m2.metric("Группа B", len(table_agg[table_agg['ABC_Группа'] == 'B']))
+                m3.metric("Группа C", len(table_agg[table_agg['ABC_Группа'] == 'C']))
+
                 # --- ИЗМЕНЕННЫЙ БЛОК: Кастомные метрики с красными числами ---
                 def render_metric(label, total, bad):
                     bad_html = f'<span style="color: #ef4444; margin-left: 12px;">{bad}</span>' if bad > 0 else ''
@@ -1457,13 +1460,13 @@ elif page == "Уровень PPM":
                         start = latest - pd.DateOffset(months=11)
                         chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
                         
-                        # 1. УБИРАЕМ ДЕКАБРЬ: жестко фильтруем все, что было до 2026 года
+                        # 1. УБИРАЕМ ДЕКАБРЬ: оставляем только данные за 2026 год
                         chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
 
-                        # 2. ОДИН СТОЛБЕЦ НА МЕСЯЦ: если есть живая Система (с заказами), она вытесняет Историю
-                        chart_agg['Priority'] = np.where((chart_agg['Source'] == 'System') & (chart_agg['Заказы'] > 0), 2, np.where(chart_agg['Source'] == 'External', 1, 0))
-                        chart_agg = chart_agg.sort_values(by=['Месяц_ДТ', 'Priority'], ascending=[True, False])
-                        chart_agg = chart_agg.drop_duplicates(subset=['Месяц_ДТ'], keep='first')
+                        # 2. ЖЕСТКОЕ ПРАВИЛО: До апреля берем только Историю, с апреля - только Систему
+                        mask_hist = (chart_agg['Source'] == 'External') & (chart_agg['Месяц_ДТ'] < '2026-04-01')
+                        mask_sys = (chart_agg['Source'] == 'System') & (chart_agg['Месяц_ДТ'] >= '2026-04-01')
+                        chart_agg = chart_agg[mask_hist | mask_sys]
 
                         chart_agg['PPM'] = np.where(chart_agg['Заказы'] > 0, (chart_agg['Брак'] / chart_agg['Заказы']) * 1000000, 0).astype(int)
                         chart_agg = chart_agg.sort_values('Месяц_ДТ')
