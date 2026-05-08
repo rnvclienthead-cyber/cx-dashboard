@@ -1459,24 +1459,20 @@ elif page == "Уровень PPM":
                         st.markdown(f"#### :material/monitoring: {chart_title}")
                         fig = go.Figure()
                         
+                        # ... (начало отрисовки графика, столбцы)
                         for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
                             curr = chart_agg[chart_agg['Source'] == src].copy()
                             if not curr.empty:
-                                # Превращаем нули в пустые строки, чтобы они не рисовались на графике
                                 text_labels = curr['PPM'].apply(lambda x: str(x) if x > 0 else "")
-                                
                                 fig.add_trace(go.Bar(
-                                    x=curr['Месяц_Стр'], 
-                                    y=curr['PPM'], 
-                                    name=nm, 
-                                    marker_color=clr, 
-                                    text=text_labels, 
-                                    textposition='outside'
+                                    x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, 
+                                    marker_color=clr, text=text_labels, textposition='outside'
                                 ))
                         
                         fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
                         
-                        # Линия заказов удалена!
+                        # --- ВОЗВРАЩАЕМ ЛИНИЮ ЗАКАЗОВ ---
+                        fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
                         
                         fig.update_layout(
                             barmode='group',
@@ -1489,7 +1485,10 @@ elif page == "Уровень PPM":
                             height=420, margin=dict(l=0, r=0, t=20, b=0),
                             legend=dict(orientation="h", y=1.15),
                             yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
-                            # Вторая ось Y удалена!
+                            
+                            # --- ВОЗВРАЩАЕМ ВТОРУЮ ОСЬ Y ДЛЯ ЗАКАЗОВ ---
+                            yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
+                            
                             hovermode="x unified"
                         )
                         st.plotly_chart(fig, use_container_width=True)
