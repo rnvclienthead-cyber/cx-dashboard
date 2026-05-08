@@ -63,7 +63,7 @@ tech_menu = {
 
 ops_menu = {
     "Отчет производства": ("Отчет производства", ":material/insights:"),
-    "Уровень ": ("Уровень ", ":material/warning:"),
+    "Уровень PPM": ("Уровень PPM", ":material/warning:"),
     "Рейтинг товаров": ("Рейтинг товаров", ":material/star:")
 }
 
