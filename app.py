@@ -1172,14 +1172,19 @@ elif page == "Отчет производства":
                 total_rows = len(df_filtered)
                 tagged_rows = df_filtered['Размечено'].sum()
                 
-                # --- ИСПРАВЛЕННЫЙ БЛОК ПОДСЧЕТА РУЧНЫХ КОРРЕКТИРОВОК ---
-                corrections = df_filtered.get('Корректировка', pd.Series(dtype=str)).astype(str).str.strip().str.lower()
-                
-                # Исключаем технические пустоты И статусы подтверждения
-                corrected_rows = len(df_filtered[
-                    (corrections != '') & 
-                    (~corrections.isin(['nan', 'none', 'null', 'подтверждено', 'нет тегов']))
-                ])
+               # --- БРОНЕБОЙНЫЙ БЛОК ПОДСЧЕТА РУЧНЫХ КОРРЕКТИРОВОК ---
+                if 'Корректировка' in df_filtered.columns:
+                    # 1. Сначала жестко заменяем все типы пустот (None, NaN) на реальную пустую строку
+                    corr_col = df_filtered['Корректировка'].fillna('')
+                    # 2. Только после этого приводим к тексту и нижнему регистру
+                    corr_clean = corr_col.astype(str).str.strip().str.lower()
+                    # 3. Считаем финальный результат
+                    corrected_rows = len(df_filtered[
+                        (corr_clean != '') & 
+                        (~corr_clean.isin(['nan', 'none', 'null', 'подтверждено', 'нет тегов']))
+                    ])
+                else:
+                    corrected_rows = 0
                 # -------------------------------------------------------
                 
                 accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
@@ -1192,10 +1197,6 @@ elif page == "Отчет производства":
                 c3.metric("Изменено вручную", corrected_rows)
                 c4.metric("Точность ИИ", f"{accuracy}%")
                 st.markdown("---")
-                
-                # === ДОБАВЬТЕ ДИАГНОСТИКУ ПРЯМО СЮДА ===
-                st.write("Скрытые значения в колонке 'Корректировка':", df_filtered['Корректировка'].unique())
-                # ======================================
                 
                 st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
                 matrix_list = []
