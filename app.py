@@ -1537,9 +1537,49 @@ elif page == "Уровень PPM":
         st.error(f"Ошибка PPM: {e}")
         
 elif page == "Рейтинг товаров":
-    st.title(":material/star_rate: Мониторинг Рейтинга (В разработке)")
-    st.info("Здесь будет отображаться динамика рейтинга товаров (звезды) на основе данных из API Wildberries.")
-    st.markdown("Мы настроим воркер на ежедневный сбор оценок, чтобы вы могли видеть падения рейтинга в реальном времени и сопоставлять их с данными PPM.")
+    st.title(":material/star_rate: Мониторинг Рейтинга")
+    
+    if engine:
+        try:
+            # Читаем данные из новой таблицы
+            query = "SELECT date as \"Дата\", supplier_article as \"Артикул\", average_rating as \"Рейтинг\", review_count as \"Отзывы\" FROM wb_ratings ORDER BY date ASC"
+            df_ratings = pd.read_sql(query, engine)
+            
+            if not df_ratings.empty:
+                df_ratings['Дата'] = pd.to_datetime(df_ratings['Дата'])
+                
+                # Фильтры
+                sku_list = ['Все'] + sorted(list(df_ratings['Артикул'].unique()))
+                selected_sku = st.selectbox("Выберите артикул для анализа:", sku_list)
+                
+                if selected_sku != 'Все':
+                    df_plot = df_ratings[df_ratings['Артикул'] == selected_sku]
+                    
+                    st.markdown(f"### Динамика рейтинга: {selected_sku}")
+                    
+                    # Рисуем график с помощью Plotly (две оси Y)
+                    import plotly.graph_objects as go
+                    
+                    fig = go.Figure()
+                    # Линия рейтинга
+                    fig.add_trace(go.Scatter(x=df_plot['Дата'], y=df_plot['Рейтинг'], mode='lines+markers', name='Средний рейтинг', line=dict(color='#f59e0b', width=3)))
+                    # Столбцы количества отзывов на второй оси
+                    fig.add_trace(go.Bar(x=df_plot['Дата'], y=df_plot['Отзывы'], name='Всего отзывов', marker_color='#cbd5e1', yaxis='y2', opacity=0.3))
+                    
+                    fig.update_layout(
+                        height=400,
+                        yaxis=dict(title="Рейтинг (Звезды)", range=[1, 5]),
+                        yaxis2=dict(title="Кол-во отзывов", overlaying='y', side='right'),
+                        hovermode="x unified",
+                        margin=dict(l=0, r=0, t=30, b=0)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Выберите конкретный артикул для просмотра динамики.")
+            else:
+                st.warning("Таблица wb_ratings пока пуста. Ожидаем первую синхронизацию.")
+        except Exception as e:
+            st.error(f"Ошибка загрузки рейтингов: {e}")
         
 elif page == "Системный Журнал":
     st.title(":material/receipt_long: Системный Журнал (SQL Edition)")
