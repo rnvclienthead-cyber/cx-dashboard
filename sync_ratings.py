@@ -9,20 +9,20 @@ WB_API_KEY = os.environ.get("WB_API_KEY", "").strip()
 DB_URL = os.environ.get("DB_URL", "").strip()
 
 def get_wb_cards_mapping_from_db(engine):
-    """Получает связку nmId -> Артикул продавца из вашей собственной БД (без API Контента)"""
+    """Получает связку nmId -> Артикул продавца из вашей БД (из таблицы логистики)"""
     mapping = {}
     try:
-        # Ищем уникальные связки артикулов и nm_id в ваших уже загруженных заказах
+        # Ищем уникальные связки артикулов и nm_id в таблице wb_logistics
         query = text("""
             SELECT DISTINCT nm_id, supplier_article 
-            FROM wb_orders 
+            FROM wb_logistics 
             WHERE nm_id IS NOT NULL AND supplier_article IS NOT NULL
         """)
         
         with engine.connect() as conn:
             result = conn.execute(query).fetchall()
             for row in result:
-                # В PostgreSQL row[0] это nm_id, row[1] это supplier_article
+                # row[0] это nm_id, row[1] это supplier_article
                 mapping[row[0]] = str(row[1]).strip()
                 
         print(f"✅ Успешно собран маппинг из БД: {len(mapping)} товаров")
