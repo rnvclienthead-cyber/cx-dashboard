@@ -1146,7 +1146,7 @@ elif page == "Отчет производства":
                 period_options.append(f"{months_ru[m]} {y}")
             period_options.append("За всё время")
 
-            # ==========================================
+           # ==========================================
             # ИНТЕРАКТИВНЫЙ ФРАГМЕНТ ДЛЯ ОТЧЕТА ПРОИЗВОДСТВА
             # ==========================================
             @st.fragment
@@ -1171,7 +1171,14 @@ elif page == "Отчет производства":
 
                 total_rows = len(df_filtered)
                 tagged_rows = df_filtered['Размечено'].sum()
-                corrected_rows = len(df_filtered[df_filtered.get('Корректировка', '').astype(str).str.strip() != ''])
+                
+                # --- ИСПРАВЛЕННЫЙ БЛОК ПОДСЧЕТА РУЧНЫХ КОРРЕКТИРОВОК ---
+                corrections = df_filtered.get('Корректировка', pd.Series(dtype=str)).astype(str).str.strip().str.lower()
+                corrected_rows = len(df_filtered[
+                    (corrections != '') & 
+                    (~corrections.isin(['nan', 'none', 'null']))
+                ])
+                # -------------------------------------------------------
                 
                 accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
                 processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
