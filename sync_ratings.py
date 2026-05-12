@@ -5,11 +5,9 @@ from sqlalchemy import create_engine, text
 import time
 
 DB_URL = os.environ.get("DB_URL", "").strip()
-# Формат прокси: http://login:password@ip:port
 PROXY_URL = os.environ.get("PROXY_URL", "").strip() 
 
 def get_wb_cards_mapping_from_db(engine):
-    """Получает связку nmId -> Артикул продавца из таблицы wb_logistics"""
     mapping = {}
     try:
         query = text("""
@@ -28,7 +26,6 @@ def get_wb_cards_mapping_from_db(engine):
         return {}
 
 def get_public_wb_ratings_with_proxy(nm_ids):
-    """Получает клиентские рейтинги через публичное API с использованием прокси"""
     ratings_data = {}
     
     proxies = {}
@@ -48,16 +45,15 @@ def get_public_wb_ratings_with_proxy(nm_ids):
         "Referer": "https://www.wildberries.ru/"
     }
 
-    # WB отдает данные пачками до 50 штук за раз
     chunk_size = 50
     for i in range(0, len(nm_ids), chunk_size):
         chunk = nm_ids[i:i + chunk_size]
         nm_string = ";".join(map(str, chunk))
         
+        # ВОТ ЗДЕСЬ ИСПРАВЛЕНИЕ: Вернули рабочий адрес v1
         endpoints = [
-            f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}",
-            f"https://card.wb.ru/cards/v3/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}",
-            f"https://card.wb.ru/cards/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}"
+            f"https://card.wb.ru/cards/v1/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}",
+            f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}"
         ]
         
         success = False
@@ -65,7 +61,6 @@ def get_public_wb_ratings_with_proxy(nm_ids):
         
         for url in endpoints:
             try:
-                # Отправляем запрос через прокси
                 response = requests.get(url, headers=headers, proxies=proxies, timeout=20)
                 response.raise_for_status()
                 
@@ -86,7 +81,7 @@ def get_public_wb_ratings_with_proxy(nm_ids):
         if not success:
              print(f"⚠️ Ошибка для пачки. Последняя ошибка: {last_error}")
              
-        time.sleep(2) # Пауза для защиты от лимитов
+        time.sleep(2) 
             
     print(f"✅ Успешно получены публичные рейтинги для {len(ratings_data)} товаров.")
     return ratings_data
@@ -99,13 +94,11 @@ def sync_ratings_to_supabase():
     engine = create_engine(DB_URL)
     current_date = datetime.now().date()
     
-    # 1. Достаем актуальные артикулы из вашей БД
     mapping = get_wb_cards_mapping_from_db(engine)
     if not mapping:
         print("⚠️ Нет маппинга для синхронизации.")
         return
 
-    # 2. Собираем рейтинги с витрины
     nm_ids_list = list(mapping.keys())
     ratings_data = get_public_wb_ratings_with_proxy(nm_ids_list)
     
@@ -113,7 +106,6 @@ def sync_ratings_to_supabase():
         print("⚠️ Нет данных рейтингов для сохранения.")
         return
 
-    # 3. Сохраняем в таблицу рейтингов
     upsert_query = text("""
         INSERT INTO wb_ratings (date, supplier_article, nm_id, average_rating, review_count)
         VALUES (:date, :supplier_article, :nm_id, :average_rating, :review_count)
