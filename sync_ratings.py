@@ -32,34 +32,57 @@ def get_wb_cards_mapping_from_db(engine):
         return {}
 
 def get_public_wb_ratings(nm_ids):
-    """Получает рейтинги через публичное API сайта WB (Самый надежный способ в 2026 году)"""
+    """Получает рейтинги через публичное API сайта WB (Обновленный каскадный метод)"""
     ratings_data = {}
     
     # Разбиваем список nm_id на пачки по 50 штук (лимит запроса)
     chunk_size = 50
     for i in range(0, len(nm_ids), chunk_size):
         chunk = nm_ids[i:i + chunk_size]
-        # Соединяем nm_id через точку с запятой для ссылки
         nm_string = ";".join(map(str, chunk))
         
-        # Обращаемся к публичному эндпоинту карточек WB
-        url = f"https://card.wb.ru/cards/v1/detail?appType=1&dest=-1257786&nm={nm_string}"
+        # WB часто меняет версии API. Делаем массив из актуальных эндпоинтов для подстраховки
+        endpoints = [
+            f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}",
+            f"https://card.wb.ru/cards/v3/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}",
+            f"https://card.wb.ru/cards/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}"
+        ]
         
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            data = response.json().get('data', {}).get('products', [])
-            
-            for item in data:
-                nm = item.get('id')
-                # WB отдает рейтинг в reviewRating и количество в feedbacks
-                ratings_data[nm] = {
-                    'average_rating': item.get('reviewRating', 0.0),
-                    'review_count': item.get('feedbacks', 0)
-                }
-            time.sleep(1) # Пауза между пачками, чтобы не спамить
-        except Exception as e:
-            print(f"⚠️ Ошибка получения публичного рейтинга для пачки: {e}")
+        # Маскируемся под обычный браузер, чтобы не поймать 403 Forbidden или 404
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Origin": "https://www.wildberries.ru",
+            "Referer": "https://www.wildberries.ru/"
+        }
+        
+        success = False
+        last_error = None
+        
+        # Пробуем каждый URL по очереди
+        for url in endpoints:
+            try:
+                response = requests.get(url, headers=headers, timeout=15)
+                response.raise_for_status() # Выбросит ошибку, если статус не 200
+                
+                data = response.json().get('data', {}).get('products', [])
+                for item in data:
+                    nm = item.get('id')
+                    ratings_data[nm] = {
+                        'average_rating': item.get('reviewRating', 0.0),
+                        'review_count': item.get('feedbacks', 0)
+                    }
+                success = True
+                break # Если получилось скачать, выходим из цикла эндпоинтов и идем к следующей пачке
+                
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                continue # Пробуем следующий URL из списка
+                
+        if not success:
+             print(f"⚠️ Ошибка для пачки (все эндпоинты недоступны). Последняя ошибка: {last_error}")
+             
+        time.sleep(1.5) # Пауза между пачками чуть увеличена для безопасности
             
     print(f"✅ Получены рейтинги для {len(ratings_data)} товаров из публичного API")
     return ratings_data
