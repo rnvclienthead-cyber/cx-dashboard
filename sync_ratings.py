@@ -4,11 +4,12 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 import time
 
-WB_API_KEY = os.environ.get("WB_API_KEY", "").strip()
 DB_URL = os.environ.get("DB_URL", "").strip()
+# Формат прокси: http://login:password@ip:port
+PROXY_URL = os.environ.get("PROXY_URL", "").strip() 
 
 def get_wb_cards_mapping_from_db(engine):
-    """Получает связку nmId -> Артикул продавца из вашей БД (из таблицы логистики)"""
+    """Получает связку nmId -> Артикул продавца из таблицы wb_logistics"""
     mapping = {}
     try:
         query = text("""
@@ -16,109 +17,103 @@ def get_wb_cards_mapping_from_db(engine):
             FROM wb_logistics 
             WHERE nm_id IS NOT NULL AND supplier_article IS NOT NULL
         """)
-        
         with engine.connect() as conn:
             result = conn.execute(query).fetchall()
             for row in result:
                 mapping[row[0]] = str(row[1]).strip()
-                
         print(f"✅ Успешно собран маппинг из БД: {len(mapping)} товаров")
         return mapping
     except Exception as e:
         print(f"❌ Ошибка получения маппинга из БД: {e}")
         return {}
 
-def get_ratings_via_feedbacks_api():
-    """Считает рейтинг математически, выкачивая отзывы через официальное API (токен Вопросы и отзывы)"""
+def get_public_wb_ratings_with_proxy(nm_ids):
+    """Получает клиентские рейтинги через публичное API с использованием прокси"""
     ratings_data = {}
     
-    # Скачиваем и отвеченные, и неотвеченные отзывы для полноты картины
-    for is_answered in ["true", "false"]:
-        skip = 0
-        take = 5000 # Максимальный лимит страницы по API
+    proxies = {}
+    if PROXY_URL:
+        proxies = {
+            "http": PROXY_URL,
+            "https": PROXY_URL
+        }
+        print("🌐 Используется прокси-сервер.")
+    else:
+        print("⚠️ ПРОКСИ НЕ ЗАДАН! Запрос пойдет с IP-адреса GitHub, возможна ошибка 404.")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Origin": "https://www.wildberries.ru",
+        "Referer": "https://www.wildberries.ru/"
+    }
+
+    # WB отдает данные пачками до 50 штук за раз
+    chunk_size = 50
+    for i in range(0, len(nm_ids), chunk_size):
+        chunk = nm_ids[i:i + chunk_size]
+        nm_string = ";".join(map(str, chunk))
         
-        while True:
-            url = f"https://feedbacks-api.wildberries.ru/api/v1/feedbacks?isAnswered={is_answered}&take={take}&skip={skip}"
-            headers = {"Authorization": WB_API_KEY}
-            
+        endpoints = [
+            f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}",
+            f"https://card.wb.ru/cards/v3/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}",
+            f"https://card.wb.ru/cards/detail?appType=1&curr=rub&dest=-1257786&nm={nm_string}"
+        ]
+        
+        success = False
+        last_error = None
+        
+        for url in endpoints:
             try:
-                response = requests.get(url, headers=headers, timeout=30)
-                
-                if response.status_code == 401:
-                    print("❌ ОШИБКА 401: Токен недействителен или нет доступа к 'Вопросам и отзывам'")
-                    return {}
-                    
-                # Защита от лимитов (если запросов слишком много)
-                if response.status_code == 429:
-                    print("⚠️ WB Лимит 429. Ждем 10 секунд...")
-                    time.sleep(10)
-                    continue
-                    
+                # Отправляем запрос через прокси
+                response = requests.get(url, headers=headers, proxies=proxies, timeout=20)
                 response.raise_for_status()
-                data = response.json().get('data', {})
-                feedbacks = data.get('feedbacks', [])
                 
-                if not feedbacks:
-                    break # Отзывы закончились
-                
-                # Собираем оценки
-                for fb in feedbacks:
-                    # Учитываем возможные изменения структуры JSON от WB
-                    nm = fb.get('productDetails', {}).get('nmId') or fb.get('nmId')
-                    stars = fb.get('productValuation', 0)
-                    
-                    if nm and stars:
-                        if nm not in ratings_data:
-                            ratings_data[nm] = {'sum': 0, 'count': 0}
-                        ratings_data[nm]['sum'] += stars
-                        ratings_data[nm]['count'] += 1
-                
-                print(f"📦 Скачана страница: {len(feedbacks)} отзывов (isAnswered={is_answered}, skip={skip})...")
-                
-                # Если пришло меньше лимита, значит это последняя страница
-                if len(feedbacks) < take:
-                    break 
-                    
-                skip += take
-                time.sleep(1) # Бережем лимиты WB
-                
-            except Exception as e:
-                print(f"⚠️ Ошибка получения отзывов на skip={skip}: {e}")
+                data = response.json().get('data', {}).get('products', [])
+                for item in data:
+                    nm = item.get('id')
+                    ratings_data[nm] = {
+                        'average_rating': item.get('reviewRating', 0.0),
+                        'review_count': item.get('feedbacks', 0)
+                    }
+                success = True
                 break
                 
-    # Превращаем сумму звезд в чистый средний рейтинг
-    final_ratings = {}
-    for nm, stats in ratings_data.items():
-        if stats['count'] > 0:
-            final_ratings[nm] = {
-                'average_rating': round(stats['sum'] / stats['count'], 2),
-                'review_count': stats['count']
-            }
+            except Exception as e:
+                last_error = e
+                continue
+                
+        if not success:
+             print(f"⚠️ Ошибка для пачки. Последняя ошибка: {last_error}")
+             
+        time.sleep(2) # Пауза для защиты от лимитов
             
-    print(f"✅ Успешно высчитан рейтинг для {len(final_ratings)} товаров на основе реальных отзывов")
-    return final_ratings
+    print(f"✅ Успешно получены публичные рейтинги для {len(ratings_data)} товаров.")
+    return ratings_data
 
 def sync_ratings_to_supabase():
-    if not WB_API_KEY or not DB_URL:
-        print("🚨 КРИТИЧЕСКАЯ ОШИБКА: Не найдены переменные WB_API_KEY или DB_URL")
+    if not DB_URL:
+        print("🚨 КРИТИЧЕСКАЯ ОШИБКА: Не найдена переменная DB_URL")
         return
 
     engine = create_engine(DB_URL)
     current_date = datetime.now().date()
     
+    # 1. Достаем актуальные артикулы из вашей БД
     mapping = get_wb_cards_mapping_from_db(engine)
     if not mapping:
-        print("⚠️ Нет маппинга. Синхронизация остановлена.")
+        print("⚠️ Нет маппинга для синхронизации.")
         return
 
-    # Запускаем официальный сбор
-    ratings_data = get_ratings_via_feedbacks_api()
+    # 2. Собираем рейтинги с витрины
+    nm_ids_list = list(mapping.keys())
+    ratings_data = get_public_wb_ratings_with_proxy(nm_ids_list)
     
     if not ratings_data:
-        print("⚠️ Нет данных рейтингов. Синхронизация остановлена.")
+        print("⚠️ Нет данных рейтингов для сохранения.")
         return
 
-    # Обновляем базу данных (UPSERT)
+    # 3. Сохраняем в таблицу рейтингов
     upsert_query = text("""
         INSERT INTO wb_ratings (date, supplier_article, nm_id, average_rating, review_count)
         VALUES (:date, :supplier_article, :nm_id, :average_rating, :review_count)
@@ -139,7 +134,7 @@ def sync_ratings_to_supabase():
             try:
                 conn.execute(upsert_query, {
                     "date": current_date,
-                    "supplier_article": str(supplier_article).strip(),
+                    "supplier_article": supplier_article,
                     "nm_id": nm_id,
                     "average_rating": float(stats['average_rating']),
                     "review_count": int(stats['review_count'])
