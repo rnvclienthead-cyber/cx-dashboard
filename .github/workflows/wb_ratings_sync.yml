@@ -29,6 +29,4 @@ jobs:
       env:
         WB_API_KEY: ${{ secrets.WB_API_KEY }}
         DB_URL: ${{ secrets.DB_URL }}
-        PROXY_URL: ${{ secrets.PROXY_URL }} # <--- ОБЯЗАТЕЛЬНО ДОБАВИТЬ ЭТУ СТРОКУ
-      run: |
         python sync_ratings.py
