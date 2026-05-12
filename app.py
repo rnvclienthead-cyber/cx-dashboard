@@ -1174,9 +1174,11 @@ elif page == "Отчет производства":
                 
                 # --- ИСПРАВЛЕННЫЙ БЛОК ПОДСЧЕТА РУЧНЫХ КОРРЕКТИРОВОК ---
                 corrections = df_filtered.get('Корректировка', pd.Series(dtype=str)).astype(str).str.strip().str.lower()
+                
+                # Исключаем технические пустоты И статусы подтверждения
                 corrected_rows = len(df_filtered[
                     (corrections != '') & 
-                    (~corrections.isin(['nan', 'none', 'null']))
+                    (~corrections.isin(['nan', 'none', 'null', 'подтверждено', 'нет тегов']))
                 ])
                 # -------------------------------------------------------
                 
