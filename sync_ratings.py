@@ -4,8 +4,8 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 
 # Загружаем доступы из переменных окружения GitHub Actions
-WB_API_KEY = os.environ.get("WB_API_KEY")
-DB_URL = os.environ.get("DB_URL")
+WB_API_KEY = os.environ.get("WB_API_KEY", "").strip()
+DB_URL = os.environ.get("DB_URL", "").strip()
 
 def get_wb_cards_mapping():
     """Получает связку nmId -> Артикул продавца (vendorCode)"""
