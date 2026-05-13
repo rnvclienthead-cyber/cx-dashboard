@@ -20,7 +20,7 @@ DB_URL = os.getenv("DB_URL", "").strip()
 
 # --- НОВЫЕ НАСТРОЙКИ ДЛЯ ИНВОЙСОВ ---
 # Используем твой файл со скриншота
-PATH_TO_GOOGLE_CREDS = "bot_api_key.json" 
+PATH_TO_GOOGLE_CREDS = "bot_api_key.json"
 SPREADSHEET_ID_INVOICES = os.getenv("SPREADSHEET_ID_INVOICES")
 
 engine = create_engine(DB_URL)
