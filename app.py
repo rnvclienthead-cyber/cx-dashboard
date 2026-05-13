@@ -1239,43 +1239,49 @@ elif page == "Отчет производства":
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
                 
                     st.markdown("---")
-                    st.markdown("### 📦 Проблемные поставки и инвойсы (Топ-15)")
+                    st.markdown("### 📦 Проблемные инвойсы (Топ-15)")
                     
-                    supply_grouped = []
+                    invoice_grouped = []
                     df_matrix_data = pd.DataFrame(matrix_list)
                     
-                    if 'Номер поставки' in df_matrix_data.columns:
-                        for supply, group in df_matrix_data.groupby('Номер поставки'):
-                            clean_supply = str(supply).strip()
-                            if clean_supply in ['Не указан', '', '0', '0.0'] or pd.isna(supply): 
+                    if 'Инвойс' in df_matrix_data.columns:
+                        # Группируем по Инвойсу вместо Номера поставки
+                        for invoice, group in df_matrix_data.groupby('Инвойс'):
+                            clean_invoice = str(invoice).strip()
+                            if clean_invoice in ['Не указан', '', '0', '0.0'] or pd.isna(invoice): 
                                 continue
-                            invoices = ", ".join(sorted(list(set([str(x) for x in group['Инвойс'] if str(x) != 'Не указан' and str(x).strip()]))))
+                            
+                            # Собираем связанные поставки для тултипа
+                            supplies = ", ".join(sorted(list(set([str(x) for x in group['Номер поставки'] if str(x) != 'Не указан' and str(x).strip()]))))
                             all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in group['Артикул продавца'].value_counts().items()])
-                            supply_grouped.append({
-                                'Номер поставки': clean_supply, 
+                            
+                            invoice_grouped.append({
+                                'Инвойс': clean_invoice, 
                                 'Дефекты': len(group), 
-                                'Инвойсы': invoices if invoices else "Не указаны", 
+                                'Поставки': supplies if supplies else "Не указаны", 
                                 'Список Артикулов': all_skus
                             })
                         
-                        if supply_grouped:
-                            df_supply = pd.DataFrame(supply_grouped).sort_values('Дефекты', ascending=False).head(15)
-                            supply_chart = alt.Chart(df_supply).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-                                x=alt.X('Номер поставки:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)), 
+                        if invoice_grouped:
+                            df_invoice = pd.DataFrame(invoice_grouped).sort_values('Дефекты', ascending=False).head(15)
+                            
+                            # Строим график по инвойсам
+                            invoice_chart = alt.Chart(df_invoice).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                                x=alt.X('Инвойс:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)), 
                                 y=alt.Y('Дефекты:Q', title='Количество дефектов'), 
                                 color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='oranges'), legend=None), 
                                 tooltip=[
-                                    alt.Tooltip('Номер поставки:N', title='Поставка'), 
+                                    alt.Tooltip('Инвойс:N', title='Инвойс'), 
                                     alt.Tooltip('Дефекты:Q', title='Всего дефектов'), 
-                                    alt.Tooltip('Инвойсы:N', title='Инвойсы (связанные)'), 
+                                    alt.Tooltip('Поставки:N', title='Связанные поставки'), 
                                     alt.Tooltip('Список Артикулов:N', title='Артикулы')
                                 ]
                             ).properties(height=350)
-                            st.altair_chart(supply_chart, use_container_width=True)
+                            st.altair_chart(invoice_chart, use_container_width=True)
                         else: 
-                            st.info("Нет данных по поставкам (или у всех дефектов не указан номер поставки).")
+                            st.info("Нет данных по инвойсам (или у всех дефектов не указан инвойс).")
                     else:
-                        st.info("Невозможно построить график: отсутствует колонка 'Номер поставки'.")
+                        st.info("Невозможно построить график: отсутствует колонка 'Инвойс'.")
                 else: 
                     st.info("Данных для матрицы пока нет.")
 
