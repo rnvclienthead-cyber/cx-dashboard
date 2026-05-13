@@ -8,11 +8,20 @@ import time
 import io
 import uuid
 import boto3
+import gspread
 from PIL import Image
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- НАСТРОЙКИ ОСНОВНЫЕ ---
 WB_API_KEY = os.getenv("WB_API_KEY", "").strip()
 DB_URL = os.getenv("DB_URL", "").strip()
+
+# --- НОВЫЕ НАСТРОЙКИ ДЛЯ ИНВОЙСОВ ---
+# Используем твой файл со скриншота
+PATH_TO_GOOGLE_CREDS = "bot_api_key.json" 
+SPREADSHEET_ID_INVOICES = os.getenv("SPREADSHEET_ID_INVOICES")
 
 engine = create_engine(DB_URL)
 headers = {"Authorization": WB_API_KEY, "Content-Type": "application/json"}
@@ -398,12 +407,56 @@ def fetch_and_save_orders(url):
             print(f"⚠️ Ошибка заказов: {e}. Повтор через 30 секунд...")
             time.sleep(30)
 
+def sync_invoices():
+    print("⏳ Синхронизация инвойсов из Google Sheets...")
+    try:
+        # Авторизуемся через твой bot_api_key.json
+        gc = gspread.service_account(filename=PATH_TO_GOOGLE_CREDS)
+        sheet = gc.open_by_key(SPREADSHEET_ID_INVOICES).get_worksheet(0)
+        
+        df = pd.DataFrame(sheet.get_all_records())
+        if df.empty: return
+
+        df.columns = df.columns.str.strip().str.lower()
+
+        # Поиск колонок (учитываем твой скриншот с таблицей)
+        supply_col = next((c for c in df.columns if 'supplyid' in c or 'поставк' in c), None)
+        invoice_col = next((c for c in df.columns if 'инвойс' in c), None)
+        # Берем "Артикул", но пропускаем тот, где есть "wb"
+        article_col = next((c for c in df.columns if 'артикул' in c and 'wb' not in c), None)
+
+        if not all([supply_col, article_col, invoice_col]):
+            print(f"❌ Колонки не найдены. Проверь заголовки в таблице.")
+            return
+
+        # Очистка и подготовка данных
+        df['s_id'] = df[supply_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df['a_id'] = df[article_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df['i_id'] = df[invoice_col].astype(str).str.strip()
+
+        with engine.begin() as conn:
+            for _, row in df.iterrows():
+                sql = text("""
+                    INSERT INTO wb_invoices (supply_id, supplier_article, invoice_num)
+                    VALUES (:sid, :art, :inv)
+                    ON CONFLICT (supply_id, supplier_article) 
+                    DO UPDATE SET invoice_num = EXCLUDED.invoice_num
+                """)
+                conn.execute(sql, {"sid": row['s_id'], "art": row['a_id'], "inv": row['i_id']})
+                
+        print("✅ Инвойсы обновлены в базе.")
+    except Exception as e:
+        print(f"🚨 Ошибка: {e}")
+
 # =========================================
 # ЗАПУСК
 # =========================================
 if __name__ == "__main__":
     print("🚀 СТАРТ ЧИСТОГО ВОРКЕРА")
     try:
+        # 0. Качаем инвойсы из Google
+        sync_invoices()
+        
         # 1. Качаем претензии
         sync_claims_to_db(fetch_wb_claims())
         
