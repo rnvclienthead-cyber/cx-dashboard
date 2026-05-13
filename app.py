@@ -443,6 +443,30 @@ def load_cached_hybrid_data():
         return df_temp
         
     if df_temp.empty: 
+        return df_temp@st.cache_data(ttl=120) 
+def load_cached_hybrid_data():
+    # ИДЕАЛЬНЫЙ БАЛАНС: 
+    # Запрос сразу подтягивает Инвойс прямо из базы данных с точной привязкой по Артикулу и Поставке.
+    query = """
+        SELECT 
+            v."SRID", v."Дата и время оформления заявки на возврат", v."Дата заказа", v."Дата и время получения заказа покупателем",
+            v."Артикул продавца", v."Комментарий покупателя", v."Решение по возврату покупателю", v."Статус товара",
+            v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
+            v."Корректировка", v."Номер поставки",
+            COALESCE(inv.invoice_num, 'Не указан') AS "Инвойс"
+        FROM view_cx_dashboard v
+        LEFT JOIN wb_invoices inv 
+            ON TRIM(v."Номер поставки") = inv.supply_id 
+            AND TRIM(v."Артикул продавца") = inv.supplier_article
+    """
+    df_temp = pd.DataFrame()
+    try:
+        df_temp = pd.read_sql(query, engine)
+    except Exception as e:
+        print(f"Ошибка SQL: {e}")
+        return df_temp
+        
+    if df_temp.empty: 
         return df_temp
 
     # --- Обработка дат ---
@@ -469,38 +493,8 @@ def load_cached_hybrid_data():
     
     df_temp['Номер поставки_ОРИГИНАЛ'] = df_temp['Номер поставки'].astype(str).replace(['nan', 'None', ''], 'Не указан').str.strip()
         
-    try:
-        # --- Подтягиваем инвойсы ---
-        inv_id = st.secrets.get("SPREADSHEET_ID_INVOICES", "")
-        if inv_id:
-            client = get_gspread_client()
-            df_inv = pd.DataFrame(client.open_by_key(inv_id).get_worksheet(0).get_all_records())
-            
-            if 'supplyID' in df_inv.columns and 'Номер поставки' not in df_inv.columns: 
-                df_inv.rename(columns={'supplyID': 'Номер поставки'}, inplace=True)
-                
-            if not df_inv.empty and 'Номер поставки' in df_inv.columns:
-                df_temp['Номер поставки_clean'] = df_temp['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                df_temp['Номер поставки_clean'] = df_temp['Номер поставки_clean'].replace(['nan', 'none', ''], 'не указан')
-                
-                df_inv['Номер поставки_clean'] = df_inv['Номер поставки'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-                df_inv.columns = df_inv.columns.str.strip()
-                
-                inv_col = next((col for col in df_inv.columns if 'инвойс' in col.lower()), None)
-                
-                if inv_col:
-                    df_inv = df_inv.rename(columns={inv_col: 'Инвойс'})
-                    inv_grouped = df_inv.dropna(subset=['Инвойс']).groupby('Номер поставки_clean')['Инвойс'].apply(lambda x: ', '.join(x.astype(str).unique())).reset_index()
-                    
-                    if 'Инвойс' in df_temp.columns: 
-                        df_temp = df_temp.drop(columns=['Инвойс'])
-                    
-                    df_temp = df_temp.merge(inv_grouped, on='Номер поставки_clean', how='left')
-                
-                if 'Номер поставки_clean' in df_temp.columns:
-                    df_temp.drop(columns=['Номер поставки_clean'], inplace=True)
-    except Exception as e: 
-        print(f"Ошибка загрузки инвойсов: {e}")
+    # БЛОК СКАЧИВАНИЯ ИЗ GOOGLE SHEETS УДАЛЕН ЗА НЕНАДОБНОСТЬЮ
+    # Теперь колонка "Инвойс" приходит сразу готовой из базы!
         
     return df_temp
 
