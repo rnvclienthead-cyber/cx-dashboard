@@ -1541,7 +1541,7 @@ elif page == "Рейтинг товаров":
     
     if engine:
         try:
-            # 1. Загрузка данных с округлением до десятых (Пункт 1)
+            # 1. Загрузка данных
             query = """
                 SELECT 
                     r.date as "Дата", 
@@ -1559,55 +1559,28 @@ elif page == "Рейтинг товаров":
                 df_ratings['Дата'] = pd.to_datetime(df_ratings['Дата'])
                 latest_date = df_ratings['Дата'].max()
                 
-                # --- ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ (Для кликов по метрикам - Пункт 3) ---
+                # --- ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ ---
                 if 'sku_filter' not in st.session_state:
                     st.session_state.sku_filter = ["[ВСЕ АРТИКУЛЫ]"]
 
-                # --- ВЕРХНЯЯ ПАНЕЛЬ KPI (Пункт 4) ---
-                st.markdown("### :material/analytics: Сводка состояния")
-                
-                # Подготовка данных для KPI
-                df_last_day = df_ratings[df_ratings['Дата'] == latest_date]
-                critical_skus = df_last_day[df_last_day['Рейтинг'] < 4.5]['Артикул'].tolist()
-                
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Всего артикулов", len(df_last_day))
-                
-                # Метрика как кнопка для фильтрации (Пункт 3)
-                with k2:
-                    st.markdown(f"<div style='font-size: 0.8rem; color: gray;'>Зона риска (< 4.5)</div>", unsafe_allow_html=True)
-                    if st.button(f"🔴 {len(critical_skus)} SKU", use_container_width=True, help="Нажмите, чтобы отфильтровать эти артикулы"):
-                        st.session_state.sku_filter = critical_skus
-                        st.rerun()
-                
-                # Считаем падения за последние 3 дня
-                date_3d = latest_date - pd.Timedelta(days=3)
-                falling_skus = []
-                for s in df_last_day['Артикул'].unique():
-                    s_data = df_ratings[(df_ratings['Артикул'] == s) & (df_ratings['Дата'] >= date_3d)].sort_values('Дата')
-                    if len(s_data) > 1 and s_data['Рейтинг'].iloc[-1] < s_data['Рейтинг'].iloc[0]:
-                        falling_skus.append(s)
-                
-                with k3:
-                    st.markdown(f"<div style='font-size: 0.8rem; color: gray;'>Падение (3 дня)</div>", unsafe_allow_html=True)
-                    if st.button(f"📉 {len(falling_skus)} SKU", use_container_width=True):
-                        st.session_state.sku_filter = falling_skus
-                        st.rerun()
-                
-                k4.metric("Средний рейтинг", f"{df_last_day['Рейтинг'].mean():.2f} ⭐")
-
-                st.divider()
-
-                # --- БЛОК ФИЛЬТРАЦИИ (Пункты 1 и 2) ---
+                # --- 1. БЛОК ФИЛЬТРАЦИИ (Пункт 2: Период первый, затем Артикулы и ABC) ---
                 st.markdown("### :material/filter_alt: Настройки отображения")
-                col_f1, col_f2, col_f3 = st.columns([2, 1, 1.5])
+                col_f1, col_f2, col_f3 = st.columns([1.5, 2, 1])
                 
                 with col_f1:
+                    # Период анализа: по умолчанию последняя неделя в формате DD.MM.YYYY
+                    start_default = (latest_date - pd.Timedelta(days=7)).date()
+                    date_range = st.date_input(
+                        "Период анализа:", 
+                        [start_default, latest_date.date()],
+                        format="DD.MM.YYYY"
+                    )
+
+                with col_f2:
                     all_available_skus = sorted(df_ratings['Артикул'].unique().tolist())
-                    # Пункт 1: Список с опцией [ВСЕ АРТИКУЛЫ]
                     sku_options = ["[ВСЕ АРТИКУЛЫ]"] + all_available_skus
                     
-                    # Проверка корректности фильтра в session_state
+                    # Синхронизация с сессией
                     current_selection = [x for x in st.session_state.sku_filter if x in sku_options]
                     if not current_selection: current_selection = ["[ВСЕ АРТИКУЛЫ]"]
                     
@@ -1617,22 +1590,12 @@ elif page == "Рейтинг товаров":
                         default=current_selection,
                         key="sku_selector"
                     )
-                    # Синхронизируем выбор
                     st.session_state.sku_filter = selected_skus
 
-                with col_f2:
+                with col_f3:
                     sel_abc = st.selectbox("Группа ABC:", ["Все", "A", "B", "C"])
 
-                with col_f3:
-                    # Пункт 2: Последняя неделя по умолчанию и российский формат (через формат вывода)
-                    start_default = (latest_date - pd.Timedelta(days=7)).date()
-                    date_range = st.date_input(
-                        "Период анализа:", 
-                        [start_default, latest_date.date()],
-                        format="DD.MM.YYYY"
-                    )
-
-                # Применение фильтров
+                # Применение базовых фильтров для расчетов
                 active_skus = selected_skus
                 if "[ВСЕ АРТИКУЛЫ]" in selected_skus:
                     active_skus = all_available_skus
@@ -1645,53 +1608,93 @@ elif page == "Рейтинг товаров":
                 
                 df_filtered = df_ratings[mask].copy()
 
+                # --- 2. ЕДИНЫЙ БЛОК KPI (Пункт 3: Одинаковый вид, сохранение функций) ---
+                st.markdown("### :material/analytics: Сводка состояния")
+                
+                # Расчеты для KPI
+                df_last_day = df_ratings[df_ratings['Дата'] == latest_date]
+                critical_skus = df_last_day[df_last_day['Рейтинг'] < 4.5]['Артикул'].tolist()
+                
+                date_3d = latest_date - pd.Timedelta(days=3)
+                falling_skus = []
+                for s in df_last_day['Артикул'].unique():
+                    s_data = df_ratings[(df_ratings['Артикул'] == s) & (df_ratings['Дата'] >= date_3d)].sort_values('Дата')
+                    if len(s_data) > 1 and s_data['Рейтинг'].iloc[-1] < s_data['Рейтинг'].iloc[0]:
+                        falling_skus.append(s)
+
+                # Отрисовка в едином стиле через кнопки-карточки
+                k1, k2, k3, k4 = st.columns(4)
+                
+                with k1:
+                    st.markdown("<div style='font-size: 0.85rem; color: #64748b; margin-bottom: 5px;'>Всего артикулов</div>", unsafe_allow_html=True)
+                    st.button(f"📦 {len(df_last_day)} SKU", key="kpi_all", use_container_width=True, disabled=True)
+                
+                with k2:
+                    st.markdown("<div style='font-size: 0.85rem; color: #64748b; margin-bottom: 5px;'>Зона риска (< 4.5)</div>", unsafe_allow_html=True)
+                    if st.button(f"🔴 {len(critical_skus)} SKU", key="kpi_risk", use_container_width=True):
+                        st.session_state.sku_filter = critical_skus
+                        st.rerun()
+                
+                with k3:
+                    st.markdown("<div style='font-size: 0.85rem; color: #64748b; margin-bottom: 5px;'>Падение (3 дня)</div>", unsafe_allow_html=True)
+                    if st.button(f"📉 {len(falling_skus)} SKU", key="kpi_fall", use_container_width=True):
+                        st.session_state.sku_filter = falling_skus
+                        st.rerun()
+                
+                with k4:
+                    avg_rating = df_last_day['Рейтинг'].mean()
+                    st.markdown("<div style='font-size: 0.85rem; color: #64748b; margin-bottom: 5px;'>Средний рейтинг</div>", unsafe_allow_html=True)
+                    st.button(f"⭐ {avg_rating:.2f}", key="kpi_avg", use_container_width=True, disabled=True)
+
+                st.divider()
+
                 if not df_filtered.empty:
-                    # --- 4. ТЕПЛОВАЯ КАРТА ТРЕНДОВ (Пункт 5) ---
-                    st.markdown("#### :material/trending_up: Карта изменений рейтинга (Trend Map)")
-                    st.caption("Цвет показывает изменение относительно предыдущего дня: 🟩 Рост, 🟥 Падение, ⬜ Без изменений.")
+                    # --- 3. ТЕПЛОВАЯ МАТРИЦА (Пункт 1: Возврат к абсолютным значениям + новая шкала) ---
+                    st.markdown("#### :material/grid_view: Матрица состояния рейтингов")
+                    st.caption("Цвет показывает абсолютное значение рейтинга. Переход в «проблемную» зону начинается с 4.5.")
                     
-                    # Группируем и считаем разницу (diff)
+                    # Сводная таблица по рейтингам (абсолютные значения)
                     df_pivot = df_filtered.pivot(index="Артикул", columns="Дата", values="Рейтинг").sort_index()
-                    df_trend = df_pivot.diff(axis=1).fillna(0) # Разница между днями
-                    
-                    # Форматируем даты для заголовков (Пункт 2)
-                    df_trend.columns = [d.strftime('%d.%m.%Y') for d in df_trend.columns]
+                    df_pivot.columns = [d.strftime('%d.%m.%Y') for d in df_pivot.columns]
 
                     import plotly.graph_objects as go
                     
+                    # Настройка цветовой шкалы: красный до 4.5, желтый/зеленый выше
+                    # 3.5 -> 0, 4.5 -> 0.66 (переход), 5.0 -> 1.0
+                    custom_colorscale = [
+                        [0, 'rgb(215,48,39)'],       # Темно-красный (3.5)
+                        [0.66, 'rgb(255,255,191)'],  # Бледно-желтый (4.5)
+                        [1, 'rgb(26,152,80)']        # Зеленый (5.0)
+                    ]
+
                     fig_heat = go.Figure(data=go.Heatmap(
-                        z=df_trend.values,
-                        x=df_trend.columns,
-                        y=df_trend.index,
-                        colorscale=[[0, 'rgb(215,48,39)'], [0.5, 'rgb(247,247,247)'], [1, 'rgb(26,152,80)']],
-                        zmid=0,
-                        colorbar=dict(title="Дельта"),
-                        hovertemplate="Артикул: %{y}<br>Дата: %{x}<br>Изменение: %{z:.2f}<extra></extra>"
+                        z=df_pivot.values,
+                        x=df_pivot.columns,
+                        y=df_pivot.index,
+                        colorscale=custom_colorscale,
+                        zmin=3.5,
+                        zmax=5.0,
+                        colorbar=dict(title="Рейтинг"),
+                        hovertemplate="Артикул: %{y}<br>Дата: %{x}<br>Рейтинг: %{z:.1f}<extra></extra>"
                     ))
                     
                     fig_heat.update_layout(
-                        height=max(300, len(df_trend) * 20),
+                        height=max(350, len(df_pivot) * 25),
                         margin=dict(l=0, r=0, t=10, b=0),
-                        xaxis=dict(tickangle=-45)
+                        xaxis=dict(tickangle=-45, showgrid=False),
+                        yaxis=dict(showgrid=False)
                     )
                     st.plotly_chart(fig_heat, use_container_width=True)
 
                     st.divider()
 
-                    # --- 5. ИНДИВИДУАЛЬНЫЕ ТРЕНДЫ (Пункт 6 - Исправление ошибки) ---
-                    st.markdown("#### :material/stacks: Детальная динамика")
+                    # --- 4. ИНДИВИДУАЛЬНЫЕ ТРЕНДЫ ---
+                    st.markdown("#### :material/stacks: Детальная динамика (Top 12)")
                     
-                    # Если выбрано слишком много артикулов, ограничиваем фасеты для читаемости
-                    max_facets = 12
-                    skus_to_plot = active_skus[:max_facets]
-                    if len(active_skus) > max_facets:
-                        st.warning(f"Показаны первые {max_facets} артикулов. Используйте фильтр для выбора конкретных.")
-                    
+                    skus_to_plot = active_skus[:12]
                     df_plot = df_filtered[df_filtered['Артикул'].isin(skus_to_plot)]
                     
                     import plotly.express as px
-                    
-                    # Расчет высоты и исправление интервалов (facet_row_spacing)
                     num_rows = (len(skus_to_plot) - 1) // 3 + 1
                     
                     fig_facet = px.line(
@@ -1703,25 +1706,17 @@ elif page == "Рейтинг товаров":
                         markers=True,
                         color="Артикул",
                         template="plotly_white",
-                        # Исправление ошибки Vertical Spacing (Пункт 6)
                         facet_row_spacing=0.08 if num_rows > 1 else 0,
                         hover_data={"Дата": "|%d.%m.%Y", "Рейтинг": ":.1f"}
                     )
                     
                     fig_facet.update_yaxes(range=[3.0, 5.1], dtick=0.5, showgrid=True, gridcolor="#f1f5f9")
-                    fig_facet.update_layout(
-                        height=350 * num_rows,
-                        showlegend=False,
-                        margin=dict(l=40, r=20, t=40, b=20)
-                    )
-                    # Очистка заголовков фасетов
+                    fig_facet.update_layout(height=350 * num_rows, showlegend=False, margin=dict(l=40, r=20, t=40, b=20))
                     fig_facet.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
                     
                     st.plotly_chart(fig_facet, use_container_width=True)
                 else:
-                    st.info("Нет данных для отображения по выбранным фильтрам.")
-            else:
-                st.warning("Таблица рейтингов пуста.")
+                    st.info("Нет данных по выбранным фильтрам.")
         except Exception as e:
             st.error(f"Ошибка блока Рейтингов: {e}")
         
