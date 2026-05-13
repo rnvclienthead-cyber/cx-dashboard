@@ -19,9 +19,13 @@ WB_API_KEY = os.getenv("WB_API_KEY", "").strip()
 DB_URL = os.getenv("DB_URL", "").strip()
 
 # --- НОВЫЕ НАСТРОЙКИ ДЛЯ ИНВОЙСОВ ---
-# Используем твой файл со скриншота
-PATH_TO_GOOGLE_CREDS = "bot_api_key.json"
+# Используем ПОЛНЫЙ путь, чтобы не путаться в папках терминала
+PATH_TO_GOOGLE_CREDS = "/root/my_project/bot_api_key.json" 
 SPREADSHEET_ID_INVOICES = os.getenv("SPREADSHEET_ID_INVOICES")
+
+# Проверка перед стартом
+if not os.path.exists(PATH_TO_GOOGLE_CREDS):
+    print(f"❌ ФАЙЛ НЕ НАЙДЕН ПО ПУТИ: {PATH_TO_GOOGLE_CREDS}")
 
 engine = create_engine(DB_URL)
 headers = {"Authorization": WB_API_KEY, "Content-Type": "application/json"}
