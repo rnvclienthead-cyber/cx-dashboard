@@ -1570,7 +1570,7 @@ elif page == "Рейтинг товаров":
                         format="DD.MM.YYYY"
                     )
 
-                # Шаг 1: Первичная фильтрация по дате (определяем "последний день периода" для фильтра рейтинга)
+                # Шаг 1: Первичная фильтрация по дате
                 if len(date_range) == 2:
                     df_date_filtered = df_ratings[
                         (df_ratings['Дата'].dt.date >= date_range[0]) & 
@@ -1579,9 +1579,22 @@ elif page == "Рейтинг товаров":
                 else:
                     df_date_filtered = df_ratings.copy()
 
-                # Находим последний день в выбранном периоде
+                # Находим последний день в выбранном периоде для расчетов глобальной сводки
                 max_date_in_period = df_date_filtered['Дата'].max() if not df_date_filtered.empty else latest_overall_date
                 last_day_data = df_date_filtered[df_date_filtered['Дата'] == max_date_in_period]
+
+                # --- РАСЧЕТ ПАДЕНИЯ РЕЙТИНГА (Сравнение с предыдущим днем) ---
+                all_dates = sorted(df_ratings['Дата'].dt.date.unique())
+                current_date_idx = all_dates.index(max_date_in_period.date()) if max_date_in_period.date() in all_dates else -1
+                
+                dropped_count = 0
+                if current_date_idx > 0:
+                    prev_date = all_dates[current_date_idx - 1]
+                    prev_day_data = df_ratings[df_ratings['Дата'].dt.date == prev_date]
+                    
+                    # Склеиваем данные двух дней для сравнения по артикулам
+                    merged = pd.merge(last_day_data, prev_day_data, on='Артикул', suffixes=('_curr', '_prev'))
+                    dropped_count = len(merged[merged['Рейтинг_curr'] < merged['Рейтинг_prev']])
 
                 with col_f2:
                     all_available_skus = sorted(df_ratings['Артикул'].unique().tolist())
@@ -1599,12 +1612,27 @@ elif page == "Рейтинг товаров":
                     rating_options = ["Все", "5.0", "4.9", "4.8", "4.7", "4.6", "4.5", "Ниже 4.5"]
                     sel_rating = st.selectbox("Рейтинг на конец периода:", rating_options)
 
-                # Шаг 2: Применение фильтров SKU и Рейтинга
+                # --- 2. СВОДКА СОСТОЯНИЯ (ОТВЯЗАНА ОТ ФИЛЬТРОВ АРТИКУЛОВ/РЕЙТИНГА) ---
+                st.markdown("### :material/analytics: Сводка")
+                
+                # Метрики считаем жестко по last_day_data, игнорируя то, что выбрано в col_f2 и col_f3
+                total_skus = len(last_day_data)
+                avg_rating = last_day_data['Рейтинг'].mean() if not last_day_data.empty else 0.0
+                critical_count = len(last_day_data[last_day_data['Рейтинг'] < avg_rating]) if not last_day_data.empty else 0
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("📦 Всего товаров", f"{total_skus} SKU")
+                m2.metric("⚠️ Ниже среднего", f"{critical_count} SKU", help=f"Товары с рейтингом ниже {avg_rating:.2f}")
+                m3.metric("⭐ Средний балл", f"{avg_rating:.2f}")
+                m4.metric("📉 Упали в рейтинге", f"{dropped_count} SKU", help="Количество товаров, чей рейтинг снизился по сравнению с предыдущим днем")
+
+                st.divider()
+
+                # --- ПРИМЕНЕНИЕ ФИЛЬТРОВ ДЛЯ ГРАФИКОВ ---
                 active_skus = selected_skus
                 if "[ВСЕ АРТИКУЛЫ]" in selected_skus: 
                     active_skus = all_available_skus
                 
-                # Фильтрация по рейтингу (проверяем рейтинг именно на max_date_in_period)
                 if sel_rating != "Все":
                     if sel_rating == "Ниже 4.5":
                         valid_skus = last_day_data[last_day_data['Рейтинг'] < 4.5]['Артикул'].tolist()
@@ -1612,28 +1640,10 @@ elif page == "Рейтинг товаров":
                         target_val = float(sel_rating)
                         valid_skus = last_day_data[last_day_data['Рейтинг'] == target_val]['Артикул'].tolist()
                     
-                    # Пересекаем выбранные вручную SKU с теми, что прошли проверку по рейтингу
                     active_skus = [s for s in active_skus if s in valid_skus]
 
-                # Итоговый датафрейм для отрисовки
+                # Итоговый датафрейм для отрисовки матриц и линий
                 df_filtered = df_date_filtered[df_date_filtered['Артикул'].isin(active_skus)].copy()
-
-                # --- 2. СВОДКА СОСТОЯНИЯ ---
-                st.markdown("### :material/analytics: Сводка")
-                
-                # Метрики считаем по последнему дню выбранного периода
-                df_last = df_filtered[df_filtered['Дата'] == max_date_in_period]
-                
-                total_skus = len(df_last)
-                avg_rating = df_last['Рейтинг'].mean() if not df_last.empty else 0.0
-                critical_count = len(df_last[df_last['Рейтинг'] < avg_rating]) if not df_last.empty else 0
-
-                m1, m2, m3 = st.columns(3)
-                m1.metric("📦 Всего товаров", f"{total_skus} SKU")
-                m2.metric("⚠️ Ниже среднего", f"{critical_count} SKU", help=f"Товары с рейтингом ниже {avg_rating:.2f}")
-                m3.metric("⭐ Средний балл", f"{avg_rating:.2f}")
-
-                st.divider()
 
                 if not df_filtered.empty:
                     # --- 3. ТЕПЛОВАЯ МАТРИЦА ---
@@ -1680,7 +1690,6 @@ elif page == "Рейтинг товаров":
                     num_skus = len(df_filtered['Артикул'].unique())
                     num_rows = (num_skus - 1) // 3 + 1
                     
-                    # Безопасный расчет отступа между фасетами (защита от краша Plotly)
                     safe_spacing = min(0.04, 0.9 / (num_rows - 1)) if num_rows > 1 else 0.0
                     
                     fig_facet = px.line(
