@@ -62,16 +62,12 @@ class WBRatingsParser:
             except:
                 text_content = await page.inner_text("body")
             
-            # Меняем неразрывные пробелы на обычные
             clean_text = text_content.lower().replace('\xa0', ' ')
             
-            # Ищем отзывы: ищем цифры (возможно с пробелами внутри), за которыми идет "оцен" или "отзыв"
             m_rev = re.search(r'([\d\s]+)\s*(оцен|отзыв)', clean_text)
             if m_rev:
-                # Убираем пробелы только из найденного числа
                 reviews = int(re.sub(r'\s+', '', m_rev.group(1)))
             
-            # Ищем рейтинг
             m_rating = re.search(r'([1-4][.,]\d|5[.,]0)', text_content)
             if m_rating:
                 rating = float(m_rating.group(1).replace(',', '.'))
@@ -101,7 +97,7 @@ class WBRatingsParser:
                         
                 except Exception as e:
                     if "Timeout" in str(e) or "TargetClosed" in str(e) or "ERR_" in str(e):
-                        logger.info(f"⚠️ Сбой соединения у {article} (смена IP прокси). Перезагрузка...")
+                        logger.info(f"⚠️ Сбой соединения у {article}. Перезагрузка...")
                         await asyncio.sleep(5)
                         await page.reload(wait_until="domcontentloaded", timeout=30000)
                     else:
@@ -132,35 +128,15 @@ class WBRatingsParser:
 
     async def run(self, article_list):
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                proxy={
-                    "server": "158.160.76.171:41000",
-                    "username": "user_fb89cb12",
-                    "password": "rDHSZZazHs6VbzsfGQUA_country-RU_lifetime-5_session-bykomemy"
-                }
-            )
+            # Запуск обычного браузера без прокси
+            browser = await p.chromium.launch(headless=True)
+            
             try:
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     viewport={'width': 1920, 'height': 1080},
                     timezone_id='Europe/Moscow'
                 )
-
-                # === БЛОК ДИАГНОСТИКИ ПРОКСИ ===
-                logger.info("🔍 Проверка прокси-соединения...")
-                test_page = await context.new_page()
-                try:
-                    response = await test_page.goto("https://api.ipify.org?format=json", timeout=15000)
-                    ip_data = await response.json()
-                    current_ip = ip_data.get('ip')
-                    logger.info(f"🌐 Внешний IP браузера: {current_ip}")
-                except Exception as e:
-                    logger.error(f"❌ ОШИБКА ПРОКСИ: {e}")
-                    return self.results
-                finally:
-                    await test_page.close()
-                # ===============================
 
                 async def parse_with_delay(article):
                     await asyncio.sleep(random.uniform(1, 3))
@@ -245,7 +221,6 @@ async def main():
 
     logger.info(f"🚀 Синхронизация завершена! Записано/обновлено строк: {success_count}")
     
-    # === ИМЕННО ЗДЕСЬ ЛОГ ЗАПИСЫВАЕТСЯ В БАЗУ ДЛЯ ТВОЕГО STREAMLIT ===
     save_log_to_db(engine, logger.get_full_log(), logger.has_errors)
 
 if __name__ == "__main__":
