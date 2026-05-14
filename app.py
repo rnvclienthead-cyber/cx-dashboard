@@ -1630,8 +1630,8 @@ elif page == "Рейтинг товаров":
                 
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("📦 Всего товаров", f"{total_skus} SKU")
-                m2.metric("⚠️ Ниже среднего", f"{critical_count} SKU", help=f"Товары с рейтингом ниже {avg_rating:.2f}")
-                m3.metric("⭐ Средний балл", f"{avg_rating:.2f}")
+                m2.metric("⚠️ Ниже среднего", f"{critical_count} SKU", help=f"Товары с рейтингом ниже {avg_rating:.1f}")
+                m3.metric("⭐ Средний балл", f"{avg_rating:.1f}")
                 m4.metric("📉 Упали в рейтинге", f"{dropped_count} SKU", help="Количество товаров, чей рейтинг снизился по сравнению с предыдущим днем")
 
                 st.divider()
