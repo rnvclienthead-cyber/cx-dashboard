@@ -1375,6 +1375,62 @@ elif page == "Отчет производства":
                                 clean_reason = reason_clicked.split(' [')[0]
                                 reason_id = int(reason_clicked.split('.')[0])
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
+
+                    # ==========================================================
+                    # НОВЫЙ БЛОК: ДИНАМИКА ПРОБЛЕМ ПО SKU (МЕЖДУ МАТРИЦЕЙ И ИНВОЙСАМИ)
+                    # ==========================================================
+                    st.markdown("---")
+                    st.markdown("### 📈 Динамика проблем по конкретному SKU")
+                    
+                    # Получаем список SKU, у которых есть хотя бы одна проблема в текущем фильтре
+                    available_skus = sorted(df_matrix['Артикул продавца'].unique())
+                    
+                    col_sku_dyn, _ = st.columns([1, 2])
+                    sku_dyn_target = col_sku_dyn.selectbox(
+                        "Выберите артикул для анализа динамики:", 
+                        available_skus, 
+                        key="sku_dynamic_filter"
+                    )
+
+                    if sku_dyn_target:
+                        # Фильтруем исходный df_filtered по выбранному SKU
+                        df_sku_dyn = df_filtered[df_filtered['Артикул продавца'].astype(str) == sku_dyn_target].copy()
+                        
+                        # Подготавливаем данные для графика динамики
+                        dyn_plot_list = []
+                        valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
+                        
+                        for i in range(1, 14):
+                            cat_col = str(i)
+                            if cat_col in df_sku_dyn.columns:
+                                # Находим строки, где этот тег проставлен
+                                mask = df_sku_dyn[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
+                                temp = df_sku_dyn[mask].copy()
+                                if not temp.empty:
+                                    # Группируем по месяцу
+                                    temp['Месяц'] = temp['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+                                    monthly_stats = temp.groupby('Месяц').size().reset_index(name='Кол-во')
+                                    monthly_stats['Причина'] = f"{i}. {CATEGORIES[i]}"
+                                    dyn_plot_list.append(monthly_stats)
+                        
+                        if dyn_plot_list:
+                            df_dyn_final = pd.concat(dyn_plot_list)
+                            
+                            # Отрисовка графика динамики (Стековые столбцы)
+                            dyn_chart = alt.Chart(df_dyn_final).mark_bar().encode(
+                                x=alt.X('Месяц:T', title='Период (Месяц)', axis=alt.Axis(format='%m.%Y')),
+                                y=alt.Y('Кол-во:Q', title='Кол-во дефектов'),
+                                color=alt.Color('Причина:N', title='Категория проблемы', scale=alt.Scale(scheme='category20')),
+                                tooltip=[
+                                    alt.Tooltip('Месяц:T', title='Месяц', format='%m.%Y'),
+                                    alt.Tooltip('Причина:N', title='Причина'),
+                                    alt.Tooltip('Кол-во:Q', title='Количество')
+                                ]
+                            ).properties(height=350, title=f"Распределение проблем по месяцам: {sku_dyn_target}")
+                            
+                            st.altair_chart(dyn_chart, use_container_width=True)
+                        else:
+                            st.info("Для выбранного SKU не найдено данных о проблемах в указанный период.")
                 
                     st.markdown("---")
                     st.markdown("### 📦 Проблемные инвойсы (Топ-15)")
