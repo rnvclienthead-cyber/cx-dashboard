@@ -62,11 +62,16 @@ class WBRatingsParser:
             except:
                 text_content = await page.inner_text("body")
             
-            clean_text = text_content.lower().replace('\xa0', '').replace(' ', '')
-            m_rev = re.search(r'(\d+)(оцен|отзыв)', clean_text)
-            if m_rev:
-                reviews = int(m_rev.group(1))
+            # Меняем неразрывные пробелы на обычные
+            clean_text = text_content.lower().replace('\xa0', ' ')
             
+            # Ищем отзывы: ищем цифры (возможно с пробелами внутри), за которыми идет "оцен" или "отзыв"
+            m_rev = re.search(r'([\d\s]+)\s*(оцен|отзыв)', clean_text)
+            if m_rev:
+                # Убираем пробелы только из найденного числа
+                reviews = int(re.sub(r'\s+', '', m_rev.group(1)))
+            
+            # Ищем рейтинг
             m_rating = re.search(r'([1-4][.,]\d|5[.,]0)', text_content)
             if m_rating:
                 rating = float(m_rating.group(1).replace(',', '.'))
@@ -142,6 +147,21 @@ class WBRatingsParser:
                     timezone_id='Europe/Moscow'
                 )
 
+                # === БЛОК ДИАГНОСТИКИ ПРОКСИ ===
+                logger.info("🔍 Проверка прокси-соединения...")
+                test_page = await context.new_page()
+                try:
+                    response = await test_page.goto("https://api.ipify.org?format=json", timeout=15000)
+                    ip_data = await response.json()
+                    current_ip = ip_data.get('ip')
+                    logger.info(f"🌐 Внешний IP браузера: {current_ip}")
+                except Exception as e:
+                    logger.error(f"❌ ОШИБКА ПРОКСИ: {e}")
+                    return self.results
+                finally:
+                    await test_page.close()
+                # ===============================
+
                 async def parse_with_delay(article):
                     await asyncio.sleep(random.uniform(1, 3))
                     return await self.parse_single_article(context, article)
@@ -172,6 +192,7 @@ def save_log_to_db(engine, details, has_errors):
         """)
         with engine.begin() as conn:
             conn.execute(query, {"action": "Синхронизация рейтингов", "status": status, "details": details})
+        print("💾 Лог успешно сохранен в базу данных system_logs.")
     except Exception as e:
         print(f"⚠️ Ошибка записи лога в БД: {e}")
 
@@ -223,6 +244,8 @@ async def main():
                 logger.error(f"⚠️ Ошибка записи БД для {supplier_article}: {e}")
 
     logger.info(f"🚀 Синхронизация завершена! Записано/обновлено строк: {success_count}")
+    
+    # === ИМЕННО ЗДЕСЬ ЛОГ ЗАПИСЫВАЕТСЯ В БАЗУ ДЛЯ ТВОЕГО STREAMLIT ===
     save_log_to_db(engine, logger.get_full_log(), logger.has_errors)
 
 if __name__ == "__main__":
