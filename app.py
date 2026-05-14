@@ -581,6 +581,59 @@ def load_cached_orders():
     except Exception as e: 
         print(f"Ошибка загрузки заказов: {e}")
         return pd.DataFrame()
+
+@st.cache_data(ttl=3600) # Кешируем на час (справочник меняется редко)
+def load_cached_abc():
+    try:
+        return pd.read_sql("SELECT article as \"Артикул\", class_abc as \"ABC_Группа\", class_xyz as \"Класс XYZ\" FROM product_classification", engine)
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=300) # Кешируем на 5 минут
+def load_cached_history():
+    try:
+        df = pd.read_sql("SELECT article as \"Артикул\", month_date as \"Месяц_ДТ\", defects as \"Брак\", orders as \"Заказы\", source as \"Source\" FROM historical_ppm", engine)
+        if not df.empty: df['Месяц_ДТ'] = pd.to_datetime(df['Месяц_ДТ'])
+        return df
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=120)
+def build_ppm_base_dataset():
+    df_sys = load_cached_hybrid_data()
+    df_orders_sys = load_cached_orders()
+    df_hist = load_cached_history()
+    df_abc = load_cached_abc()
+    
+    if not df_orders_sys.empty and not df_sys.empty:
+        # Векторизованная разметка тегов (в 100 раз быстрее df.apply)
+        valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
+        tag_cols = [str(i) for i in range(1, 14) if str(i) in df_sys.columns]
+        if tag_cols:
+            df_tags = df_sys[tag_cols].fillna('').astype(str).apply(lambda x: x.str.strip().str.lower())
+            df_sys['Размечено'] = df_tags.isin(valid_tag_vals).any(axis=1)
+        else:
+            df_sys['Размечено'] = False
+            
+        df_app_sys = df_sys[df_sys['Размечено'] == True].copy()
+        if not df_app_sys.empty:
+            df_app_sys['Месяц_ДТ'] = df_app_sys['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
+        
+        sys_metrics = df_app_sys.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Брак') if not df_app_sys.empty else pd.DataFrame(columns=['Артикул продавца', 'Месяц_ДТ', 'Брак'])
+        sys_metrics = pd.merge(df_orders_sys, sys_metrics, left_on=['Артикул продавца', 'Месяц_ДТ'], right_on=['Артикул продавца', 'Месяц_ДТ'], how='left').fillna(0)
+        sys_metrics.rename(columns={'Артикул продавца':'Артикул', 'Чистые_заказы':'Заказы'}, inplace=True)
+        sys_metrics['Source'] = 'System'
+
+        df_total = pd.concat([df_hist, sys_metrics], ignore_index=True)
+        if not df_abc.empty:
+            df_total = pd.merge(df_total, df_abc, on='Артикул', how='left')
+            df_total['ABC_Группа'] = df_total['ABC_Группа'].fillna('C')
+            df_total['Класс XYZ'] = df_total['Класс XYZ'].fillna('-')
+        else:
+            df_total['ABC_Группа'] = 'C'; df_total['Класс XYZ'] = '-'
+
+        months_ru = {1:'Янв', 2:'Фев', 3:'Мар', 4:'Апр', 5:'Май', 6:'Июн', 7:'Июл', 8:'Авг', 9:'Сен', 10:'Окт', 11:'Ноя', 12:'Дек'}
+        df_total['Месяц_Стр'] = df_total['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_total['Месяц_ДТ'].dt.year.astype(str)
+        return df_total
+    return pd.DataFrame()
     
 from datetime import timedelta
 
@@ -1179,8 +1232,14 @@ elif page == "Отчет производства":
             df['Инвойс'] = df['Инвойс'].fillna('Не указан')
             df['Номер поставки_ОРИГИНАЛ'] = df.get('Номер поставки_ОРИГИНАЛ', 'Не указан').fillna('Не указан')
             
-            def has_tags(row): return any(str(row.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14))
-            df['Размечено'] = df.apply(has_tags, axis=1)
+            # --- ВЕКТОРИЗОВАННАЯ РАЗМЕТКА (Вместо медленного .apply) ---
+            valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
+            tag_cols = [str(i) for i in range(1, 14) if str(i) in df.columns]
+            if tag_cols:
+                df_tags = df[tag_cols].fillna('').astype(str).apply(lambda x: x.str.strip().str.lower())
+                df['Размечено'] = df_tags.isin(valid_tag_vals).any(axis=1)
+            else:
+                df['Размечено'] = False
             
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'Не указан'])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
@@ -1251,18 +1310,27 @@ elif page == "Отчет производства":
                 
                 st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
                 matrix_list = []
-                for i in range(1, 14):
-                    cat_col = str(i)
-                    if cat_col in df_filtered.columns:
-                        temp = df_filtered[df_filtered[cat_col].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да'])]
-                        for _, r in temp.iterrows():
-                            matrix_list.append({
-                                'Артикул продавца': str(r.get('Артикул продавца', 'Без артикула')).strip(),
-                                'Причина': f"{i}. {CATEGORIES[i]}",
-                                'ID': i,
-                                'Инвойс': str(r.get('Инвойс', 'Не указан')).strip(),
-                                'Номер поставки': str(r.get('Номер поставки_ОРИГИНАЛ', 'Не указан')).strip()
-                            })
+                st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
+                matrix_list = []
+                
+                # --- ВЕКТОРИЗОВАННЫЙ СБОР МАТРИЦЫ (Вместо медленного iterrows) ---
+                if tag_cols:
+                    df_tags_filt = df_filtered[tag_cols].fillna('').astype(str).apply(lambda x: x.str.strip().str.lower())
+                    for i in range(1, 14):
+                        cat_col = str(i)
+                        if cat_col in df_tags_filt.columns:
+                            valid_rows = df_tags_filt[cat_col].isin(valid_tag_vals)
+                            if valid_rows.any():
+                                temp = df_filtered[valid_rows]
+                                # Генерируем пачку словарей мгновенно
+                                temp_matrix = pd.DataFrame({
+                                    'Артикул продавца': temp['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула'),
+                                    'Причина': f"{i}. {CATEGORIES[i]}",
+                                    'ID': i,
+                                    'Инвойс': temp['Инвойс'].astype(str).str.strip().replace(['nan', 'None', ''], 'Не указан'),
+                                    'Номер поставки': temp.get('Номер поставки_ОРИГИНАЛ', temp['Инвойс']).astype(str).str.strip()
+                                })
+                                matrix_list.extend(temp_matrix.to_dict('records'))
 
                 if matrix_list:
                     df_matrix = pd.DataFrame(matrix_list)
@@ -1374,61 +1442,12 @@ elif page == "Уровень PPM":
                     return False
             return False
 
-        # ==========================================
-        # 1. ТЯЖЕЛАЯ ЧАСТЬ (Выполняется 1 раз при входе)
+      # ==========================================
+        # 1. ТЯЖЕЛАЯ ЧАСТЬ (Выполняется мгновенно из кеша)
         # ==========================================
         with st.spinner("Синхронизация данных..."):
-            df_sys = load_cached_hybrid_data()
-            df_orders_sys = load_cached_orders()
-            
-            df_hist = pd.DataFrame()
-            try:
-                df_hist = pd.read_sql("SELECT article, month_date, defects, orders, source FROM historical_ppm", engine)
-                if not df_hist.empty:
-                    df_hist.rename(columns={'article':'Артикул', 'month_date':'Месяц_ДТ', 'defects':'Брак', 'orders':'Заказы', 'source':'Source'}, inplace=True)
-                    df_hist['Месяц_ДТ'] = pd.to_datetime(df_hist['Месяц_ДТ'])
-            except Exception as e: st.warning(f"История недоступна: {e}")
-
-            df_abc = pd.DataFrame()
-            try:
-                df_abc = pd.read_sql("SELECT article, class_abc, class_xyz FROM product_classification", engine)
-                if not df_abc.empty:
-                    df_abc.rename(columns={'article':'Артикул', 'class_abc':'ABC_Группа', 'class_xyz':'Класс XYZ'}, inplace=True)
-            except Exception as e: st.warning(f"Справочник ABC недоступен: {e}")
-
-        with st.expander(":material/upload_file: Обновить справочник ABC-XYZ", expanded=False):
-            abc_file = st.file_uploader("Загрузить XLSX/CSV", type=['csv', 'xlsx', 'xls'], label_visibility="collapsed")
-            if abc_file:
-                df_new_abc = safe_read(abc_file)
-                if not df_new_abc.empty and 'Артикул' in df_new_abc.columns:
-                    if st.button("💾 Сохранить в базу"):
-                        if update_abc_in_sql(df_new_abc):
-                            st.success("✅ Справочник обновлен!")
-                            st.rerun()
-
-        if not df_orders_sys.empty:
-            df_sys['Размечено'] = df_sys.apply(lambda r: any(str(r.get(str(i),'')).strip().lower() in ['1','1.0','+','true','да'] for i in range(1,14)), axis=1)
-            df_app_sys = df_sys[df_sys['Размечено'] == True].copy()
-            if not df_app_sys.empty:
-                df_app_sys['Месяц_ДТ'] = df_app_sys['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
-            
-            sys_metrics = df_app_sys.groupby(['Артикул продавца', 'Месяц_ДТ']).size().reset_index(name='Брак') if not df_app_sys.empty else pd.DataFrame(columns=['Артикул продавца', 'Месяц_ДТ', 'Брак'])
-            sys_metrics = pd.merge(df_orders_sys, sys_metrics, on=['Артикул продавца', 'Месяц_ДТ'], how='left').fillna(0)
-            sys_metrics.rename(columns={'Артикул продавца':'Артикул', 'Чистые_заказы':'Заказы'}, inplace=True)
-            sys_metrics['Source'] = 'System'
-
-            df_total = pd.concat([df_hist, sys_metrics], ignore_index=True)
-            if not df_abc.empty:
-                df_total = pd.merge(df_total, df_abc, on='Артикул', how='left')
-                df_total['ABC_Группа'] = df_total['ABC_Группа'].fillna('C')
-                df_total['Класс XYZ'] = df_total['Класс XYZ'].fillna('-')
-            else:
-                df_total['ABC_Группа'] = 'C'; df_total['Класс XYZ'] = '-'
-
-            months_ru = {1:'Янв', 2:'Фев', 3:'Мар', 4:'Апр', 5:'Май', 6:'Июн', 7:'Июл', 8:'Авг', 9:'Сен', 10:'Окт', 11:'Ноя', 12:'Дек'}
-            df_total['Месяц_Стр'] = df_total['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_total['Месяц_ДТ'].dt.year.astype(str)
-
-            sku_options = sorted(df_total['Артикул'].unique().tolist())
+            df_total = build_ppm_base_dataset()
+            sku_options = sorted(df_total['Артикул'].unique().tolist()) if not df_total.empty else []
             
             # ==========================================
             # 2. ИНТЕРАКТИВНЫЙ ФРАГМЕНТ (Твой UI + Генератор)
