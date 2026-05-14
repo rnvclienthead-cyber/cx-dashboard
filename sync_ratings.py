@@ -112,6 +112,13 @@ class WBRatingsParser:
 
                 row_data["rating_val"] = rating_val if rating_val else 0.0
                 row_data["reviews_count"] = reviews_count if reviews_count else 0
+
+                # --- ВИЗУАЛЬНЫЙ ДЕБАГ ---
+                if row_data["rating_val"] == 0.0:
+                    screenshot_path = f"/root/my_project/debug_wb_{article}.png"
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    print(f"📸 ВБ не отдал рейтинг! Скриншот экрана сохранен: {screenshot_path}")
+                # -----------------------
                 
                 print(f"✓ {article} | Рейтинг: {row_data['rating_val']} | Отзывов: {row_data['reviews_count']}")
 
