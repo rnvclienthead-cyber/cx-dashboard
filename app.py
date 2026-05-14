@@ -1135,14 +1135,13 @@ elif page == "Отчет производства":
                 f_col1, f_col2, f_col3 = st.columns(3)
                 
                 with f_col1:
-                    # Находим крайние даты в датасете для дефолтных значений
-                    valid_dates = df_full['Дата_ДТ'].dropna()
-                    latest_date = valid_dates.max() if not valid_dates.empty else pd.to_datetime(datetime.now())
-                    start_default = (latest_date - pd.Timedelta(days=30)).date()
+                    # Установка фильтра на текущий месяц (с 1-го числа по сегодня)
+                    today = datetime.now().date()
+                    start_current_month = today.replace(day=1)
                     
                     date_range = st.date_input(
                         "Период анализа:", 
-                        [start_default, latest_date.date()],
+                        [start_current_month, today],
                         format="DD.MM.YYYY",
                         key="prod_date_filter"
                     )
@@ -1378,13 +1377,13 @@ elif page == "Уровень PPM":
                 f1, f2 = st.columns(2)
                 
                 with f1:
-                    valid_dates = df_full['Месяц_ДТ'].dropna()
-                    latest_date = valid_dates.max() if not valid_dates.empty else pd.to_datetime(datetime.now())
-                    start_default = (latest_date - pd.DateOffset(months=6)).date()
+                    # Предустановка на текущий месяц
+                    today = datetime.now().date()
+                    start_current_month = today.replace(day=1)
                     
                     date_range = st.date_input(
                         "📅 Период анализа:", 
-                        [start_default, latest_date.date()],
+                        [start_current_month, today],
                         format="DD.MM.YYYY",
                         key="ppm_date_filter"
                     )
@@ -1419,6 +1418,33 @@ elif page == "Уровень PPM":
                 table_agg['PPM'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 1000000, 0).astype(int)
                 table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
                 table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
+
+                # --- НОВЫЙ БЛОК МЕТРИК СО СРЕДНИМ PPM ---
+                m1, m2, m3 = st.columns(3)
+
+                def get_group_metrics(group_name):
+                    group_data = table_agg[table_agg['ABC_Группа'] == group_name]
+                    total_sku = len(group_data)
+                    problem_sku = len(group_data[group_data['PPM'] > 10000])
+                    
+                    # Считаем средний PPM по группе (общий брак / общие заказы)
+                    sum_brk = group_data['Брак'].sum()
+                    sum_ord = group_data['Заказы'].sum()
+                    avg_ppm = int((sum_brk / sum_ord * 1000000)) if sum_ord > 0 else 0
+                    return total_sku, problem_sku, avg_ppm
+
+                for col, grp in zip([m1, m2, m3], ['A', 'B', 'C']):
+                    t_sku, p_sku, a_ppm = get_group_metrics(grp)
+                    with col:
+                        st.metric(
+                            label=f"Группа {grp}", 
+                            value=f"{t_sku} SKU", 
+                            delta=f"{p_sku} проблемных", 
+                            delta_color="inverse"
+                        )
+                        # Вывод среднего PPM в абсолютном значении
+                        st.markdown(f"**Средний PPM: {a_ppm:,}**".replace(',', ' '))
+                        st.caption(f"Доля проблемных: {round(p_sku/t_sku*100 if t_sku > 0 else 0)}%")
 
                 # --- ВАРИАНТ 2: Нативные метрики Streamlit (Чистый стиль) ---
                 m1, m2, m3 = st.columns(3)
