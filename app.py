@@ -1377,24 +1377,25 @@ elif page == "Отчет производства":
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
 
                     # ==========================================================
-                    # ДИНАМИКА ПРОБЛЕМ ПО SKU
+                    # ДИНАМИКА ПРОБЛЕМ ПО SKU (Игнорирует глобальные фильтры)
                     # ==========================================================
                     st.markdown("---")
-                    st.markdown("### 📈 Динамика проблем по конкретному SKU")
+                    st.markdown("### 📈 Динамика проблем по конкретному SKU (За всё время)")
                     
-                    available_skus = sorted(df_matrix['Артикул продавца'].unique())
+                    # Берем список ВСЕХ доступных артикулов из исходной базы (исключая 'Все')
+                    available_skus_all = [s for s in sku_list if s != 'Все']
                     
                     col_sku_dyn, _ = st.columns([1, 2])
                     sku_dyn_target = col_sku_dyn.selectbox(
                         "Выберите артикул для анализа динамики:", 
-                        available_skus, 
+                        available_skus_all, 
                         key="sku_dynamic_filter"
                     )
 
                     if sku_dyn_target:
-                        # ИСПРАВЛЕНИЕ 3: Применяем тот же фильтр, иначе поиск по "Без артикула" выдаст пустоту
-                        clean_skus_dyn = df_filtered['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
-                        df_sku_dyn = df_filtered[clean_skus_dyn == sku_dyn_target].copy()
+                        # ИСПОЛЬЗУЕМ df_full ВМЕСТО df_filtered, чтобы игнорировать глобальный фильтр дат
+                        clean_skus_dyn = df_full['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
+                        df_sku_dyn = df_full[clean_skus_dyn == sku_dyn_target].copy()
                         
                         dyn_plot_list = []
                         
@@ -1404,11 +1405,11 @@ elif page == "Отчет производства":
                                 mask = df_sku_dyn[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
                                 temp = df_sku_dyn[mask].copy()
                                 if not temp.empty:
-                                    # ИСПРАВЛЕНИЕ 4: Безопасно преобразуем даты, удаляя пустые (NaT), чтобы Altair не падал
                                     temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ'], errors='coerce').dt.to_period('M').dt.to_timestamp()
                                     temp = temp.dropna(subset=['Месяц'])
                                     if not temp.empty:
-                                        monthly_stats = temp.groupby('Месяц').size().reset_index(name='Кол-во')
+                                        # Называем колонку 'Количество' для красивого тултипа
+                                        monthly_stats = temp.groupby('Месяц').size().reset_index(name='Количество')
                                         monthly_stats['Причина'] = f"{i}. {CATEGORIES[i]}"
                                         dyn_plot_list.append(monthly_stats)
                         
@@ -1416,21 +1417,26 @@ elif page == "Отчет производства":
                             df_dyn_final = pd.concat(dyn_plot_list)
                             if not df_dyn_final.empty:
                                 dyn_chart = alt.Chart(df_dyn_final).mark_bar().encode(
-                                    x=alt.X('Месяц:T', title='Период (Месяц)', axis=alt.Axis(format='%m.%Y')),
-                                    y=alt.Y('Кол-во:Q', title='Кол-во дефектов'),
+                                    x=alt.X('Месяц:T', title='Период (Месяц)', axis=alt.Axis(format='%m.%Y', tickCount='month')),
+                                    y=alt.Y('Количество:Q', title='Кол-во дефектов'),
                                     color=alt.Color('Причина:N', title='Категория проблемы', scale=alt.Scale(scheme='category20')),
+                                    # Тултип гарантированно показывает количество при наведении на сегмент
                                     tooltip=[
                                         alt.Tooltip('Месяц:T', title='Месяц', format='%m.%Y'),
                                         alt.Tooltip('Причина:N', title='Причина'),
-                                        alt.Tooltip('Кол-во:Q', title='Количество')
+                                        alt.Tooltip('Количество:Q', title='Количество дефектов')
                                     ]
-                                ).properties(height=350, title=f"Распределение проблем по месяцам: {sku_dyn_target}")
+                                ).properties(
+                                    height=350, 
+                                    title=f"Распределение проблем: {sku_dyn_target}"
+                                ).interactive(bind_y=False) # Добавляем легкую интерактивность (зум по X), тултипы будут работать идеально
                                 
                                 st.altair_chart(dyn_chart, use_container_width=True)
                             else:
                                 st.info("Нет дат для построения графика.")
                         else:
-                            st.info("Для выбранного SKU не найдено данных о проблемах в указанный период.")
+                            st.info("Для выбранного SKU не найдено данных о проблемах за всё время.")
+                    # ==========================================================
                     
                     st.markdown("---")
                     st.markdown("### 📦 Проблемные инвойсы (Топ-15)")
