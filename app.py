@@ -1103,6 +1103,7 @@ elif page == "Отчет производства":
     st.title(":material/insights: Отчет производства")
     
     import altair as alt 
+    import time # Убедимся, что time доступен для генерации ключа
     
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
@@ -1162,6 +1163,8 @@ elif page == "Отчет производства":
             st.write("Нет данных по этому пересечению.")
 
         if st.button("Закрыть детализацию"):
+            # ИСПРАВЛЕНИЕ: Обновляем ключ перед перезагрузкой, чтобы сбросить выделение Altair
+            st.session_state.matrix_key = int(time.time())
             st.rerun()
 
     # ==========================================
@@ -1279,7 +1282,10 @@ elif page == "Отчет производства":
                     text_marks = base.mark_text(baseline='middle', fontSize=11).encode(text='Текст:N', color=alt.condition(alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2), alt.value('white'), alt.value('black')))
                     final_chart = alt.layer(rects, text_marks).properties(height=max(400, len(pivot) * 35 + 100)).add_params(click_selector)
                     
-                    event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun", key="prod_matrix")
+                    # ИСПРАВЛЕНИЕ: Формируем динамический ключ для графика
+                    current_matrix_key = st.session_state.get('matrix_key', 0)
+                    chart_key = f"prod_matrix_{current_matrix_key}"
+                    event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun", key=chart_key)
                     
                     if event and hasattr(event, "selection"):
                         sel = event.selection.get("cell_click", [])
