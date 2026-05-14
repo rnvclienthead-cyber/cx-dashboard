@@ -1548,7 +1548,7 @@ elif page == "Уровень PPM":
                         st.info("Нет данных для графика")
 
             # Вызов созданного фрагмента
-            render_ppm_dashboard(df_total, sku_options, available_months)
+            render_ppm_dashboard(df_total, sku_options,)
 
     except Exception as e:
         st.error(f"Ошибка PPM: {e}")
