@@ -84,23 +84,24 @@ class WBRatingsParser:
             try:
                 try:
                     await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(0.4)
+                    await asyncio.sleep(2) # Даем время прогрузиться
+                    
+                    # Проверяем, не попали ли мы на экран проверки
+                    page_title = await page.title()
+                    if "Почти готово" in page_title or "Внимание" in page_title or not page_title:
+                        print(f"⏳ {article} попал на проверку анти-бота. Ждем 8 секунд...")
+                        await asyncio.sleep(8) # Ждем, пока ВБ нас пропустит
+                        
                 except Exception as e:
                     if "Timeout" in str(e):
-                        print(f"⚠️ Timeout on {article}. Reloading...")
                         await page.reload(wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(5)
                     else:
                         raise e
 
-                # --- ДИАГНОСТИКА КАПЧИ ---
-                page_title = await page.title()
-                if not page_title or ("Wildberries" not in page_title and "Вайлдберриз" not in page_title):
-                    print(f"⚠️ Подозрительная страница у {article}. Заголовок: '{page_title}' (Возможно капча!)")
-
-                # Имитация человека: скролл
                 await page.mouse.wheel(0, 1200)
-                await asyncio.sleep(0.1)
-
+                await asyncio.sleep(0.5)
+                
                 try:
                     await page.wait_for_selector(".product-page__header, h1", timeout=15000)
                 except:
@@ -212,7 +213,7 @@ async def main():
 
     nm_ids_list = list(mapping.keys())
     
-    parser = WBRatingsParser(concurrency_limit=5)
+    parser = WBRatingsParser(concurrency_limit=1)
     parsed_data = await parser.run(nm_ids_list)
 
     if not parsed_data:
