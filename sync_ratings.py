@@ -35,22 +35,32 @@ class WBRatingsParser:
 
     @staticmethod
     async def get_stats(page):
-        """Extracts rating and reviews count."""
+        """Бронебойный поиск рейтинга без привязки к конкретным CSS-классам."""
         rating, reviews = None, None
-        elements = page.locator(".mo-typography")
-        count = await elements.count()
-        words = ("оценка", "оценки", "оценок")
-        
-        for i in range(count):
-            text = (await elements.nth(i).text_content()).lower()
-            if not rating:
-                match_rating = re.search(r'(\d[.,]\d)', text)
-                if match_rating:
-                    rating = float(match_rating.group(1).replace(',', '.'))
-            if any(word in text for word in words) and not reviews:
-                match_reviews = re.sub(r'[^\d]', '', text)
-                if match_reviews:
-                    reviews = int(match_reviews)
+        try:
+            # Пытаемся взять шапку, если структура изменилась - берем весь текст страницы
+            text_content = ""
+            try:
+                text_content = await page.inner_text(".product-page__header", timeout=3000)
+            except:
+                text_content = await page.inner_text("body")
+            
+            # Очищаем текст от неразрывных пробелов для поиска количества отзывов (1 234 -> 1234)
+            clean_text = text_content.lower().replace('\xa0', '').replace(' ', '')
+            
+            # Ищем количество отзывов (любые цифры перед словом оценк или отзыв)
+            m_rev = re.search(r'(\d+)(оцен|отзыв)', clean_text)
+            if m_rev:
+                reviews = int(m_rev.group(1))
+            
+            # Ищем сам рейтинг (цифры в формате X.X или X,X от 1 до 5)
+            m_rating = re.search(r'([1-4][.,]\d|5[.,]0)', text_content)
+            if m_rating:
+                rating = float(m_rating.group(1).replace(',', '.'))
+                
+        except Exception as e:
+            pass # Если не нашли, вернем None, чтобы скрипт проставил 0.0
+            
         return rating, reviews
 
     async def parse_single_article(self, browser_context, article):
@@ -82,6 +92,11 @@ class WBRatingsParser:
                     else:
                         raise e
 
+                # --- ДИАГНОСТИКА КАПЧИ ---
+                page_title = await page.title()
+                if not page_title or ("Wildberries" not in page_title and "Вайлдберриз" not in page_title):
+                    print(f"⚠️ Подозрительная страница у {article}. Заголовок: '{page_title}' (Возможно капча!)")
+
                 # Имитация человека: скролл
                 await page.mouse.wheel(0, 1200)
                 await asyncio.sleep(0.1)
@@ -92,6 +107,7 @@ class WBRatingsParser:
                     await page.keyboard.press("Space")
                     await asyncio.sleep(0.1)
 
+                # Вызов нового метода
                 rating_val, reviews_count = await self.get_stats(page)
 
                 row_data["rating_val"] = rating_val if rating_val else 0.0
