@@ -178,6 +178,7 @@ class WBRatingsParser:
                 print(f"🚀 [Проход 1/2] Запуск для {len(article_list)} артикулов...")
                 tasks = [self.parse_single_article(context, article) for article in article_list]
                 await asyncio.gather(*tasks)
+                
                 # --- ВТОРОЙ ПРОХОД (RETRY) ---
                 to_retry = [res["article"] for res in self.results if res["status"] == "failed" or res["rating_val"] == 0.0]
                 
