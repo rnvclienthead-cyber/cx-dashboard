@@ -1562,7 +1562,6 @@ elif page == "Рейтинг товаров":
                 col_f1, col_f2, col_f3 = st.columns([1.5, 2, 1])
                 
                 with col_f1:
-                    # Период (Российский формат)
                     start_default = (latest_overall_date - pd.Timedelta(days=7)).date()
                     date_range = st.date_input(
                         "Период анализа:", 
@@ -1579,26 +1578,41 @@ elif page == "Рейтинг товаров":
                 else:
                     df_date_filtered = df_ratings.copy()
 
-                # Находим последний день в выбранном периоде для расчетов глобальной сводки
+                # Находим последний день в выбранном периоде
                 max_date_in_period = df_date_filtered['Дата'].max() if not df_date_filtered.empty else latest_overall_date
                 last_day_data = df_date_filtered[df_date_filtered['Дата'] == max_date_in_period]
 
-                # --- РАСЧЕТ ПАДЕНИЯ РЕЙТИНГА (Сравнение с предыдущим днем) ---
+                # --- ПРЕДВАРИТЕЛЬНЫЙ РАСЧЕТ ДЛЯ СВОДКИ И ГРУППИРОВОК ---
+                total_skus = len(last_day_data)
+                avg_rating = last_day_data['Рейтинг'].mean() if not last_day_data.empty else 0.0
+                
+                # Собираем список артикулов "Ниже среднего"
+                below_avg_skus = last_day_data[last_day_data['Рейтинг'] < avg_rating]['Артикул'].tolist() if not last_day_data.empty else []
+                critical_count = len(below_avg_skus)
+
+                # Собираем список артикулов "Упали в рейтинге" (Сравнение с предыдущим днем)
                 all_dates = sorted(df_ratings['Дата'].dt.date.unique())
                 current_date_idx = all_dates.index(max_date_in_period.date()) if max_date_in_period.date() in all_dates else -1
                 
-                dropped_count = 0
+                dropped_skus = []
                 if current_date_idx > 0:
                     prev_date = all_dates[current_date_idx - 1]
                     prev_day_data = df_ratings[df_ratings['Дата'].dt.date == prev_date]
                     
-                    # Склеиваем данные двух дней для сравнения по артикулам
                     merged = pd.merge(last_day_data, prev_day_data, on='Артикул', suffixes=('_curr', '_prev'))
-                    dropped_count = len(merged[merged['Рейтинг_curr'] < merged['Рейтинг_prev']])
+                    dropped_skus = merged[merged['Рейтинг_curr'] < merged['Рейтинг_prev']]['Артикул'].tolist()
+                
+                dropped_count = len(dropped_skus)
 
                 with col_f2:
                     all_available_skus = sorted(df_ratings['Артикул'].unique().tolist())
-                    sku_options = ["[ВСЕ АРТИКУЛЫ]"] + all_available_skus
+                    
+                    # Добавляем новые группировки в начало списка
+                    sku_options = [
+                        "[ВСЕ АРТИКУЛЫ]", 
+                        "[НИЖЕ СРЕДНЕГО]", 
+                        "[УПАЛИ В РЕЙТИНГЕ]"
+                    ] + all_available_skus
                     
                     selected_skus = st.multiselect(
                         "Артикулы:", 
@@ -1608,18 +1622,12 @@ elif page == "Рейтинг товаров":
                     )
 
                 with col_f3:
-                    # Фильтр по рейтингу
                     rating_options = ["Все", "5.0", "4.9", "4.8", "4.7", "4.6", "4.5", "Ниже 4.5"]
                     sel_rating = st.selectbox("Рейтинг на конец периода:", rating_options)
 
-                # --- 2. СВОДКА СОСТОЯНИЯ (ОТВЯЗАНА ОТ ФИЛЬТРОВ АРТИКУЛОВ/РЕЙТИНГА) ---
+                # --- 2. СВОДКА СОСТОЯНИЯ (ОТВЯЗАНА ОТ ФИЛЬТРОВ) ---
                 st.markdown("### :material/analytics: Сводка")
                 
-                # Метрики считаем жестко по last_day_data, игнорируя то, что выбрано в col_f2 и col_f3
-                total_skus = len(last_day_data)
-                avg_rating = last_day_data['Рейтинг'].mean() if not last_day_data.empty else 0.0
-                critical_count = len(last_day_data[last_day_data['Рейтинг'] < avg_rating]) if not last_day_data.empty else 0
-
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("📦 Всего товаров", f"{total_skus} SKU")
                 m2.metric("⚠️ Ниже среднего", f"{critical_count} SKU", help=f"Товары с рейтингом ниже {avg_rating:.2f}")
@@ -1628,11 +1636,25 @@ elif page == "Рейтинг товаров":
 
                 st.divider()
 
-                # --- ПРИМЕНЕНИЕ ФИЛЬТРОВ ДЛЯ ГРАФИКОВ ---
-                active_skus = selected_skus
-                if "[ВСЕ АРТИКУЛЫ]" in selected_skus: 
-                    active_skus = all_available_skus
+                # --- 3. ПРИМЕНЕНИЕ ФИЛЬТРОВ ДЛЯ МАТРИЦЫ И ГРАФИКОВ ---
                 
+                # Обрабатываем выбор артикулов и группировок
+                if "[ВСЕ АРТИКУЛЫ]" in selected_skus or not selected_skus: 
+                    active_skus = all_available_skus
+                else:
+                    active_skus_set = set()
+                    if "[НИЖЕ СРЕДНЕГО]" in selected_skus:
+                        active_skus_set.update(below_avg_skus)
+                    if "[УПАЛИ В РЕЙТИНГЕ]" in selected_skus:
+                        active_skus_set.update(dropped_skus)
+                    
+                    # Добавляем индивидуально выбранные артикулы (исключая наши теги в скобках)
+                    individual_skus = [s for s in selected_skus if not s.startswith("[")]
+                    active_skus_set.update(individual_skus)
+                    
+                    active_skus = list(active_skus_set)
+                
+                # Применяем фильтр по конкретной оценке
                 if sel_rating != "Все":
                     if sel_rating == "Ниже 4.5":
                         valid_skus = last_day_data[last_day_data['Рейтинг'] < 4.5]['Артикул'].tolist()
@@ -1642,11 +1664,11 @@ elif page == "Рейтинг товаров":
                     
                     active_skus = [s for s in active_skus if s in valid_skus]
 
-                # Итоговый датафрейм для отрисовки матриц и линий
+                # Формируем финальный датафрейм
                 df_filtered = df_date_filtered[df_date_filtered['Артикул'].isin(active_skus)].copy()
 
                 if not df_filtered.empty:
-                    # --- 3. ТЕПЛОВАЯ МАТРИЦА ---
+                    # --- 4. ТЕПЛОВАЯ МАТРИЦА ---
                     st.markdown("#### :material/grid_view: Матрица состояния")
                     
                     df_pivot = df_filtered.pivot(index="Артикул", columns="Дата", values="Рейтинг").sort_index()
@@ -1654,7 +1676,6 @@ elif page == "Рейтинг товаров":
 
                     import plotly.graph_objects as go
                     
-                    # Смещение желтого цвета на 4.7
                     custom_colorscale = [
                         [0, '#ef4444'],    # Красный (до 3.5)
                         [0.8, '#fef08a'],  # Желтый начинается с 4.7
@@ -1682,7 +1703,7 @@ elif page == "Рейтинг товаров":
 
                     st.divider()
 
-                    # --- 4. ДЕТАЛЬНАЯ ДИНАМИКА ---
+                    # --- 5. ДЕТАЛЬНАЯ ДИНАМИКА ---
                     st.markdown("#### :material/stacks: Индивидуальные графики")
                     
                     import plotly.express as px
@@ -1718,7 +1739,7 @@ elif page == "Рейтинг товаров":
                     
                     st.plotly_chart(fig_facet, use_container_width=True)
                 else:
-                    st.info("Нет данных по выбранным фильтрам.")
+                    st.info("Нет данных по выбранным фильтрам (либо ни один товар не попал в выбранную группу).")
         except Exception as e:
             st.error(f"Ошибка блока Рейтингов: {e}")
         
