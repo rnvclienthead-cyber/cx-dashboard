@@ -1281,7 +1281,7 @@ elif page == "Отчет производства":
 
             @st.fragment
             def render_production_dashboard(df_full):
-                # --- ИСПРАВЛЕНИЕ: Объявляем переменную в самом начале функции один раз ---
+                # Объявляем константы в начале
                 valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
                 
                 st.markdown("### 🔍 Глобальные фильтры")
@@ -1294,6 +1294,17 @@ elif page == "Отчет производства":
 
                 selected_sku = f_col2.selectbox("Артикул:", sku_list)
                 selected_inv = f_col3.selectbox("Инвойс / Поставка:", inv_list)
+                
+                df_filtered = df_full.copy()
+                
+                if len(date_range) == 2:
+                    df_filtered = df_filtered[
+                        (df_filtered['Дата_ДТ'].dt.date >= date_range[0]) & 
+                        (df_filtered['Дата_ДТ'].dt.date <= date_range[1])
+                    ]
+
+                if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
+                if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
                 
                 df_filtered = df_full.copy()
                 
@@ -1380,61 +1391,87 @@ elif page == "Отчет производства":
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
 
                     # ==========================================================
-                    # ДИНАМИКА ПРОБЛЕМ ПО SKU
+                    # ПОЛНОСТЬЮ ОБНОВЛЕННЫЙ БЛОК: ДИНАМИКА SKU (ГРАФИК ТРЕНДА)
                     # ==========================================================
                     st.markdown("---")
-                    st.markdown("### 📈 Динамика проблем по конкретному SKU (За всё время)")
+                    st.subheader(f"📈 Анализ тренда и категорий: {sku_dyn_target if 'sku_dyn_target' in locals() else ''}")
                     
                     available_skus_all = [s for s in sku_list if s != 'Все']
-                    
                     col_sku_dyn, _ = st.columns([1, 2])
                     sku_dyn_target = col_sku_dyn.selectbox(
-                        "Выберите артикул для анализа динамики:", 
+                        "Выберите артикул для глубокого анализа:", 
                         available_skus_all, 
                         key="sku_dynamic_filter"
                     )
 
                     if sku_dyn_target:
+                        # 1. Загружаем данные: Системные (с категориями) + Исторические (общий тренд)
+                        # Подготовка системных данных
                         clean_skus_dyn = df_full['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
-                        df_sku_dyn = df_full[clean_skus_dyn == sku_dyn_target].copy()
+                        df_sku_sys = df_full[clean_skus_dyn == sku_dyn_target].copy()
                         
+                        # Подготовка исторических данных (для линии общего тренда)
+                        df_hist_sku = pd.DataFrame()
+                        try:
+                            df_hist_sku = pd.read_sql(f"SELECT month_date, defects, source FROM historical_ppm WHERE article = '{sku_dyn_target}'", engine)
+                            if not df_hist_sku.empty:
+                                df_hist_sku['Месяц'] = pd.to_datetime(df_hist_sku['month_date']).dt.to_period('M').dt.to_timestamp()
+                                df_hist_sku = df_hist_sku.groupby('Месяц')['defects'].sum().reset_index(name='Всего дефектов')
+                        except: pass
+
+                        # Собираем данные по 13 категориям
                         dyn_plot_list = []
-                        
                         for i in range(1, 14):
                             cat_col = str(i)
-                            if cat_col in df_sku_dyn.columns:
-                                mask = df_sku_dyn[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
-                                temp = df_sku_dyn[mask].copy()
+                            if cat_col in df_sku_sys.columns:
+                                mask = df_sku_sys[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
+                                temp = df_sku_sys[mask].copy()
                                 if not temp.empty:
-                                    temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ'], errors='coerce').dt.to_period('M').dt.to_timestamp()
-                                    temp = temp.dropna(subset=['Месяц'])
-                                    if not temp.empty:
-                                        monthly_stats = temp.groupby('Месяц').size().reset_index(name='Количество')
-                                        monthly_stats['Причина'] = f"{i}. {CATEGORIES[i]}"
-                                        dyn_plot_list.append(monthly_stats)
+                                    temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ']).dt.to_period('M').dt.to_timestamp()
+                                    monthly = temp.groupby('Месяц').size().reset_index(name='Количество')
+                                    monthly['Причина'] = f"{i}. {CATEGORIES[i]}"
+                                    dyn_plot_list.append(monthly)
                         
-                        if dyn_plot_list:
-                            df_dyn_final = pd.concat(dyn_plot_list)
-                            if not df_dyn_final.empty:
-                                dyn_chart = alt.Chart(df_dyn_final).mark_bar().encode(
-                                    x=alt.X('Месяц:T', title='Период (Месяц)', axis=alt.Axis(format='%m.%Y', tickCount='month')),
-                                    y=alt.Y('Количество:Q', title='Кол-во дефектов'),
-                                    color=alt.Color('Причина:N', title='Категория проблемы', scale=alt.Scale(scheme='category20')),
-                                    tooltip=[
-                                        alt.Tooltip('Месяц:T', title='Месяц', format='%m.%Y'),
-                                        alt.Tooltip('Причина:N', title='Причина'),
-                                        alt.Tooltip('Количество:Q', title='Количество дефектов')
-                                    ]
-                                ).properties(
-                                    height=350, 
-                                    title=f"Распределение проблем: {sku_dyn_target}"
-                                ).interactive(bind_y=False)
-                                
-                                st.altair_chart(dyn_chart, use_container_width=True)
-                            else:
-                                st.info("Нет дат для построения графика.")
+                        if dyn_plot_list or not df_hist_sku.empty:
+                            # Основной график категорий
+                            df_categories = pd.concat(dyn_plot_list) if dyn_plot_list else pd.DataFrame()
+                            
+                            # Настройка осей: используем Ordinal (O) для месяцев, чтобы столбцы/точки были широкими
+                            x_axis = alt.X('Месяц:O', title='Месяц', axis=alt.Axis(labelAngle=-45, format='%m.%Y'))
+                            
+                            # 1. Слой областей (фон для наглядности объема)
+                            area = alt.Chart(df_categories).mark_area(opacity=0.3, interpolate='monotone').encode(
+                                x=x_axis,
+                                y=alt.Y('Количество:Q', stack=True, title='Кол-во дефектов'),
+                                color=alt.Color('Причина:N', scale=alt.Scale(scheme='category20'), legend=alt.Legend(orient="bottom", columns=2))
+                            )
+
+                            # 2. Слой линий и точек (сам тренд)
+                            lines = alt.Chart(df_categories).mark_line(point=True, size=3, interpolate='monotone').encode(
+                                x=x_axis,
+                                y=alt.Y('Количество:Q', stack=True),
+                                color='Причина:N',
+                                tooltip=['Месяц:T', 'Причина:N', 'Количество:Q']
+                            )
+
+                            # 3. Текстовые метки (чтобы сразу видеть цифры)
+                            labels = lines.mark_text(dy=-15, fontWeight='bold').encode(
+                                text='Количество:Q'
+                            )
+
+                            # Сборка финального чарта
+                            final_dyn_chart = alt.layer(area, lines, labels).properties(
+                                width='container',
+                                height=500,
+                                title=f"Динамика дефектов по категориям: {sku_dyn_target}"
+                            ).interactive(bind_y=False)
+
+                            st.altair_chart(final_dyn_chart, use_container_width=True)
+                            
+                            if not df_hist_sku.empty:
+                                st.caption("👆 График выше показывает детальную разбивку. Исторический тренд (общий) доступен в блоке PPM.")
                         else:
-                            st.info("Для выбранного SKU не найдено данных о проблемах за всё время.")
+                            st.info("Данных по этому артикулу не найдено.")
                     
                     # ==========================================================
                     # ПРОБЛЕМНЫЕ ИНВОЙСЫ
