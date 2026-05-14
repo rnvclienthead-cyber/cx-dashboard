@@ -1125,22 +1125,8 @@ elif page == "Отчет производства":
             
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'Не указан'])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
-            
-            months_ru = {1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель', 5: 'Май', 6: 'Июнь', 
-                         7: 'Июль', 8: 'Август', 9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'}
-            today_date = datetime.now()
-            
-            period_options = []
-            for i in range(6): 
-                m = today_date.month - i
-                y = today_date.year
-                if m <= 0:
-                    m += 12
-                    y -= 1
-                period_options.append(f"{months_ru[m]} {y}")
-            period_options.append("За всё время")
 
-           # ==========================================
+            # ==========================================
             # ИНТЕРАКТИВНЫЙ ФРАГМЕНТ ДЛЯ ОТЧЕТА ПРОИЗВОДСТВА
             # ==========================================
             @st.fragment
@@ -1148,17 +1134,30 @@ elif page == "Отчет производства":
                 st.markdown("### 🔍 Глобальные фильтры")
                 f_col1, f_col2, f_col3 = st.columns(3)
                 
-                selected_month = f_col1.selectbox("Период (Дата заявки):", period_options, index=0)
+                with f_col1:
+                    # Находим крайние даты в датасете для дефолтных значений
+                    valid_dates = df_full['Дата_ДТ'].dropna()
+                    latest_date = valid_dates.max() if not valid_dates.empty else pd.to_datetime(datetime.now())
+                    start_default = (latest_date - pd.Timedelta(days=30)).date()
+                    
+                    date_range = st.date_input(
+                        "Период анализа:", 
+                        [start_default, latest_date.date()],
+                        format="DD.MM.YYYY",
+                        key="prod_date_filter"
+                    )
+
                 selected_sku = f_col2.selectbox("Артикул:", sku_list)
                 selected_inv = f_col3.selectbox("Инвойс / Поставка:", inv_list)
                 
                 df_filtered = df_full.copy()
                 
-                if selected_month != "За всё время":
-                    month_name, year_str = selected_month.split(' ')
-                    selected_m = list(months_ru.keys())[list(months_ru.values()).index(month_name)]
-                    selected_y = int(year_str)
-                    df_filtered = df_filtered[(df_filtered['Дата_ДТ'].dt.month == selected_m) & (df_filtered['Дата_ДТ'].dt.year == selected_y)]
+                # Новая фильтрация по выбранным датам
+                if len(date_range) == 2:
+                    df_filtered = df_filtered[
+                        (df_filtered['Дата_ДТ'].dt.date >= date_range[0]) & 
+                        (df_filtered['Дата_ДТ'].dt.date <= date_range[1])
+                    ]
 
                 if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
                 if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
@@ -1369,17 +1368,27 @@ elif page == "Уровень PPM":
             df_total['Месяц_Стр'] = df_total['Месяц_ДТ'].dt.month.map(months_ru) + " " + df_total['Месяц_ДТ'].dt.year.astype(str)
 
             sku_options = sorted(df_total['Артикул'].unique().tolist())
-            available_months = df_total.drop_duplicates('Месяц_Стр').sort_values('Месяц_ДТ', ascending=True)['Месяц_Стр'].tolist()
-
+            
             # ==========================================
             # 2. ИНТЕРАКТИВНЫЙ ФРАГМЕНТ (Перезапускается только он)
             # ==========================================
             @st.fragment
-            def render_ppm_dashboard(df_full, skus, months):
+            def render_ppm_dashboard(df_full, skus):
                 st.markdown("### :material/tune: Настройки отображения")
                 f1, f2 = st.columns(2)
                 
-                sel_months = f1.multiselect("📅 Период для таблицы:", options=months, default=months[-1:])
+                with f1:
+                    valid_dates = df_full['Месяц_ДТ'].dropna()
+                    latest_date = valid_dates.max() if not valid_dates.empty else pd.to_datetime(datetime.now())
+                    start_default = (latest_date - pd.DateOffset(months=6)).date()
+                    
+                    date_range = st.date_input(
+                        "📅 Период анализа:", 
+                        [start_default, latest_date.date()],
+                        format="DD.MM.YYYY",
+                        key="ppm_date_filter"
+                    )
+
                 all_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + skus
                 sel_skus = f2.multiselect("📦 Объекты (Таблица + График):", options=all_options, default=['[Все артикулы]'])
 
@@ -1395,7 +1404,16 @@ elif page == "Уровень PPM":
                             active_skus.add(item)
                 
                 filtered_sku_df = df_full[df_full['Артикул'].isin(active_skus)].copy()
-                table_df = filtered_sku_df[filtered_sku_df['Месяц_Стр'].isin(sel_months)].copy() if sel_months else filtered_sku_df.copy()
+                
+                # Применяем фильтр дат. Берем 1-е число начального месяца для корректного охвата
+                if len(date_range) == 2:
+                    start_month = date_range[0].replace(day=1)
+                    table_df = filtered_sku_df[
+                        (filtered_sku_df['Месяц_ДТ'].dt.date >= start_month) & 
+                        (filtered_sku_df['Месяц_ДТ'].dt.date <= date_range[1])
+                    ].copy()
+                else:
+                    table_df = filtered_sku_df.copy()
 
                 table_agg = table_df.groupby(['Артикул', 'ABC_Группа', 'Класс XYZ']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
                 table_agg['PPM'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 1000000, 0).astype(int)
@@ -1442,7 +1460,6 @@ elif page == "Уровень PPM":
                         delta_color="inverse"
                     )
                     st.caption(f"Доля брака: {round(c_bad/c_tot*100 if c_tot > 0 else 0)}%")
-                # -------------------------------------------------------------
 
                 # --- ВОТ ЗДЕСЬ СОЗДАЮТСЯ КОЛОНКИ ДЛЯ ТАБЛИЦЫ И ГРАФИКА ---
                 col_table, col_chart = st.columns([2.5, 2], gap="large") 
