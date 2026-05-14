@@ -14,6 +14,7 @@ import urllib.request
 import base64
 import streamlit.components.v1 as componentsаа
 import time
+import xlsxwriter
 from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
@@ -113,6 +114,27 @@ CATEGORIES = {
     7: "Хлипкость / Устойчивость", 8: "Пересорт / Ошибка склада", 9: "Качество материалов",
     10: "Габариты и Размер", 11: "Несоответствие описанию", 12: "Субъективное 'Не подошло'",
     13: "Следы использования / Б/У"
+}
+
+# Словари для автоматического заполнения Рекламационных Актов
+CLAIM_MAPPING = {
+    "defect_descr": {
+        "Некомплект": ("Не хватает комплектующих изделий", "缺少配件"),
+        "Дефект": ("Повреждения деталей", "零部件损坏 / 部件有损坏"),
+        "Сварка": ("Некачественная сварка", "焊接质量不良"),
+    },
+    "causes": {
+        "Производство": ("Нарушение при производственном процессе", "生产过程异常"),
+        "Сборка": ("Отклонение в процессе сборки (комплектации)", "装配/配套过程偏差"),
+    }
+}
+
+# Маппинг категорий вашего приложения (ID) в текст Рекламации
+CAT_TO_CLAIM_TEXT = {
+    1: ("Не хватает комплектующих (Фурнитура)", "缺少配件（五金）"),
+    2: ("Не хватает деталей", "缺少零件"),
+    4: ("Производственный дефект / Сварка", "生产过程异常 / 焊接质量不良"),
+    5: ("Механические повреждения", "零部件损坏"),
 }
 
 # ==========================================
@@ -228,6 +250,41 @@ def get_media_for_srid(srid):
                 return str(result[0] or ''), str(result[1] or '')
     except: pass
     return "", ""
+
+def generate_claim_excel(data):
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    sheet = workbook.add_worksheet("Лист1")
+    
+    # Стили
+    bold = workbook.add_format({'bold': True, 'border': 1, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#f8f9fa'})
+    cell = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True})
+    header_style = workbook.add_format({'bold': True, 'bottom': 2, 'font_size': 12})
+
+    # Заголовок
+    sheet.write(0, 0, f"Рекламационный акт № {data['number']}", header_style)
+    sheet.write(0, 9, f"质量投诉报告 №{data['number']}", header_style)
+
+    # Строки данных (Шаблон на основе ваших CSV)
+    rows = [
+        ["Дата составления", data['date'], "", "Поставщик", data['supplier'], "编制日期", data['date'], "", "供应商", data['supplier']],
+        ["Временной промежуток", data['period'], "", "№ инвойса", data['invoice'], "报告期间", "2026年5月", "", "发票号", data['invoice']],
+        ["Артикул", data['sku'], "", "№ партии", "-", "产品编号", data['sku'], "", "批次号", "-"],
+        ["Наименование", data['name'], "", "Кол-во брака", f"{data['defects']} ({data['ppm_pct']}%)", "名称", data['name_cn'], "", "不合格数量", f"{data['defects']} ({data['ppm_pct']}%)"],
+        ["Описание несоответствия", data['desc_ru'], "", "Предварительная причина", data['cause_ru'], "不符合项描述", data['desc_cn'], "", "初步原因", data['cause_cn']],
+    ]
+
+    for r_idx, r_data in enumerate(rows, start=2):
+        for c_idx, val in enumerate(r_data):
+            fmt = cell if c_idx != 0 and c_idx != 5 else bold
+            sheet.write(r_idx, c_idx, val, fmt)
+
+    # Настройка ширины колонок
+    sheet.set_column('A:A', 25); sheet.set_column('B:B', 20); sheet.set_column('E:E', 20)
+    sheet.set_column('F:F', 25); sheet.set_column('G:G', 20); sheet.set_column('J:J', 20)
+
+    workbook.close()
+    return output.getvalue()
 
 # ==========================================
 # ИИ ДВИЖОК
@@ -1368,7 +1425,7 @@ elif page == "Уровень PPM":
             sku_options = sorted(df_total['Артикул'].unique().tolist())
             
             # ==========================================
-            # 2. ИНТЕРАКТИВНЫЙ ФРАГМЕНТ
+            # 2. ИНТЕРАКТИВНЫЙ ФРАГМЕНТ (Твой UI + Генератор)
             # ==========================================
             @st.fragment
             def render_ppm_dashboard(df_full, skus):
@@ -1376,15 +1433,9 @@ elif page == "Уровень PPM":
                 f1, f2 = st.columns(2)
                 
                 with f1:
-                    # Предустановка на текущий месяц (начинается с 1-го числа текущего месяца)
                     today = datetime.now().date()
                     start_current_month = today.replace(day=1)
-                    date_range = st.date_input(
-                        "📅 Период анализа:", 
-                        [start_current_month, today],
-                        format="DD.MM.YYYY",
-                        key="ppm_date_filter"
-                    )
+                    date_range = st.date_input("📅 Период анализа:", [start_current_month, today], format="DD.MM.YYYY", key="ppm_date_filter")
 
                 all_options = ['[Все артикулы]', '[Вся Группа A]', '[Вся Группа B]', '[Вся Группа C]'] + skus
                 sel_skus = f2.multiselect("📦 Объекты (Таблица + График):", options=all_options, default=['[Все артикулы]'])
@@ -1415,7 +1466,6 @@ elif page == "Уровень PPM":
                 table_agg['%'] = np.where(table_agg['Заказы'] > 0, (table_agg['Брак'] / table_agg['Заказы']) * 100, 0)
                 table_agg = table_agg.sort_values(by=['ABC_Группа', 'PPM'], ascending=[True, False])
 
-                # --- ОДИН ЕДИНСТВЕННЫЙ БЛОК МЕТРИК СО СРЕДНИМ PPM ---
                 st.markdown("### 📊 Сводка по группам")
                 m1, m2, m3 = st.columns(3)
 
@@ -1456,22 +1506,22 @@ elif page == "Уровень PPM":
                             "PPM": st.column_config.NumberColumn("PPM", format="%d", width="small")
                         }
                     )
-                    clicked_sku = table_agg.iloc[selection.selection.rows[0]]['Артикул'] if selection.selection.rows else None
+                
+                # Твоя логика определения клика
+                selected_indices = selection.selection.rows
+                clicked_sku = table_agg.iloc[selected_indices[0]]['Артикул'] if selected_indices else None
 
                 with col_chart:
                     chart_base_df = filtered_sku_df[filtered_sku_df['Артикул'] == clicked_sku].copy() if clicked_sku else filtered_sku_df.copy()
                     chart_title = f"Динамика: {clicked_sku}" if clicked_sku else "Динамика: Сводно"
                     
                     if not chart_base_df.empty:
-                        # --- ПОЛНОСТЬЮ ВОССТАНОВЛЕННАЯ ЛОГИКА ГРАФИКА ---
+                        # Твоя фильтрация по датам и источникам (External vs System)
                         latest = chart_base_df['Месяц_ДТ'].max()
                         start = latest - pd.DateOffset(months=11)
                         chart_agg = chart_base_df[chart_base_df['Месяц_ДТ'] >= start].groupby(['Месяц_ДТ', 'Месяц_Стр', 'Source']).agg({'Брак':'sum', 'Заказы':'sum'}).reset_index()
-                        
-                        # Оставляем только 2026 год
                         chart_agg = chart_agg[chart_agg['Месяц_ДТ'] >= '2026-01-01']
                         
-                        # Маски для Истории (до апреля) и Системы (с апреля)
                         mask_hist = (chart_agg['Source'] == 'External') & (chart_agg['Месяц_ДТ'] < '2026-04-01')
                         mask_sys = (chart_agg['Source'] == 'System') & (chart_agg['Месяц_ДТ'] >= '2026-04-01')
                         chart_agg = chart_agg[mask_hist | mask_sys]
@@ -1484,42 +1534,46 @@ elif page == "Уровень PPM":
 
                         st.markdown(f"#### :material/monitoring: {chart_title}")
                         fig = go.Figure()
-                        
                         for src, clr, nm in [('External', '#f39c12', 'История'), ('System', '#3b82f6', 'Система')]:
                             curr = chart_agg[chart_agg['Source'] == src]
                             if not curr.empty:
-                                fig.add_trace(go.Bar(
-                                    x=curr['Месяц_Стр'], 
-                                    y=curr['PPM'], 
-                                    name=nm, 
-                                    marker_color=clr, 
-                                    text=curr['PPM'].apply(lambda x: str(x) if x > 0 else ""), 
-                                    textposition='outside'
-                                ))
+                                fig.add_trace(go.Bar(x=curr['Месяц_Стр'], y=curr['PPM'], name=nm, marker_color=clr, text=curr['PPM'], textposition='outside'))
                         
                         fig.add_hline(y=10000, line_dash="dash", line_color="#e74c3c", annotation_text="Limit 1%")
                         fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
                         
-                        fig.update_layout(
-                            barmode='overlay',
-                            height=420, 
-                            margin=dict(l=0, r=0, t=20, b=0),
-                            xaxis=dict(
-                                type='category', 
-                                categoryorder='array', 
-                                categoryarray=chart_agg['Месяц_Стр'].unique(), 
-                                showgrid=False
-                            ),
-                            legend=dict(orientation="h", y=1.15),
-                            yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
-                            yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True),
-                            hovermode="x unified"
-                        )
+                        fig.update_layout(barmode='overlay', height=420, margin=dict(l=0, r=0, t=20, b=0),
+                            xaxis=dict(type='category', categoryorder='array', categoryarray=chart_agg['Месяц_Стр'].unique(), showgrid=False),
+                            legend=dict(orientation="h", y=1.15), yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
+                            yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True), hovermode="x unified")
                         st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("Нет данных для графика")
+                    else: st.info("Нет данных для графика")
 
-            # Вызов созданного фрагмента
+                # --- НОВЫЙ БЛОК: ГЕНЕРАТОР ПРЕТЕНЗИИ ---
+                if selected_indices:
+                    selected_row = table_agg.iloc[selected_indices[0]]
+                    st.markdown("---")
+                    st.subheader(f"🛠 Формирование претензии для {selected_row['Артикул']}")
+                    cl1, cl2, cl3 = st.columns(3)
+                    with cl1:
+                        sup = st.text_input("Завод", value="Pujiang-Haohong", key="cl_sup")
+                        num = st.text_input("Номер РА", value="102", key="cl_num")
+                    with cl2:
+                        d_ru = st.text_area("Описание (RU)", "Повреждения деталей / Некачественная сварка", key="cl_d_ru")
+                    with cl3:
+                        d_cn = st.text_area("Описание (CN)", "零部件损坏 / 焊接质量不良", key="cl_d_cn")
+
+                    c_data = {
+                        "number": num, "date": datetime.now().strftime("%Y-%m-%d"), "supplier": sup,
+                        "period": "Май 2026г.", "invoice": "---", "sku": selected_row['Артикул'],
+                        "name": "Изделие", "name_cn": "产品", "defects": selected_row['Брак'],
+                        "ppm_pct": round(selected_row['%'], 2), "desc_ru": d_ru, "desc_cn": d_cn,
+                        "cause_ru": "Нарушение при производстве", "cause_cn": "生产过程异常"
+                    }
+                    if st.download_button("📥 Скачать Акт", data=generate_claim_excel(c_data), 
+                                          file_name=f"RA_{num}_{selected_row['Артикул']}.xlsx", type="primary", use_container_width=True):
+                        st.balloons()
+
             render_ppm_dashboard(df_total, sku_options)
 
     except Exception as e:
