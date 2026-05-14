@@ -1157,13 +1157,15 @@ elif page == "Отчет производства":
     
     import altair as alt 
     import time
-    from collections import defaultdict # Понадобится для группировки проблем
+    from collections import defaultdict
     
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
         st.subheader(f"📦 Артикул: {sku} | 🛠 Причина: {reason_name}")
         
-        details = filtered_df[(filtered_df['Артикул продавца'] == sku) & (filtered_df[str(reason_id)].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да']))]
+        # ИСПРАВЛЕНИЕ 1: Приводим Артикулы к тому же виду, что и в матрице, чтобы избежать сбоя при "Без артикула"
+        clean_skus = filtered_df['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
+        details = filtered_df[(clean_skus == sku) & (filtered_df[str(reason_id)].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да']))]
         
         if not details.empty:
             all_original_photos = []
@@ -1218,30 +1220,30 @@ elif page == "Отчет производства":
             st.session_state.matrix_key = int(time.time())
             st.rerun()
 
-    # --- НОВЫЙ ДИАЛОГ ДЛЯ ИНВОЙСОВ ---
+    # --- ДИАЛОГ ДЛЯ ИНВОЙСОВ ---
     @st.dialog("Детализация Инвойса", width="medium")
     def show_invoice_details(invoice, filtered_df):
         st.subheader(f"🧾 Инвойс: {invoice}")
         
-        # Находим все заявки этого инвойса
-        inv_details = filtered_df[filtered_df['Инвойс'].astype(str).str.strip() == invoice]
+        # ИСПРАВЛЕНИЕ 2: Приводим Инвойсы к тому же виду, что на графике, для защиты от 'nan' / 'None'
+        clean_inv = filtered_df['Инвойс'].astype(str).str.strip().replace(['nan', 'None', ''], 'Не указан')
+        inv_details = filtered_df[clean_inv == invoice]
         
         if not inv_details.empty:
             st.write(f"**Всего дефектных заявок в инвойсе:** {len(inv_details)}")
             st.markdown("---")
             
-            # Собираем статистику: Артикул -> Причина -> Количество
             sku_stats = defaultdict(lambda: defaultdict(int))
             valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
             
             for _, r in inv_details.iterrows():
                 sku = str(r.get('Артикул продавца', 'Без артикула')).strip()
+                if not sku: sku = 'Без артикула'
                 for i in range(1, 14):
                     cat_col = str(i)
                     if cat_col in r and str(r.get(cat_col, '')).strip().lower() in valid_tag_vals:
                         sku_stats[sku][CATEGORIES[i]] += 1
             
-            # Красиво выводим артикулы и их проблемы
             for sku, problems in sku_stats.items():
                 st.markdown(f"#### 📦 {sku}")
                 for prob, count in problems.items():
@@ -1251,11 +1253,11 @@ elif page == "Отчет производства":
             st.info("Нет данных по этому инвойсу.")
 
         if st.button("Закрыть окно", type="primary"):
-            st.session_state.invoice_key = int(time.time()) # Сбрасываем ключ графика
+            st.session_state.invoice_key = int(time.time()) 
             st.rerun()
 
     # ==========================================
-    # ТЯЖЕЛАЯ ЧАСТЬ (Выполняется снаружи фрагмента)
+    # ТЯЖЕЛАЯ ЧАСТЬ
     # ==========================================
     try:
         with st.spinner("📊 Загрузка и анализ данных..."):
@@ -1266,7 +1268,6 @@ elif page == "Отчет производства":
             df['Инвойс'] = df['Инвойс'].fillna('Не указан')
             df['Номер поставки_ОРИГИНАЛ'] = df.get('Номер поставки_ОРИГИНАЛ', 'Не указан').fillna('Не указан')
             
-            # --- ВЕКТОРИЗОВАННАЯ РАЗМЕТКА ---
             valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
             tag_cols = [str(i) for i in range(1, 14) if str(i) in df.columns]
             if tag_cols:
@@ -1326,7 +1327,6 @@ elif page == "Отчет производства":
                 st.info("💡 **Кликните на любой цветной квадрат (или столбец инвойса ниже) для мгновенной детализации!**")
                 
                 matrix_list = []
-                # --- ВЕКТОРИЗОВАННЫЙ СБОР МАТРИЦЫ ---
                 if tag_cols:
                     df_tags_filt = df_filtered[tag_cols].fillna('').astype(str).apply(lambda x: x.str.strip().str.lower())
                     for i in range(1, 14):
@@ -1377,12 +1377,11 @@ elif page == "Отчет производства":
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
 
                     # ==========================================================
-                    # НОВЫЙ БЛОК: ДИНАМИКА ПРОБЛЕМ ПО SKU (МЕЖДУ МАТРИЦЕЙ И ИНВОЙСАМИ)
+                    # ДИНАМИКА ПРОБЛЕМ ПО SKU
                     # ==========================================================
                     st.markdown("---")
                     st.markdown("### 📈 Динамика проблем по конкретному SKU")
                     
-                    # Получаем список SKU, у которых есть хотя бы одна проблема в текущем фильтре
                     available_skus = sorted(df_matrix['Артикул продавца'].unique())
                     
                     col_sku_dyn, _ = st.columns([1, 2])
@@ -1393,45 +1392,46 @@ elif page == "Отчет производства":
                     )
 
                     if sku_dyn_target:
-                        # Фильтруем исходный df_filtered по выбранному SKU
-                        df_sku_dyn = df_filtered[df_filtered['Артикул продавца'].astype(str) == sku_dyn_target].copy()
+                        # ИСПРАВЛЕНИЕ 3: Применяем тот же фильтр, иначе поиск по "Без артикула" выдаст пустоту
+                        clean_skus_dyn = df_filtered['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
+                        df_sku_dyn = df_filtered[clean_skus_dyn == sku_dyn_target].copy()
                         
-                        # Подготавливаем данные для графика динамики
                         dyn_plot_list = []
-                        valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
                         
                         for i in range(1, 14):
                             cat_col = str(i)
                             if cat_col in df_sku_dyn.columns:
-                                # Находим строки, где этот тег проставлен
                                 mask = df_sku_dyn[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
                                 temp = df_sku_dyn[mask].copy()
                                 if not temp.empty:
-                                    # Группируем по месяцу
-                                    temp['Месяц'] = temp['Дата_ДТ'].dt.to_period('M').dt.to_timestamp()
-                                    monthly_stats = temp.groupby('Месяц').size().reset_index(name='Кол-во')
-                                    monthly_stats['Причина'] = f"{i}. {CATEGORIES[i]}"
-                                    dyn_plot_list.append(monthly_stats)
+                                    # ИСПРАВЛЕНИЕ 4: Безопасно преобразуем даты, удаляя пустые (NaT), чтобы Altair не падал
+                                    temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ'], errors='coerce').dt.to_period('M').dt.to_timestamp()
+                                    temp = temp.dropna(subset=['Месяц'])
+                                    if not temp.empty:
+                                        monthly_stats = temp.groupby('Месяц').size().reset_index(name='Кол-во')
+                                        monthly_stats['Причина'] = f"{i}. {CATEGORIES[i]}"
+                                        dyn_plot_list.append(monthly_stats)
                         
                         if dyn_plot_list:
                             df_dyn_final = pd.concat(dyn_plot_list)
-                            
-                            # Отрисовка графика динамики (Стековые столбцы)
-                            dyn_chart = alt.Chart(df_dyn_final).mark_bar().encode(
-                                x=alt.X('Месяц:T', title='Период (Месяц)', axis=alt.Axis(format='%m.%Y')),
-                                y=alt.Y('Кол-во:Q', title='Кол-во дефектов'),
-                                color=alt.Color('Причина:N', title='Категория проблемы', scale=alt.Scale(scheme='category20')),
-                                tooltip=[
-                                    alt.Tooltip('Месяц:T', title='Месяц', format='%m.%Y'),
-                                    alt.Tooltip('Причина:N', title='Причина'),
-                                    alt.Tooltip('Кол-во:Q', title='Количество')
-                                ]
-                            ).properties(height=350, title=f"Распределение проблем по месяцам: {sku_dyn_target}")
-                            
-                            st.altair_chart(dyn_chart, use_container_width=True)
+                            if not df_dyn_final.empty:
+                                dyn_chart = alt.Chart(df_dyn_final).mark_bar().encode(
+                                    x=alt.X('Месяц:T', title='Период (Месяц)', axis=alt.Axis(format='%m.%Y')),
+                                    y=alt.Y('Кол-во:Q', title='Кол-во дефектов'),
+                                    color=alt.Color('Причина:N', title='Категория проблемы', scale=alt.Scale(scheme='category20')),
+                                    tooltip=[
+                                        alt.Tooltip('Месяц:T', title='Месяц', format='%m.%Y'),
+                                        alt.Tooltip('Причина:N', title='Причина'),
+                                        alt.Tooltip('Кол-во:Q', title='Количество')
+                                    ]
+                                ).properties(height=350, title=f"Распределение проблем по месяцам: {sku_dyn_target}")
+                                
+                                st.altair_chart(dyn_chart, use_container_width=True)
+                            else:
+                                st.info("Нет дат для построения графика.")
                         else:
                             st.info("Для выбранного SKU не найдено данных о проблемах в указанный период.")
-                
+                    
                     st.markdown("---")
                     st.markdown("### 📦 Проблемные инвойсы (Топ-15)")
                     
@@ -1457,7 +1457,6 @@ elif page == "Отчет производства":
                         if invoice_grouped:
                             df_invoice = pd.DataFrame(invoice_grouped).sort_values('Дефекты', ascending=False).head(15)
                             
-                            # ИНТЕРАКТИВНОСТЬ: Добавляем выбор (selection) для инвойсов
                             inv_click_selector = alt.selection_point(name='inv_click', fields=['Инвойс'])
                             
                             invoice_chart = alt.Chart(df_invoice).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
@@ -1470,13 +1469,11 @@ elif page == "Отчет производства":
                                     alt.Tooltip('Поставки:N', title='Связанные поставки'), 
                                     alt.Tooltip('Список Артикулов:N', title='Артикулы')
                                 ]
-                            ).properties(height=350).add_params(inv_click_selector) # Привязываем селектор
+                            ).properties(height=350).add_params(inv_click_selector)
                             
-                            # Динамический ключ для графика инвойсов (защита от зависания окна)
                             current_inv_key = st.session_state.get('invoice_key', 0)
                             inv_event = st.altair_chart(invoice_chart, use_container_width=True, on_select="rerun", key=f"inv_chart_{current_inv_key}")
                             
-                            # Отработка клика по столбцу инвойса
                             if inv_event and hasattr(inv_event, "selection"):
                                 sel_inv = inv_event.selection.get("inv_click", [])
                                 if sel_inv and len(sel_inv) > 0:
