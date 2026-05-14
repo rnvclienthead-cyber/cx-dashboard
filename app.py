@@ -1377,65 +1377,99 @@ elif page == "Отчет производства":
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
 
                     # ==========================================================
-                    # ДИНАМИКА ПРОБЛЕМ ПО SKU (Игнорирует глобальные фильтры)
+                    # УЛУЧШЕННАЯ ДИНАМИКА: ИСТОРИЯ (SQL) + СИСТЕМА (ТЕГИ)
                     # ==========================================================
                     st.markdown("---")
-                    st.markdown("### 📈 Динамика проблем по конкретному SKU (За всё время)")
+                    st.markdown("### 📈 Глубокая динамика дефектов по SKU")
                     
-                    # Берем список ВСЕХ доступных артикулов из исходной базы (исключая 'Все')
-                    available_skus_all = [s for s in sku_list if s != 'Все']
+                    # 1. Получаем ВСЕ возможные артикулы (из истории и из текущих данных)
+                    hist_skus = []
+                    try:
+                        hist_skus = pd.read_sql("SELECT DISTINCT article FROM historical_ppm", engine)['article'].tolist()
+                    except: pass
                     
+                    all_available_skus = sorted(list(set(hist_skus + df_full['Артикул продавца'].astype(str).unique().tolist())))
+                    if 'Все' in all_available_skus: all_available_skus.remove('Все')
+
                     col_sku_dyn, _ = st.columns([1, 2])
                     sku_dyn_target = col_sku_dyn.selectbox(
-                        "Выберите артикул для анализа динамики:", 
-                        available_skus_all, 
-                        key="sku_dynamic_filter"
+                        "Выберите артикул для анализа истории:", 
+                        all_available_skus, 
+                        key="sku_dynamic_filter_v2"
                     )
 
                     if sku_dyn_target:
-                        # ИСПОЛЬЗУЕМ df_full ВМЕСТО df_filtered, чтобы игнорировать глобальный фильтр дат
-                        clean_skus_dyn = df_full['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
-                        df_sku_dyn = df_full[clean_skus_dyn == sku_dyn_target].copy()
-                        
-                        dyn_plot_list = []
-                        
-                        for i in range(1, 14):
-                            cat_col = str(i)
-                            if cat_col in df_sku_dyn.columns:
-                                mask = df_sku_dyn[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
-                                temp = df_sku_dyn[mask].copy()
-                                if not temp.empty:
-                                    temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ'], errors='coerce').dt.to_period('M').dt.to_timestamp()
-                                    temp = temp.dropna(subset=['Месяц'])
-                                    if not temp.empty:
-                                        # Называем колонку 'Количество' для красивого тултипа
-                                        monthly_stats = temp.groupby('Месяц').size().reset_index(name='Количество')
-                                        monthly_stats['Причина'] = f"{i}. {CATEGORIES[i]}"
-                                        dyn_plot_list.append(monthly_stats)
-                        
-                        if dyn_plot_list:
-                            df_dyn_final = pd.concat(dyn_plot_list)
-                            if not df_dyn_final.empty:
-                                dyn_chart = alt.Chart(df_dyn_final).mark_bar().encode(
-                                    x=alt.X('Месяц:T', title='Период (Месяц)', axis=alt.Axis(format='%m.%Y', tickCount='month')),
-                                    y=alt.Y('Количество:Q', title='Кол-во дефектов'),
-                                    color=alt.Color('Причина:N', title='Категория проблемы', scale=alt.Scale(scheme='category20')),
-                                    # Тултип гарантированно показывает количество при наведении на сегмент
-                                    tooltip=[
-                                        alt.Tooltip('Месяц:T', title='Месяц', format='%m.%Y'),
-                                        alt.Tooltip('Причина:N', title='Причина'),
-                                        alt.Tooltip('Количество:Q', title='Количество дефектов')
-                                    ]
-                                ).properties(
-                                    height=350, 
-                                    title=f"Распределение проблем: {sku_dyn_target}"
-                                ).interactive(bind_y=False) # Добавляем легкую интерактивность (зум по X), тултипы будут работать идеально
+                        with st.spinner("Собираем данные по крупицам..."):
+                            # --- А. ЗАГРУЗКА ИСТОРИИ ИЗ SQL ---
+                            df_hist_sku = pd.DataFrame()
+                            try:
+                                query = text("SELECT month_date, defects FROM historical_ppm WHERE article = :sku")
+                                df_hist_sku = pd.read_sql(query, engine, params={"sku": sku_dyn_target})
+                                if not df_hist_sku.empty:
+                                    df_hist_sku['month_date'] = pd.to_datetime(df_hist_sku['month_date'])
+                                    df_hist_sku['Причина'] = "История (Общее количество)"
+                                    df_hist_sku.rename(columns={'month_date': 'Месяц', 'defects': 'Количество'}, inplace=True)
+                            except: pass
+
+                            # --- Б. ОБРАБОТКА ТЕКУЩИХ ДАННЫХ (С ТЕГАМИ) ---
+                            # Берем df_full (игнорируем глобальный фильтр)
+                            clean_skus_all = df_full['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
+                            df_sku_sys = df_full[clean_skus_all == sku_dyn_target].copy()
+                            
+                            dyn_plot_list = []
+                            if not df_sku_sys.empty:
+                                valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
+                                for i in range(1, 14):
+                                    cat_col = str(i)
+                                    if cat_col in df_sku_sys.columns:
+                                        mask = df_sku_sys[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
+                                        temp = df_sku_sys[mask].copy()
+                                        if not temp.empty:
+                                            temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ']).dt.to_period('M').dt.to_timestamp()
+                                            monthly = temp.groupby('Месяц').size().reset_index(name='Количество')
+                                            monthly['Причина'] = f"{i}. {CATEGORIES[i]}"
+                                            dyn_plot_list.append(monthly)
+                            
+                            # --- В. ОБЪЕДИНЕНИЕ ---
+                            final_dyn_df = pd.DataFrame()
+                            if dyn_plot_list:
+                                final_dyn_df = pd.concat(dyn_plot_list)
+                            
+                            # Если есть история, добавляем её, но только те месяцы, которых нет в системе
+                            if not df_hist_sku.empty:
+                                if not final_dyn_df.empty:
+                                    existing_months = final_dyn_df['Месяц'].unique()
+                                    df_hist_sku = df_hist_sku[~df_hist_sku['Месяц'].isin(existing_months)]
+                                final_dyn_df = pd.concat([final_dyn_df, df_hist_sku])
+
+                            if not final_dyn_df.empty:
+                                final_dyn_df = final_dyn_df.sort_values('Месяц')
                                 
-                                st.altair_chart(dyn_chart, use_container_width=True)
+                                # --- ПОСТРОЕНИЕ ГРАФИКА ---
+                                # Основной график: Области с накоплением для наглядности динамики
+                                area_chart = alt.Chart(final_dyn_df).mark_area(opacity=0.6, line=True).encode(
+                                    x=alt.X('Месяц:T', title='Месяц', axis=alt.Axis(format='%m.%Y', tickCount='month')),
+                                    y=alt.Y('Количество:Q', stack=True, title='Кол-во дефектов'),
+                                    color=alt.Color('Причина:N', 
+                                                   scale=alt.Scale(scheme='tableau20'),
+                                                   legend=alt.Legend(orient='bottom', columns=2),
+                                                   title="Категория"),
+                                    tooltip=[
+                                        alt.Tooltip('Месяц:T', title='Дата', format='%B %Y'),
+                                        alt.Tooltip('Причина:N', title='Проблема'),
+                                        alt.Tooltip('Количество:Q', title='Кол-во')
+                                    ]
+                                ).properties(height=450, title=f"Полная история дефектов: {sku_dyn_target}")
+
+                                # Линия общего тренда сверху
+                                total_line = alt.Chart(final_dyn_df).mark_line(color='red', size=2, strokeDash=[5,5]).encode(
+                                    x='Месяц:T',
+                                    y='sum(Количество):Q'
+                                )
+
+                                st.altair_chart(area_chart + total_line, use_container_width=True)
                             else:
-                                st.info("Нет дат для построения графика.")
-                        else:
-                            st.info("Для выбранного SKU не найдено данных о проблемах за всё время.")
+                                st.info("Данные по этому артикулу отсутствуют во всех источниках.")
                     # ==========================================================
                     
                     st.markdown("---")
