@@ -149,6 +149,27 @@ class WBRatingsParser:
                     timezone_id='Europe/Moscow'
                 )
 
+                # --- ДИАГНОСТИКА ПРОКСИ ---
+                print("🔍 Проверка прокси-соединения...")
+                test_page = await context.new_page()
+                try:
+                    # Идем на независимый сервис проверки IP
+                    response = await test_page.goto("https://api.ipify.org?format=json", timeout=15000)
+                    ip_data = await response.json()
+                    current_ip = ip_data.get('ip')
+                    print(f"🌐 Внешний IP браузера: {current_ip}")
+                    
+                    if current_ip == "IP_ТВОЕГО_СЕРВЕРА_VPS":
+                        print("⚠️ ВНИМАНИЕ: Прокси не сработал! Браузер идет напрямую с сервера.")
+                    else:
+                        print("✅ Прокси работает успешно! Начинаем парсинг ВБ...")
+                except Exception as e:
+                    print(f"❌ ОШИБКА ПРОКСИ: Не удалось выйти в интернет. Проверьте данные прокси. Детали: {e}")
+                    return self.results # Прерываем скрипт, так как ВБ тоже не загрузится
+                finally:
+                    await test_page.close()
+                # ---------------------------
+
                 async def parse_with_delay(article):
                     await asyncio.sleep(random.uniform(1, 3))
                     return await self.parse_single_article(context, article)
@@ -157,7 +178,6 @@ class WBRatingsParser:
                 print(f"🚀 [Проход 1/2] Запуск для {len(article_list)} артикулов...")
                 tasks = [self.parse_single_article(context, article) for article in article_list]
                 await asyncio.gather(*tasks)
-
                 # --- ВТОРОЙ ПРОХОД (RETRY) ---
                 to_retry = [res["article"] for res in self.results if res["status"] == "failed" or res["rating_val"] == 0.0]
                 
