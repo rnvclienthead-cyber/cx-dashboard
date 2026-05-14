@@ -1562,7 +1562,7 @@ elif page == "Рейтинг товаров":
                 col_f1, col_f2, col_f3 = st.columns([1.5, 2, 1])
                 
                 with col_f1:
-                    # Период (Пункт 2: Первый в строке, российский формат)
+                    # Период (Российский формат)
                     start_default = (latest_overall_date - pd.Timedelta(days=7)).date()
                     date_range = st.date_input(
                         "Период анализа:", 
@@ -1570,7 +1570,7 @@ elif page == "Рейтинг товаров":
                         format="DD.MM.YYYY"
                     )
 
-                # Шаг 1: Первичная фильтрация по дате (чтобы определить "последний день периода" для фильтра рейтинга)
+                # Шаг 1: Первичная фильтрация по дате (определяем "последний день периода" для фильтра рейтинга)
                 if len(date_range) == 2:
                     df_date_filtered = df_ratings[
                         (df_ratings['Дата'].dt.date >= date_range[0]) & 
@@ -1595,7 +1595,7 @@ elif page == "Рейтинг товаров":
                     )
 
                 with col_f3:
-                    # Фильтр по рейтингу (Пункт 5: Замена ABC на фильтр рейтинга)
+                    # Фильтр по рейтингу
                     rating_options = ["Все", "5.0", "4.9", "4.8", "4.7", "4.6", "4.5", "Ниже 4.5"]
                     sel_rating = st.selectbox("Рейтинг на конец периода:", rating_options)
 
@@ -1618,7 +1618,7 @@ elif page == "Рейтинг товаров":
                 # Итоговый датафрейм для отрисовки
                 df_filtered = df_date_filtered[df_date_filtered['Артикул'].isin(active_skus)].copy()
 
-                # --- 2. СВОДКА СОСТОЯНИЯ (Пункт 2 и 3: Информативные, без кнопок, 3 колонки) ---
+                # --- 2. СВОДКА СОСТОЯНИЯ ---
                 st.markdown("### :material/analytics: Сводка")
                 
                 # Метрики считаем по последнему дню выбранного периода
@@ -1628,7 +1628,6 @@ elif page == "Рейтинг товаров":
                 avg_rating = df_last['Рейтинг'].mean() if not df_last.empty else 0.0
                 critical_count = len(df_last[df_last['Рейтинг'] < avg_rating]) if not df_last.empty else 0
 
-                # Используем стандартный st.metric, который отлично вписывается в минимализм
                 m1, m2, m3 = st.columns(3)
                 m1.metric("📦 Всего товаров", f"{total_skus} SKU")
                 m2.metric("⚠️ Ниже среднего", f"{critical_count} SKU", help=f"Товары с рейтингом ниже {avg_rating:.2f}")
@@ -1645,8 +1644,7 @@ elif page == "Рейтинг товаров":
 
                     import plotly.graph_objects as go
                     
-                    # Пункт 4: Смещение желтого цвета на 4.7
-                    # zmin=3.5, zmax=5.0. Диапазон 1.5. (4.7 - 3.5) / 1.5 = 1.2 / 1.5 = 0.8
+                    # Смещение желтого цвета на 4.7
                     custom_colorscale = [
                         [0, '#ef4444'],    # Красный (до 3.5)
                         [0.8, '#fef08a'],  # Желтый начинается с 4.7
@@ -1682,7 +1680,7 @@ elif page == "Рейтинг товаров":
                     num_skus = len(df_filtered['Артикул'].unique())
                     num_rows = (num_skus - 1) // 3 + 1
                     
-                    # Пункт 6: Безопасный расчет отступа между фасетами (защита от краша Plotly)
+                    # Безопасный расчет отступа между фасетами (защита от краша Plotly)
                     safe_spacing = min(0.04, 0.9 / (num_rows - 1)) if num_rows > 1 else 0.0
                     
                     fig_facet = px.line(
