@@ -1584,7 +1584,7 @@ elif page == "Рейтинг товаров":
 
                 # --- ПРЕДВАРИТЕЛЬНЫЙ РАСЧЕТ ДЛЯ СВОДКИ И ГРУППИРОВОК ---
                 total_skus = len(last_day_data)
-                avg_rating = last_day_data['Рейтинг'].mean() if not last_day_data.empty else 0.0
+                avg_rating = round(last_day_data['Рейтинг'].mean(), 1) if not last_day_data.empty else 0.0
                 
                 # Собираем список артикулов "Ниже среднего"
                 below_avg_skus = last_day_data[last_day_data['Рейтинг'] < avg_rating]['Артикул'].tolist() if not last_day_data.empty else []
