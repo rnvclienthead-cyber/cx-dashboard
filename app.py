@@ -1281,39 +1281,24 @@ elif page == "Отчет производства":
 
             @st.fragment
             def render_production_dashboard(df_full):
-                # Объявляем константы в начале
+                # 1. Объявляем константы в самом начале фрагмента
                 valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
                 
+                # --- Глобальные фильтры (ваша логика) ---
                 st.markdown("### 🔍 Глобальные фильтры")
                 f_col1, f_col2, f_col3 = st.columns(3)
-                
                 with f_col1:
                     today = datetime.now().date()
-                    start_current_month = today.replace(day=1)
-                    date_range = st.date_input("Период анализа:", [start_current_month, today], format="DD.MM.YYYY", key="prod_date_filter")
-
+                    start_month = today.replace(day=1)
+                    date_range = st.date_input("Период анализа:", [start_month, today], format="DD.MM.YYYY", key="prod_date_filter")
+                
                 selected_sku = f_col2.selectbox("Артикул:", sku_list)
                 selected_inv = f_col3.selectbox("Инвойс / Поставка:", inv_list)
                 
+                # Фильтрация для статистики и хитмапа
                 df_filtered = df_full.copy()
-                
                 if len(date_range) == 2:
-                    df_filtered = df_filtered[
-                        (df_filtered['Дата_ДТ'].dt.date >= date_range[0]) & 
-                        (df_filtered['Дата_ДТ'].dt.date <= date_range[1])
-                    ]
-
-                if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
-                if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
-                
-                df_filtered = df_full.copy()
-                
-                if len(date_range) == 2:
-                    df_filtered = df_filtered[
-                        (df_filtered['Дата_ДТ'].dt.date >= date_range[0]) & 
-                        (df_filtered['Дата_ДТ'].dt.date <= date_range[1])
-                    ]
-
+                    df_filtered = df_filtered[(df_filtered['Дата_ДТ'].dt.date >= date_range[0]) & (df_filtered['Дата_ДТ'].dt.date <= date_range[1])]
                 if selected_sku != 'Все': df_filtered = df_filtered[df_filtered['Артикул продавца'].astype(str) == selected_sku]
                 if selected_inv != 'Все': df_filtered = df_filtered[df_filtered['Инвойс'].astype(str) == selected_inv]
 
@@ -1391,87 +1376,78 @@ elif page == "Отчет производства":
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
 
                     # ==========================================================
-                    # ПОЛНОСТЬЮ ОБНОВЛЕННЫЙ БЛОК: ДИНАМИКА SKU (ГРАФИК ТРЕНДА)
-                    # ==========================================================
-                    st.markdown("---")
-                    st.subheader(f"📈 Анализ тренда и категорий: {sku_dyn_target if 'sku_dyn_target' in locals() else ''}")
-                    
-                    available_skus_all = [s for s in sku_list if s != 'Все']
-                    col_sku_dyn, _ = st.columns([1, 2])
-                    sku_dyn_target = col_sku_dyn.selectbox(
-                        "Выберите артикул для глубокого анализа:", 
-                        available_skus_all, 
-                        key="sku_dynamic_filter"
-                    )
+                # ОБНОВЛЕННЫЙ БЛОК: ДИНАМИКА SKU (Plotly Trend)
+                # ==========================================================
+                st.markdown("---")
+                st.markdown("### 📈 Детальная динамика и Исторический тренд")
+                
+                # Список артикулов для выбора (игнорирует верхний фильтр дат)
+                all_sku_options = [s for s in sku_list if s != 'Все']
+                
+                c_sku, _ = st.columns([1.5, 2])
+                sku_dyn_target = c_sku.selectbox("Выберите SKU для анализа тренда:", all_sku_options, key="sku_trend_select")
 
-                    if sku_dyn_target:
-                        # 1. Загружаем данные: Системные (с категориями) + Исторические (общий тренд)
-                        # Подготовка системных данных
-                        clean_skus_dyn = df_full['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула')
-                        df_sku_sys = df_full[clean_skus_dyn == sku_dyn_target].copy()
+                if sku_dyn_target:
+                    with st.spinner("Сбор истории и системных данных..."):
+                        plot_data = []
                         
-                        # Подготовка исторических данных (для линии общего тренда)
-                        df_hist_sku = pd.DataFrame()
+                        # 1. Собираем системные данные по категориям (из df_full)
+                        df_sku_sys = df_full[df_full['Артикул продавца'].astype(str).str.strip() == sku_dyn_target].copy()
+                        if not df_sku_sys.empty:
+                            for i in range(1, 14):
+                                cat_col = str(i)
+                                if cat_col in df_sku_sys.columns:
+                                    mask = df_sku_sys[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
+                                    temp = df_sku_sys[mask].copy()
+                                    if not temp.empty:
+                                        temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ']).dt.to_period('M').dt.to_timestamp()
+                                        monthly = temp.groupby('Месяц').size().reset_index(name='Количество')
+                                        monthly['Источник'] = f"{i}. {CATEGORIES.get(i, f'Категория {i}')}"
+                                        plot_data.append(monthly)
+
+                        # 2. Подтягиваем историю из SQL (таблица historical_ppm)
                         try:
-                            df_hist_sku = pd.read_sql(f"SELECT month_date, defects, source FROM historical_ppm WHERE article = '{sku_dyn_target}'", engine)
-                            if not df_hist_sku.empty:
-                                df_hist_sku['Месяц'] = pd.to_datetime(df_hist_sku['month_date']).dt.to_period('M').dt.to_timestamp()
-                                df_hist_sku = df_hist_sku.groupby('Месяц')['defects'].sum().reset_index(name='Всего дефектов')
+                            hist_query = text("SELECT month_date, defects FROM historical_ppm WHERE article = :sku")
+                            with engine.connect() as conn:
+                                df_h = pd.read_sql(hist_query, conn, params={"sku": sku_dyn_target})
+                            if not df_h.empty:
+                                df_h['Месяц'] = pd.to_datetime(df_h['month_date']).dt.to_period('M').dt.to_timestamp()
+                                df_h = df_h.groupby('Месяц')['defects'].sum().reset_index(name='Количество')
+                                df_h['Источник'] = "История (Общий брак)"
+                                plot_data.append(df_h)
                         except: pass
 
-                        # Собираем данные по 13 категориям
-                        dyn_plot_list = []
-                        for i in range(1, 14):
-                            cat_col = str(i)
-                            if cat_col in df_sku_sys.columns:
-                                mask = df_sku_sys[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
-                                temp = df_sku_sys[mask].copy()
-                                if not temp.empty:
-                                    temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ']).dt.to_period('M').dt.to_timestamp()
-                                    monthly = temp.groupby('Месяц').size().reset_index(name='Количество')
-                                    monthly['Причина'] = f"{i}. {CATEGORIES[i]}"
-                                    dyn_plot_list.append(monthly)
-                        
-                        if dyn_plot_list or not df_hist_sku.empty:
-                            # Основной график категорий
-                            df_categories = pd.concat(dyn_plot_list) if dyn_plot_list else pd.DataFrame()
+                        if plot_data:
+                            df_plot = pd.concat(plot_data).sort_values('Месяц')
                             
-                            # Настройка осей: используем Ordinal (O) для месяцев, чтобы столбцы/точки были широкими
-                            x_axis = alt.X('Месяц:O', title='Месяц', axis=alt.Axis(labelAngle=-45, format='%m.%Y'))
-                            
-                            # 1. Слой областей (фон для наглядности объема)
-                            area = alt.Chart(df_categories).mark_area(opacity=0.3, interpolate='monotone').encode(
-                                x=x_axis,
-                                y=alt.Y('Количество:Q', stack=True, title='Кол-во дефектов'),
-                                color=alt.Color('Причина:N', scale=alt.Scale(scheme='category20'), legend=alt.Legend(orient="bottom", columns=2))
+                            # Отрисовка через Plotly (он стабильнее и информативнее Altair)
+                            import plotly.express as px
+                            fig_dyn = px.bar(
+                                df_plot,
+                                x='Месяц',
+                                y='Количество',
+                                color='Источник',
+                                title=f"Анализ дефектов по месяцам: {sku_dyn_target}",
+                                text_auto=True, # Цифры на столбцах
+                                template='plotly_white',
+                                color_discrete_sequence=px.colors.qualitative.Pastel + px.colors.qualitative.Bold
                             )
 
-                            # 2. Слой линий и точек (сам тренд)
-                            lines = alt.Chart(df_categories).mark_line(point=True, size=3, interpolate='monotone').encode(
-                                x=x_axis,
-                                y=alt.Y('Количество:Q', stack=True),
-                                color='Причина:N',
-                                tooltip=['Месяц:T', 'Причина:N', 'Количество:Q']
+                            fig_dyn.update_layout(
+                                xaxis_title=None,
+                                yaxis_title="Кол-во дефектов (заявки)",
+                                legend=dict(orientation="h", yanchor="bottom", y=-0.5, xanchor="center", x=0.5),
+                                hovermode="x unified",
+                                height=550,
+                                bargap=0.3 # Настройка ширины столбцов
                             )
-
-                            # 3. Текстовые метки (чтобы сразу видеть цифры)
-                            labels = lines.mark_text(dy=-15, fontWeight='bold').encode(
-                                text='Количество:Q'
-                            )
-
-                            # Сборка финального чарта
-                            final_dyn_chart = alt.layer(area, lines, labels).properties(
-                                width='container',
-                                height=500,
-                                title=f"Динамика дефектов по категориям: {sku_dyn_target}"
-                            ).interactive(bind_y=False)
-
-                            st.altair_chart(final_dyn_chart, use_container_width=True)
                             
-                            if not df_hist_sku.empty:
-                                st.caption("👆 График выше показывает детальную разбивку. Исторический тренд (общий) доступен в блоке PPM.")
+                            # Настройка оси X для читаемости месяцев
+                            fig_dyn.update_xaxes(dtick="M1", tickformat="%b %Y", tickangle=-45)
+                            
+                            st.plotly_chart(fig_dyn, use_container_width=True)
                         else:
-                            st.info("Данных по этому артикулу не найдено.")
+                            st.info(f"Данных по артикулу {sku_dyn_target} не найдено ни в системе, ни в истории.")
                     
                     # ==========================================================
                     # ПРОБЛЕМНЫЕ ИНВОЙСЫ
