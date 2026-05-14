@@ -133,8 +133,15 @@ class WBRatingsParser:
 
     async def run(self, article_list):
         async with async_playwright() as p:
-            # На серверах GitHub Actions обязательно headless=True
-            browser = await p.chromium.launch(headless=True)
+            # Запускаем браузер с использованием купленного прокси
+            browser = await p.chromium.launch(
+                headless=True,
+                proxy={
+                    "server": "http://158.160.76.171:41000",
+                    "username": "user_fb89cb12",
+                    "password": "rDHSZZazHs6VbzsfGQUA_country-RU_lifetime-5_session-bykomemy"
+                }
+            )
             try:
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
