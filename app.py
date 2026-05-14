@@ -1156,7 +1156,8 @@ elif page == "Отчет производства":
     st.title(":material/insights: Отчет производства")
     
     import altair as alt 
-    import time # Убедимся, что time доступен для генерации ключа
+    import time
+    from collections import defaultdict # Понадобится для группировки проблем
     
     @st.dialog("Детализация пересечения", width="large")
     def show_matrix_details(sku, reason_name, filtered_df, reason_id):
@@ -1165,12 +1166,11 @@ elif page == "Отчет производства":
         details = filtered_df[(filtered_df['Артикул продавца'] == sku) & (filtered_df[str(reason_id)].astype(str).str.strip().str.lower().isin(['1', '1.0', '+', 'true', 'да']))]
         
         if not details.empty:
-            # 1. Собираем только ОРИГИНАЛЬНЫЕ ссылки для скачивания архивом
             all_original_photos = []
             for _, r in details.iterrows():
                 p_raw, _ = get_media_for_srid(r['SRID'])
                 for group in p_raw.split():
-                    wb_url = group.split("|")[-1] # Всегда берем последний элемент (оригинал)
+                    wb_url = group.split("|")[-1]
                     if wb_url.startswith("//"): wb_url = "https:" + wb_url
                     all_original_photos.append(wb_url)
             
@@ -1203,7 +1203,6 @@ elif page == "Отчет производства":
                                     s3_url, wb_url = group.split("|", 1)
                                 else:
                                     s3_url = wb_url = group
-                                # Превью из S3, переход по клику на WB
                                 html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom"></a>'
                             html_imgs += '</div>'
                             st.markdown(html_imgs, unsafe_allow_html=True)
@@ -1216,8 +1215,43 @@ elif page == "Отчет производства":
             st.write("Нет данных по этому пересечению.")
 
         if st.button("Закрыть детализацию"):
-            # ИСПРАВЛЕНИЕ: Обновляем ключ перед перезагрузкой, чтобы сбросить выделение Altair
             st.session_state.matrix_key = int(time.time())
+            st.rerun()
+
+    # --- НОВЫЙ ДИАЛОГ ДЛЯ ИНВОЙСОВ ---
+    @st.dialog("Детализация Инвойса", width="medium")
+    def show_invoice_details(invoice, filtered_df):
+        st.subheader(f"🧾 Инвойс: {invoice}")
+        
+        # Находим все заявки этого инвойса
+        inv_details = filtered_df[filtered_df['Инвойс'].astype(str).str.strip() == invoice]
+        
+        if not inv_details.empty:
+            st.write(f"**Всего дефектных заявок в инвойсе:** {len(inv_details)}")
+            st.markdown("---")
+            
+            # Собираем статистику: Артикул -> Причина -> Количество
+            sku_stats = defaultdict(lambda: defaultdict(int))
+            valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
+            
+            for _, r in inv_details.iterrows():
+                sku = str(r.get('Артикул продавца', 'Без артикула')).strip()
+                for i in range(1, 14):
+                    cat_col = str(i)
+                    if cat_col in r and str(r.get(cat_col, '')).strip().lower() in valid_tag_vals:
+                        sku_stats[sku][CATEGORIES[i]] += 1
+            
+            # Красиво выводим артикулы и их проблемы
+            for sku, problems in sku_stats.items():
+                st.markdown(f"#### 📦 {sku}")
+                for prob, count in problems.items():
+                    st.markdown(f"- 🛠 **{prob}**: {count} шт.")
+                st.markdown("<br>", unsafe_allow_html=True)
+        else:
+            st.info("Нет данных по этому инвойсу.")
+
+        if st.button("Закрыть окно", type="primary"):
+            st.session_state.invoice_key = int(time.time()) # Сбрасываем ключ графика
             st.rerun()
 
     # ==========================================
@@ -1232,7 +1266,7 @@ elif page == "Отчет производства":
             df['Инвойс'] = df['Инвойс'].fillna('Не указан')
             df['Номер поставки_ОРИГИНАЛ'] = df.get('Номер поставки_ОРИГИНАЛ', 'Не указан').fillna('Не указан')
             
-            # --- ВЕКТОРИЗОВАННАЯ РАЗМЕТКА (Вместо медленного .apply) ---
+            # --- ВЕКТОРИЗОВАННАЯ РАЗМЕТКА ---
             valid_tag_vals = ['1', '1.0', '+', 'true', 'да']
             tag_cols = [str(i) for i in range(1, 14) if str(i) in df.columns]
             if tag_cols:
@@ -1244,32 +1278,21 @@ elif page == "Отчет производства":
             inv_list = ['Все'] + sorted(list(set([str(x) for x in df['Инвойс'] if str(x).strip() and str(x) != 'Не указан'])))
             sku_list = ['Все'] + sorted(list(set([str(x) for x in df['Артикул продавца'] if str(x).strip()])))
 
-            # ==========================================
-            # ИНТЕРАКТИВНЫЙ ФРАГМЕНТ ДЛЯ ОТЧЕТА ПРОИЗВОДСТВА
-            # ==========================================
             @st.fragment
             def render_production_dashboard(df_full):
                 st.markdown("### 🔍 Глобальные фильтры")
                 f_col1, f_col2, f_col3 = st.columns(3)
                 
                 with f_col1:
-                    # Установка фильтра на текущий месяц (с 1-го числа по сегодня)
                     today = datetime.now().date()
                     start_current_month = today.replace(day=1)
-                    
-                    date_range = st.date_input(
-                        "Период анализа:", 
-                        [start_current_month, today],
-                        format="DD.MM.YYYY",
-                        key="prod_date_filter"
-                    )
+                    date_range = st.date_input("Период анализа:", [start_current_month, today], format="DD.MM.YYYY", key="prod_date_filter")
 
                 selected_sku = f_col2.selectbox("Артикул:", sku_list)
                 selected_inv = f_col3.selectbox("Инвойс / Поставка:", inv_list)
                 
                 df_filtered = df_full.copy()
                 
-                # Новая фильтрация по выбранным датам
                 if len(date_range) == 2:
                     df_filtered = df_filtered[
                         (df_filtered['Дата_ДТ'].dt.date >= date_range[0]) & 
@@ -1282,20 +1305,12 @@ elif page == "Отчет производства":
                 total_rows = len(df_filtered)
                 tagged_rows = df_filtered['Размечено'].sum()
                 
-               # --- БРОНЕБОЙНЫЙ БЛОК ПОДСЧЕТА РУЧНЫХ КОРРЕКТИРОВОК ---
                 if 'Корректировка' in df_filtered.columns:
-                    # 1. Сначала жестко заменяем все типы пустот (None, NaN) на реальную пустую строку
                     corr_col = df_filtered['Корректировка'].fillna('')
-                    # 2. Только после этого приводим к тексту и нижнему регистру
                     corr_clean = corr_col.astype(str).str.strip().str.lower()
-                    # 3. Считаем финальный результат
-                    corrected_rows = len(df_filtered[
-                        (corr_clean != '') & 
-                        (~corr_clean.isin(['nan', 'none', 'null', 'подтверждено', 'нет тегов']))
-                    ])
+                    corrected_rows = len(df_filtered[(corr_clean != '') & (~corr_clean.isin(['nan', 'none', 'null', 'подтверждено', 'нет тегов']))])
                 else:
                     corrected_rows = 0
-                # -------------------------------------------------------
                 
                 accuracy = round((1 - (corrected_rows / tagged_rows)) * 100, 1) if tagged_rows > 0 else 0
                 processed_percent = round((tagged_rows / total_rows) * 100, 1) if total_rows > 0 else 0
@@ -1308,10 +1323,10 @@ elif page == "Отчет производства":
                 c4.metric("Точность ИИ", f"{accuracy}%")
                 st.markdown("---")
                 
-                st.info("💡 **Кликните на любой цветной квадрат для мгновенной детализации!**")
-                matrix_list = []
+                st.info("💡 **Кликните на любой цветной квадрат (или столбец инвойса ниже) для мгновенной детализации!**")
                 
-                # --- ВЕКТОРИЗОВАННЫЙ СБОР МАТРИЦЫ (Вместо медленного iterrows) ---
+                matrix_list = []
+                # --- ВЕКТОРИЗОВАННЫЙ СБОР МАТРИЦЫ ---
                 if tag_cols:
                     df_tags_filt = df_filtered[tag_cols].fillna('').astype(str).apply(lambda x: x.str.strip().str.lower())
                     for i in range(1, 14):
@@ -1320,7 +1335,6 @@ elif page == "Отчет производства":
                             valid_rows = df_tags_filt[cat_col].isin(valid_tag_vals)
                             if valid_rows.any():
                                 temp = df_filtered[valid_rows]
-                                # Генерируем пачку словарей мгновенно
                                 temp_matrix = pd.DataFrame({
                                     'Артикул продавца': temp['Артикул продавца'].astype(str).str.strip().replace('', 'Без артикула'),
                                     'Причина': f"{i}. {CATEGORIES[i]}",
@@ -1344,11 +1358,9 @@ elif page == "Отчет производства":
                     base = alt.Chart(df_melt).encode(x=alt.X('Артикул_Метка:N', title=None, axis=alt.Axis(labelAngle=-90, labelLimit=1000, orient='bottom')), y=alt.Y('Причина_Метка:N', title=None, axis=alt.Axis(labelLimit=1000), sort=alt.EncodingSortField(field='ID', order='ascending')))
                     rects = base.mark_rect(stroke='white', strokeWidth=1).encode(color=alt.Color('Дефекты:Q', scale=alt.Scale(scheme='blues'), legend=None), tooltip=[alt.Tooltip('Артикул продавца:N', title='Артикул'), alt.Tooltip('Причина:N', title='Причина'), alt.Tooltip('Дефекты:Q', title='Кол-во')])
                     
-                    # ИСПРАВЛЕНИЕ ОШИБКИ: Заменили 'text =' на 'text_marks ='
                     text_marks = base.mark_text(baseline='middle', fontSize=11).encode(text='Текст:N', color=alt.condition(alt.datum.Дефекты > (df_melt['Дефекты'].max() / 2), alt.value('white'), alt.value('black')))
                     final_chart = alt.layer(rects, text_marks).properties(height=max(400, len(pivot) * 35 + 100)).add_params(click_selector)
                     
-                    # ИСПРАВЛЕНИЕ: Формируем динамический ключ для графика
                     current_matrix_key = st.session_state.get('matrix_key', 0)
                     chart_key = f"prod_matrix_{current_matrix_key}"
                     event = st.altair_chart(final_chart, use_container_width=True, on_select="rerun", key=chart_key)
@@ -1371,13 +1383,11 @@ elif page == "Отчет производства":
                     df_matrix_data = pd.DataFrame(matrix_list)
                     
                     if 'Инвойс' in df_matrix_data.columns:
-                        # Группируем по Инвойсу вместо Номера поставки
                         for invoice, group in df_matrix_data.groupby('Инвойс'):
                             clean_invoice = str(invoice).strip()
                             if clean_invoice in ['Не указан', '', '0', '0.0'] or pd.isna(invoice): 
                                 continue
                             
-                            # Собираем связанные поставки для тултипа
                             supplies = ", ".join(sorted(list(set([str(x) for x in group['Номер поставки'] if str(x) != 'Не указан' and str(x).strip()]))))
                             all_skus = " • ".join([f"{k} ({v} шт.)" for k, v in group['Артикул продавца'].value_counts().items()])
                             
@@ -1391,7 +1401,9 @@ elif page == "Отчет производства":
                         if invoice_grouped:
                             df_invoice = pd.DataFrame(invoice_grouped).sort_values('Дефекты', ascending=False).head(15)
                             
-                            # Строим график по инвойсам
+                            # ИНТЕРАКТИВНОСТЬ: Добавляем выбор (selection) для инвойсов
+                            inv_click_selector = alt.selection_point(name='inv_click', fields=['Инвойс'])
+                            
                             invoice_chart = alt.Chart(df_invoice).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
                                 x=alt.X('Инвойс:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-45, labelLimit=500)), 
                                 y=alt.Y('Дефекты:Q', title='Количество дефектов'), 
@@ -1402,8 +1414,19 @@ elif page == "Отчет производства":
                                     alt.Tooltip('Поставки:N', title='Связанные поставки'), 
                                     alt.Tooltip('Список Артикулов:N', title='Артикулы')
                                 ]
-                            ).properties(height=350)
-                            st.altair_chart(invoice_chart, use_container_width=True)
+                            ).properties(height=350).add_params(inv_click_selector) # Привязываем селектор
+                            
+                            # Динамический ключ для графика инвойсов (защита от зависания окна)
+                            current_inv_key = st.session_state.get('invoice_key', 0)
+                            inv_event = st.altair_chart(invoice_chart, use_container_width=True, on_select="rerun", key=f"inv_chart_{current_inv_key}")
+                            
+                            # Отработка клика по столбцу инвойса
+                            if inv_event and hasattr(inv_event, "selection"):
+                                sel_inv = inv_event.selection.get("inv_click", [])
+                                if sel_inv and len(sel_inv) > 0:
+                                    clicked_invoice = sel_inv[0].get('Инвойс')
+                                    if clicked_invoice:
+                                        show_invoice_details(clicked_invoice, df_filtered)
                         else: 
                             st.info("Нет данных по инвойсам (или у всех дефектов не указан инвойс).")
                     else:
