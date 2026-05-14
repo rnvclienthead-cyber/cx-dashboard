@@ -137,9 +137,9 @@ class WBRatingsParser:
             browser = await p.chromium.launch(
                 headless=True,
                 proxy={
-                    "server": "http://res.lteboost.com:1000",
+                    "server": "158.160.76.171:41000",
                     "username": "user_fb89cb12",
-                    "password": "rDHSZZazHs6VbzsfGQUA"
+                    "password": "rDHSZZazHs6VbzsfGQUA_country-RU_lifetime-5_session-bykomemy"
                 }
             )
             try:
