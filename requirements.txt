@@ -12,9 +12,9 @@ altair
 sqlalchemy
 psycopg2-binary
 requests
-SQLAlchemy
 boto3
 Pillow
 xlsxwriter
 kaleido==0.2.1
 playwright
+playwright-stealth
