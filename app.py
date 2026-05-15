@@ -300,11 +300,6 @@ def get_media_for_srid(srid):
 # ==========================================
 # НОВАЯ ФУНКЦИЯ ГЕНЕРАЦИИ (ПО ШАБЛОНУ)
 # ==========================================
-import openpyxl
-from openpyxl.drawing.image import Image as OpenpyxlImage
-import io
-import requests
-
 # Умная функция для записи текста (обходит блокировки объединенных ячеек)
 def safe_write(sheet, coord, value):
     try:
