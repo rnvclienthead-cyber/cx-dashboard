@@ -31,8 +31,8 @@ jobs:
 
       - name: Install Playwright Browsers
         run: |
-          # Устанавливаем только Chromium и системные библиотеки для него
-          playwright install chromium --with-deps
+          # Вместо прямой команды вызываем модуль через python -m
+          python -m playwright install chromium --with-deps
 
       - name: Run Ratings Sync
         env:
