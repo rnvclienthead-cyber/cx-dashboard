@@ -282,42 +282,40 @@ def generate_advanced_claim_excel(data, chart_fig=None):
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     sheet = workbook.add_worksheet("Лист1")
     
-    # 1. ТОЧНАЯ НАСТРОЙКА ШИРИНЫ КОЛОНОК (Как на скрине)
-    sheet.set_column('A:A', 2)   # Пустой отступ слева
-    sheet.set_column('B:B', 22)  # Названия полей (RU)
-    sheet.set_column('C:E', 11)  # Значения (RU)
-    sheet.set_column('F:F', 22)  # Названия полей 2 (RU)
-    sheet.set_column('G:I', 11)  # Значения 2 (RU)
-    sheet.set_column('J:J', 2)   # Пустой отступ между RU и CN
-    sheet.set_column('K:K', 22)  # Названия полей (CN)
-    sheet.set_column('L:N', 11)  # Значения (CN)
-    sheet.set_column('O:O', 22)  # Названия полей 2 (CN)
-    sheet.set_column('P:R', 11)  # Значения 2 (CN)
+    # 1. ТОЧНАЯ НАСТРОЙКА КОЛОНОК (Как в РА № 092)
+    sheet.set_column('A:A', 2)    # Пустой отступ
+    sheet.set_column('B:B', 25)   # Заголовки RU
+    sheet.set_column('C:E', 12)   # Значения RU
+    sheet.set_column('F:F', 25)   # Заголовки RU 2
+    sheet.set_column('G:J', 12)   # Значения RU 2
+    sheet.set_column('K:K', 25)   # Заголовки CN
+    sheet.set_column('L:N', 12)   # Значения CN
+    sheet.set_column('O:O', 25)   # Заголовки CN 2
+    sheet.set_column('P:S', 12)   # Значения CN 2
 
-    # 2. СТИЛИ (Как в оригинале: тонкие рамки, серая заливка)
-    header_fmt = workbook.add_format({'bold': True, 'font_size': 11, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True})
-    label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'font_size': 10, 'text_wrap': True, 'valign': 'vcenter'})
+    # 2. СТИЛИ (Тонкие рамки, серая заливка #F2F2F2)
+    header_fmt = workbook.add_format({'bold': True, 'font_size': 12, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True})
+    label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 10, 'text_wrap': True, 'valign': 'vcenter'})
     val_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True, 'font_size': 10})
-    title_label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 10, 'text_wrap': True, 'valign': 'vcenter'})
+    title_label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 10, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center'})
 
-    # 3. ШАПКА (Строка 1)
-    sheet.merge_range('B1:E1', "1 раздел - действия при выявлении несоответсвия товара на входном контроле (заполняет потребитель)", val_fmt)
-    sheet.merge_range('F1:I1', f"Рекламационный акт № {data['number']}", header_fmt)
+    # 3. ШАПКА
+    sheet.merge_range('B2:F2', "1 раздел - действия при выявлении несоответсвия товара на входном контроле (заполняет потребитель)", val_fmt)
+    sheet.merge_range('G2:J2', f"Рекламационный акт № {data['number']}", header_fmt)
     
-    sheet.merge_range('K1:N1', "1 chapter", val_fmt)
-    sheet.merge_range('O1:R1', f"质量投诉报告 №{data['number']}", header_fmt)
-    
-    sheet.set_row(0, 30) # Высота шапки
+    sheet.merge_range('K2:N2', "1 chapter", val_fmt)
+    sheet.merge_range('O2:S2', f"质量投诉报告 № {data['number']}", header_fmt)
+    sheet.set_row(1, 30)
 
-    # 4. ОСНОВНАЯ ТАБЛИЦА
+    # 4. ОСНОВНАЯ ТАБЛИЦА (Симметрично RU и CN)
     rows = [
         {"lab_ru": "Дата составления", "val_ru": data['date'], "lab_ru2": "Поставщик", "val_ru2": data['supplier'],
          "lab_cn": "编制日期", "lab_cn2": "供应商"},
         {"lab_ru": "Временной промежуток", "val_ru": data['period'], "lab_ru2": "№ контейнера (инвойса)", "val_ru2": data['invoice'],
          "lab_cn": "报告期间", "lab_cn2": "集装箱号（发票号）"},
-        {"lab_ru": "Этап контроля", "val_ru": "Возвраты с маркетплейсов", "lab_ru2": "Дата ТТН", "val_ru2": "",
+        {"lab_ru": "Этап контроля", "val_ru": "Возвраты с маркетплейсов", "lab_ru2": "Дата ТТН", "val_ru2": "---",
          "lab_cn": "检验阶段", "lab_cn2": "发票日期"},
-        {"lab_ru": "Артикул", "val_ru": data['sku'], "lab_ru2": "№ партии", "val_ru2": "",
+        {"lab_ru": "Артикул", "val_ru": data['sku'], "lab_ru2": "№ партии", "val_ru2": "---",
          "lab_cn": "产品编号", "lab_cn2": "批次号"},
         {"lab_ru": "Наименование", "val_ru": data['name'], "lab_ru2": "Кол-во брака", "val_ru2": f"{data['defects']} ({data['ppm_pct']} %)",
          "lab_cn": "名称", "lab_cn2": "不合格数量"},
@@ -325,64 +323,69 @@ def generate_advanced_claim_excel(data, chart_fig=None):
          "lab_cn": "不符合项描述", "lab_cn2": "初步原因"},
     ]
 
-    curr_r = 2
+    curr_r = 3
     for r in rows:
-        # RU блок (Колонки B-I)
+        # RU блок
         sheet.write(curr_r, 1, r['lab_ru'], label_fmt)
         sheet.merge_range(curr_r, 2, curr_r, 4, r['val_ru'], val_fmt)
         sheet.write(curr_r, 5, r['lab_ru2'], label_fmt)
-        sheet.merge_range(curr_r, 6, curr_r, 8, r['val_ru2'], val_fmt)
+        sheet.merge_range(curr_r, 6, curr_r, 9, r['val_ru2'], val_fmt)
         
-        # CN блок (Колонки K-R)
+        # CN блок
         sheet.write(curr_r, 10, r['lab_cn'], label_fmt)
         sheet.merge_range(curr_r, 11, curr_r, 13, r['val_ru'], val_fmt) 
         sheet.write(curr_r, 14, r['lab_cn2'], label_fmt)
-        sheet.merge_range(curr_r, 15, curr_r, 17, r['val_ru2'], val_fmt)
+        sheet.merge_range(curr_r, 15, curr_r, 18, r['val_ru2'], val_fmt)
         
         # Двойная высота для описания
         if "Описание" in r['lab_ru']:
-            sheet.set_row(curr_r, 40)
+            sheet.set_row(curr_r, 60)
             sheet.write(curr_r+1, 1, "", val_fmt)
             sheet.merge_range(curr_r+1, 2, curr_r+1, 4, data.get('desc_cn', ''), val_fmt)
             sheet.write(curr_r+1, 5, "", val_fmt)
-            sheet.merge_range(curr_r+1, 6, curr_r+1, 8, data.get('cause_cn', ''), val_fmt)
+            sheet.merge_range(curr_r+1, 6, curr_r+1, 9, data.get('cause_cn', ''), val_fmt)
+            sheet.set_row(curr_r+1, 60)
             curr_r += 1
+        else:
+            sheet.set_row(curr_r, 25)
+            
         curr_r += 1
 
-    # 5. ГРАФИКИ (Строка 10)
+    # 5. ГРАФИКИ (Два графика, уменьшены по масштабу)
     chart_row = curr_r
-    sheet.merge_range(chart_row, 1, chart_row, 8, "Визуализация отклонения", title_label_fmt)
-    sheet.merge_range(chart_row, 10, chart_row, 17, "异常可视化", title_label_fmt)
-    
-    sheet.set_row(chart_row + 1, 150) # Резервируем высоту под график
+    sheet.merge_range(chart_row, 1, chart_row, 9, "Визуализация отклонения", title_label_fmt)
+    sheet.merge_range(chart_row, 10, chart_row, 18, "异常可视化", title_label_fmt)
+    sheet.set_row(chart_row + 1, 170) 
     
     if chart_fig:
         try:
-            # Уменьшаем график
-            img_data = chart_fig.to_image(format="png", width=750, height=350)
+            img_data = chart_fig.to_image(format="png", width=800, height=400)
             chart_buf = io.BytesIO(img_data)
-            # Вставляем под RU
-            sheet.insert_image(chart_row + 1, 1, 'chart_ru.png', {'image_data': chart_buf, 'x_scale': 0.5, 'y_scale': 0.5})
-            # Вставляем под CN
-            sheet.insert_image(chart_row + 1, 10, 'chart_cn.png', {'image_data': chart_buf, 'x_scale': 0.5, 'y_scale': 0.5})
-        except: pass
+            # x_scale и y_scale снижены до 0.45 (уменьшение на 10-15%)
+            sheet.insert_image(chart_row + 1, 1, 'chart_ru.png', {'image_data': chart_buf, 'x_scale': 0.45, 'y_scale': 0.45, 'x_offset': 10, 'y_offset': 10})
+            sheet.insert_image(chart_row + 1, 10, 'chart_cn.png', {'image_data': chart_buf, 'x_scale': 0.45, 'y_scale': 0.45, 'x_offset': 10, 'y_offset': 10})
+        except Exception as e: 
+            pass
 
-    # 6. ФОТОГРАФИИ (Динамически ниже графиков)
-    photo_row = chart_row + 12
+    # 6. ФОТОГРАФИИ (Динамическая вставка с обходом блокировок)
+    photo_row = chart_row + 2
     for cat_name, photos in data.get('photo_groups', {}).items():
         if photos:
-            sheet.merge_range(photo_row, 1, photo_row, 8, f"{cat_name}", title_label_fmt)
+            sheet.merge_range(photo_row, 1, photo_row, 18, f"Категория дефекта / 缺陷类别: {cat_name}", title_label_fmt)
+            sheet.set_row(photo_row, 25)
             photo_row += 1
+            sheet.set_row(photo_row, 120)
             col_off = 1
             for url in photos[:3]: 
                 try:
-                    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-                    if resp.status_code == 200:
-                        img_data = io.BytesIO(resp.content)
-                        sheet.insert_image(photo_row, col_off, 'p.png', {'image_data': img_data, 'x_scale': 0.15, 'y_scale': 0.15})
-                        col_off += 3
-                except: continue
-            photo_row += 8
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    img_data = io.BytesIO(resp.read())
+                    sheet.insert_image(photo_row, col_off, 'p.png', {'image_data': img_data, 'x_scale': 0.15, 'y_scale': 0.15, 'x_offset': 5, 'y_offset': 5})
+                    col_off += 4
+                except Exception as e: 
+                    pass
+            photo_row += 1
     
     workbook.close()
     return output.getvalue()
@@ -1802,7 +1805,7 @@ elif page == "Уровень PPM":
                     selected_row = table_agg.iloc[selected_indices[0]]
                     current_sku = selected_row['Артикул']
                     
-                    # 1. ЗАГРУЗКА И АВТОМАТИЧЕСКИЙ СБОР ИНВОЙСОВ
+                    # 1. ЗАГРУЗКА И АВТОМАТИЧЕСКИЙ СБОР ИНВОЙСОВ (Только с браком)
                     try:
                         df_sys_detail = load_cached_hybrid_data()
                         if len(date_range) == 2:
@@ -1812,7 +1815,6 @@ elif page == "Уровень PPM":
                         else:
                             sku_details = df_sys_detail[df_sys_detail['Артикул продавца'] == current_sku].copy()
                         
-                        # Собираем инвойсы ТОЛЬКО у заявок с браком
                         valid_vals = ['1', '1.0', '+', 'true', 'да']
                         defect_mask = pd.Series(False, index=sku_details.index)
                         for i in range(1, 14):
@@ -1827,7 +1829,7 @@ elif page == "Уровень PPM":
                         sku_details = pd.DataFrame()
                         auto_invoices = ""
 
-                    # 2. ПОДГОТОВКА ДАННЫХ (Слияние категорий и сбор фото)
+                    # 2. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ
                     combined_issues = []
                     photo_payload = {}
                     seen_photos_export = set()
@@ -1841,7 +1843,7 @@ elif page == "Уровень PPM":
                             
                             group_count = sku_details[group_mask].shape[0]
                             if group_count > 0:
-                                # УБРАНО "шт."
+                                # Без слова "шт."
                                 combined_issues.append(f"{config['ru']} ({group_count})")
                                 
                                 srids = sku_details[group_mask]['SRID'].dropna().unique().tolist()
@@ -1859,7 +1861,7 @@ elif page == "Уровень PPM":
                                     if len(group_photos) >= 3: break
                                 photo_payload[config['ru']] = group_photos
 
-                    # 3. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Остается без изменений)
+                    # 3. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Интерфейс приложения)
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
                     st.subheader(f":material/troubleshoot: Визуальная детализация брака: {current_sku}")
                     
@@ -1947,8 +1949,11 @@ elif page == "Уровень PPM":
                         num = st.text_input("Номер Рекламационного Акта", value="", placeholder="Введите номер...", key="cl_num")
                     with cl2:
                         inv_val = st.text_input("Инвойс (Invoice)", value=auto_invoices, key="cl_inv")
-                        period_val = f"{date_range[0].strftime('%d.%m.%Y')} - {date_range[1].strftime('%d.%m.%Y')}" if len(date_range)==2 else "Май 2026г."
+                        
+                        # Даты теперь в формате День.Месяц.Год - День.Месяц.Год или апрель 2026 по умолчанию
+                        period_val = f"{date_range[0].strftime('%d.%m.%Y')} - {date_range[1].strftime('%d.%m.%Y')}" if len(date_range) == 2 else "01.04.2026 - 30.04.2026"
                         per = st.text_input("Период (Period)", value=period_val, key="cl_per")
+                        
                     with cl3:
                         d_ru = st.text_area("Описание дефектов (RU)", value=auto_desc_ru, key="cl_d_ru")
                         d_cn = st.text_area("Описание дефектов (CN)", value=auto_desc_cn, key="cl_d_cn")
