@@ -23,23 +23,6 @@ from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
-# ==========================================
-# БЛОК ЗАГРУЗКИ ШАБЛОНА В ПАМЯТЬ СИСТЕМЫ
-# ==========================================
-with st.sidebar.expander("⚙️ Админ: Шаблон Рекламации"):
-    st.info("Загрузите пустой эталонный Excel-файл. Он сохранится на сервере и будет использоваться всегда.")
-    uploaded_template = st.file_uploader("Загрузить шаблон (.xlsx)", type=["xlsx"])
-    if uploaded_template:
-        # Сохраняем файл в корень системы навсегда
-        with open("template_ra.xlsx", "wb") as f:
-            f.write(uploaded_template.read())
-        st.success("✅ Шаблон успешно сохранен в память системы!")
-        
-    if os.path.exists("template_ra.xlsx"):
-        st.caption("🟢 В системе сейчас загружен активный шаблон.")
-    else:
-        st.error("🔴 Шаблон отсутствует. Пожалуйста, загрузите его.")
-
 st.markdown("""
     <style>
     /* НАВИГАЦИЯ: Стилизуем кнопки под плоские пункты меню */
@@ -1810,7 +1793,7 @@ elif page == "Уровень PPM":
                     selected_row = table_agg.iloc[selected_indices[0]]
                     current_sku = selected_row['Артикул']
                     
-                    # 1. ЗАГРУЗКА И АВТОМАТИЧЕСКИЙ СБОР ИНВОЙСОВ (Только с браком)
+                    # 1. ЗАГРУЗКА ДАННЫХ И ИНВОЙСОВ
                     try:
                         df_sys_detail = load_cached_hybrid_data()
                         if len(date_range) == 2:
@@ -1834,114 +1817,114 @@ elif page == "Уровень PPM":
                         sku_details = pd.DataFrame()
                         auto_invoices = ""
 
-                    # 2. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ
+                    # 2. ЕДИНАЯ ПРЕДЗАГРУЗКА ФОТОГРАФИЙ (Для UI и Экселя одновременно)
+                    prefetched_photos = {} # Словарь для хранения найденных фото
+                    seen_photos_global = set() # Чтобы фото не дублировались
+                    
+                    if not sku_details.empty:
+                        for i in range(1, 14):
+                            cat_col = str(i)
+                            if cat_col in sku_details.columns:
+                                cat_mask = sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)
+                                if cat_mask.any():
+                                    srids = sku_details.loc[cat_mask, 'SRID'].dropna().unique().tolist()
+                                    if srids:
+                                        import random
+                                        random.shuffle(srids)
+                                        urls = []
+                                        for srid in srids:
+                                            try:
+                                                p_raw, _ = get_media_for_srid(srid)
+                                                if p_raw:
+                                                    groups = p_raw.split()
+                                                    if groups:
+                                                        for group in groups:
+                                                            if "|" in group:
+                                                                s3_url, wb_url = group.split("|", 1)
+                                                            else:
+                                                                s3_url = wb_url = group
+                                                            
+                                                            if s3_url.startswith("//"): s3_url = "https:" + s3_url
+                                                            if wb_url.startswith("//"): wb_url = "https:" + wb_url
+                                                            
+                                                            if wb_url not in seen_photos_global:
+                                                                seen_photos_global.add(wb_url)
+                                                                # Сохраняем и превью (для скорости UI) и оригинал (для экселя)
+                                                                urls.append((s3_url, wb_url))
+                                                                break 
+                                            except: continue
+                                            if len(urls) >= 6: break # Берем до 6 фото для UI
+                                        prefetched_photos[i] = urls
+
+                    # 3. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ (Берем из предзагруженного кэша)
                     combined_issues = []
                     photo_payload = {}
-                    seen_photos_export = set()
-
+                    
                     if not sku_details.empty and 'CLAIM_CATEGORIES_LOGIC' in globals():
                         for group_key, config in CLAIM_CATEGORIES_LOGIC.items():
                             group_mask = pd.Series(False, index=sku_details.index)
+                            group_urls = []
                             for cid in config['ids']:
                                 if str(cid) in sku_details.columns:
                                     group_mask |= sku_details[str(cid)].astype(str).str.strip().str.lower().isin(valid_vals)
+                                
+                                # Забираем уже найденные фото из кэша
+                                for _, wb_url in prefetched_photos.get(cid, []):
+                                    if wb_url not in group_urls:
+                                        group_urls.append(wb_url)
                             
                             group_count = sku_details[group_mask].shape[0]
                             if group_count > 0:
-                                # Без слова "шт."
                                 combined_issues.append(f"{config['ru']} ({group_count})")
-                                
-                                srids = sku_details[group_mask]['SRID'].dropna().unique().tolist()
-                                group_photos = []
-                                for srid in srids:
-                                    try:
-                                        p_raw, _ = get_media_for_srid(srid)
-                                        if p_raw:
-                                            url = p_raw.split()[0].split("|")[-1]
-                                            if url.startswith("//"): url = "https:" + url
-                                            if url not in seen_photos_export:
-                                                group_photos.append(url)
-                                                seen_photos_export.add(url)
-                                    except: continue
-                                    if len(group_photos) >= 3: break
-                                photo_payload[config['ru']] = group_photos
+                                # Передаем только первые 3 фотки в Excel
+                                photo_payload[config['ru']] = group_urls[:3]
 
-                    # 3. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Интерфейс приложения)
+                    # 4. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Интерфейс)
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
                     st.subheader(f":material/troubleshoot: Визуальная детализация брака: {current_sku}")
                     
                     if not sku_details.empty:
-                        stats_data = []
+                        has_data = False
                         for i in range(1, 14):
                             cat_col = str(i)
                             if cat_col in sku_details.columns:
                                 cat_mask = sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)
                                 count = sku_details[cat_mask].shape[0]
                                 if count > 0:
+                                    has_data = True
                                     cat_name = CATEGORIES.get(i, f"Категория {i}") if 'CATEGORIES' in globals() else f"Категория {i}"
-                                    stats_data.append({"Категория": cat_name, "Кол-во": count, "mask": cat_mask})
-                        
-                        if stats_data:
-                            seen_photos_ui = set()
-                            for cat in stats_data:
-                                with st.container():
-                                    st.markdown("<hr style='margin: 1em 0; border: none; border-bottom: 1px solid #e2e8f0;'/>", unsafe_allow_html=True)
-                                    c_text, c_media = st.columns([1.2, 1])
-                                    cat_specific_df = sku_details[cat['mask']]
                                     
-                                    invs = cat_specific_df['Инвойс'].dropna().unique()
-                                    invs_clean = [str(inv).strip() for inv in invs if str(inv).strip() not in ['nan', 'None', '', 'Не указан']]
-                                    inv_str = ", ".join(invs_clean) if invs_clean else "Не указан"
+                                    with st.container():
+                                        st.markdown("<hr style='margin: 1em 0; border: none; border-bottom: 1px solid #e2e8f0;'/>", unsafe_allow_html=True)
+                                        c_text, c_media = st.columns([1.2, 1])
+                                        
+                                        cat_specific_df = sku_details[cat_mask]
+                                        invs = cat_specific_df['Инвойс'].dropna().unique()
+                                        invs_clean = [str(inv).strip() for inv in invs if str(inv).strip() not in ['nan', 'None', '', 'Не указан']]
+                                        inv_str = ", ".join(invs_clean) if invs_clean else "Не указан"
 
-                                    with c_text:
-                                        st.markdown(f"#### :material/report: {cat['Категория']}")
-                                        st.markdown(f"**Количество:** {cat['Кол-во']} шт.")
-                                        st.markdown(f"**Инвойсы:** {inv_str}")
-                                    
-                                    with c_media:
-                                        srids = cat_specific_df['SRID'].dropna().unique().tolist()
-                                        if srids:
-                                            import random
-                                            random.shuffle(srids)
-                                            html_imgs = '<div style="display: flex; flex-wrap: wrap; gap: 8px;">'
-                                            photo_count = 0
-                                            
-                                            for srid in srids:
-                                                try:
-                                                    p_raw, _ = get_media_for_srid(srid)
-                                                    if p_raw:
-                                                        groups = p_raw.split()
-                                                        if groups:
-                                                            for group in groups:
-                                                                if "|" in group:
-                                                                    s3_url, wb_url = group.split("|", 1)
-                                                                else:
-                                                                    s3_url = wb_url = group
-                                                                
-                                                                if s3_url.startswith("//"): s3_url = "https:" + s3_url
-                                                                if wb_url.startswith("//"): wb_url = "https:" + wb_url
-                                                                
-                                                                if wb_url not in seen_photos_ui:
-                                                                    seen_photos_ui.add(wb_url)
-                                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;"></a>'
-                                                                    photo_count += 1
-                                                                    break
-                                                    if photo_count >= 6: break
-                                                except: continue
-                                                
-                                            html_imgs += '</div>'
-                                            if photo_count > 0:
+                                        with c_text:
+                                            st.markdown(f"#### :material/report: {cat_name}")
+                                            st.markdown(f"**Количество:** {count} шт.")
+                                            st.markdown(f"**Инвойсы:** {inv_str}")
+                                        
+                                        with c_media:
+                                            # Отрисовываем фото мгновенно из кэша
+                                            urls = prefetched_photos.get(i, [])
+                                            if urls:
+                                                html_imgs = '<div style="display: flex; flex-wrap: wrap; gap: 8px;">'
+                                                for s3_url, wb_url in urls:
+                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;"></a>'
+                                                html_imgs += '</div>'
                                                 st.markdown(html_imgs, unsafe_allow_html=True)
                                             else:
                                                 st.caption("Нет уникального фото")
-                                        else:
-                                            st.caption("Нет SRID для поиска фото")
-                        else:
+                        if not has_data:
                             st.info("Нет детализированных данных по категориям за выбранный период.")
                     else:
                         st.warning("За выбранный период данных по этому артикулу не найдено.")
 
-                    # 4. ФОРМА ПРЕТЕНЗИИ И СКАЧИВАНИЕ
+                    # 5. ФОРМА ПРЕТЕНЗИИ И СКАЧИВАНИЕ
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
                     st.subheader(f":material/edit_document: Формирование рекламации: {current_sku}")
                     
@@ -1954,11 +1937,8 @@ elif page == "Уровень PPM":
                         num = st.text_input("Номер Рекламационного Акта", value="", placeholder="Введите номер...", key="cl_num")
                     with cl2:
                         inv_val = st.text_input("Инвойс (Invoice)", value=auto_invoices, key="cl_inv")
-                        
-                        # Даты теперь в формате День.Месяц.Год - День.Месяц.Год или апрель 2026 по умолчанию
-                        period_val = f"{date_range[0].strftime('%d.%m.%Y')} - {date_range[1].strftime('%d.%m.%Y')}" if len(date_range) == 2 else "01.04.2026 - 30.04.2026"
+                        period_val = f"{date_range[0].strftime('%d.%m.%Y')} - {date_range[1].strftime('%d.%m.%Y')}" if len(date_range)==2 else "01.04.2026 - 30.04.2026"
                         per = st.text_input("Период (Period)", value=period_val, key="cl_per")
-                        
                     with cl3:
                         d_ru = st.text_area("Описание дефектов (RU)", value=auto_desc_ru, key="cl_d_ru")
                         d_cn = st.text_area("Описание дефектов (CN)", value=auto_desc_cn, key="cl_d_cn")
@@ -1983,7 +1963,7 @@ elif page == "Уровень PPM":
                     
                     st.download_button(
                         label=f"📥 Скачать Рекламацию для {current_sku}", 
-                        data=generate_claim_from_template(c_data, chart_fig=fig), # <-- Заменили тут
+                        data=generate_claim_from_template(c_data, chart_fig=fig), 
                         file_name=f"RA_{num if num else 'draft'}_{current_sku}.xlsx", 
                         type="primary", 
                         use_container_width=True
