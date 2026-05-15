@@ -300,89 +300,100 @@ def get_media_for_srid(srid):
 # ==========================================
 # НОВАЯ ФУНКЦИЯ ГЕНЕРАЦИИ (ПО ШАБЛОНУ)
 # ==========================================
-def generate_claim_from_template(data, chart_fig=None):
-    template_path = "template_ra.xlsx"
-    
-    # 1. Открываем сохраненный шаблон
+import openpyxl
+from openpyxl.drawing.image import Image as OpenpyxlImage
+import io
+import requests
+
+# Умная функция для записи текста (обходит блокировки объединенных ячеек)
+def safe_write(sheet, coord, value):
+    try:
+        sheet[coord].value = value
+    except AttributeError:
+        # Если ячейка объединенная и заблокирована, ищем её "главную" ячейку
+        for merged_range in sheet.merged_cells.ranges:
+            if coord in merged_range:
+                # Извлекаем левую верхнюю ячейку (например, берем 'F2' из диапазона 'F2:H2')
+                top_left = str(merged_range).split(':')[0]
+                sheet[top_left].value = value
+                break
+
+def generate_claim_from_template(data, chart_fig=None, template_path="template_ra.xlsx"):
     try:
         wb = openpyxl.load_workbook(template_path)
     except FileNotFoundError:
-        st.error("Шаблон не найден! Загрузите его через боковое меню.")
-        return b""
+        return b"" # Если файл не найден, вернем пустоту (ошибку можно вывести в Streamlit)
         
     sheet = wb.active
     
-    # 2. ВПИСЫВАЕМ ДАННЫЕ В ЯЧЕЙКИ (Координаты основаны на вашем РА № 092)
-    # Если ячейки объединены (например C4:E4), данные пишутся в верхнюю левую ячейку (C4)
+    # 1. ЗАПОЛНЯЕМ ШАПКУ
+    safe_write(sheet, 'G2', f"Рекламационный акт № {data['number']}")
+    safe_write(sheet, 'O2', f"质量投诉报告 № {data['number']}")
     
-    # Шапка
-    sheet['G2'] = f"Рекламационный акт № {data['number']}"
-    sheet['O2'] = f"质量投诉报告 № {data['number']}"
+    # 2. РУССКИЙ БЛОК (Слева)
+    safe_write(sheet, 'C4', data['date'])          
+    safe_write(sheet, 'G4', data['supplier'])      
+    safe_write(sheet, 'C5', data['period'])        
+    safe_write(sheet, 'G5', data['invoice'])       
+    safe_write(sheet, 'C6', "Возвраты с маркетплейсов")
+    safe_write(sheet, 'C7', data['sku'])           
+    safe_write(sheet, 'C8', data['name'])          
+    safe_write(sheet, 'G8', f"{data['defects']} ({data['ppm_pct']} %)") 
+    safe_write(sheet, 'C9', data['desc_ru'])       
+    safe_write(sheet, 'G9', data['cause_ru'])      
     
-    # РУССКИЙ БЛОК (Слева)
-    sheet['C4'] = data['date']          
-    sheet['G4'] = data['supplier']      
-    sheet['C5'] = data['period']        
-    sheet['G5'] = data['invoice']       
-    sheet['C6'] = "Возвраты с маркетплейсов"
-    sheet['C7'] = data['sku']           
-    sheet['C8'] = data['name']          
-    sheet['G8'] = f"{data['defects']} ({data['ppm_pct']} %)" 
-    sheet['C9'] = data['desc_ru']       
-    sheet['G9'] = data['cause_ru']      
+    # 3. КИТАЙСКИЙ БЛОК (Справа)
+    safe_write(sheet, 'L4', data['date'])          
+    safe_write(sheet, 'P4', data['supplier'])      
+    safe_write(sheet, 'L5', data['period'])        
+    safe_write(sheet, 'P5', data['invoice'])       
+    safe_write(sheet, 'L6', "电商平台退货")
+    safe_write(sheet, 'L7', data['sku'])           
+    safe_write(sheet, 'L8', data.get('name_cn', '产品'))          
+    safe_write(sheet, 'P8', f"{data['defects']} ({data['ppm_pct']} %)") 
+    safe_write(sheet, 'L9', data.get('desc_cn', '')) 
+    safe_write(sheet, 'P9', data.get('cause_cn', '')) 
     
-    # КИТАЙСКИЙ БЛОК (Справа)
-    sheet['L4'] = data['date']          
-    sheet['P4'] = data['supplier']      
-    sheet['L5'] = data['period']        
-    sheet['P5'] = data['invoice']       
-    sheet['L6'] = "电商平台退货"
-    sheet['L7'] = data['sku']           
-    sheet['L8'] = data.get('name_cn', '产品')          
-    sheet['P8'] = f"{data['defects']} ({data['ppm_pct']} %)" 
-    sheet['L9'] = data.get('desc_cn', '') 
-    sheet['P9'] = data.get('cause_cn', '') 
-    
-    # 3. ВСТАВКА ГРАФИКОВ (если передан график)
+    # 4. ВСТАВКА ГРАФИКОВ
     if chart_fig:
         try:
             img_bytes = chart_fig.to_image(format="png", width=750, height=350)
             
             # Под русский блок
             img_ru = OpenpyxlImage(io.BytesIO(img_bytes))
-            img_ru.width, img_ru.height = 375, 175 # Уменьшаем в 2 раза для компактности
-            sheet.add_image(img_ru, 'B12') # Ячейка, откуда начнется график
+            img_ru.width, img_ru.height = 375, 175 # Уменьшаем размер
+            sheet.add_image(img_ru, 'B11') # Вставляем в B11
             
             # Под китайский блок
             img_cn = OpenpyxlImage(io.BytesIO(img_bytes))
             img_cn.width, img_cn.height = 375, 175
-            sheet.add_image(img_cn, 'K12') 
+            sheet.add_image(img_cn, 'K11') 
         except Exception as e:
             pass
 
-    # 4. ВСТАВКА ФОТОГРАФИЙ
-    photo_row = 28 # Строка, с которой начинаются фото (настройте под ваш пустой шаблон)
+    # 5. ВСТАВКА ФОТОГРАФИЙ (Используем requests для надежности)
+    photo_row = 28 # Строка, с которой начинаются фото (проверьте в шаблоне)
     for cat_name, photos in data.get('photo_groups', {}).items():
         if photos:
-            sheet.cell(row=photo_row, column=2).value = f"Категория дефекта / 缺陷类别: {cat_name}"
+            safe_write(sheet, f'B{photo_row}', f"Категория дефекта / 缺陷类别: {cat_name}")
             sheet.cell(row=photo_row, column=2).font = openpyxl.styles.Font(bold=True)
             photo_row += 1
             
-            col_off = 2 # Начинаем с колонки B
+            col_off = 2 # Колонка B
             for url in photos[:3]:
                 try:
                     resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
                     if resp.status_code == 200:
                         img = OpenpyxlImage(io.BytesIO(resp.content))
-                        img.width, img.height = 130, 130 # Фиксированный размер фото
+                        img.width, img.height = 130, 130
+                        
                         col_letter = openpyxl.utils.get_column_letter(col_off)
                         sheet.add_image(img, f'{col_letter}{photo_row}')
-                        col_off += 3 # Сдвигаемся вправо на 3 колонки для следующего фото
+                        col_off += 3
                 except:
                     continue
-            photo_row += 8 # Сдвигаемся вниз для следующей категории
+            photo_row += 8 # Отступ для следующей категории
 
-    # 5. Сохранение
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
