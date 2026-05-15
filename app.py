@@ -137,6 +137,31 @@ CAT_TO_CLAIM_TEXT = {
     5: ("Механические повреждения", "零部件损坏"),
 }
 
+# Правила объединения категорий и перевода для рекламации
+CLAIM_CATEGORIES_LOGIC = {
+    "Shortage": {
+        "ids": [1, 2],
+        "ru": "Не хватает комплектующих изделий",
+        "cn": "缺少配件",
+        "cause_ru": "Отклонение в процессе сборки (комплектации)",
+        "cause_cn": "装配/配套过程偏差"
+    },
+    "Damage": {
+        "ids": [4, 5],
+        "ru": "Повреждения деталей",
+        "cn": "零部件损坏 / 部件有损坏",
+        "cause_ru": "Нарушение при производственном процессе",
+        "cause_cn": "生产过程异常"
+    },
+    "Flimsy": {
+        "ids": [12], # Предположим, 12 это Хлипкость/устойчивость
+        "ru": "Хлипкость",
+        "cn": "不牢固",
+        "cause_ru": "Конструктивный недостаток / Нарушение процесса",
+        "cause_cn": "设计缺陷 / 生产过程异常"
+    }
+}
+
 # ==========================================
 # БАЗОВЫЕ ФУНКЦИИ 
 # ==========================================
@@ -251,37 +276,70 @@ def get_media_for_srid(srid):
     except: pass
     return "", ""
 
-def generate_claim_excel(data):
+def generate_advanced_claim_excel(data, chart_fig=None):
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     sheet = workbook.add_worksheet("Лист1")
     
     # Стили
-    bold = workbook.add_format({'bold': True, 'border': 1, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#f8f9fa'})
-    cell = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True})
-    header_style = workbook.add_format({'bold': True, 'bottom': 2, 'font_size': 12})
+    header_fmt = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'center'})
+    label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 10, 'text_wrap': True})
+    val_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True})
+    
+    # 1. Шапка (Строки 1-2)
+    sheet.merge_range('A1:E1', "1 раздел - действия при выявлении несоответсвия...", val_fmt)
+    sheet.merge_range('F1:I1', f"Рекламационный акт № {data['number']}", header_fmt)
+    sheet.merge_range('J1:N1', "1 chapter", val_fmt)
+    sheet.merge_range('O1:R1', f"质量投诉报告 №{data['number']}", header_fmt)
 
-    # Заголовок
-    sheet.write(0, 0, f"Рекламационный акт № {data['number']}", header_style)
-    sheet.write(0, 9, f"质量投诉报告 №{data['number']}", header_style)
-
-    # Строки данных (Шаблон на основе ваших CSV)
-    rows = [
-        ["Дата составления", data['date'], "", "Поставщик", data['supplier'], "编制日期", data['date'], "", "供应商", data['supplier']],
-        ["Временной промежуток", data['period'], "", "№ инвойса", data['invoice'], "报告期间", "2026年5月", "", "发票号", data['invoice']],
-        ["Артикул", data['sku'], "", "№ партии", "-", "产品编号", data['sku'], "", "批次号", "-"],
-        ["Наименование", data['name'], "", "Кол-во брака", f"{data['defects']} ({data['ppm_pct']}%)", "名称", data['name_cn'], "", "不合格数量", f"{data['defects']} ({data['ppm_pct']}%)"],
-        ["Описание несоответствия", data['desc_ru'], "", "Предварительная причина", data['cause_ru'], "不符合项描述", data['desc_cn'], "", "初步原因", data['cause_cn']],
+    # 2. Инфо-блок (Строки 3-8)
+    # По аналогии с РА № 101 заполняем таблицу
+    info_rows = [
+        ("Дата составления", data['date'], "Поставщик", data['supplier'], "编制日期", "供应商"),
+        ("Временной промежуток", data['period'], "№ инвойса", data['invoice'], "报告期间", "发票号"),
+        ("Артикул", data['sku'], "№ партии", "---", "产品编号", "批次号"),
+        ("Наименование", data['name'], "Кол-во брака", f"{data['defects']} ({data['ppm_pct']} %)", "名称", "不合格数量"),
+        ("Описание несоответствия", data['desc_ru'], "Предварительная причина", data['cause_ru'], "不符合项描述", "初步原因"),
+        ("", data['desc_cn'], "", data['cause_cn'], "", ""),
     ]
 
-    for r_idx, r_data in enumerate(rows, start=2):
-        for c_idx, val in enumerate(r_data):
-            fmt = cell if c_idx != 0 and c_idx != 5 else bold
-            sheet.write(r_idx, c_idx, val, fmt)
+    for i, row in enumerate(info_rows, start=2):
+        sheet.write(i, 0, row[0], label_fmt); sheet.write(i, 1, row[1], val_fmt)
+        sheet.write(i, 4, row[2], label_fmt); sheet.write(i, 5, row[3], val_fmt)
+        sheet.write(i, 9, row[4], label_fmt); sheet.write(i, 10, row[1], val_fmt) # Повтор даты/периода на кит.
+        sheet.write(i, 13, row[5], label_fmt); sheet.write(i, 14, row[3], val_fmt)
 
-    # Настройка ширины колонок
-    sheet.set_column('A:A', 25); sheet.set_column('B:B', 20); sheet.set_column('E:E', 20)
-    sheet.set_column('F:F', 25); sheet.set_column('G:G', 20); sheet.set_column('J:J', 20)
+    # 3. Визуализация отклонения (График)
+    sheet.merge_range('A9:R9', "Визуализация отклонения / 异常可视化", label_fmt)
+    
+    if chart_fig:
+        # Скрытая генерация картинки графика
+        img_data = chart_fig.to_image(format="png", width=800, height=400)
+        chart_buffer = io.BytesIO(img_data)
+        sheet.insert_image('A10', 'chart.png', {'image_data': chart_buffer, 'x_scale': 0.7, 'y_scale': 0.7})
+
+    # 4. Фотографии (начинаем со строки 30, чтобы не перекрыть график)
+    current_row = 30
+    sheet.write(current_row, 0, "Фото дефектов / 缺陷照片", label_fmt)
+    current_row += 1
+    
+    col_idx = 0
+    for category_name, photos in data['photo_groups'].items():
+        sheet.merge_range(current_row, 0, current_row, 5, f"Категория: {category_name}", label_fmt)
+        current_row += 1
+        for img_url in photos:
+            try:
+                # Подгружаем фото для вставки (S3 превью)
+                response = urllib.request.urlopen(img_url)
+                img_stream = io.BytesIO(response.read())
+                sheet.insert_image(current_row, col_idx, 'defect.png', {'image_data': img_stream, 'x_scale': 0.15, 'y_scale': 0.15})
+                col_idx += 3
+                if col_idx > 15:
+                    col_idx = 0
+                    current_row += 8
+            except: continue
+        current_row += 8
+        col_idx = 0
 
     workbook.close()
     return output.getvalue()
@@ -1696,11 +1754,12 @@ elif page == "Уровень PPM":
                         st.plotly_chart(fig, use_container_width=True)
                     else: st.info("Нет данных для графика")
 
-                # --- ОБНОВЛЕННЫЙ БЛОК: ДЕТАЛИЗАЦИЯ И ГЕНЕРАТОР ---
+              # --- ОБНОВЛЕННЫЙ БЛОК: ДЕТАЛИЗАЦИЯ И ГЕНЕРАТОР ---
                 if selected_indices:
                     selected_row = table_agg.iloc[selected_indices[0]]
                     current_sku = selected_row['Артикул']
                     
+                    # 1. ЗАГРУЗКА И ФИЛЬТРАЦИЯ ДАННЫХ
                     try:
                         df_sys_detail = load_cached_hybrid_data()
                         if len(date_range) == 2:
@@ -1712,15 +1771,46 @@ elif page == "Уровень PPM":
                     except:
                         sku_details = pd.DataFrame()
 
-                    # ПРАВКА 3: Заменили толстый разделитель на тонкий
+                    # 2. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ (Слияние категорий и сбор фото)
+                    combined_issues = []
+                    photo_payload = {}
+                    valid_vals = ['1', '1.0', '+', 'true', 'да']
+                    seen_photos_export = set()
+
+                    if not sku_details.empty and 'CLAIM_CATEGORIES_LOGIC' in globals():
+                        for group_key, config in CLAIM_CATEGORIES_LOGIC.items():
+                            group_mask = pd.Series(False, index=sku_details.index)
+                            for cid in config['ids']:
+                                if str(cid) in sku_details.columns:
+                                    group_mask |= sku_details[str(cid)].astype(str).str.strip().str.lower().isin(valid_vals)
+                            
+                            group_count = sku_details[group_mask].shape[0]
+                            if group_count > 0:
+                                combined_issues.append(f"{config['ru']} ({group_count} шт.)")
+                                
+                                # Берем по 3 фото на каждую объединенную группу для Экселя
+                                srids = sku_details[group_mask]['SRID'].dropna().unique().tolist()
+                                group_photos = []
+                                for srid in srids:
+                                    try:
+                                        p_raw, _ = get_media_for_srid(srid)
+                                        if p_raw:
+                                            # Берем первое доступное фото из заявки
+                                            url = p_raw.split()[0].split("|")[-1]
+                                            if url.startswith("//"): url = "https:" + url
+                                            if url not in seen_photos_export:
+                                                group_photos.append(url)
+                                                seen_photos_export.add(url)
+                                    except: continue
+                                    if len(group_photos) >= 3: break
+                                photo_payload[config['ru']] = group_photos
+
+                    # 3. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Интерфейс приложения)
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
-                    # ПРАВКА 1: Системная иконка
                     st.subheader(f":material/troubleshoot: Визуальная детализация брака: {current_sku}")
                     
                     if not sku_details.empty:
-                        valid_vals = ['1', '1.0', '+', 'true', 'да']
                         stats_data = []
-                        
                         for i in range(1, 14):
                             cat_col = str(i)
                             if cat_col in sku_details.columns:
@@ -1731,14 +1821,10 @@ elif page == "Уровень PPM":
                                     stats_data.append({"Категория": cat_name, "Кол-во": count, "mask": cat_mask})
                         
                         if stats_data:
-                            # ПРАВКА 4: Создаем хранилище уже показанных фотографий
-                            seen_photos = set()
-
+                            seen_photos_ui = set()
                             for cat in stats_data:
                                 with st.container():
-                                    # ПРАВКА 3: Тонкий межстрочный разделитель
                                     st.markdown("<hr style='margin: 1em 0; border: none; border-bottom: 1px solid #e2e8f0;'/>", unsafe_allow_html=True)
-                                    
                                     c_text, c_media = st.columns([1.2, 1])
                                     cat_specific_df = sku_details[cat['mask']]
                                     
@@ -1747,7 +1833,6 @@ elif page == "Уровень PPM":
                                     inv_str = ", ".join(invs_clean) if invs_clean else "Не указан"
 
                                     with c_text:
-                                        # ПРАВКА 1 и 2: Системная иконка + увеличенный размер (####)
                                         st.markdown(f"#### :material/report: {cat['Категория']}")
                                         st.markdown(f"**Количество:** {cat['Кол-во']} шт.")
                                         st.markdown(f"**Инвойсы:** {inv_str}")
@@ -1766,7 +1851,6 @@ elif page == "Уровень PPM":
                                                     if p_raw:
                                                         groups = p_raw.split()
                                                         if groups:
-                                                            # Ищем уникальное фото в рамках заявки
                                                             for group in groups:
                                                                 if "|" in group:
                                                                     s3_url, wb_url = group.split("|", 1)
@@ -1776,12 +1860,11 @@ elif page == "Уровень PPM":
                                                                 if s3_url.startswith("//"): s3_url = "https:" + s3_url
                                                                 if wb_url.startswith("//"): wb_url = "https:" + wb_url
                                                                 
-                                                                if wb_url not in seen_photos:
-                                                                    seen_photos.add(wb_url)
-                                                                    # ВЕРНУЛИ class="photo-zoom" на место!
-                                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0;"></a>'
+                                                                if wb_url not in seen_photos_ui:
+                                                                    seen_photos_ui.add(wb_url)
+                                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;"></a>'
                                                                     photo_count += 1
-                                                                    break # Нашли уникальное фото, переходим к следующему SRID
+                                                                    break
                                                     if photo_count >= 6: break
                                                 except: continue
                                                 
@@ -1797,35 +1880,51 @@ elif page == "Уровень PPM":
                     else:
                         st.warning("За выбранный период данных по этому артикулу не найдено.")
 
-                    # --- ФОРМА ПРЕТЕНЗИИ ---
+                    # 4. ФОРМА ПРЕТЕНЗИИ И СКАЧИВАНИЕ
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
-                    # ПРАВКА 1: Добавлена системная иконка
                     st.subheader(f":material/edit_document: Формирование рекламации: {current_sku}")
                     
+                    # АВТОЗАПОЛНЕНИЕ ТЕКСТОВ на основе слияния категорий
+                    auto_desc_ru = " / ".join(combined_issues) if combined_issues else "Дефекты не обнаружены"
+                    auto_desc_cn = " / ".join([CLAIM_CATEGORIES_LOGIC[k]['cn'] for k in CLAIM_CATEGORIES_LOGIC if CLAIM_CATEGORIES_LOGIC[k]['ru'] in [x.split(' (')[0] for x in combined_issues]]) if 'CLAIM_CATEGORIES_LOGIC' in globals() and combined_issues else ""
+
                     cl1, cl2, cl3 = st.columns(3)
                     with cl1:
-                        sup = st.text_input("Завод", value="Pujiang-Haohong", key="cl_sup")
-                        num = st.text_input("Номер Рекламационного Акта", value="102", key="cl_num")
+                        sup = st.text_input("Завод", value="Уточняется", key="cl_sup")
+                        num = st.text_input("Номер Рекламационного Акта", value="", placeholder="Введите номер...", key="cl_num")
                     with cl2:
                         inv_val = st.text_input("Инвойс (Invoice)", value="---", key="cl_inv")
                         period_val = f"{date_range[0].strftime('%m.%Y')} - {date_range[1].strftime('%m.%Y')}" if len(date_range)==2 else "Май 2026г."
                         per = st.text_input("Период (Period)", value=period_val, key="cl_per")
                     with cl3:
-                        d_ru = st.text_area("Описание дефектов (RU)", "Повреждения деталей / Некачественная сварка", key="cl_d_ru")
-                        d_cn = st.text_area("Описание дефектов (CN)", "零部件损坏 / 焊接质量不良", key="cl_d_cn")
+                        # ВАЖНО: передаем auto_desc_ru в параметр value, чтобы текст подставился сам!
+                        d_ru = st.text_area("Описание дефектов (RU)", value=auto_desc_ru, key="cl_d_ru")
+                        d_cn = st.text_area("Описание дефектов (CN)", value=auto_desc_cn, key="cl_d_cn")
 
+                    # Сборка финального payload для Excel
                     c_data = {
-                        "number": num, "date": datetime.now().strftime("%Y-%m-%d"), "supplier": sup,
-                        "period": per, "invoice": inv_val, "sku": current_sku,
-                        "name": "Изделие", "name_cn": "产品", "defects": selected_row['Брак'],
-                        "ppm_pct": round(selected_row['%'], 2), "desc_ru": d_ru, "desc_cn": d_cn,
-                        "cause_ru": "Нарушение при производстве", "cause_cn": "生产过程异常"
+                        "number": num, 
+                        "date": datetime.now().strftime("%Y-%m-%d"), 
+                        "supplier": sup,
+                        "period": per, 
+                        "invoice": inv_val, 
+                        "sku": current_sku,
+                        "name": "Наименование товара", 
+                        "name_cn": "产品", 
+                        "defects": selected_row['Брак'],
+                        "ppm_pct": round(selected_row['%'], 2), 
+                        "desc_ru": d_ru, 
+                        "desc_cn": d_cn,
+                        # Берем стандартную причину для Damage, если словарь доступен
+                        "cause_ru": CLAIM_CATEGORIES_LOGIC.get('Damage', {}).get('cause_ru', 'Нарушение при производстве') if 'CLAIM_CATEGORIES_LOGIC' in globals() else 'Нарушение', 
+                        "cause_cn": CLAIM_CATEGORIES_LOGIC.get('Damage', {}).get('cause_cn', '生产过程异常') if 'CLAIM_CATEGORIES_LOGIC' in globals() else '异常',
+                        "photo_groups": photo_payload # Передаем собранные фотографии
                     }
                     
                     st.download_button(
-                        label=f"📥 Скачать Рекламацию №{num} для {current_sku}", 
-                        data=generate_claim_excel(c_data), 
-                        file_name=f"RA_{num}_{current_sku}.xlsx", 
+                        label=f"📥 Скачать Рекламацию для {current_sku}", 
+                        data=generate_advanced_claim_excel(c_data, chart_fig=fig), # Передаем график!
+                        file_name=f"RA_{num if num else 'draft'}_{current_sku}.xlsx", 
                         type="primary", 
                         use_container_width=True
                     )
