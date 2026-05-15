@@ -1788,8 +1788,12 @@ elif page == "Уровень PPM":
                             sku_details = df_sys_detail[(df_sys_detail['Артикул продавца'] == current_sku) & mask_date].copy()
                         else:
                             sku_details = df_sys_detail[df_sys_detail['Артикул продавца'] == current_sku].copy()
+                        
+                        # ДОБАВЛЕНО: Вытягиваем уникальные инвойсы для автозаполнения
+                        auto_invoices = ", ".join(sku_details['Инвойс'].dropna().unique().astype(str))
                     except:
                         sku_details = pd.DataFrame()
+                        auto_invoices = "---"
 
                     # 2. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ (Слияние категорий и сбор фото)
                     combined_issues = []
@@ -1913,11 +1917,13 @@ elif page == "Уровень PPM":
                         sup = st.text_input("Завод", value="Уточняется", key="cl_sup")
                         num = st.text_input("Номер Рекламационного Акта", value="", placeholder="Введите номер...", key="cl_num")
                     with cl2:
-                        inv_val = st.text_input("Инвойс (Invoice)", value="---", key="cl_inv")
-                        period_val = f"{date_range[0].strftime('%m.%Y')} - {date_range[1].strftime('%m.%Y')}" if len(date_range)==2 else "Май 2026г."
+                        # ДОБАВЛЕНО: Автоподстановка инвойса
+                        inv_val = st.text_input("Инвойс (Invoice)", value=auto_invoices if auto_invoices else "---", key="cl_inv")
+                        
+                        # ДОБАВЛЕНО: Формат полной даты (День.Месяц.Год)
+                        period_val = f"{date_range[0].strftime('%d.%m.%Y')} - {date_range[1].strftime('%d.%m.%Y')}" if len(date_range)==2 else "Май 2026г."
                         per = st.text_input("Период (Period)", value=period_val, key="cl_per")
                     with cl3:
-                        # ВАЖНО: передаем auto_desc_ru в параметр value, чтобы текст подставился сам!
                         d_ru = st.text_area("Описание дефектов (RU)", value=auto_desc_ru, key="cl_d_ru")
                         d_cn = st.text_area("Описание дефектов (CN)", value=auto_desc_cn, key="cl_d_cn")
 
@@ -1935,15 +1941,14 @@ elif page == "Уровень PPM":
                         "ppm_pct": round(selected_row['%'], 2), 
                         "desc_ru": d_ru, 
                         "desc_cn": d_cn,
-                        # Берем стандартную причину для Damage, если словарь доступен
                         "cause_ru": CLAIM_CATEGORIES_LOGIC.get('Damage', {}).get('cause_ru', 'Нарушение при производстве') if 'CLAIM_CATEGORIES_LOGIC' in globals() else 'Нарушение', 
                         "cause_cn": CLAIM_CATEGORIES_LOGIC.get('Damage', {}).get('cause_cn', '生产过程异常') if 'CLAIM_CATEGORIES_LOGIC' in globals() else '异常',
-                        "photo_groups": photo_payload # Передаем собранные фотографии
+                        "photo_groups": photo_payload 
                     }
                     
                     st.download_button(
                         label=f"📥 Скачать Рекламацию для {current_sku}", 
-                        data=generate_advanced_claim_excel(c_data, chart_fig=fig), # Передаем график!
+                        data=generate_advanced_claim_excel(c_data, chart_fig=fig), 
                         file_name=f"RA_{num if num else 'draft'}_{current_sku}.xlsx", 
                         type="primary", 
                         use_container_width=True
