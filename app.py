@@ -1712,8 +1712,10 @@ elif page == "Уровень PPM":
                     except:
                         sku_details = pd.DataFrame()
 
-                    st.markdown("---")
-                    st.subheader(f"🔍 Визуальная детализация брака: {current_sku}")
+                    # ПРАВКА 3: Заменили толстый разделитель на тонкий
+                    st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
+                    # ПРАВКА 1: Системная иконка
+                    st.subheader(f":material/troubleshoot: Визуальная детализация брака: {current_sku}")
                     
                     if not sku_details.empty:
                         valid_vals = ['1', '1.0', '+', 'true', 'да']
@@ -1729,30 +1731,33 @@ elif page == "Уровень PPM":
                                     stats_data.append({"Категория": cat_name, "Кол-во": count, "mask": cat_mask})
                         
                         if stats_data:
-                            # ВЫВОД В ФОРМАТЕ КАРТОЧЕК С ФОТО (С S3)
+                            # ПРАВКА 4: Создаем хранилище уже показанных фотографий
+                            seen_photos = set()
+
                             for cat in stats_data:
                                 with st.container():
-                                    st.markdown('<div class="detail-card">', unsafe_allow_html=True)
-                                    c_text, c_media = st.columns([1.2, 1])
+                                    # ПРАВКА 3: Тонкий межстрочный разделитель
+                                    st.markdown("<hr style='margin: 1em 0; border: none; border-bottom: 1px solid #e2e8f0;'/>", unsafe_allow_html=True)
                                     
+                                    c_text, c_media = st.columns([1.2, 1])
                                     cat_specific_df = sku_details[cat['mask']]
                                     
-                                    # Собираем инвойсы
                                     invs = cat_specific_df['Инвойс'].dropna().unique()
                                     invs_clean = [str(inv).strip() for inv in invs if str(inv).strip() not in ['nan', 'None', '', 'Не указан']]
                                     inv_str = ", ".join(invs_clean) if invs_clean else "Не указан"
 
                                     with c_text:
-                                        st.write(f"🛠 **Категория:** {cat['Категория']}")
-                                        st.write(f"🔢 **Количество:** {cat['Кол-во']} шт.")
-                                        st.write(f"🧾 **Инвойсы:** {inv_str}")
+                                        # ПРАВКА 1 и 2: Системная иконка + увеличенный размер (####)
+                                        st.markdown(f"#### :material/report: {cat['Категория']}")
+                                        st.markdown(f"**Количество:** {cat['Кол-во']} шт.")
+                                        st.markdown(f"**Инвойсы:** {inv_str}")
                                     
                                     with c_media:
                                         srids = cat_specific_df['SRID'].dropna().unique().tolist()
                                         if srids:
                                             import random
                                             random.shuffle(srids)
-                                            html_imgs = '<div class="media-row">'
+                                            html_imgs = '<div style="display: flex; flex-wrap: wrap; gap: 8px;">'
                                             photo_count = 0
                                             
                                             for srid in srids:
@@ -1761,18 +1766,23 @@ elif page == "Уровень PPM":
                                                     if p_raw:
                                                         groups = p_raw.split()
                                                         if groups:
-                                                            group = groups[0] if len(groups) == 1 else groups[1]
-                                                            # ЛОГИКА ПОДТЯГИВАНИЯ ПРЕВЬЮ ИЗ ЯНДЕКСА
-                                                            if "|" in group:
-                                                                s3_url, wb_url = group.split("|", 1)
-                                                            else:
-                                                                s3_url = wb_url = group
-                                                            
-                                                            if s3_url.startswith("//"): s3_url = "https:" + s3_url
-                                                            if wb_url.startswith("//"): wb_url = "https:" + wb_url
-                                                            
-                                                            html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom"></a>'
-                                                            photo_count += 1
+                                                            # Ищем уникальное фото в рамках заявки
+                                                            for group in groups:
+                                                                if "|" in group:
+                                                                    s3_url, wb_url = group.split("|", 1)
+                                                                else:
+                                                                    s3_url = wb_url = group
+                                                                
+                                                                if s3_url.startswith("//"): s3_url = "https:" + s3_url
+                                                                if wb_url.startswith("//"): wb_url = "https:" + wb_url
+                                                                
+                                                                # ПРАВКА 4: Проверка на уникальность
+                                                                if wb_url not in seen_photos:
+                                                                    seen_photos.add(wb_url)
+                                                                    # Задали жесткие размеры и скругления прямо в HTML для аккуратности
+                                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;"></a>'
+                                                                    photo_count += 1
+                                                                    break # Нашли уникальное фото, переходим к следующему SRID
                                                     if photo_count >= 6: break
                                                 except: continue
                                                 
@@ -1780,18 +1790,19 @@ elif page == "Уровень PPM":
                                             if photo_count > 0:
                                                 st.markdown(html_imgs, unsafe_allow_html=True)
                                             else:
-                                                st.caption("Фото не найдены")
+                                                # ПРАВКА 4: Сообщение, если все фото из категории уже были использованы
+                                                st.caption("Нет уникального фото")
                                         else:
                                             st.caption("Нет SRID для поиска фото")
-                                st.markdown('</div>', unsafe_allow_html=True)
                         else:
                             st.info("Нет детализированных данных по категориям за выбранный период.")
                     else:
                         st.warning("За выбранный период данных по этому артикулу не найдено.")
 
-                    # --- ФОРМА ПРЕТЕНЗИИ (Остается внизу) ---
-                    st.markdown("---")
-                    st.subheader(f"🛠 Формирование рекламации: {current_sku}")
+                    # --- ФОРМА ПРЕТЕНЗИИ ---
+                    st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
+                    # ПРАВКА 1: Добавлена системная иконка
+                    st.subheader(f":material/edit_document: Формирование рекламации: {current_sku}")
                     
                     cl1, cl2, cl3 = st.columns(3)
                     with cl1:
