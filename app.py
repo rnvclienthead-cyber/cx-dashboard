@@ -293,7 +293,6 @@ def generate_advanced_claim_excel(data, chart_fig=None):
     sheet.merge_range('O1:R1', f"质量投诉报告 №{data['number']}", header_fmt)
 
     # 2. Инфо-блок (Строки 3-8)
-    # По аналогии с РА № 101 заполняем таблицу
     info_rows = [
         ("Дата составления", data['date'], "Поставщик", data['supplier'], "编制日期", "供应商"),
         ("Временной промежуток", data['period'], "№ инвойса", data['invoice'], "报告期间", "发票号"),
@@ -306,38 +305,46 @@ def generate_advanced_claim_excel(data, chart_fig=None):
     for i, row in enumerate(info_rows, start=2):
         sheet.write(i, 0, row[0], label_fmt); sheet.write(i, 1, row[1], val_fmt)
         sheet.write(i, 4, row[2], label_fmt); sheet.write(i, 5, row[3], val_fmt)
-        sheet.write(i, 9, row[4], label_fmt); sheet.write(i, 10, row[1], val_fmt) # Повтор даты/периода на кит.
+        sheet.write(i, 9, row[4], label_fmt); sheet.write(i, 10, row[1], val_fmt) 
         sheet.write(i, 13, row[5], label_fmt); sheet.write(i, 14, row[3], val_fmt)
 
     # 3. Визуализация отклонения (График)
     sheet.merge_range('A9:R9', "Визуализация отклонения / 异常可视化", label_fmt)
     
     if chart_fig:
-        # Скрытая генерация картинки графика
-        img_data = chart_fig.to_image(format="png", width=800, height=400)
-        chart_buffer = io.BytesIO(img_data)
-        sheet.insert_image('A10', 'chart.png', {'image_data': chart_buffer, 'x_scale': 0.7, 'y_scale': 0.7})
+        try:
+            # Пытаемся сгенерировать картинку графика (требует kaleido)
+            img_data = chart_fig.to_image(format="png", width=800, height=400)
+            chart_buffer = io.BytesIO(img_data)
+            sheet.insert_image('A10', 'chart.png', {'image_data': chart_buffer, 'x_scale': 0.7, 'y_scale': 0.7})
+        except Exception as e:
+            # Если kaleido нет, эксель все равно скачается, но без графика
+            sheet.write('A10', f"Не удалось загрузить график. Убедитесь, что установлен пакет kaleido.", val_fmt)
 
-    # 4. Фотографии (начинаем со строки 30, чтобы не перекрыть график)
+    # 4. Фотографии
     current_row = 30
     sheet.write(current_row, 0, "Фото дефектов / 缺陷照片", label_fmt)
     current_row += 1
     
     col_idx = 0
-    for category_name, photos in data['photo_groups'].items():
+    for category_name, photos in data.get('photo_groups', {}).items():
         sheet.merge_range(current_row, 0, current_row, 5, f"Категория: {category_name}", label_fmt)
         current_row += 1
         for img_url in photos:
             try:
-                # Подгружаем фото для вставки (S3 превью)
-                response = urllib.request.urlopen(img_url)
+                import urllib.request
+                req = urllib.request.Request(img_url, headers={'User-Agent': 'Mozilla/5.0'})
+                response = urllib.request.urlopen(req, timeout=5)
                 img_stream = io.BytesIO(response.read())
                 sheet.insert_image(current_row, col_idx, 'defect.png', {'image_data': img_stream, 'x_scale': 0.15, 'y_scale': 0.15})
+                
                 col_idx += 3
                 if col_idx > 15:
                     col_idx = 0
                     current_row += 8
-            except: continue
+            except Exception as e: 
+                continue
+                
         current_row += 8
         col_idx = 0
 
