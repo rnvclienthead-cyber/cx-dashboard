@@ -15,6 +15,7 @@ import base64
 import streamlit.components.v1 as componentsаа
 import time
 import os
+import urllib.request
 import xlsxwriter
 import requests
 import openpyxl
@@ -301,9 +302,10 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
     except Exception as e:
         return b""
 
-    # ЗАПОЛНЕНИЕ ДАННЫХ
+    # 1. ЗАПОЛНЕНИЕ ДАННЫХ
     safe_write(sheet, 'G1', f"Рекламационный акт № {data['number']}")
     safe_write(sheet, 'O1', f"质量投诉报告 № {data['number']}")
+    
     coords = {
         'C3': data['date'], 'G3': data['supplier'], 'L3': data['date'], 'P3': data['supplier'],
         'C4': data['period'], 'G4': data['invoice'], 'L4': data['period'], 'P4': data['invoice'],
@@ -314,46 +316,63 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
         'C8': data['desc_ru'], 'G8': data['cause_ru'],
         'L8': data.get('desc_cn', ''), 'P8': data.get('cause_cn', '')
     }
+    
     for cell, val in coords.items():
         safe_write(sheet, cell, val)
 
-    # ВСТАВКА ГРАФИКОВ (С ЖЕСТКОЙ ФИКСАЦИЕЙ)
+    # 2. ВСТАВКА ГРАФИКОВ (Строго в 9 строку)
     if chart_fig:
         try:
-            # Принудительно раздвигаем строку 10, чтобы график не сползал на другие ячейки
-            sheet.row_dimensions[10].height = 170 
+            # Расширяем именно 9 строку
+            sheet.row_dimensions[9].height = 170 
             img_bytes = chart_fig.to_image(format="png", width=700, height=320)
             
-            for anchor in ['B10', 'K10']:
+            for anchor in ['B9', 'K9']: # Привязываем графики к 9 строке
                 img_stream = io.BytesIO(img_bytes)
                 img = OpenpyxlImage(img_stream)
                 img.width, img.height = 350, 160 
                 sheet.add_image(img, anchor)
-        except: pass
+        except Exception as e: 
+            pass
 
-    # ВСТАВКА ФОТОГРАФИЙ (С КОНВЕРТАЦИЕЙ PIL)
-    photo_row = 28 # Настройте, если в шаблоне фото начинаются с другой строки
+    # 3. ВСТАВКА ФОТОГРАФИЙ (С исправленным курсором памяти)
+    photo_row = 28 # Если в вашем шаблоне фото начинаются с другой строки - измените эту цифру
+    
     for cat_name, urls in data.get('photo_groups', {}).items():
         if urls:
-            safe_write(sheet, f'B{photo_row}', f"Категория: {cat_name}")
+            safe_write(sheet, f'B{photo_row}', f"Категория дефекта: {cat_name}")
             photo_row += 1
-            col_indices = [2, 5, 8] # B, E, H
+            
+            # Задаем высоту строки для фото, чтобы они не наезжали на текст
+            sheet.row_dimensions[photo_row].height = 110
+            
+            col_indices = [2, 5, 8] # Колонки B, E, H
             for idx, url in enumerate(urls[:3]):
                 try:
-                    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-                    if resp.status_code == 200:
-                        # Конвертируем картинку через PIL (спасает от глюков Excel)
-                        pil_img = PILImage.open(io.BytesIO(resp.content))
-                        pil_img.thumbnail((140, 140)) # Размер фото
-                        
-                        img_temp = io.BytesIO()
-                        pil_img.save(img_temp, format="PNG")
-                        
-                        xl_img = OpenpyxlImage(img_temp)
-                        col_letter = openpyxl.utils.get_column_letter(col_indices[idx])
-                        sheet.add_image(xl_img, f'{col_letter}{photo_row}')
-                except: continue
-            photo_row += 8
+                    # Скачиваем фото
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    image_data = resp.read()
+                    
+                    # Прогоняем через PIL для стабилизации формата
+                    pil_img = PILImage.open(io.BytesIO(image_data))
+                    pil_img.thumbnail((140, 140))
+                    
+                    # Сохраняем в память
+                    img_temp = io.BytesIO()
+                    pil_img.save(img_temp, format="PNG")
+                    
+                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем курсор в начало файла!
+                    img_temp.seek(0) 
+                    
+                    # Вставляем в Excel
+                    xl_img = OpenpyxlImage(img_temp)
+                    col_letter = openpyxl.utils.get_column_letter(col_indices[idx])
+                    sheet.add_image(xl_img, f'{col_letter}{photo_row}')
+                except Exception as e:
+                    continue
+                    
+            photo_row += 8 # Сдвигаемся вниз для следующей категории
 
     output = io.BytesIO()
     wb.save(output)
