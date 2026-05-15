@@ -291,13 +291,14 @@ def generate_advanced_claim_excel(data, chart_fig=None):
     label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 9, 'text_wrap': True, 'valign': 'vcenter'})
     val_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True, 'font_size': 9})
     
-    # 1. Шапка
-    sheet.merge_range('A1:I1', "1 раздел - действия при выявлении несоответсвия товара на входном контроле (заполняет потребитель)", val_fmt)
+    # 1. Шапка (ИСПРАВЛЕНО НАЛОЖЕНИЕ ЯЧЕЕК)
+    sheet.merge_range('A1:E1', "1 раздел - действия при выявлении несоответсвия товара на входном контроле (заполняет потребитель)", val_fmt)
     sheet.merge_range('F1:I1', f"Рекламационный акт № {data['number']}", header_fmt)
-    sheet.merge_range('K1:R1', "1 chapter / 质量投诉报告 №" + str(data['number']), header_fmt)
+    
+    sheet.merge_range('K1:N1', "1 chapter", val_fmt)
+    sheet.merge_range('O1:R1', f"质量投诉报告 № {data['number']}", header_fmt)
 
     # 2. Основная таблица данных (RU и CN параллельно)
-    # Формируем строки по вашему образцу
     rows = [
         {"lab_ru": "Дата составления", "val_ru": data['date'], "lab_ru2": "Поставщик", "val_ru2": data['supplier'],
          "lab_cn": "编制日期", "lab_cn2": "供应商"},
@@ -318,16 +319,16 @@ def generate_advanced_claim_excel(data, chart_fig=None):
         sheet.merge_range(curr_r, 2, curr_r, 4, r['val_ru'], val_fmt)
         sheet.write(curr_r, 5, r['lab_ru2'], label_fmt)
         sheet.merge_range(curr_r, 6, curr_r, 8, r['val_ru2'], val_fmt)
+        
         # CN блок
         sheet.write(curr_r, 10, r['lab_cn'], label_fmt)
-        sheet.merge_range(curr_r, 11, curr_r, 13, r['val_ru'], val_fmt) # Значение даты/периода то же
+        sheet.merge_range(curr_r, 11, curr_r, 13, r['val_ru'], val_fmt) 
         sheet.write(curr_r, 14, r['lab_cn2'], label_fmt)
         sheet.merge_range(curr_r, 15, curr_r, 17, r['val_ru2'], val_fmt)
         
         # Для строк описания делаем высоту больше
         if "Описание" in r['lab_ru']:
             sheet.set_row(curr_r, 40)
-            # Добавляем китайский перевод описания во вторую строку
             sheet.write(curr_r+1, 1, "", val_fmt)
             sheet.merge_range(curr_r+1, 2, curr_r+1, 4, data.get('desc_cn', ''), val_fmt)
             sheet.write(curr_r+1, 5, "", val_fmt)
@@ -344,15 +345,16 @@ def generate_advanced_claim_excel(data, chart_fig=None):
             sheet.insert_image(chart_row + 1, 1, 'chart.png', {'image_data': io.BytesIO(img_data), 'x_scale': 0.65, 'y_scale': 0.65})
         except: pass
 
-    # 4. Фотографии (начиная с 35 строки)
+    # 4. Фотографии
     photo_row = 35
     for cat_name, photos in data.get('photo_groups', {}).items():
         if photos:
             sheet.merge_range(photo_row, 1, photo_row, 8, f"Категория: {cat_name}", label_fmt)
             photo_row += 1
             col_off = 1
-            for url in photos[:3]: # По 3 фото как просили
+            for url in photos[:3]: 
                 try:
+                    import urllib.request
                     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                     resp = urllib.request.urlopen(req, timeout=5)
                     img_data = io.BytesIO(resp.read())
