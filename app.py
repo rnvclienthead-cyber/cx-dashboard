@@ -1683,111 +1683,145 @@ elif page == "Уровень PPM":
                         ))
                         fig.add_trace(go.Scatter(x=chart_agg['Месяц_Стр'], y=chart_agg['Заказы'], name='Заказы', line=dict(color='#95a5a6'), yaxis='y2'))
                         
-                        fig.update_layout(barmode='overlay', height=420, margin=dict(l=0, r=0, t=20, b=0),
-                            xaxis=dict(type='category', categoryorder='array', categoryarray=chart_agg['Месяц_Стр'].unique(), showgrid=False),
-                            legend=dict(orientation="h", y=1.15), yaxis=dict(title="PPM", range=[0, y_limit], showgrid=False),
-                            yaxis2=dict(overlaying='y', side='right', title="Заказы", showgrid=True), hovermode="x unified")
+                        fig.update_layout(
+                            barmode='overlay', 
+                            height=420, 
+                            margin=dict(l=0, r=0, t=20, b=0),
+                            xaxis=dict(
+                                type='category', 
+                                categoryorder='array', 
+                                categoryarray=chart_agg['Месяц_Стр'].unique(), 
+                                showgrid=False
+                            ),
+                            legend=dict(orientation="h", y=1.15), 
+                            yaxis=dict(
+                                title="PPM", 
+                                range=[0, y_limit], 
+                                side='left',
+                                showgrid=False
+                            ),
+                            yaxis2=dict(
+                                title="Кол-во (Брак / Заказы)", 
+                                overlaying='y', 
+                                side='right', 
+                                showgrid=True,
+                                rangemode='tozero' # Гарантирует, что линия брака не "повиснет" в воздухе
+                            ), 
+                            hovermode="x unified"
+                        )
                         st.plotly_chart(fig, use_container_width=True)
                     else: st.info("Нет данных для графика")
 
-               # --- НОВЫЙ БЛОК: ГЕНЕРАТОР ПРЕТЕНЗИИ И ДЕТАЛИЗАЦИЯ ---
+               # --- ОБНОВЛЕННЫЙ БЛОК: ДЕТАЛИЗАЦИЯ И ГЕНЕРАТОР ---
                 if selected_indices:
                     selected_row = table_agg.iloc[selected_indices[0]]
                     current_sku = selected_row['Артикул']
-                    st.markdown("---")
                     
-                    # Создаем две колонки: 1.5 для детализации (слева) и 1 для формы претензии (справа)
-                    det_col, claim_col = st.columns([1.5, 1], gap="large")
-                    
-                    with det_col:
-                        st.subheader(f"🔍 Детализация брака: {current_sku}")
-                        
-                        # Безопасно подгружаем системные заявки для извлечения фото и категорий
-                        try:
-                            df_sys_detail = load_cached_hybrid_data()
+                    # Синхронизация данных: фильтруем детализацию по тем же датам, что и таблицу
+                    try:
+                        df_sys_detail = load_cached_hybrid_data()
+                        # Применяем фильтр дат из глобальных настроек
+                        if len(date_range) == 2:
+                            mask_date = (df_sys_detail['Дата_ДТ'].dt.date >= date_range[0]) & \
+                                        (df_sys_detail['Дата_ДТ'].dt.date <= date_range[1])
+                            sku_details = df_sys_detail[(df_sys_detail['Артикул продавца'] == current_sku) & mask_date].copy()
+                        else:
                             sku_details = df_sys_detail[df_sys_detail['Артикул продавца'] == current_sku].copy()
-                        except:
-                            sku_details = pd.DataFrame()
+                    except:
+                        sku_details = pd.DataFrame()
 
-                        if not sku_details.empty:
-                            # 1. Считаем и выводим категории брака
-                            stats = []
-                            valid_vals = ['1', '1.0', '+', 'true', 'да']
-                            for i in range(1, 14):
-                                cat_col = str(i)
-                                if cat_col in sku_details.columns:
-                                    count = sku_details[sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)].shape[0]
-                                    if count > 0:
-                                        # Подтягиваем название из словаря CATEGORIES, если он есть
-                                        cat_name = CATEGORIES.get(i, f"Категория {i}") if 'CATEGORIES' in globals() else f"Категория {i}"
-                                        stats.append({"Категория": f"{i}. {cat_name}", "Кол-во": count})
-                            
-                            if stats:
-                                st.dataframe(pd.DataFrame(stats), hide_index=True, use_container_width=True)
-                            
-                            # 2. Достаем 5-6 рандомных фотографий по этому артикулу
-                            st.markdown("**📸 Примеры фотографий из заявок:**")
-                            if 'SRID' in sku_details.columns:
-                                defect_srids = sku_details['SRID'].dropna().unique().tolist()
-                                if defect_srids:
-                                    import random
-                                    # Берем выборку, чтобы точно найти фото (до 10 заявок)
-                                    sampled_srids = random.sample(defect_srids, min(len(defect_srids), 10))
-                                    photos_to_show = []
+                    st.markdown("---")
+                    st.subheader(f"🔍 Визуальная детализация брака: {current_sku}")
+                    
+                    if not sku_details.empty:
+                        # 1. Анализ категорий брака
+                        valid_vals = ['1', '1.0', '+', 'true', 'да']
+                        
+                        # Собираем статистику категорий
+                        stats_data = []
+                        for i in range(1, 14):
+                            cat_col = str(i)
+                            if cat_col in sku_details.columns:
+                                # Считаем только те записи, которые помечены этим тегом
+                                cat_mask = sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)
+                                count = sku_details[cat_mask].shape[0]
+                                if count > 0:
+                                    cat_name = CATEGORIES.get(i, f"Категория {i}")
+                                    stats_data.append({
+                                        "ID": i,
+                                        "Категория": cat_name,
+                                        "Кол-во": count,
+                                        "mask": cat_mask
+                                    })
+                        
+                        if stats_data:
+                            # Вывод каждой категории с её фотографиями
+                            for cat in stats_data:
+                                with st.expander(f"📍 {cat['Категория']} — {cat['Кол-во']} шт.", expanded=True):
+                                    # Берем SRID именно для этой категории
+                                    cat_specific_df = sku_details[cat['mask']]
+                                    srids = cat_specific_df['SRID'].dropna().unique().tolist()
                                     
-                                    for srid in sampled_srids:
-                                        try:
+                                    if srids:
+                                        import random
+                                        # Берем до 10 разных заявок, чтобы найти 5-6 качественных фото
+                                        random.shuffle(srids)
+                                        cat_photos = []
+                                        for srid in srids:
                                             p_raw, _ = get_media_for_srid(srid)
                                             if p_raw:
                                                 groups = p_raw.split()
                                                 if groups:
-                                                    # Берем первую или вторую фотографию из заявки
-                                                    group = groups[0] if len(groups) == 1 else groups[1]
-                                                    wb_url = group.split("|")[-1]
-                                                    if wb_url.startswith("//"): wb_url = "https:" + wb_url
-                                                    photos_to_show.append(wb_url)
-                                            # Ограничиваем количество фото на экране до 6
-                                            if len(photos_to_show) >= 6: break
-                                        except: continue
+                                                    # Берем 1 или 2 фото из заявки
+                                                    img = groups[0] if len(groups) == 1 else groups[1]
+                                                    url = img.split("|")[-1]
+                                                    if url.startswith("//"): url = "https:" + url
+                                                    cat_photos.append(url)
+                                            if len(cat_photos) >= 6: break
                                         
-                                    if photos_to_show:
-                                        pic_cols = st.columns(len(photos_to_show))
-                                        for idx, img_url in enumerate(photos_to_show):
-                                            pic_cols[idx].image(img_url, use_container_width=True)
-                                    else:
-                                        st.info("В недавних заявках по этому артикулу нет фотографий.")
-                                else:
-                                    st.info("Нет заявок с SRID для показа фотографий.")
+                                        if cat_photos:
+                                            p_cols = st.columns(6)
+                                            for idx, photo_url in enumerate(cat_photos):
+                                                p_cols[idx].image(photo_url, use_container_width=True)
+                                        else:
+                                            st.caption("Фотографии для данной категории не найдены.")
                         else:
-                            st.info("В системе нет детальных заявок по этому артикулу (возможно, это исторические данные).")
+                            st.info("Нет детализированных данных по категориям за выбранный период.")
+                    else:
+                        st.warning("За выбранный период данных по этому артикулу не найдено.")
 
-                    with claim_col:
-                        st.subheader("🛠 Формирование претензии")
-                        
-                        # Разбил ваши инпуты на две мини-колонки для компактности
-                        cl1, cl2 = st.columns(2)
-                        with cl1:
-                            sup = st.text_input("Завод", value="Pujiang-Haohong", key="cl_sup")
-                            num = st.text_input("Номер РА", value="102", key="cl_num")
-                        with cl2:
-                            # Оставил блоки инвойса и периода для гибкости
-                            inv = st.text_input("Инвойс", value="---", key="cl_inv")
-                            per = st.text_input("Период", value="Май 2026г.", key="cl_per")
-                            
-                        d_ru = st.text_area("Описание (RU)", "Повреждения деталей / Некачественная сварка", key="cl_d_ru")
-                        d_cn = st.text_area("Описание (CN)", "零部件损坏 / 焊接质量不良", key="cl_d_cn")
+                    # --- ФОРМА ПРЕТЕНЗИИ (ПЕРЕНЕСЕНА НИЖЕ) ---
+                    st.markdown("---")
+                    st.subheader(f"🛠 Формирование рекламации: {current_sku}")
+                    
+                    cl1, cl2, cl3 = st.columns(3)
+                    with cl1:
+                        sup = st.text_input("Завод", value="Pujiang-Haohong", key="cl_sup")
+                        num = st.text_input("Номер Рекламационного Акта", value="102", key="cl_num")
+                    with cl2:
+                        inv_val = st.text_input("Инвойс (Invoice)", value="---", key="cl_inv")
+                        # Автоматически подставляем период из фильтра дат
+                        period_val = f"{date_range[0].strftime('%m.%Y')} - {date_range[1].strftime('%m.%Y')}" if len(date_range)==2 else "Май 2026г."
+                        per = st.text_input("Период (Period)", value=period_val, key="cl_per")
+                    with cl3:
+                        d_ru = st.text_area("Описание дефектов (RU)", "Повреждения деталей / Некачественная сварка", key="cl_d_ru")
+                        d_cn = st.text_area("Описание дефектов (CN)", "零部件损坏 / 焊接质量不良", key="cl_d_cn")
 
-                        c_data = {
-                            "number": num, "date": datetime.now().strftime("%Y-%m-%d"), "supplier": sup,
-                            "period": per, "invoice": inv, "sku": current_sku,
-                            "name": "Изделие", "name_cn": "产品", "defects": selected_row['Брак'],
-                            "ppm_pct": round(selected_row['%'], 2), "desc_ru": d_ru, "desc_cn": d_cn,
-                            "cause_ru": "Нарушение при производстве", "cause_cn": "生产过程异常"
-                        }
-                        
-                        if st.download_button("📥 Скачать Акт", data=generate_claim_excel(c_data), 
-                                              file_name=f"RA_{num}_{current_sku}.xlsx", type="primary", use_container_width=True):
-                            st.balloons()
+                    c_data = {
+                        "number": num, "date": datetime.now().strftime("%Y-%m-%d"), "supplier": sup,
+                        "period": per, "invoice": inv_val, "sku": current_sku,
+                        "name": "Изделие", "name_cn": "产品", "defects": selected_row['Брак'],
+                        "ppm_pct": round(selected_row['%'], 2), "desc_ru": d_ru, "desc_cn": d_cn,
+                        "cause_ru": "Нарушение при производстве", "cause_cn": "生产过程异常"
+                    }
+                    
+                    st.download_button(
+                        label=f"📥 Скачать Рекламацию №{num} для {current_sku}", 
+                        data=generate_claim_excel(c_data), 
+                        file_name=f"RA_{num}_{current_sku}.xlsx", 
+                        type="primary", 
+                        use_container_width=True
+                    )
 
             render_ppm_dashboard(df_total, sku_options)
 
