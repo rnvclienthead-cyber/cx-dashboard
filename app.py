@@ -285,7 +285,6 @@ def get_media_for_srid(srid):
 # ==========================================
 # Умная функция для записи текста (обходит блокировки объединенных ячеек)
 def safe_write(sheet, coord, value):
-    """Умная запись с поддержкой объединенных ячеек"""
     try:
         sheet[coord].value = value
     except AttributeError:
@@ -298,81 +297,63 @@ def safe_write(sheet, coord, value):
 def generate_claim_from_template(data, chart_fig=None, template_path="template_ra.xlsx"):
     try:
         wb = openpyxl.load_workbook(template_path)
-    except FileNotFoundError:
+        sheet = wb.active
+    except Exception as e:
         return b""
-        
-    sheet = wb.active
-    
-    # 1. ШАПКА (Смещено на 1 строку вверх: 2 -> 1)
+
+    # ЗАПОЛНЕНИЕ ДАННЫХ
     safe_write(sheet, 'G1', f"Рекламационный акт № {data['number']}")
     safe_write(sheet, 'O1', f"质量投诉报告 № {data['number']}")
-    
-    # 2. РУССКИЙ БЛОК (Смещено на 1 строку вверх: 4->3, 5->4 и т.д.)
-    safe_write(sheet, 'C3', data['date'])          
-    safe_write(sheet, 'G3', data['supplier'])      
-    safe_write(sheet, 'C4', data['period'])        
-    safe_write(sheet, 'G4', data['invoice'])       
-    safe_write(sheet, 'C5', "Возвраты с маркетплейсов")
-    safe_write(sheet, 'C6', data['sku'])           
-    safe_write(sheet, 'C7', data['name'])          
-    safe_write(sheet, 'G7', f"{data['defects']} ({data['ppm_pct']} %)") 
-    safe_write(sheet, 'C8', data['desc_ru'])       
-    safe_write(sheet, 'G8', data['cause_ru'])      
-    
-    # 3. КИТАЙСКИЙ БЛОК (Смещено на 1 строку вверх)
-    safe_write(sheet, 'L3', data['date'])          
-    safe_write(sheet, 'P3', data['supplier'])      
-    safe_write(sheet, 'L4', data['period'])        
-    safe_write(sheet, 'P4', data['invoice'])       
-    safe_write(sheet, 'L5', "电商平台退货")
-    safe_write(sheet, 'L6', data['sku'])           
-    safe_write(sheet, 'L7', data.get('name_cn', '产品'))          
-    safe_write(sheet, 'P7', f"{data['defects']} ({data['ppm_pct']} %)") 
-    safe_write(sheet, 'L8', data.get('desc_cn', '')) 
-    safe_write(sheet, 'P8', data.get('cause_cn', '')) 
-    
-    # 4. ГРАФИКИ (Теперь в 10-й строке)
+    coords = {
+        'C3': data['date'], 'G3': data['supplier'], 'L3': data['date'], 'P3': data['supplier'],
+        'C4': data['period'], 'G4': data['invoice'], 'L4': data['period'], 'P4': data['invoice'],
+        'C5': "Возвраты с маркетплейсов", 'L5': "电商平台退货",
+        'C6': data['sku'], 'L6': data['sku'],
+        'C7': data['name'], 'G7': f"{data['defects']} ({data['ppm_pct']} %)",
+        'L7': data.get('name_cn', '产品'), 'P7': f"{data['defects']} ({data['ppm_pct']} %)",
+        'C8': data['desc_ru'], 'G8': data['cause_ru'],
+        'L8': data.get('desc_cn', ''), 'P8': data.get('cause_cn', '')
+    }
+    for cell, val in coords.items():
+        safe_write(sheet, cell, val)
+
+    # ВСТАВКА ГРАФИКОВ (С ЖЕСТКОЙ ФИКСАЦИЕЙ)
     if chart_fig:
         try:
-            # Генерация картинки (уменьшена на 10% для точности)
+            # Принудительно раздвигаем строку 10, чтобы график не сползал на другие ячейки
+            sheet.row_dimensions[10].height = 170 
             img_bytes = chart_fig.to_image(format="png", width=700, height=320)
             
-            # RU
-            img_ru = OpenpyxlImage(io.BytesIO(img_bytes))
-            img_ru.width, img_ru.height = 350, 160
-            sheet.add_image(img_ru, 'B10') 
-            
-            # CN
-            img_cn = OpenpyxlImage(io.BytesIO(img_bytes))
-            img_cn.width, img_cn.height = 350, 160
-            sheet.add_image(img_cn, 'K10') 
-        except Exception:
-            pass
+            for anchor in ['B10', 'K10']:
+                img_stream = io.BytesIO(img_bytes)
+                img = OpenpyxlImage(img_stream)
+                img.width, img.height = 350, 160 
+                sheet.add_image(img, anchor)
+        except: pass
 
-    # 5. ФОТОГРАФИИ (Начинаем с 25 строки, чтобы не было дыр)
-    photo_row = 25 
-    for cat_name, photos in data.get('photo_groups', {}).items():
-        if photos:
-            # Заголовок категории
-            safe_write(sheet, f'B{photo_row}', f"Категория дефекта / 缺陷类别: {cat_name}")
-            sheet.cell(row=photo_row, column=2).font = openpyxl.styles.Font(bold=True)
+    # ВСТАВКА ФОТОГРАФИЙ (С КОНВЕРТАЦИЕЙ PIL)
+    photo_row = 28 # Настройте, если в шаблоне фото начинаются с другой строки
+    for cat_name, urls in data.get('photo_groups', {}).items():
+        if urls:
+            safe_write(sheet, f'B{photo_row}', f"Категория: {cat_name}")
             photo_row += 1
-            
-            col_off = 2 # Колонка B
-            for url in photos[:3]:
+            col_indices = [2, 5, 8] # B, E, H
+            for idx, url in enumerate(urls[:3]):
                 try:
-                    # Усиленная загрузка фото
-                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                    resp = requests.get(url, headers=headers, timeout=10)
+                    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
                     if resp.status_code == 200:
-                        img = OpenpyxlImage(io.BytesIO(resp.content))
-                        img.width, img.height = 130, 130
-                        col_letter = openpyxl.utils.get_column_letter(col_off)
-                        sheet.add_image(img, f'{col_letter}{photo_row}')
-                        col_off += 3
-                except Exception:
-                    continue
-            photo_row += 8 # Шаг для следующей группы
+                        # Конвертируем картинку через PIL (спасает от глюков Excel)
+                        pil_img = PILImage.open(io.BytesIO(resp.content))
+                        pil_img.thumbnail((140, 140)) # Размер фото
+                        
+                        img_temp = io.BytesIO()
+                        pil_img.save(img_temp, format="PNG")
+                        
+                        xl_img = OpenpyxlImage(img_temp)
+                        col_letter = openpyxl.utils.get_column_letter(col_indices[idx])
+                        sheet.add_image(xl_img, f'{col_letter}{photo_row}')
+                except: continue
+            photo_row += 8
 
     output = io.BytesIO()
     wb.save(output)
@@ -1943,6 +1924,12 @@ elif page == "Уровень PPM":
                         d_ru = st.text_area("Описание дефектов (RU)", value=auto_desc_ru, key="cl_d_ru")
                         d_cn = st.text_area("Описание дефектов (CN)", value=auto_desc_cn, key="cl_d_cn")
 
+                    # === ЛОГИКА УМНОЙ КНОПКИ ===
+                    # Проверяем, нужны ли вообще фото (есть ли дефекты) и загрузились ли они
+                    needs_photos = len(combined_issues) > 0
+                    photos_ready = any(len(urls) > 0 for urls in photo_payload.values())
+                    can_download = (not needs_photos) or photos_ready
+
                     c_data = {
                         "number": num, 
                         "date": datetime.now().strftime("%Y-%m-%d"), 
@@ -1961,12 +1948,16 @@ elif page == "Уровень PPM":
                         "photo_groups": photo_payload 
                     }
                     
+                    if not can_download:
+                        st.warning("⚠️ Ожидание загрузки фотографий или фото не найдены. Акт без фотографий не формируется.")
+                    
                     st.download_button(
-                        label=f"📥 Скачать Рекламацию для {current_sku}", 
-                        data=generate_claim_from_template(c_data, chart_fig=fig), 
+                        label=f"📥 Скачать Рекламацию для {current_sku}" if can_download else "⏳ Загрузите фото для скачивания", 
+                        data=generate_claim_from_template(c_data, chart_fig=fig) if can_download else b"", 
                         file_name=f"RA_{num if num else 'draft'}_{current_sku}.xlsx", 
                         type="primary", 
-                        use_container_width=True
+                        use_container_width=True,
+                        disabled=not can_download # Блокирует нажатие, делая кнопку серой
                     )
 
             render_ppm_dashboard(df_total, sku_options)
