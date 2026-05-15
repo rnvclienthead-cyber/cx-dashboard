@@ -1375,79 +1375,89 @@ elif page == "Отчет производства":
                                 reason_id = int(reason_clicked.split('.')[0])
                                 show_matrix_details(clean_sku, clean_reason, df_filtered, reason_id)
 
-                    # ==========================================================
-                # ОБНОВЛЕННЫЙ БЛОК: ДИНАМИКА SKU (Plotly Trend)
                 # ==========================================================
-                st.markdown("---")
-                st.markdown("### 📈 Детальная динамика и Исторический тренд")
-                
-                # Список артикулов для выбора (игнорирует верхний фильтр дат)
-                all_sku_options = [s for s in sku_list if s != 'Все']
-                
-                c_sku, _ = st.columns([1.5, 2])
-                sku_dyn_target = c_sku.selectbox("Выберите SKU для анализа тренда:", all_sku_options, key="sku_trend_select")
+                    # ОБНОВЛЕННЫЙ БЛОК: ДИНАМИКА SKU (Plotly Trend)
+                    # ==========================================================
+                    st.markdown("---")
+                    st.markdown("### 📈 Детальная динамика и Исторический тренд")
+                    
+                    all_sku_options = [s for s in sku_list if s != 'Все']
+                    
+                    c_sku, _ = st.columns([1.5, 2])
+                    sku_dyn_target = c_sku.selectbox("Выберите SKU для анализа тренда:", all_sku_options, key="sku_trend_select")
 
-                if sku_dyn_target:
-                    with st.spinner("Сбор истории и системных данных..."):
-                        plot_data = []
-                        
-                        # 1. Собираем системные данные по категориям (из df_full)
-                        df_sku_sys = df_full[df_full['Артикул продавца'].astype(str).str.strip() == sku_dyn_target].copy()
-                        if not df_sku_sys.empty:
-                            for i in range(1, 14):
-                                cat_col = str(i)
-                                if cat_col in df_sku_sys.columns:
-                                    mask = df_sku_sys[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
-                                    temp = df_sku_sys[mask].copy()
-                                    if not temp.empty:
-                                        temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ']).dt.to_period('M').dt.to_timestamp()
-                                        monthly = temp.groupby('Месяц').size().reset_index(name='Количество')
-                                        monthly['Источник'] = f"{i}. {CATEGORIES.get(i, f'Категория {i}')}"
-                                        plot_data.append(monthly)
-
-                        # 2. Подтягиваем историю из SQL (таблица historical_ppm)
-                        try:
-                            hist_query = text("SELECT month_date, defects FROM historical_ppm WHERE article = :sku")
-                            with engine.connect() as conn:
-                                df_h = pd.read_sql(hist_query, conn, params={"sku": sku_dyn_target})
-                            if not df_h.empty:
-                                df_h['Месяц'] = pd.to_datetime(df_h['month_date']).dt.to_period('M').dt.to_timestamp()
-                                df_h = df_h.groupby('Месяц')['defects'].sum().reset_index(name='Количество')
-                                df_h['Источник'] = "История (Общий брак)"
-                                plot_data.append(df_h)
-                        except: pass
-
-                        if plot_data:
-                            df_plot = pd.concat(plot_data).sort_values('Месяц')
+                    if sku_dyn_target:
+                        with st.spinner("Сбор истории и системных данных..."):
+                            plot_data = []
                             
-                            # Отрисовка через Plotly (он стабильнее и информативнее Altair)
-                            import plotly.express as px
-                            fig_dyn = px.bar(
-                                df_plot,
-                                x='Месяц',
-                                y='Количество',
-                                color='Источник',
-                                title=f"Анализ дефектов по месяцам: {sku_dyn_target}",
-                                text_auto=True, # Цифры на столбцах
-                                template='plotly_white',
-                                color_discrete_sequence=px.colors.qualitative.Pastel + px.colors.qualitative.Bold
-                            )
+                            # 1. Системные данные
+                            df_sku_sys = df_full[df_full['Артикул продавца'].astype(str).str.strip() == sku_dyn_target].copy()
+                            if not df_sku_sys.empty:
+                                for i in range(1, 14):
+                                    cat_col = str(i)
+                                    if cat_col in df_sku_sys.columns:
+                                        mask = df_sku_sys[cat_col].astype(str).str.strip().str.lower().isin(valid_tag_vals)
+                                        temp = df_sku_sys[mask].copy()
+                                        if not temp.empty:
+                                            temp['Месяц'] = pd.to_datetime(temp['Дата_ДТ']).dt.to_period('M').dt.to_timestamp()
+                                            monthly = temp.groupby('Месяц').size().reset_index(name='Количество')
+                                            monthly['Источник'] = f"{i}. {CATEGORIES.get(i, f'Категория {i}')}"
+                                            plot_data.append(monthly)
 
-                            fig_dyn.update_layout(
-                                xaxis_title=None,
-                                yaxis_title="Кол-во дефектов (заявки)",
-                                legend=dict(orientation="h", yanchor="bottom", y=-0.5, xanchor="center", x=0.5),
-                                hovermode="x unified",
-                                height=550,
-                                bargap=0.3 # Настройка ширины столбцов
-                            )
-                            
-                            # Настройка оси X для читаемости месяцев
-                            fig_dyn.update_xaxes(dtick="M1", tickformat="%b %Y", tickangle=-45)
-                            
-                            st.plotly_chart(fig_dyn, use_container_width=True)
-                        else:
-                            st.info(f"Данных по артикулу {sku_dyn_target} не найдено ни в системе, ни в истории.")
+                            # 2. Исторические данные из SQL
+                            try:
+                                hist_query = text("SELECT month_date, defects FROM historical_ppm WHERE article = :sku")
+                                with engine.connect() as conn:
+                                    df_h = pd.read_sql(hist_query, conn, params={"sku": sku_dyn_target})
+                                if not df_h.empty:
+                                    df_h['Месяц'] = pd.to_datetime(df_h['month_date']).dt.to_period('M').dt.to_timestamp()
+                                    df_h = df_h.groupby('Месяц')['defects'].sum().reset_index(name='Количество')
+                                    df_h['Источник'] = "История (Общий брак)"
+                                    plot_data.append(df_h)
+                            except: pass
+
+                            if plot_data:
+                                df_plot = pd.concat(plot_data).sort_values('Месяц')
+                                
+                                import plotly.express as px
+                                fig_dyn = px.bar(
+                                    df_plot,
+                                    x='Месяц',
+                                    y='Количество',
+                                    color='Источник',
+                                    title=f"Анализ дефектов по месяцам: {sku_dyn_target}",
+                                    text_auto=True,
+                                    template='plotly_white',
+                                    color_discrete_sequence=px.colors.qualitative.Pastel + px.colors.qualitative.Bold
+                                )
+
+                                # КОРРЕКТИРОВКА 1 и 3: Индивидуальный тултип без лишних слов
+                                # %{fullData.name} берет название из легенды (Источник), %{y} берет количество
+                                fig_dyn.update_traces(
+                                    hovertemplate="<b>%{fullData.name}</b>: %{y}<extra></extra>"
+                                )
+
+                                # КОРРЕКТИРОВКА 2: Высота и режим наведения
+                                fig_dyn.update_layout(
+                                    hovermode="closest", # Показывать только тот блок, на который навели
+                                    height=800,          # Увеличенная высота для узких сегментов
+                                    xaxis_title=None,
+                                    yaxis_title="Кол-во дефектов (заявки)",
+                                    legend=dict(
+                                        orientation="h", 
+                                        yanchor="bottom", 
+                                        y=-0.3, # Немного подняли легенду из-за большой высоты
+                                        xanchor="center", 
+                                        x=0.5
+                                    ),
+                                    bargap=0.4
+                                )
+                                
+                                fig_dyn.update_xaxes(dtick="M1", tickformat="%b %Y", tickangle=-45)
+                                
+                                st.plotly_chart(fig_dyn, use_container_width=True)
+                            else:
+                                st.info(f"Данных по артикулу {sku_dyn_target} не найдено.")
                     
                     # ==========================================================
                     # ПРОБЛЕМНЫЕ ИНВОЙСЫ
