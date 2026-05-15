@@ -14,11 +14,31 @@ import urllib.request
 import base64
 import streamlit.components.v1 as componentsаа
 import time
+import os
 import xlsxwriter
 import requests
+import openpyxl
+from openpyxl.drawing.image import Image as OpenpyxlImage
 from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
+
+# ==========================================
+# БЛОК ЗАГРУЗКИ ШАБЛОНА В ПАМЯТЬ СИСТЕМЫ
+# ==========================================
+with st.sidebar.expander("⚙️ Админ: Шаблон Рекламации"):
+    st.info("Загрузите пустой эталонный Excel-файл. Он сохранится на сервере и будет использоваться всегда.")
+    uploaded_template = st.file_uploader("Загрузить шаблон (.xlsx)", type=["xlsx"])
+    if uploaded_template:
+        # Сохраняем файл в корень системы навсегда
+        with open("template_ra.xlsx", "wb") as f:
+            f.write(uploaded_template.read())
+        st.success("✅ Шаблон успешно сохранен в память системы!")
+        
+    if os.path.exists("template_ra.xlsx"):
+        st.caption("🟢 В системе сейчас загружен активный шаблон.")
+    else:
+        st.error("🔴 Шаблон отсутствует. Пожалуйста, загрузите его.")
 
 st.markdown("""
     <style>
@@ -277,117 +297,94 @@ def get_media_for_srid(srid):
     except: pass
     return "", ""
 
-def generate_advanced_claim_excel(data, chart_fig=None):
-    output = io.BytesIO()
-    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
-    sheet = workbook.add_worksheet("Лист1")
+# ==========================================
+# НОВАЯ ФУНКЦИЯ ГЕНЕРАЦИИ (ПО ШАБЛОНУ)
+# ==========================================
+def generate_claim_from_template(data, chart_fig=None):
+    template_path = "template_ra.xlsx"
     
-    # 1. ТОЧНАЯ НАСТРОЙКА КОЛОНОК (Как в РА № 092)
-    sheet.set_column('A:A', 2)    # Пустой отступ
-    sheet.set_column('B:B', 25)   # Заголовки RU
-    sheet.set_column('C:E', 12)   # Значения RU
-    sheet.set_column('F:F', 25)   # Заголовки RU 2
-    sheet.set_column('G:J', 12)   # Значения RU 2
-    sheet.set_column('K:K', 25)   # Заголовки CN
-    sheet.set_column('L:N', 12)   # Значения CN
-    sheet.set_column('O:O', 25)   # Заголовки CN 2
-    sheet.set_column('P:S', 12)   # Значения CN 2
-
-    # 2. СТИЛИ (Тонкие рамки, серая заливка #F2F2F2)
-    header_fmt = workbook.add_format({'bold': True, 'font_size': 12, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True})
-    label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 10, 'text_wrap': True, 'valign': 'vcenter'})
-    val_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True, 'font_size': 10})
-    title_label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 10, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center'})
-
-    # 3. ШАПКА
-    sheet.merge_range('B2:F2', "1 раздел - действия при выявлении несоответсвия товара на входном контроле (заполняет потребитель)", val_fmt)
-    sheet.merge_range('G2:J2', f"Рекламационный акт № {data['number']}", header_fmt)
-    
-    sheet.merge_range('K2:N2', "1 chapter", val_fmt)
-    sheet.merge_range('O2:S2', f"质量投诉报告 № {data['number']}", header_fmt)
-    sheet.set_row(1, 30)
-
-    # 4. ОСНОВНАЯ ТАБЛИЦА (Симметрично RU и CN)
-    rows = [
-        {"lab_ru": "Дата составления", "val_ru": data['date'], "lab_ru2": "Поставщик", "val_ru2": data['supplier'],
-         "lab_cn": "编制日期", "lab_cn2": "供应商"},
-        {"lab_ru": "Временной промежуток", "val_ru": data['period'], "lab_ru2": "№ контейнера (инвойса)", "val_ru2": data['invoice'],
-         "lab_cn": "报告期间", "lab_cn2": "集装箱号（发票号）"},
-        {"lab_ru": "Этап контроля", "val_ru": "Возвраты с маркетплейсов", "lab_ru2": "Дата ТТН", "val_ru2": "---",
-         "lab_cn": "检验阶段", "lab_cn2": "发票日期"},
-        {"lab_ru": "Артикул", "val_ru": data['sku'], "lab_ru2": "№ партии", "val_ru2": "---",
-         "lab_cn": "产品编号", "lab_cn2": "批次号"},
-        {"lab_ru": "Наименование", "val_ru": data['name'], "lab_ru2": "Кол-во брака", "val_ru2": f"{data['defects']} ({data['ppm_pct']} %)",
-         "lab_cn": "名称", "lab_cn2": "不合格数量"},
-        {"lab_ru": "Описание несоответствия", "val_ru": data['desc_ru'], "lab_ru2": "Предварительная причина", "val_ru2": data['cause_ru'],
-         "lab_cn": "不符合项描述", "lab_cn2": "初步原因"},
-    ]
-
-    curr_r = 3
-    for r in rows:
-        # RU блок
-        sheet.write(curr_r, 1, r['lab_ru'], label_fmt)
-        sheet.merge_range(curr_r, 2, curr_r, 4, r['val_ru'], val_fmt)
-        sheet.write(curr_r, 5, r['lab_ru2'], label_fmt)
-        sheet.merge_range(curr_r, 6, curr_r, 9, r['val_ru2'], val_fmt)
+    # 1. Открываем сохраненный шаблон
+    try:
+        wb = openpyxl.load_workbook(template_path)
+    except FileNotFoundError:
+        st.error("Шаблон не найден! Загрузите его через боковое меню.")
+        return b""
         
-        # CN блок
-        sheet.write(curr_r, 10, r['lab_cn'], label_fmt)
-        sheet.merge_range(curr_r, 11, curr_r, 13, r['val_ru'], val_fmt) 
-        sheet.write(curr_r, 14, r['lab_cn2'], label_fmt)
-        sheet.merge_range(curr_r, 15, curr_r, 18, r['val_ru2'], val_fmt)
-        
-        # Двойная высота для описания
-        if "Описание" in r['lab_ru']:
-            sheet.set_row(curr_r, 60)
-            sheet.write(curr_r+1, 1, "", val_fmt)
-            sheet.merge_range(curr_r+1, 2, curr_r+1, 4, data.get('desc_cn', ''), val_fmt)
-            sheet.write(curr_r+1, 5, "", val_fmt)
-            sheet.merge_range(curr_r+1, 6, curr_r+1, 9, data.get('cause_cn', ''), val_fmt)
-            sheet.set_row(curr_r+1, 60)
-            curr_r += 1
-        else:
-            sheet.set_row(curr_r, 25)
-            
-        curr_r += 1
-
-    # 5. ГРАФИКИ (Два графика, уменьшены по масштабу)
-    chart_row = curr_r
-    sheet.merge_range(chart_row, 1, chart_row, 9, "Визуализация отклонения", title_label_fmt)
-    sheet.merge_range(chart_row, 10, chart_row, 18, "异常可视化", title_label_fmt)
-    sheet.set_row(chart_row + 1, 170) 
+    sheet = wb.active
     
+    # 2. ВПИСЫВАЕМ ДАННЫЕ В ЯЧЕЙКИ (Координаты основаны на вашем РА № 092)
+    # Если ячейки объединены (например C4:E4), данные пишутся в верхнюю левую ячейку (C4)
+    
+    # Шапка
+    sheet['G2'] = f"Рекламационный акт № {data['number']}"
+    sheet['O2'] = f"质量投诉报告 № {data['number']}"
+    
+    # РУССКИЙ БЛОК (Слева)
+    sheet['C4'] = data['date']          
+    sheet['G4'] = data['supplier']      
+    sheet['C5'] = data['period']        
+    sheet['G5'] = data['invoice']       
+    sheet['C6'] = "Возвраты с маркетплейсов"
+    sheet['C7'] = data['sku']           
+    sheet['C8'] = data['name']          
+    sheet['G8'] = f"{data['defects']} ({data['ppm_pct']} %)" 
+    sheet['C9'] = data['desc_ru']       
+    sheet['G9'] = data['cause_ru']      
+    
+    # КИТАЙСКИЙ БЛОК (Справа)
+    sheet['L4'] = data['date']          
+    sheet['P4'] = data['supplier']      
+    sheet['L5'] = data['period']        
+    sheet['P5'] = data['invoice']       
+    sheet['L6'] = "电商平台退货"
+    sheet['L7'] = data['sku']           
+    sheet['L8'] = data.get('name_cn', '产品')          
+    sheet['P8'] = f"{data['defects']} ({data['ppm_pct']} %)" 
+    sheet['L9'] = data.get('desc_cn', '') 
+    sheet['P9'] = data.get('cause_cn', '') 
+    
+    # 3. ВСТАВКА ГРАФИКОВ (если передан график)
     if chart_fig:
         try:
-            img_data = chart_fig.to_image(format="png", width=800, height=400)
-            chart_buf = io.BytesIO(img_data)
-            # x_scale и y_scale снижены до 0.45 (уменьшение на 10-15%)
-            sheet.insert_image(chart_row + 1, 1, 'chart_ru.png', {'image_data': chart_buf, 'x_scale': 0.45, 'y_scale': 0.45, 'x_offset': 10, 'y_offset': 10})
-            sheet.insert_image(chart_row + 1, 10, 'chart_cn.png', {'image_data': chart_buf, 'x_scale': 0.45, 'y_scale': 0.45, 'x_offset': 10, 'y_offset': 10})
-        except Exception as e: 
+            img_bytes = chart_fig.to_image(format="png", width=750, height=350)
+            
+            # Под русский блок
+            img_ru = OpenpyxlImage(io.BytesIO(img_bytes))
+            img_ru.width, img_ru.height = 375, 175 # Уменьшаем в 2 раза для компактности
+            sheet.add_image(img_ru, 'B12') # Ячейка, откуда начнется график
+            
+            # Под китайский блок
+            img_cn = OpenpyxlImage(io.BytesIO(img_bytes))
+            img_cn.width, img_cn.height = 375, 175
+            sheet.add_image(img_cn, 'K12') 
+        except Exception as e:
             pass
 
-    # 6. ФОТОГРАФИИ (Динамическая вставка с обходом блокировок)
-    photo_row = chart_row + 2
+    # 4. ВСТАВКА ФОТОГРАФИЙ
+    photo_row = 28 # Строка, с которой начинаются фото (настройте под ваш пустой шаблон)
     for cat_name, photos in data.get('photo_groups', {}).items():
         if photos:
-            sheet.merge_range(photo_row, 1, photo_row, 18, f"Категория дефекта / 缺陷类别: {cat_name}", title_label_fmt)
-            sheet.set_row(photo_row, 25)
+            sheet.cell(row=photo_row, column=2).value = f"Категория дефекта / 缺陷类别: {cat_name}"
+            sheet.cell(row=photo_row, column=2).font = openpyxl.styles.Font(bold=True)
             photo_row += 1
-            sheet.set_row(photo_row, 120)
-            col_off = 1
-            for url in photos[:3]: 
+            
+            col_off = 2 # Начинаем с колонки B
+            for url in photos[:3]:
                 try:
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-                    resp = urllib.request.urlopen(req, timeout=10)
-                    img_data = io.BytesIO(resp.read())
-                    sheet.insert_image(photo_row, col_off, 'p.png', {'image_data': img_data, 'x_scale': 0.15, 'y_scale': 0.15, 'x_offset': 5, 'y_offset': 5})
-                    col_off += 4
-                except Exception as e: 
-                    pass
-            photo_row += 1
-    
-    workbook.close()
+                    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+                    if resp.status_code == 200:
+                        img = OpenpyxlImage(io.BytesIO(resp.content))
+                        img.width, img.height = 130, 130 # Фиксированный размер фото
+                        col_letter = openpyxl.utils.get_column_letter(col_off)
+                        sheet.add_image(img, f'{col_letter}{photo_row}')
+                        col_off += 3 # Сдвигаемся вправо на 3 колонки для следующего фото
+                except:
+                    continue
+            photo_row += 8 # Сдвигаемся вниз для следующей категории
+
+    # 5. Сохранение
+    output = io.BytesIO()
+    wb.save(output)
     return output.getvalue()
 
 # ==========================================
@@ -1978,7 +1975,7 @@ elif page == "Уровень PPM":
                     
                     st.download_button(
                         label=f"📥 Скачать Рекламацию для {current_sku}", 
-                        data=generate_advanced_claim_excel(c_data, chart_fig=fig), 
+                        data=generate_claim_from_template(c_data, chart_fig=fig), # <-- Заменили тут
                         file_name=f"RA_{num if num else 'draft'}_{current_sku}.xlsx", 
                         type="primary", 
                         use_container_width=True
