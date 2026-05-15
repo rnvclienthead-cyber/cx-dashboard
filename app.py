@@ -1776,11 +1776,10 @@ elif page == "Уровень PPM":
                                                                 if s3_url.startswith("//"): s3_url = "https:" + s3_url
                                                                 if wb_url.startswith("//"): wb_url = "https:" + wb_url
                                                                 
-                                                                # ПРАВКА 4: Проверка на уникальность
                                                                 if wb_url not in seen_photos:
                                                                     seen_photos.add(wb_url)
-                                                                    # Задали жесткие размеры и скругления прямо в HTML для аккуратности
-                                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;"></a>'
+                                                                    # ВЕРНУЛИ class="photo-zoom" на место!
+                                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0;"></a>'
                                                                     photo_count += 1
                                                                     break # Нашли уникальное фото, переходим к следующему SRID
                                                     if photo_count >= 6: break
@@ -1790,7 +1789,6 @@ elif page == "Уровень PPM":
                                             if photo_count > 0:
                                                 st.markdown(html_imgs, unsafe_allow_html=True)
                                             else:
-                                                # ПРАВКА 4: Сообщение, если все фото из категории уже были использованы
                                                 st.caption("Нет уникального фото")
                                         else:
                                             st.caption("Нет SRID для поиска фото")
