@@ -281,73 +281,86 @@ def generate_advanced_claim_excel(data, chart_fig=None):
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     sheet = workbook.add_worksheet("Лист1")
     
-    # Стили
-    header_fmt = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'center'})
-    label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 10, 'text_wrap': True})
-    val_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True})
-    
-    # 1. Шапка (Строки 1-2)
-    sheet.merge_range('A1:E1', "1 раздел - действия при выявлении несоответсвия...", val_fmt)
-    sheet.merge_range('F1:I1', f"Рекламационный акт № {data['number']}", header_fmt)
-    sheet.merge_range('J1:N1', "1 chapter", val_fmt)
-    sheet.merge_range('O1:R1', f"质量投诉报告 №{data['number']}", header_fmt)
+    # Настройка ширины колонок для схожести с шаблоном
+    sheet.set_column('A:A', 2); sheet.set_column('B:B', 20); sheet.set_column('C:E', 10)
+    sheet.set_column('F:F', 20); sheet.set_column('G:I', 10); sheet.set_column('J:J', 5)
+    sheet.set_column('K:K', 20); sheet.set_column('L:N', 10); sheet.set_column('O:O', 20); sheet.set_column('P:R', 10)
 
-    # 2. Инфо-блок (Строки 3-8)
-    info_rows = [
-        ("Дата составления", data['date'], "Поставщик", data['supplier'], "编制日期", "供应商"),
-        ("Временной промежуток", data['period'], "№ инвойса", data['invoice'], "报告期间", "发票号"),
-        ("Артикул", data['sku'], "№ партии", "---", "产品编号", "批次号"),
-        ("Наименование", data['name'], "Кол-во брака", f"{data['defects']} ({data['ppm_pct']} %)", "名称", "不合格数量"),
-        ("Описание несоответствия", data['desc_ru'], "Предварительная причина", data['cause_ru'], "不符合项描述", "初步原因"),
-        ("", data['desc_cn'], "", data['cause_cn'], "", ""),
+    # Стили
+    header_fmt = workbook.add_format({'bold': True, 'font_size': 12, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True})
+    label_fmt = workbook.add_format({'bg_color': '#F2F2F2', 'border': 1, 'bold': True, 'font_size': 9, 'text_wrap': True, 'valign': 'vcenter'})
+    val_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True, 'font_size': 9})
+    
+    # 1. Шапка
+    sheet.merge_range('A1:I1', "1 раздел - действия при выявлении несоответсвия товара на входном контроле (заполняет потребитель)", val_fmt)
+    sheet.merge_range('F1:I1', f"Рекламационный акт № {data['number']}", header_fmt)
+    sheet.merge_range('K1:R1', "1 chapter / 质量投诉报告 №" + str(data['number']), header_fmt)
+
+    # 2. Основная таблица данных (RU и CN параллельно)
+    # Формируем строки по вашему образцу
+    rows = [
+        {"lab_ru": "Дата составления", "val_ru": data['date'], "lab_ru2": "Поставщик", "val_ru2": data['supplier'],
+         "lab_cn": "编制日期", "lab_cn2": "供应商"},
+        {"lab_ru": "Временной промежуток", "val_ru": data['period'], "lab_ru2": "№ инвойса", "val_ru2": data['invoice'],
+         "lab_cn": "报告期间", "lab_cn2": "发票号"},
+        {"lab_ru": "Артикул", "val_ru": data['sku'], "lab_ru2": "№ партии", "val_ru2": "---",
+         "lab_cn": "产品编号", "lab_cn2": "批次号"},
+        {"lab_ru": "Наименование", "val_ru": data['name'], "lab_ru2": "Кол-во брака", "val_ru2": f"{data['defects']} ({data['ppm_pct']}%)",
+         "lab_cn": "名称", "lab_cn2": "不合格数量"},
+        {"lab_ru": "Описание несоответствия", "val_ru": data['desc_ru'], "lab_ru2": "Предварительная причина", "val_ru2": data['cause_ru'],
+         "lab_cn": "不符合项描述", "lab_cn2": "初步原因"},
     ]
 
-    for i, row in enumerate(info_rows, start=2):
-        sheet.write(i, 0, row[0], label_fmt); sheet.write(i, 1, row[1], val_fmt)
-        sheet.write(i, 4, row[2], label_fmt); sheet.write(i, 5, row[3], val_fmt)
-        sheet.write(i, 9, row[4], label_fmt); sheet.write(i, 10, row[1], val_fmt) 
-        sheet.write(i, 13, row[5], label_fmt); sheet.write(i, 14, row[3], val_fmt)
+    curr_r = 2
+    for r in rows:
+        # RU блок
+        sheet.write(curr_r, 1, r['lab_ru'], label_fmt)
+        sheet.merge_range(curr_r, 2, curr_r, 4, r['val_ru'], val_fmt)
+        sheet.write(curr_r, 5, r['lab_ru2'], label_fmt)
+        sheet.merge_range(curr_r, 6, curr_r, 8, r['val_ru2'], val_fmt)
+        # CN блок
+        sheet.write(curr_r, 10, r['lab_cn'], label_fmt)
+        sheet.merge_range(curr_r, 11, curr_r, 13, r['val_ru'], val_fmt) # Значение даты/периода то же
+        sheet.write(curr_r, 14, r['lab_cn2'], label_fmt)
+        sheet.merge_range(curr_r, 15, curr_r, 17, r['val_ru2'], val_fmt)
+        
+        # Для строк описания делаем высоту больше
+        if "Описание" in r['lab_ru']:
+            sheet.set_row(curr_r, 40)
+            # Добавляем китайский перевод описания во вторую строку
+            sheet.write(curr_r+1, 1, "", val_fmt)
+            sheet.merge_range(curr_r+1, 2, curr_r+1, 4, data.get('desc_cn', ''), val_fmt)
+            sheet.write(curr_r+1, 5, "", val_fmt)
+            sheet.merge_range(curr_r+1, 6, curr_r+1, 8, data.get('cause_cn', ''), val_fmt)
+            curr_r += 1
+        curr_r += 1
 
-    # 3. Визуализация отклонения (График)
-    sheet.merge_range('A9:R9', "Визуализация отклонения / 异常可视化", label_fmt)
-    
+    # 3. График
+    chart_row = curr_r + 1
+    sheet.merge_range(chart_row, 1, chart_row, 17, "Визуализация отклонения / 异常可视化", label_fmt)
     if chart_fig:
         try:
-            # Пытаемся сгенерировать картинку графика (требует kaleido)
-            img_data = chart_fig.to_image(format="png", width=800, height=400)
-            chart_buffer = io.BytesIO(img_data)
-            sheet.insert_image('A10', 'chart.png', {'image_data': chart_buffer, 'x_scale': 0.7, 'y_scale': 0.7})
-        except Exception as e:
-            # Если kaleido нет, эксель все равно скачается, но без графика
-            sheet.write('A10', f"Не удалось загрузить график. Убедитесь, что установлен пакет kaleido.", val_fmt)
+            img_data = chart_fig.to_image(format="png", width=1000, height=400)
+            sheet.insert_image(chart_row + 1, 1, 'chart.png', {'image_data': io.BytesIO(img_data), 'x_scale': 0.65, 'y_scale': 0.65})
+        except: pass
 
-    # 4. Фотографии
-    current_row = 30
-    sheet.write(current_row, 0, "Фото дефектов / 缺陷照片", label_fmt)
-    current_row += 1
+    # 4. Фотографии (начиная с 35 строки)
+    photo_row = 35
+    for cat_name, photos in data.get('photo_groups', {}).items():
+        if photos:
+            sheet.merge_range(photo_row, 1, photo_row, 8, f"Категория: {cat_name}", label_fmt)
+            photo_row += 1
+            col_off = 1
+            for url in photos[:3]: # По 3 фото как просили
+                try:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    img_data = io.BytesIO(resp.read())
+                    sheet.insert_image(photo_row, col_off, 'p.png', {'image_data': img_data, 'x_scale': 0.12, 'y_scale': 0.12})
+                    col_off += 3
+                except: continue
+            photo_row += 8
     
-    col_idx = 0
-    for category_name, photos in data.get('photo_groups', {}).items():
-        sheet.merge_range(current_row, 0, current_row, 5, f"Категория: {category_name}", label_fmt)
-        current_row += 1
-        for img_url in photos:
-            try:
-                import urllib.request
-                req = urllib.request.Request(img_url, headers={'User-Agent': 'Mozilla/5.0'})
-                response = urllib.request.urlopen(req, timeout=5)
-                img_stream = io.BytesIO(response.read())
-                sheet.insert_image(current_row, col_idx, 'defect.png', {'image_data': img_stream, 'x_scale': 0.15, 'y_scale': 0.15})
-                
-                col_idx += 3
-                if col_idx > 15:
-                    col_idx = 0
-                    current_row += 8
-            except Exception as e: 
-                continue
-                
-        current_row += 8
-        col_idx = 0
-
     workbook.close()
     return output.getvalue()
 
