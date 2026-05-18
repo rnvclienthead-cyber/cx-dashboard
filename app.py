@@ -25,7 +25,7 @@ from openpyxl.styles import Alignment
 from sqlalchemy import create_engine, text
 from PIL import Image as PILImage
 
-st.set_page_config(page_title="CX AI Enterprise", layout="wide")
+st.set_page_config(page_title="CX Видовито", page_icon="favicon.png", layout="wide")
 
 # ==========================================
 # БЛОК ЗАГРУЗКИ ШАБЛОНА В ПАМЯТЬ СИСТЕМЫ
