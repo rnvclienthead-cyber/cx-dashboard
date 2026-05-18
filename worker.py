@@ -244,14 +244,15 @@ def sync_chunk_to_db(df):
     if df.empty: return
     df.to_sql('temp_wb_logistics', engine, if_exists='replace', index=False)
     upsert_sql = """
-    INSERT INTO wb_logistics (srid, doc_type, dt, supplier_article, nm_id, warehouse_name, category, subject, brand, is_cancel, last_change_date, income_id)
-    SELECT DISTINCT ON (srid) srid, doc_type, CAST(dt AS TIMESTAMP), supplier_article, nm_id, warehouse_name, category, subject, brand, CAST(is_cancel AS BOOLEAN), CAST(last_change_date AS TIMESTAMP), income_id
+    INSERT INTO wb_logistics (srid, doc_type, dt, supplier_article, nm_id, warehouse_name, category, subject, brand, is_cancel, last_change_date, income_id, last_sync)
+    SELECT DISTINCT ON (srid) srid, doc_type, CAST(dt AS TIMESTAMP), supplier_article, nm_id, warehouse_name, category, subject, brand, CAST(is_cancel AS BOOLEAN), CAST(last_change_date AS TIMESTAMP), income_id, CAST(last_sync AS TIMESTAMP)
     FROM temp_wb_logistics ORDER BY srid, last_change_date DESC
     ON CONFLICT (srid) DO UPDATE SET 
         is_cancel = EXCLUDED.is_cancel, 
         nm_id = COALESCE(EXCLUDED.nm_id, wb_logistics.nm_id),
         last_change_date = EXCLUDED.last_change_date,
-        income_id = COALESCE(EXCLUDED.income_id, wb_logistics.income_id);
+        income_id = COALESCE(EXCLUDED.income_id, wb_logistics.income_id),
+        last_sync = EXCLUDED.last_sync;
     """
     with engine.begin() as conn:
         conn.execute(text(upsert_sql))
@@ -303,6 +304,7 @@ def fetch_and_save_logistics(url, doc_type):
             df_chunk = pd.DataFrame(chunk_data)
             if not df_chunk.empty:
                 df_chunk = df_chunk.drop_duplicates(subset=['srid'], keep='last')
+                df_chunk['last_sync'] = pd.Timestamp.now() # ДОБАВИЛИ ВРЕМЯ
                 sync_chunk_to_db(df_chunk)
                 
             print(f"📥 Сохранена пачка {doc_type} ({len(df_chunk)} строк). Текущая дата: {current_from}")
@@ -338,13 +340,14 @@ def sync_orders_chunk_to_db(df):
     if df.empty: return
     df.to_sql('temp_wb_orders', engine, if_exists='replace', index=False)
     upsert_sql = """
-    INSERT INTO wb_orders (srid, dt, supplier_article, cancel_dt, last_change_date)
+    INSERT INTO wb_orders (srid, dt, supplier_article, cancel_dt, last_change_date, last_sync)
     SELECT DISTINCT ON (srid) srid, CAST(dt AS TIMESTAMP), supplier_article, 
-        CAST(cancel_dt AS TIMESTAMP), CAST(last_change_date AS TIMESTAMP)
+        CAST(cancel_dt AS TIMESTAMP), CAST(last_change_date AS TIMESTAMP), CAST(last_sync AS TIMESTAMP)
     FROM temp_wb_orders ORDER BY srid, last_change_date DESC
     ON CONFLICT (srid) DO UPDATE SET 
         cancel_dt = EXCLUDED.cancel_dt,
-        last_change_date = EXCLUDED.last_change_date;
+        last_change_date = EXCLUDED.last_change_date,
+        last_sync = EXCLUDED.last_sync;
     """
     with engine.begin() as conn:
         conn.execute(text(upsert_sql))
@@ -391,6 +394,7 @@ def fetch_and_save_orders(url):
                 })
             
             df_chunk = pd.DataFrame(chunk_data).drop_duplicates(subset=['srid'], keep='last')
+            df_chunk['last_sync'] = pd.Timestamp.now() # ДОБАВИЛИ ВРЕМЯ
             sync_orders_chunk_to_db(df_chunk)
             print(f"📥 Сохранена пачка заказов ({len(df_chunk)} строк). Текущая дата: {current_from}")
             
@@ -465,10 +469,12 @@ def sync_invoices():
         with engine.begin() as conn:
             for _, row in df_to_process.iterrows():
                 sql = text("""
-                    INSERT INTO wb_invoices (supply_id, supplier_article, invoice_num)
-                    VALUES (:sid, :art, :inv)
+                    INSERT INTO wb_invoices (supply_id, supplier_article, invoice_num, last_sync)
+                    VALUES (:sid, :art, :inv, CURRENT_TIMESTAMP)
                     ON CONFLICT (supply_id, supplier_article) 
-                    DO UPDATE SET invoice_num = EXCLUDED.invoice_num
+                    DO UPDATE SET 
+                        invoice_num = EXCLUDED.invoice_num,
+                        last_sync = EXCLUDED.last_sync
                 """)
                 conn.execute(sql, {"sid": row['s_id'], "art": row['a_id'], "inv": row['i_id']})
                 
@@ -506,7 +512,8 @@ def sync_assortment_matrix():
             supplier_article TEXT PRIMARY KEY,
             name_ru TEXT,
             name_cn TEXT,
-            manufacturer TEXT
+            manufacturer TEXT,
+            last_sync TIMESTAMP
         );
         """
         
@@ -523,13 +530,14 @@ def sync_assortment_matrix():
 
                 # UPSERT данных
                 sql = text("""
-                    INSERT INTO wb_assortment (supplier_article, name_ru, name_cn, manufacturer)
-                    VALUES (:art, :n_ru, :n_cn, :manuf)
+                    INSERT INTO wb_assortment (supplier_article, name_ru, name_cn, manufacturer, last_sync)
+                    VALUES (:art, :n_ru, :n_cn, :manuf, CURRENT_TIMESTAMP)
                     ON CONFLICT (supplier_article) 
                     DO UPDATE SET 
                         name_ru = EXCLUDED.name_ru,
                         name_cn = EXCLUDED.name_cn,
-                        manufacturer = EXCLUDED.manufacturer
+                        manufacturer = EXCLUDED.manufacturer,
+                        last_sync = EXCLUDED.last_sync
                 """)
                 conn.execute(sql, {"art": art, "n_ru": n_ru, "n_cn": n_cn, "manuf": manuf})
                 
