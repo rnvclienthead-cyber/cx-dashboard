@@ -452,6 +452,67 @@ def sync_invoices():
     except Exception as e:
         print(f"🚨 Ошибка: {e}")
 
+def sync_assortment_matrix():
+    print("⏳ Синхронизация ассортиментной матрицы из Google Sheets...")
+    try:
+        gc = gspread.service_account(filename=PATH_TO_GOOGLE_CREDS)
+        # Берем ВТОРОЙ лист (индекс 1). Индекс 0 — это инвойсы.
+        sheet = gc.open_by_key(SPREADSHEET_ID_INVOICES).get_worksheet(1)
+        
+        df = pd.DataFrame(sheet.get_all_records())
+        if df.empty: 
+            print("⚠️ Второй лист с матрицей пуст.")
+            return
+
+        df.columns = df.columns.str.strip().str.lower()
+
+        # Умный поиск колонок по ключевым словам
+        article_col = next((c for c in df.columns if 'артикул' in c and 'wb' not in c), None)
+        name_ru_col = next((c for c in df.columns if 'наименование' in c and 'кит' not in c), None)
+        name_cn_col = next((c for c in df.columns if 'китайск' in c or ('наименование' in c and 'кит' in c)), None)
+        manuf_col = next((c for c in df.columns if 'завод' in c or 'производитель' in c), None)
+
+        if not article_col:
+            print("❌ Колонка с артикулом не найдена на листе ассортиментной матрицы.")
+            return
+
+        # Автоматическое создание таблицы, если её еще нет в Supabase
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS wb_assortment (
+            supplier_article TEXT PRIMARY KEY,
+            name_ru TEXT,
+            name_cn TEXT,
+            manufacturer TEXT
+        );
+        """
+        
+        with engine.begin() as conn:
+            conn.execute(text(create_table_sql))
+
+            for _, row in df.iterrows():
+                art = str(row.get(article_col, '')).strip()
+                if not art or art.lower() in ['nan', 'none', '']: continue
+                
+                n_ru = str(row.get(name_ru_col, '')).strip() if name_ru_col else ''
+                n_cn = str(row.get(name_cn_col, '')).strip() if name_cn_col else ''
+                manuf = str(row.get(manuf_col, '')).strip() if manuf_col else ''
+
+                # UPSERT данных
+                sql = text("""
+                    INSERT INTO wb_assortment (supplier_article, name_ru, name_cn, manufacturer)
+                    VALUES (:art, :n_ru, :n_cn, :manuf)
+                    ON CONFLICT (supplier_article) 
+                    DO UPDATE SET 
+                        name_ru = EXCLUDED.name_ru,
+                        name_cn = EXCLUDED.name_cn,
+                        manufacturer = EXCLUDED.manufacturer
+                """)
+                conn.execute(sql, {"art": art, "n_ru": n_ru, "n_cn": n_cn, "manuf": manuf})
+                
+        print("✅ Ассортиментная матрица успешно обновлена в базе.")
+    except Exception as e:
+        print(f"🚨 Ошибка синхронизации матрицы: {e}")
+
 # =========================================
 # ЗАПУСК
 # =========================================
@@ -460,6 +521,7 @@ if __name__ == "__main__":
     try:
         # 0. Качаем инвойсы из Google
         sync_invoices()
+        sync_assortment_matrix()
         
         # 1. Качаем претензии
         sync_claims_to_db(fetch_wb_claims())
