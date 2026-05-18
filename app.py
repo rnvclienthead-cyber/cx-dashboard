@@ -321,7 +321,7 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
     except Exception:
         return b""
 
-    # 1. ЗАПОЛНЕНИЕ ДАННЫХ
+    # 1. ЗАПОЛНЕНИЕ СВОДНЫХ ДАННЫХ (СТРОКИ 1 - 8)
     safe_write(sheet, 'G1', f"Рекламационный акт № {data['number']}")
     safe_write(sheet, 'O1', f"质量投诉报告 № {data['number']}")
     
@@ -338,62 +338,72 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
     for cell, val in coords.items():
         safe_write(sheet, cell, val)
 
-    # 2. ГРАФИКИ (Строка 10, Высокое разрешение)
+    # 2. ГРАФИКИ (Строка 10, Высокое разрешение и центрирование)
     if chart_fig:
         try:
-            sheet.row_dimensions[10].height = 190 
-            img_bytes = chart_fig.to_image(format="png", width=750, height=350, scale=2.5)
+            sheet.row_dimensions[10].height = 210 
+            # scale=2.5 убирает размытие и пиксели при увеличении
+            img_bytes = chart_fig.to_image(format="png", width=850, height=380, scale=2.5)
             
             for anchor in ['B10', 'K10']:
-                img_stream = io.BytesIO(img_bytes) # Создаем независимый поток для каждого графика
+                img_stream = io.BytesIO(img_bytes)
                 img = OpenpyxlImage(img_stream)
-                img.width, img.height = 370, 180
+                img.width, img.height = 440, 195  # Оптимальный размер для заполнения ячеек по центру
                 sheet.add_image(img, anchor)
         except Exception: 
             pass
 
-    # 3. ФОТОГРАФИИ (Строки 11 и 12)
-    current_row = 11 
+    # 3. ФОТОГРАФИИ (Строго по структуре строк 12-21 с автоскрытием пустых)
+    start_row = 12
+    max_problems = 5
     
-    col_ru = [2, 4, 6, 8, 9]     # B, D, F, H, I
-    col_cn = [11, 13, 15, 17, 18] # K, M, O, Q, R
+    # Извлекаем все категории дефектов, у которых реально есть фотографии
+    active_groups = [(cat_name, urls) for cat_name, urls in data.get('photo_groups', {}).items() if urls]
     
-    for cat_name, urls in data.get('photo_groups', {}).items():
-        if urls:
-            safe_write(sheet, f'B{current_row}', f"Не соответствует: {cat_name}")
-            safe_write(sheet, f'K{current_row}', f"缺陷类别: {cat_name}")
+    for idx in range(max_problems):
+        row_title = start_row + (idx * 2)
+        row_photos = row_title + 1
+        
+        if idx < len(active_groups):
+            cat_name, urls = active_groups[idx]
             
-            photo_row = current_row + 1
-            sheet.row_dimensions[photo_row].height = 140 
+            # Запись названий проблем (Строки 12, 14, 16, 18, 20)
+            safe_write(sheet, f'B{row_title}', f"{cat_name}")
+            safe_write(sheet, f'K{row_title}', f"{cat_name}")
             
-            for idx, url in enumerate(urls[:5]):
+            # Настройка высоты строки под крупные фото (Строки 13, 15, 17, 19, 21)
+            sheet.row_dimensions[row_photos].height = 145
+            
+            # Вставка до 5 фото подряд без пробелов по колонкам (B-F для RU, K-O для CN)
+            for f_idx, url in enumerate(urls[:5]):
                 try:
                     resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                     if resp.status_code == 200:
+                        # Сохраняем HD оригиналы без пережатия
                         pil_img = PILImage.open(io.BytesIO(resp.content))
-                        pil_img.thumbnail((1000, 1000))
+                        pil_img.thumbnail((1200, 1200))
                         
                         img_buf = io.BytesIO()
                         pil_img.save(img_buf, format="PNG")
-                        
-                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Вытаскиваем "чистые" байты из буфера
                         image_bytes = img_buf.getvalue()
                         
-                        # --- ВСТАВКА В РУССКИЙ БЛОК (С независимым потоком) ---
+                        # --- ВСТАВКА В РУССКИЙ БЛОК (Подряд со столбца B) ---
                         xl_img_ru = OpenpyxlImage(io.BytesIO(image_bytes))
-                        xl_img_ru.width, xl_img_ru.height = 130, 130 
-                        col_letter_ru = openpyxl.utils.get_column_letter(col_ru[idx])
-                        sheet.add_image(xl_img_ru, f"{col_letter_ru}{photo_row}")
+                        xl_img_ru.width, xl_img_ru.height = 135, 135
+                        col_letter_ru = openpyxl.utils.get_column_letter(2 + f_idx) # 2=B, 3=C, 4=D...
+                        sheet.add_image(xl_img_ru, f"{col_letter_ru}{row_photos}")
                         
-                        # --- ВСТАВКА В КИТАЙСКИЙ БЛОК (С независимым потоком) ---
+                        # --- ВСТАВКА В КИТАЙСКИЙ БЛОК (Подряд со столбца K) ---
                         xl_img_cn = OpenpyxlImage(io.BytesIO(image_bytes))
-                        xl_img_cn.width, xl_img_cn.height = 130, 130
-                        col_letter_cn = openpyxl.utils.get_column_letter(col_cn[idx])
-                        sheet.add_image(xl_img_cn, f"{col_letter_cn}{photo_row}")
+                        xl_img_cn.width, xl_img_cn.height = 135, 135
+                        col_letter_cn = openpyxl.utils.get_column_letter(11 + f_idx) # 11=K, 12=L, 13=M...
+                        sheet.add_image(xl_img_cn, f"{col_letter_cn}{row_photos}")
                 except Exception: 
                     continue
-            
-            current_row += 4 
+        else:
+            # Скрываем неиспользованные строки из зарезервированных 5 блоков
+            sheet.row_dimensions[row_title].hidden = True
+            sheet.row_dimensions[row_photos].hidden = True
 
     output = io.BytesIO()
     wb.save(output)
