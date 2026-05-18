@@ -191,13 +191,13 @@ async def main():
         return
 
     upsert_query = text("""
-        INSERT INTO wb_ratings (date, supplier_article, nm_id, average_rating, review_count)
-        VALUES (:date, :supplier_article, :nm_id, :average_rating, :review_count)
+        INSERT INTO wb_ratings (date, supplier_article, nm_id, average_rating, review_count, last_sync)
+        VALUES (:date, :supplier_article, :nm_id, :average_rating, :review_count, CURRENT_TIMESTAMP)
         ON CONFLICT (date, supplier_article) 
         DO UPDATE SET 
             average_rating = EXCLUDED.average_rating,
             review_count = EXCLUDED.review_count,
-            created_at = CURRENT_TIMESTAMP;
+            last_sync = EXCLUDED.last_sync;
     """)
 
     success_count = 0
