@@ -769,66 +769,106 @@ def build_ppm_base_dataset():
 from datetime import timedelta
 
 if page == "Робот-Синхронизатор":
-    st.title(":material/database: Статус Базы Данных (Supabase)")
-    st.info("Сбор логистики и обращений работает автоматически через GitHub Actions.")
+    st.title(":material/database: Статус синхронизаторов")
     
     if engine:
         try:
             with engine.connect() as conn:
-                # 1. Считаем общее количество
+                # ==========================================
+                # 1. ВРЕМЯ ПОСЛЕДНЕЙ СИНХРОНИЗАЦИИ
+                # ==========================================
+                # Главный синхронизатор
+                main_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
+                main_sync_str = "Нет данных"
+                if main_sync_raw:
+                    main_sync_msk = main_sync_raw + timedelta(hours=3)
+                    main_sync_str = main_sync_msk.strftime('%d.%m.%Y в %H:%M')
+
+                # Синхронизатор рейтингов
+                rat_sync_str = "Нет данных"
+                rat_sync_raw = None
+                try:
+                    rat_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_ratings")).scalar()
+                    if rat_sync_raw:
+                        rat_sync_msk = rat_sync_raw + timedelta(hours=3)
+                        rat_sync_str = rat_sync_msk.strftime('%d.%m.%Y в %H:%M')
+                except:
+                    pass # На случай, если колонка last_sync еще не создана в wb_ratings
+
+                st.success(f"📦 **Главный синхронизатор (Логистика и Возвраты):** {main_sync_str}\n\n⭐ **Синхронизатор рейтингов:** {rat_sync_str}")
+                st.markdown("---")
+
+                # ==========================================
+                # 2. ОБЩИЕ ДАННЫЕ (Без отображения изменений)
+                # ==========================================
+                # Базовые счетчики
                 claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar() or 0
                 orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_orders")).scalar() or 0
                 sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar() or 0
                 
-                # 2. Находим время последнего успешного завершения воркера
-                last_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
-                
-                # Инициализируем дельты нулями
-                claims_delta, orders_delta, sales_delta = 0, 0, 0
-                sync_time_str = "Нет данных"
+                try:
+                    ratings_count = conn.execute(text("SELECT COUNT(*) FROM wb_ratings")).scalar() or 0
+                except:
+                    ratings_count = 0
 
-                if last_sync_raw:
-                    # Корректировка времени на Московское (UTC+3)
-                    # Если last_sync_raw без часового пояса, просто прибавляем 3 часа
-                    last_sync_msk = last_sync_raw + timedelta(hours=3)
-                    sync_time_str = last_sync_msk.strftime('%d.%m.%Y в %H:%M')
-                    
-                    # 3. Считаем, сколько записей было затронуто именно в этот запуск (по точному времени)
-                    claims_delta = conn.execute(
-                        text("SELECT COUNT(*) FROM wb_claims WHERE last_sync = :ts"), 
-                        {"ts": last_sync_raw}
-                    ).scalar() or 0
-                    
-                    # Для заказов и продаж (если в них тоже есть колонка last_sync, иначе используем дату)
-                    # Если в wb_orders нет last_sync, оставим фильтр по дате или уберем дельту
+                # Расчет Одобренных и Отказов (используем view_cx_dashboard для точного совпадения с логикой отчетов)
+                approved_count, rejected_count = 0, 0
+                try:
+                    appr_query = text("""
+                        SELECT COUNT(*) FROM view_cx_dashboard
+                        WHERE LOWER(TRIM("Решение по возврату покупателю")) IN ('одобрено', '2', '2.0', 'да', 'true')
+                           OR LOWER(TRIM("Статус товара")) IN ('одобрено', '2', '2.0', 'да', 'true')
+                    """)
+                    approved_count = conn.execute(appr_query).scalar() or 0
+
+                    rej_query = text("""
+                        SELECT COUNT(*) FROM view_cx_dashboard
+                        WHERE LOWER(TRIM("Решение по возврату покупателю")) IN ('отклонено', 'отказ', 'false', 'нет', 'отмена')
+                           OR LOWER(TRIM("Статус товара")) IN ('отклонено', 'отказ', 'false', 'нет', 'отмена')
+                    """)
+                    rejected_count = conn.execute(rej_query).scalar() or 0
+                except:
+                    pass # Если вьюха не обновилась, счетчики просто останутся нулями
+
+                st.markdown("### 🗄️ Общие данные в базе")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Общее количество возвратов", f"{claims_count:,}".replace(',', ' '))
+                c2.metric("Одобренных возвратов", f"{approved_count:,}".replace(',', ' '))
+                c3.metric("Отказов по возвратам", f"{rejected_count:,}".replace(',', ' '))
+
+                c4, c5, c6 = st.columns(3)
+                c4.metric("Заказы", f"{orders_count:,}".replace(',', ' '))
+                c5.metric("Продажи", f"{sales_count:,}".replace(',', ' '))
+                c6.metric("Оценок товаров", f"{ratings_count:,}".replace(',', ' '))
+
+                st.markdown("---")
+
+                # ==========================================
+                # 3. ДОБАВЛЕНО В ПОСЛЕДНЕМ ОБНОВЛЕНИИ
+                # ==========================================
+                claims_delta, orders_delta, sales_delta, ratings_delta = 0, 0, 0, 0
+
+                if main_sync_raw:
+                    claims_delta = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE last_sync = :ts"), {"ts": main_sync_raw}).scalar() or 0
                     try:
-                        orders_delta = conn.execute(
-                            text("SELECT COUNT(*) FROM wb_orders WHERE last_sync = :ts"), 
-                            {"ts": last_sync_raw}
-                        ).scalar() or 0
-                    except:
-                        orders_delta = 0 # Если колонки нет в этой таблице
+                        orders_delta = conn.execute(text("SELECT COUNT(*) FROM wb_orders WHERE last_sync = :ts"), {"ts": main_sync_raw}).scalar() or 0
+                    except: pass
+                    try:
+                        sales_delta = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND last_sync = :ts"), {"ts": main_sync_raw}).scalar() or 0
+                    except: pass
 
-            # Визуализация метрик
-            c1, c2, c3 = st.columns(3)
-            
-            c1.metric(
-                "Всего Обращений в БД", 
-                f"{claims_count:,}".replace(',', ' '), 
-                delta=f"+{claims_delta} в последнем пакете" if claims_delta > 0 else None
-            )
-            c2.metric(
-                "Строк Заказов (ORDER)", 
-                f"{orders_count:,}".replace(',', ' '), 
-                delta=f"+{orders_delta} новых" if orders_delta > 0 else None
-            )
-            c3.metric(
-                "Строк Продаж (SALE)", 
-                f"{sales_count:,}".replace(',', ' ')
-            )
-            
-            st.success(f"✅ Последняя синхронизация (МСК): **{sync_time_str}**")
-            
+                if rat_sync_raw:
+                    try:
+                        ratings_delta = conn.execute(text("SELECT COUNT(*) FROM wb_ratings WHERE last_sync = :ts"), {"ts": rat_sync_raw}).scalar() or 0
+                    except: pass
+
+                st.markdown("### 🆕 Добавлено в последнем обновлении")
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("Новых возвратов", f"+{claims_delta}")
+                d2.metric("Новых заказов", f"+{orders_delta}")
+                d3.metric("Новых продаж", f"+{sales_delta}")
+                d4.metric("Новых оценок", f"+{ratings_delta}")
+                
         except Exception as e: 
             st.error(f"⚠️ Ошибка получения метрик: {e}")
     else: 
