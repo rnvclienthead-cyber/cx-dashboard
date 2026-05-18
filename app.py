@@ -21,6 +21,7 @@ import requests
 import tempfile
 import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
+from openpyxl.styles import Alignment
 from sqlalchemy import create_engine, text
 from PIL import Image as PILImage
 
