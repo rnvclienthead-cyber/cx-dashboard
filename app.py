@@ -603,7 +603,13 @@ async def run_ai_batch_processing(df_to_tag, model_choice, memory_string="", mod
 # ==========================================
 # ИНТЕРФЕЙС И НАВИГАЦИЯ
 # ==========================================
-
+@st.cache_data(ttl=3600)
+def load_cached_assortment():
+    try:
+        return pd.read_sql("SELECT * FROM wb_assortment", engine)
+    except: 
+        return pd.DataFrame()
+        
 @st.cache_data(ttl=120) 
 def load_cached_hybrid_data():
     # ОСТАВЛЯЕМ ТОЛЬКО ЭТУ ВЕРСИЮ (с JOIN инвойсов)
@@ -1826,9 +1832,14 @@ elif page == "Уровень PPM":
                     selected_row = table_agg.iloc[selected_indices[0]]
                     current_sku = selected_row['Артикул']
                     
-                    # 1. ЗАГРУЗКА ДАННЫХ И ОЧИСТКА ИНВОЙСОВ (Только номера)
+                    # 1. ЗАГРУЗКА ДАННЫХ И ОЧИСТКА ИНВОЙСОВ (Унифицировано с Отчетом)
                     try:
                         df_sys_detail = load_cached_hybrid_data()
+                        # Страховка колонок, как в Отчете производства
+                        if 'Инвойс' not in df_sys_detail.columns: df_sys_detail['Инвойс'] = 'Не указан'
+                        df_sys_detail['Инвойс'] = df_sys_detail['Инвойс'].fillna('Не указан')
+                        df_sys_detail['Номер поставки_ОРИГИНАЛ'] = df_sys_detail.get('Номер поставки_ОРИГИНАЛ', 'Не указан').fillna('Не указан')
+
                         if len(date_range) == 2:
                             mask_date = (df_sys_detail['Дата_ДТ'].dt.date >= date_range[0]) & \
                                         (df_sys_detail['Дата_ДТ'].dt.date <= date_range[1])
@@ -1845,13 +1856,12 @@ elif page == "Уровень PPM":
                             if cat_col in sku_details.columns:
                                 defect_mask |= sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)
                         
-                        # Собираем только уникальные валидные инвойсы
+                        # Собираем чистые инвойсы
                         defect_invs = sku_details.loc[defect_mask, 'Инвойс'].dropna().unique()
                         valid_invs = [str(inv).strip() for inv in defect_invs if str(inv).strip().lower() not in bad_vals]
-                        
-                        # Перенос на новую строку
-                        auto_invoices = "\n".join(valid_invs)
-                    except:
+                        auto_invoices = "\n".join(valid_invs) if valid_invs else ""
+                    except Exception as e:
+                        print(f"Ошибка сбора инвойсов: {e}")
                         sku_details, auto_invoices = pd.DataFrame(), ""
 
                     # 2. ЕДИНАЯ ПРЕДЗАГРУЗКА ФОТОГРАФИЙ
@@ -1971,24 +1981,35 @@ elif page == "Уровень PPM":
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
                     st.subheader(f":material/edit_document: Формирование рекламации: {current_sku}")
                     
-                    # Перенос на новую строку вместо слэшей
                     auto_desc_ru = "\n".join(combined_issues) if combined_issues else "Дефекты не обнаружены"
                     auto_desc_cn = "\n".join([CLAIM_CATEGORIES_LOGIC[k]['cn'] for k in CLAIM_CATEGORIES_LOGIC if CLAIM_CATEGORIES_LOGIC[k]['ru'] in [x.split(' (')[0] for x in combined_issues]]) if 'CLAIM_CATEGORIES_LOGIC' in globals() and combined_issues else ""
                     auto_cause_ru = "\n".join(combined_causes_ru) if combined_causes_ru else "Нарушение при производстве"
                     auto_cause_cn = "\n".join(combined_causes_cn) if combined_causes_cn else "生产过程异常"
 
-                    # === ЛОГИКА УМНОЙ КНОПКИ ===
+                    # === ПОДТЯГИВАЕМ ДАННЫЕ ИЗ МАТРИЦЫ ===
+                    df_assortment = load_cached_assortment()
+                    def_sup = "Уточняется"
+                    def_name_ru = "Наименование товара"
+                    def_name_cn = "产品"
+
+                    if not df_assortment.empty and current_sku in df_assortment['supplier_article'].values:
+                        row_matrix = df_assortment[df_assortment['supplier_article'] == current_sku].iloc[0]
+                        if pd.notna(row_matrix.get('manufacturer')) and str(row_matrix.get('manufacturer')).strip():
+                            def_sup = str(row_matrix['manufacturer']).strip()
+                        if pd.notna(row_matrix.get('name_ru')) and str(row_matrix.get('name_ru')).strip():
+                            def_name_ru = str(row_matrix['name_ru']).strip()
+                        if pd.notna(row_matrix.get('name_cn')) and str(row_matrix.get('name_cn')).strip():
+                            def_name_cn = str(row_matrix['name_cn']).strip()
+
                     needs_photos = len(combined_issues) > 0
                     photos_ready = any(len(urls) > 0 for urls in photo_payload.values())
                     can_download = (not needs_photos) or photos_ready
 
-                    # ИСПРАВЛЕНИЕ: Добавлен _{current_sku} к параметрам key!
                     cl1, cl2, cl3 = st.columns(3)
                     with cl1:
-                        sup = st.text_input("Завод", value="Уточняется", key=f"cl_sup_{current_sku}")
+                        sup = st.text_input("Завод", value=def_sup, key=f"cl_sup_{current_sku}")
                         num = st.text_input("Номер Рекламационного Акта", value="", placeholder="Введите номер...", key=f"cl_num_{current_sku}")
                     with cl2:
-                        # Использован text_area для корректного отображения переносов строк в UI
                         inv_val = st.text_area("Инвойс (Invoice)", value=auto_invoices, key=f"cl_inv_{current_sku}")
                         period_val = f"{date_range[0].strftime('%d.%m.%Y')} - {date_range[1].strftime('%d.%m.%Y')}" if len(date_range)==2 else "01.04.2026 - 30.04.2026"
                         per = st.text_input("Период (Period)", value=period_val, key=f"cl_per_{current_sku}")
@@ -2004,8 +2025,8 @@ elif page == "Уровень PPM":
                         "period": per, 
                         "invoice": inv_val, 
                         "sku": current_sku,
-                        "name": "Наименование товара", 
-                        "name_cn": "产品", 
+                        "name": def_name_ru, 
+                        "name_cn": def_name_cn, 
                         "defects": selected_row['Брак'],
                         "ppm_pct": round(selected_row['%'], 2), 
                         "desc_ru": d_ru, 
