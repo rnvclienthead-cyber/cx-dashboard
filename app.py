@@ -773,34 +773,47 @@ if page == "Робот-Синхронизатор":
     
     if engine:
         try:
+            # ==========================================
+            # 1. ВРЕМЯ ПОСЛЕДНЕЙ СИНХРОНИЗАЦИИ
+            # ==========================================
+            main_sync_str = "Нет данных"
+            rat_sync_str = "Нет данных"
+            main_sync_raw = None
+            rat_sync_raw = None
+            
             with engine.connect() as conn:
-                # ==========================================
-                # 1. ВРЕМЯ ПОСЛЕДНЕЙ СИНХРОНИЗАЦИИ
-                # ==========================================
                 # Главный синхронизатор
-                main_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
-                main_sync_str = "Нет данных"
-                if main_sync_raw:
-                    main_sync_msk = main_sync_raw + timedelta(hours=3)
-                    main_sync_str = main_sync_msk.strftime('%d.%m.%Y в %H:%M')
+                try:
+                    main_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
+                    if main_sync_raw:
+                        main_sync_str = (main_sync_raw + timedelta(hours=3)).strftime('%d.%m.%Y в %H:%M')
+                except:
+                    conn.rollback() # Очищаем транзакцию в случае ошибки
 
                 # Синхронизатор рейтингов
-                rat_sync_str = "Нет данных"
-                rat_sync_raw = None
                 try:
                     rat_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_ratings")).scalar()
                     if rat_sync_raw:
-                        rat_sync_msk = rat_sync_raw + timedelta(hours=3)
-                        rat_sync_str = rat_sync_msk.strftime('%d.%m.%Y в %H:%M')
+                        rat_sync_str = (rat_sync_raw + timedelta(hours=3)).strftime('%d.%m.%Y в %H:%M')
                 except:
-                    pass # На случай, если колонка last_sync еще не создана в wb_ratings
+                    conn.rollback() # Очищаем транзакцию в случае ошибки
+                    
+            # КРАСИВЫЙ БЛОК СО СТАТУСАМИ (В 2 колонки)
+            sync_col1, sync_col2 = st.columns(2)
+            with sync_col1:
+                st.success(f":material/local_shipping: **Главный (Логистика/Возвраты):** \n{main_sync_str}")
+            with sync_col2:
+                if rat_sync_str == "Нет данных":
+                    st.warning(f":material/star_rate: **Синхронизатор рейтингов:** \n{rat_sync_str}")
+                else:
+                    st.success(f":material/star_rate: **Синхронизатор рейтингов:** \n{rat_sync_str}")
+                    
+            st.markdown("---")
 
-                st.success(f"📦 **Главный синхронизатор (Логистика и Возвраты):** {main_sync_str}\n\n⭐ **Синхронизатор рейтингов:** {rat_sync_str}")
-                st.markdown("---")
-
-                # ==========================================
-                # 2. ОБЩИЕ ДАННЫЕ (Без отображения изменений)
-                # ==========================================
+            # ==========================================
+            # 2. ОБЩИЕ ДАННЫЕ (Без отображения изменений)
+            # ==========================================
+            with engine.connect() as conn:
                 # Базовые счетчики
                 claims_count = conn.execute(text("SELECT COUNT(*) FROM wb_claims")).scalar() or 0
                 orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_orders")).scalar() or 0
@@ -809,9 +822,10 @@ if page == "Робот-Синхронизатор":
                 try:
                     ratings_count = conn.execute(text("SELECT COUNT(*) FROM wb_ratings")).scalar() or 0
                 except:
+                    conn.rollback()
                     ratings_count = 0
 
-                # Расчет Одобренных и Отказов (используем view_cx_dashboard для точного совпадения с логикой отчетов)
+                # Расчет Одобренных и Отказов (через блок try/except)
                 approved_count, rejected_count = 0, 0
                 try:
                     appr_query = text("""
@@ -820,7 +834,10 @@ if page == "Робот-Синхронизатор":
                            OR LOWER(TRIM("Статус товара")) IN ('одобрено', '2', '2.0', 'да', 'true')
                     """)
                     approved_count = conn.execute(appr_query).scalar() or 0
+                except:
+                    conn.rollback()
 
+                try:
                     rej_query = text("""
                         SELECT COUNT(*) FROM view_cx_dashboard
                         WHERE LOWER(TRIM("Решение по возврату покупателю")) IN ('отклонено', 'отказ', 'false', 'нет', 'отмена')
@@ -828,11 +845,11 @@ if page == "Робот-Синхронизатор":
                     """)
                     rejected_count = conn.execute(rej_query).scalar() or 0
                 except:
-                    pass # Если вьюха не обновилась, счетчики просто останутся нулями
+                    conn.rollback()
 
-                st.markdown("### 🗄️ Общие данные в базе")
+                st.markdown("### :material/dataset: Общие данные в базе")
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Общее количество возвратов", f"{claims_count:,}".replace(',', ' '))
+                c1.metric("Общее кол-во возвратов", f"{claims_count:,}".replace(',', ' '))
                 c2.metric("Одобренных возвратов", f"{approved_count:,}".replace(',', ' '))
                 c3.metric("Отказов по возвратам", f"{rejected_count:,}".replace(',', ' '))
 
@@ -841,28 +858,31 @@ if page == "Робот-Синхронизатор":
                 c5.metric("Продажи", f"{sales_count:,}".replace(',', ' '))
                 c6.metric("Оценок товаров", f"{ratings_count:,}".replace(',', ' '))
 
-                st.markdown("---")
+            st.markdown("---")
 
-                # ==========================================
-                # 3. ДОБАВЛЕНО В ПОСЛЕДНЕМ ОБНОВЛЕНИИ
-                # ==========================================
+            # ==========================================
+            # 3. ДОБАВЛЕНО В ПОСЛЕДНЕМ ОБНОВЛЕНИИ
+            # ==========================================
+            with engine.connect() as conn:
                 claims_delta, orders_delta, sales_delta, ratings_delta = 0, 0, 0, 0
 
                 if main_sync_raw:
-                    claims_delta = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE last_sync = :ts"), {"ts": main_sync_raw}).scalar() or 0
+                    try:
+                        claims_delta = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE last_sync = :ts"), {"ts": main_sync_raw}).scalar() or 0
+                    except: conn.rollback()
                     try:
                         orders_delta = conn.execute(text("SELECT COUNT(*) FROM wb_orders WHERE last_sync = :ts"), {"ts": main_sync_raw}).scalar() or 0
-                    except: pass
+                    except: conn.rollback()
                     try:
                         sales_delta = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND last_sync = :ts"), {"ts": main_sync_raw}).scalar() or 0
-                    except: pass
+                    except: conn.rollback()
 
                 if rat_sync_raw:
                     try:
                         ratings_delta = conn.execute(text("SELECT COUNT(*) FROM wb_ratings WHERE last_sync = :ts"), {"ts": rat_sync_raw}).scalar() or 0
-                    except: pass
+                    except: conn.rollback()
 
-                st.markdown("### 🆕 Добавлено в последнем обновлении")
+                st.markdown("### :material/update: Добавлено в последнем обновлении")
                 d1, d2, d3, d4 = st.columns(4)
                 d1.metric("Новых возвратов", f"+{claims_delta}")
                 d2.metric("Новых заказов", f"+{orders_delta}")
@@ -870,7 +890,7 @@ if page == "Робот-Синхронизатор":
                 d4.metric("Новых оценок", f"+{ratings_delta}")
                 
         except Exception as e: 
-            st.error(f"⚠️ Ошибка получения метрик: {e}")
+            st.error(f"⚠️ Системная ошибка страницы: {e}")
     else: 
         st.warning("⚠️ База данных не подключена. Проверьте DB_URL.")
 
