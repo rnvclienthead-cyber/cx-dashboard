@@ -321,7 +321,7 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
     except Exception:
         return b""
 
-    # 1. ЗАПОЛНЕНИЕ СВОДНЫХ ДАННЫХ (СТРОКИ 1 - 8)
+    # 1. ЗАПОЛНЕНИЕ СВОДНЫХ ДАННЫХ
     safe_write(sheet, 'G1', f"Рекламационный акт № {data['number']}")
     safe_write(sheet, 'O1', f"质量投诉报告 № {data['number']}")
     
@@ -331,33 +331,31 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
         'C5': "Возвраты с маркетплейсов", 'L5': "电商平台退货",
         'C6': data['sku'], 'L6': data['sku'],
         'C7': data['name'], 'G7': f"{data['defects']} ({data['ppm_pct']} %)",
-        'L7': data.get('name_cn', '产品'), 'P7': f"{data['defects']} ({data['ppm_pct']} %)",
+        'L7': data.get('name_cn', 'product'), 'P7': f"{data['defects']} ({data['ppm_pct']} %)",
         'C8': data['desc_ru'], 'G8': data['cause_ru'],
         'L8': data.get('desc_cn', ''), 'P8': data.get('cause_cn', '')
     }
     for cell, val in coords.items():
         safe_write(sheet, cell, val)
 
-    # 2. ГРАФИКИ (Строка 10, Высокое разрешение и центрирование)
+    # 2. ГРАФИКИ (Увеличены и отцентрованы)
     if chart_fig:
         try:
-            sheet.row_dimensions[10].height = 210 
-            # scale=2.5 убирает размытие и пиксели при увеличении
-            img_bytes = chart_fig.to_image(format="png", width=850, height=380, scale=2.5)
+            sheet.row_dimensions[10].height = 240 
+            img_bytes = chart_fig.to_image(format="png", width=950, height=420, scale=2.5)
             
             for anchor in ['B10', 'K10']:
                 img_stream = io.BytesIO(img_bytes)
                 img = OpenpyxlImage(img_stream)
-                img.width, img.height = 440, 195  # Оптимальный размер для заполнения ячеек по центру
+                # УВЕЛИЧЕНО! Растягиваем график для лучшей видимости
+                img.width, img.height = 540, 230 
                 sheet.add_image(img, anchor)
         except Exception: 
             pass
 
-    # 3. ФОТОГРАФИИ (Строго по структуре строк 12-21 с автоскрытием пустых)
+    # 3. ФОТОГРАФИИ (Раздвинуты друг от друга)
     start_row = 12
     max_problems = 5
-    
-    # Извлекаем все категории дефектов, у которых реально есть фотографии
     active_groups = [(cat_name, urls) for cat_name, urls in data.get('photo_groups', {}).items() if urls]
     
     for idx in range(max_problems):
@@ -367,41 +365,35 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
         if idx < len(active_groups):
             cat_name, urls = active_groups[idx]
             
-            # Запись названий проблем (Строки 12, 14, 16, 18, 20)
             safe_write(sheet, f'B{row_title}', f"{cat_name}")
             safe_write(sheet, f'K{row_title}', f"{cat_name}")
             
-            # Настройка высоты строки под крупные фото (Строки 13, 15, 17, 19, 21)
-            sheet.row_dimensions[row_photos].height = 145
+            sheet.row_dimensions[row_photos].height = 125
             
-            # Вставка до 5 фото подряд без пробелов по колонкам (B-F для RU, K-O для CN)
             for f_idx, url in enumerate(urls[:5]):
                 try:
                     resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                     if resp.status_code == 200:
-                        # Сохраняем HD оригиналы без пережатия
                         pil_img = PILImage.open(io.BytesIO(resp.content))
-                        pil_img.thumbnail((1200, 1200))
+                        pil_img.thumbnail((1200, 1200)) 
                         
                         img_buf = io.BytesIO()
                         pil_img.save(img_buf, format="PNG")
                         image_bytes = img_buf.getvalue()
                         
-                        # --- ВСТАВКА В РУССКИЙ БЛОК (Подряд со столбца B) ---
+                        # УМЕНЬШЕН РАЗМЕР ВСТАВКИ (110х110) ЧТОБЫ ФОТО НЕ НАЕЗЖАЛИ ДРУГ НА ДРУГА
                         xl_img_ru = OpenpyxlImage(io.BytesIO(image_bytes))
-                        xl_img_ru.width, xl_img_ru.height = 135, 135
-                        col_letter_ru = openpyxl.utils.get_column_letter(2 + f_idx) # 2=B, 3=C, 4=D...
+                        xl_img_ru.width, xl_img_ru.height = 110, 110
+                        col_letter_ru = openpyxl.utils.get_column_letter(2 + f_idx)
                         sheet.add_image(xl_img_ru, f"{col_letter_ru}{row_photos}")
                         
-                        # --- ВСТАВКА В КИТАЙСКИЙ БЛОК (Подряд со столбца K) ---
                         xl_img_cn = OpenpyxlImage(io.BytesIO(image_bytes))
-                        xl_img_cn.width, xl_img_cn.height = 135, 135
-                        col_letter_cn = openpyxl.utils.get_column_letter(11 + f_idx) # 11=K, 12=L, 13=M...
+                        xl_img_cn.width, xl_img_cn.height = 110, 110
+                        col_letter_cn = openpyxl.utils.get_column_letter(11 + f_idx)
                         sheet.add_image(xl_img_cn, f"{col_letter_cn}{row_photos}")
                 except Exception: 
                     continue
         else:
-            # Скрываем неиспользованные строки из зарезервированных 5 блоков
             sheet.row_dimensions[row_title].hidden = True
             sheet.row_dimensions[row_photos].hidden = True
 
@@ -1819,12 +1811,12 @@ elif page == "Уровень PPM":
                         st.plotly_chart(fig, use_container_width=True)
                     else: st.info("Нет данных для графика")
 
-              # --- ОБНОВЛЕННЫЙ БЛОК: ДЕТАЛИЗАЦИЯ И ГЕНЕРАТОР ---
+              # --- ОБНОВЛЕННЫЙ БЛОК: ДЕТАЛИЗАЦИЯ И СБОР ДАННЫХ ---
                 if selected_indices:
                     selected_row = table_agg.iloc[selected_indices[0]]
                     current_sku = selected_row['Артикул']
                     
-                    # 1. ЗАГРУЗКА ДАННЫХ И ИНВОЙСОВ
+                    # 1. ЗАГРУЗКА ДАННЫХ И ДЕТАЛИЗАЦИЯ ИНВОЙСОВ
                     try:
                         df_sys_detail = load_cached_hybrid_data()
                         if len(date_range) == 2:
@@ -1835,22 +1827,38 @@ elif page == "Уровень PPM":
                             sku_details = df_sys_detail[df_sys_detail['Артикул продавца'] == current_sku].copy()
                         
                         valid_vals = ['1', '1.0', '+', 'true', 'да']
-                        defect_mask = pd.Series(False, index=sku_details.index)
-                        for i in range(1, 14):
-                            cat_col = str(i)
-                            if cat_col in sku_details.columns:
-                                defect_mask |= sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)
+                        bad_vals = ['nan', 'none', '', 'не указан', '0', '0.0', '---', '-', 'undefined', 'не закрытые инвойсы']
                         
-                        defect_invs = sku_details.loc[defect_mask, 'Инвойс'].dropna().unique()
-                        valid_invs = [str(inv).strip() for inv in defect_invs if str(inv).strip() not in ['nan', 'None', '', 'Не указан', '0', '0.0']]
-                        auto_invoices = ", ".join(valid_invs)
+                        # Собираем инвойсы с детализацией проблем по каждому
+                        inv_details_list = []
+                        for inv_name, group_df in sku_details.groupby('Инвойс'):
+                            inv_str = str(inv_name).strip()
+                            if inv_str.lower() in bad_vals:
+                                continue
+                                
+                            inv_issues = []
+                            if 'CLAIM_CATEGORIES_LOGIC' in globals():
+                                for group_key, config in CLAIM_CATEGORIES_LOGIC.items():
+                                    g_mask = pd.Series(False, index=group_df.index)
+                                    for cid in config['ids']:
+                                        if str(cid) in group_df.columns:
+                                            g_mask |= group_df[str(cid)].astype(str).str.strip().str.lower().isin(valid_vals)
+                                    g_count = group_df[g_mask].shape[0]
+                                    if g_count > 0:
+                                        inv_issues.append(f"{config['ru']}: {g_count}")
+                            
+                            if inv_issues:
+                                inv_details_list.append(f"{inv_str} ({', '.join(inv_issues)})")
+                            else:
+                                inv_details_list.append(inv_str)
+                                
+                        auto_invoices = "; ".join(inv_details_list)
                     except:
-                        sku_details = pd.DataFrame()
-                        auto_invoices = ""
+                        sku_details, auto_invoices = pd.DataFrame(), ""
 
-                    # 2. ЕДИНАЯ ПРЕДЗАГРУЗКА ФОТОГРАФИЙ (Для UI и Экселя одновременно)
-                    prefetched_photos = {} # Словарь для хранения найденных фото
-                    seen_photos_global = set() # Чтобы фото не дублировались
+                    # 2. ЕДИНАЯ ПРЕДЗАГРУЗКА ФОТОГРАФИЙ
+                    prefetched_photos = {}
+                    seen_photos_global = set()
                     
                     if not sku_details.empty:
                         for i in range(1, 14):
@@ -1880,15 +1888,16 @@ elif page == "Уровень PPM":
                                                             
                                                             if wb_url not in seen_photos_global:
                                                                 seen_photos_global.add(wb_url)
-                                                                # Сохраняем и превью (для скорости UI) и оригинал (для экселя)
                                                                 urls.append((s3_url, wb_url))
                                                                 break 
                                             except: continue
-                                            if len(urls) >= 6: break # Берем до 6 фото для UI
+                                            if len(urls) >= 6: break 
                                         prefetched_photos[i] = urls
 
-                    # 3. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ
+                    # 3. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ (Кэш оригиналов WB и динамические причины)
                     combined_issues = []
+                    combined_causes_ru = [] # <-- Собираем причины RU
+                    combined_causes_cn = [] # <-- Собираем причины CN
                     photo_payload = {}
                     
                     if not sku_details.empty and 'CLAIM_CATEGORIES_LOGIC' in globals():
@@ -1899,16 +1908,22 @@ elif page == "Уровень PPM":
                                 if str(cid) in sku_details.columns:
                                     group_mask |= sku_details[str(cid)].astype(str).str.strip().str.lower().isin(valid_vals)
                                 
-                                # ИЗМЕНЕНИЕ 1: Берем wb_url (оригиналы высокого качества)
+                                # Берем wb_url для сохранения HD качества оригиналов
                                 for s3_url, wb_url in prefetched_photos.get(cid, []):
                                     if wb_url not in group_urls:
                                         group_urls.append(wb_url)
                             
                             group_count = sku_details[group_mask].shape[0]
                             if group_count > 0:
-                                combined_issues.append(f"{config['ru']} ({group_count})")
-                                # ИЗМЕНЕНИЕ 2: Передаем до 5 фотографий вместо 3
-                                photo_payload[config['ru']] = group_urls[:5]
+                                label_issue = f"{config['ru']} ({group_count})"
+                                combined_issues.append(label_issue)
+                                photo_payload[config['ru']] = group_urls[:5] # Передаем до 5 фото
+                                
+                                # Собираем причины из словаря
+                                if 'cause_ru' in config and config['cause_ru'] not in combined_causes_ru:
+                                    combined_causes_ru.append(config['cause_ru'])
+                                if 'cause_cn' in config and config['cause_cn'] not in combined_causes_cn:
+                                    combined_causes_cn.append(config['cause_cn'])
 
                     # 4. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Интерфейс)
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
@@ -1931,7 +1946,7 @@ elif page == "Уровень PPM":
                                         
                                         cat_specific_df = sku_details[cat_mask]
                                         invs = cat_specific_df['Инвойс'].dropna().unique()
-                                        invs_clean = [str(inv).strip() for inv in invs if str(inv).strip() not in ['nan', 'None', '', 'Не указан']]
+                                        invs_clean = [str(inv).strip() for inv in invs if str(inv).strip().lower() not in bad_vals]
                                         inv_str = ", ".join(invs_clean) if invs_clean else "Не указан"
 
                                         with c_text:
@@ -1940,7 +1955,6 @@ elif page == "Уровень PPM":
                                             st.markdown(f"**Инвойсы:** {inv_str}")
                                         
                                         with c_media:
-                                            # Отрисовываем фото мгновенно из кэша
                                             urls = prefetched_photos.get(i, [])
                                             if urls:
                                                 html_imgs = '<div style="display: flex; flex-wrap: wrap; gap: 8px;">'
@@ -1961,6 +1975,15 @@ elif page == "Уровень PPM":
                     
                     auto_desc_ru = " / ".join(combined_issues) if combined_issues else "Дефекты не обнаружены"
                     auto_desc_cn = " / ".join([CLAIM_CATEGORIES_LOGIC[k]['cn'] for k in CLAIM_CATEGORIES_LOGIC if CLAIM_CATEGORIES_LOGIC[k]['ru'] in [x.split(' (')[0] for x in combined_issues]]) if 'CLAIM_CATEGORIES_LOGIC' in globals() and combined_issues else ""
+                    
+                    # Динамические причины (разделитель можно поменять на \n, если нужно на новых строках)
+                    auto_cause_ru = " / ".join(combined_causes_ru) if combined_causes_ru else "Нарушение при производстве"
+                    auto_cause_cn = " / ".join(combined_causes_cn) if combined_causes_cn else "生产过程异常"
+
+                    # === ЛОГИКА УМНОЙ КНОПКИ ===
+                    needs_photos = len(combined_issues) > 0
+                    photos_ready = any(len(urls) > 0 for urls in photo_payload.values())
+                    can_download = (not needs_photos) or photos_ready
 
                     cl1, cl2, cl3 = st.columns(3)
                     with cl1:
@@ -1973,12 +1996,8 @@ elif page == "Уровень PPM":
                     with cl3:
                         d_ru = st.text_area("Описание дефектов (RU)", value=auto_desc_ru, key="cl_d_ru")
                         d_cn = st.text_area("Описание дефектов (CN)", value=auto_desc_cn, key="cl_d_cn")
-
-                    # === ЛОГИКА УМНОЙ КНОПКИ ===
-                    # Проверяем, нужны ли вообще фото (есть ли дефекты) и загрузились ли они
-                    needs_photos = len(combined_issues) > 0
-                    photos_ready = any(len(urls) > 0 for urls in photo_payload.values())
-                    can_download = (not needs_photos) or photos_ready
+                        # Добавил поле причины в UI, чтобы вы могли её проверить/отредактировать перед скачиванием
+                        c_ru = st.text_area("Предварительная причина (RU)", value=auto_cause_ru, key="cl_cause_ru")
 
                     c_data = {
                         "number": num, 
@@ -1993,8 +2012,8 @@ elif page == "Уровень PPM":
                         "ppm_pct": round(selected_row['%'], 2), 
                         "desc_ru": d_ru, 
                         "desc_cn": d_cn,
-                        "cause_ru": CLAIM_CATEGORIES_LOGIC.get('Damage', {}).get('cause_ru', 'Нарушение при производстве') if 'CLAIM_CATEGORIES_LOGIC' in globals() else 'Нарушение', 
-                        "cause_cn": CLAIM_CATEGORIES_LOGIC.get('Damage', {}).get('cause_cn', '生产过程异常') if 'CLAIM_CATEGORIES_LOGIC' in globals() else '异常',
+                        "cause_ru": c_ru, # <-- ТЕПЕРЬ ДАННЫЕ В С8 И G8 БУДУТ МЕНЯТЬСЯ
+                        "cause_cn": auto_cause_cn, # <-- И В P8 ТОЖЕ
                         "photo_groups": photo_payload 
                     }
                     
@@ -2007,7 +2026,7 @@ elif page == "Уровень PPM":
                         file_name=f"RA_{num if num else 'draft'}_{current_sku}.xlsx", 
                         type="primary", 
                         use_container_width=True,
-                        disabled=not can_download # Блокирует нажатие, делая кнопку серой
+                        disabled=not can_download
                     )
 
             render_ppm_dashboard(df_total, sku_options)
