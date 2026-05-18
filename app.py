@@ -787,16 +787,14 @@ if page == "Робот-Синхронизатор":
                     main_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_claims")).scalar()
                     if main_sync_raw:
                         main_sync_str = (main_sync_raw + timedelta(hours=3)).strftime('%d.%m.%Y в %H:%M')
-                except:
-                    conn.rollback() 
+                except: conn.rollback() 
 
-                # Синхронизатор рейтингов (используем created_at)
+                # Синхронизатор рейтингов
                 try:
-                    rat_sync_raw = conn.execute(text("SELECT MAX(created_at) FROM wb_ratings")).scalar()
+                    rat_sync_raw = conn.execute(text("SELECT MAX(last_sync) FROM wb_ratings")).scalar()
                     if rat_sync_raw:
                         rat_sync_str = (rat_sync_raw + timedelta(hours=3)).strftime('%d.%m.%Y в %H:%M')
-                except:
-                    conn.rollback() 
+                except: conn.rollback() 
                     
             # КРАСИВЫЙ БЛОК СО СТАТУСАМИ
             sync_col1, sync_col2 = st.columns(2)
@@ -819,11 +817,11 @@ if page == "Робот-Синхронизатор":
                 orders_count = conn.execute(text("SELECT COUNT(*) FROM wb_orders")).scalar() or 0
                 sales_count = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE'")).scalar() or 0
                 
-                try:
-                    ratings_count = conn.execute(text("SELECT COUNT(*) FROM wb_ratings")).scalar() or 0
-                except:
-                    conn.rollback()
-                    ratings_count = 0
+                try: invoices_count = conn.execute(text("SELECT COUNT(*) FROM wb_invoices")).scalar() or 0
+                except: conn.rollback(); invoices_count = 0
+                
+                try: ratings_count = conn.execute(text("SELECT COUNT(*) FROM wb_ratings")).scalar() or 0
+                except: conn.rollback(); ratings_count = 0
 
                 # Расчет Одобренных и Отказов
                 approved_count, rejected_count = 0, 0
@@ -834,8 +832,7 @@ if page == "Робот-Синхронизатор":
                            OR LOWER(TRIM("Статус товара")) IN ('одобрено', '2', '2.0', 'да', 'true')
                     """)
                     approved_count = conn.execute(appr_query).scalar() or 0
-                except:
-                    conn.rollback()
+                except: conn.rollback()
 
                 try:
                     rej_query = text("""
@@ -844,19 +841,23 @@ if page == "Робот-Синхронизатор":
                            OR LOWER(TRIM("Статус товара")) IN ('отклонено', 'отказ', 'false', 'нет', 'отмена')
                     """)
                     rejected_count = conn.execute(rej_query).scalar() or 0
-                except:
-                    conn.rollback()
+                except: conn.rollback()
 
                 st.markdown("### :material/dataset: Общие данные в базе")
+                # Ряд 1: Возвраты
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Общее кол-во возвратов", f"{claims_count:,}".replace(',', ' '))
                 c2.metric("Одобренных возвратов", f"{approved_count:,}".replace(',', ' '))
                 c3.metric("Отказов по возвратам", f"{rejected_count:,}".replace(',', ' '))
+                
+                st.write("") # Небольшой отступ
 
-                c4, c5, c6 = st.columns(3)
+                # Ряд 2: Коммерция, Рейтинги, Инвойсы
+                c4, c5, c6, c7 = st.columns(4)
                 c4.metric("Заказы", f"{orders_count:,}".replace(',', ' '))
                 c5.metric("Продажи", f"{sales_count:,}".replace(',', ' '))
                 c6.metric("Оценок товаров", f"{ratings_count:,}".replace(',', ' '))
+                c7.metric("Инвойсы (Поставки)", f"{invoices_count:,}".replace(',', ' '))
 
             st.markdown("---")
 
@@ -864,153 +865,60 @@ if page == "Робот-Синхронизатор":
             # 3. ДОБАВЛЕНО В ПОСЛЕДНЕМ ОБНОВЛЕНИИ
             # ==========================================
             with engine.connect() as conn:
-                claims_delta, orders_delta, sales_delta, ratings_delta = 0, 0, 0, 0
+                claims_delta, appr_delta, invoices_delta = 0, 0, 0
+                orders_delta, sales_delta, ratings_delta = 0, 0, 0
 
-                # Считаем данные за тот же ДЕНЬ (DATE), что и последняя синхронизация
                 if main_sync_raw:
                     try:
-                        claims_delta = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE DATE(last_sync) = DATE(:ts)"), {"ts": main_sync_raw}).scalar() or 0
+                        claims_delta = conn.execute(text("SELECT COUNT(*) FROM wb_claims WHERE DATE_TRUNC('minute', last_sync) = DATE_TRUNC('minute', CAST(:ts AS timestamp))"), {"ts": main_sync_raw}).scalar() or 0
                     except: conn.rollback()
+                    
                     try:
-                        orders_delta = conn.execute(text("SELECT COUNT(*) FROM wb_orders WHERE DATE(last_sync) = DATE(:ts)"), {"ts": main_sync_raw}).scalar() or 0
+                        appr_delta_query = text("""
+                            SELECT COUNT(*) 
+                            FROM view_cx_dashboard v
+                            JOIN wb_claims c ON v."SRID" = c.srid
+                            WHERE DATE_TRUNC('minute', c.last_sync) = DATE_TRUNC('minute', CAST(:ts AS timestamp))
+                              AND (LOWER(TRIM(v."Решение по возврату покупателю")) IN ('одобрено', '2', '2.0', 'да', 'true')
+                                   OR LOWER(TRIM(v."Статус товара")) IN ('одобрено', '2', '2.0', 'да', 'true'))
+                        """)
+                        appr_delta = conn.execute(appr_delta_query, {"ts": main_sync_raw}).scalar() or 0
                     except: conn.rollback()
-                    try:
-                        sales_delta = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND DATE(last_sync) = DATE(:ts)"), {"ts": main_sync_raw}).scalar() or 0
+                    
+                    try: invoices_delta = conn.execute(text("SELECT COUNT(*) FROM wb_invoices WHERE DATE_TRUNC('minute', last_sync) = DATE_TRUNC('minute', CAST(:ts AS timestamp))"), {"ts": main_sync_raw}).scalar() or 0
+                    except: conn.rollback()
+
+                    try: orders_delta = conn.execute(text("SELECT COUNT(*) FROM wb_orders WHERE DATE_TRUNC('minute', last_sync) = DATE_TRUNC('minute', CAST(:ts AS timestamp))"), {"ts": main_sync_raw}).scalar() or 0
+                    except: conn.rollback()
+                        
+                    try: sales_delta = conn.execute(text("SELECT COUNT(*) FROM wb_logistics WHERE doc_type='SALE' AND DATE_TRUNC('minute', last_sync) = DATE_TRUNC('minute', CAST(:ts AS timestamp))"), {"ts": main_sync_raw}).scalar() or 0
                     except: conn.rollback()
 
                 if rat_sync_raw:
                     try:
-                        # Используем created_at для рейтингов
-                        ratings_delta = conn.execute(text("SELECT COUNT(*) FROM wb_ratings WHERE DATE(created_at) = DATE(:ts)"), {"ts": rat_sync_raw}).scalar() or 0
+                        ratings_delta = conn.execute(text("SELECT COUNT(*) FROM wb_ratings WHERE DATE_TRUNC('minute', last_sync) = DATE_TRUNC('minute', CAST(:ts AS timestamp))"), {"ts": rat_sync_raw}).scalar() or 0
                     except: conn.rollback()
 
                 st.markdown("### :material/update: Добавлено в последнем обновлении")
-                d1, d2, d3, d4 = st.columns(4)
+                
+                # Ряд 1 (Возвраты и Инвойсы)
+                d1, d2, d3 = st.columns(3)
                 d1.metric("Новых возвратов", f"+{claims_delta}")
-                d2.metric("Новых заказов", f"+{orders_delta}")
-                d3.metric("Новых продаж", f"+{sales_delta}")
-                d4.metric("Новых оценок", f"+{ratings_delta}")
+                d2.metric("Из них одобрено", f"+{appr_delta}")
+                d3.metric("Новых инвойсов", f"+{invoices_delta}")
+                
+                st.write("") # Небольшой отступ
+                
+                # Ряд 2 (Коммерция и Рейтинги)
+                d4, d5, d6 = st.columns(3)
+                d4.metric("Новых заказов", f"+{orders_delta}")
+                d5.metric("Новых продаж", f"+{sales_delta}")
+                d6.metric("Новых оценок", f"+{ratings_delta}")
                 
         except Exception as e: 
             st.error(f"⚠️ Системная ошибка страницы: {e}")
     else: 
         st.warning("⚠️ База данных не подключена. Проверьте DB_URL.")
-
-elif page == "Обучение ИИ":
-    st.title(":material/psychology: База знаний ИИ (Умный импорт)")
-    st.markdown("Загрузите исторический файл с проверенными отзывами. Робот всё поймет, расшифрует теги и загрузит в свою память")
-    f_import = st.file_uploader("📂 Загрузить базу знаний (Excel/CSV)", type=['xlsx', 'csv', 'xls'])
-
-    if st.button("📥 Загрузить и обновить память", type="primary"):
-        if f_import:
-            with st.spinner("Анализируем структуру файла и разрешаем конфликты..."):
-                # УМНОЕ ЧТЕНИЕ ФАЙЛА
-                bytes_data = f_import.getvalue()
-                name = f_import.name.lower()
-                df_import = pd.DataFrame()
-                
-                try:
-                    if name.endswith(('.xlsx', '.xls')):
-                        eng = 'calamine' if name.endswith('.xlsx') else 'xlrd'
-                        try:
-                            df_import = pd.read_excel(io.BytesIO(bytes_data), engine=eng)
-                        except:
-                            df_import = pd.read_excel(io.BytesIO(bytes_data), engine='openpyxl')
-                    else:
-                        for enc in ['utf-8-sig', 'utf-8', 'windows-1251']:
-                            for sep in [';', '\t', ',']:
-                                try:
-                                    df_import = pd.read_csv(io.BytesIO(bytes_data), sep=sep, engine='python', encoding=enc)
-                                    if len(df_import.columns) > 1: break
-                                except: pass
-                                
-                    if not df_import.empty:
-                        # Проверка на сбитые заголовки (как в "Датасете для отзывов")
-                        if df_import.columns.astype(str).str.contains('Unnamed').sum() > 2:
-                            row0 = df_import.iloc[0].astype(str).str.lower()
-                            if any('текст' in s for s in row0.values):
-                                new_header = df_import.iloc[0]
-                                df_import = df_import[1:]
-                                df_import.columns = new_header
-                except Exception as e:
-                    st.error(f"⚠️ Ошибка чтения файла: {e}")
-
-                if not df_import.empty:
-                    # Ищем все возможные текстовые колонки (чтобы склеить Достоинства и Недостатки)
-                    text_cols = [str(c) for c in df_import.columns if any(kw in str(c).lower() for kw in ['текст', 'достоинства', 'недостатки', 'comment', 'комментарий покупателя'])]
-                    
-                    # Ищем колонку с готовыми текстовыми решениями (как в "Лилиях")
-                    corr_col = next((str(c) for c in df_import.columns if any(kw in str(c).lower() for kw in ['корректировка', 'исправление', 'комментарий']) and str(c).lower() not in [str(x).lower() for x in text_cols]), None)
-                    
-                    if not text_cols: 
-                        st.error("❌ Ошибка: В файле не найдены колонки с текстом.")
-                    else:
-                        new_memory_dict = {}
-                        for idx, row in df_import.iterrows():
-                            # Собираем текст, игнорируя ошибки типов
-                            parts = []
-                            for tc in text_cols:
-                                if tc in row and pd.notna(row[tc]):
-                                    cell_val = str(row[tc]).strip()
-                                    if cell_val.lower() not in ['nan', 'none', '']:
-                                        parts.append(cell_val)
-                            
-                            combined_text = " ".join(parts).strip()
-                            if not combined_text: continue
-                            
-                            final_tags = []
-                            
-                            # 1. Приоритет ручному текстовому комментарию (если он есть)
-                            if corr_col and pd.notna(row[corr_col]):
-                                val = str(row[corr_col]).strip()
-                                # Разбиваем строку по точке с запятой или запятой
-                                split_vals = [v.strip() for v in re.split(r'[;,]', val) if v.strip()]
-                                for v in split_vals:
-                                    # Проверяем, есть ли такое значение в нашем словаре
-                                    if v in CATEGORIES.values():
-                                        final_tags.append(v)
-                                    
-                            # 2. Если ручного текста нет, ищем отметки 1/+/Да в колонках
-                            if not final_tags:
-                                for col in df_import.columns:
-                                    col_str = str(col).lower()
-                                    cat_id = None
-                                    
-                                    # Обрабатываем колонки, которые просто названы цифрами (1.0, 2.0)
-                                    if isinstance(col, (int, float)):
-                                        cat_id = int(col)
-                                    else:
-                                        # Ищем слово Кат/Cat и цифру рядом
-                                        match = re.search(r'(?:кат|cat|категория)?\s*(\d+)', col_str)
-                                        if match:
-                                            cat_id = int(match.group(1))
-                                            
-                                    if cat_id and cat_id in CATEGORIES:
-                                        cell_val = str(row[col]).strip().lower()
-                                        if cell_val in ['1', '1.0', '+', 'true', 'да', 'v']:
-                                            final_tags.append(CATEGORIES[cat_id])
-                                            
-                            if final_tags: 
-                                new_memory_dict[combined_text] = "; ".join(final_tags)
-
-                        if new_memory_dict:
-                            try:
-                                # Сохраняем в SQL через UPSERT (если текст такой же - обновим тег)
-                                with engine.begin() as conn:
-                                    for txt, tgs in new_memory_dict.items():
-                                        conn.execute(text("""
-                                            INSERT INTO ai_knowledge_base (content, tags, source) 
-                                            VALUES (:txt, :tgs, 'training')
-                                            ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags
-                                        """), {"txt": txt, "tgs": tgs})
-                                
-                                st.success(f":material/check_circle: Опыт успешно записан в SQL-базу! Всего добавлено: {len(new_memory_dict)} примеров.")
-                            except Exception as e: 
-                                st.error(f"Ошибка записи в SQL: {e}")
-                        else: 
-                            st.warning("⚠️ Не найдено валидных тегов в файле. Проверьте, стоят ли '1' в колонках категорий.")
-        else: 
-            st.warning("Пожалуйста, загрузите файл.")
 
 elif page == "ИИ Тегирование":
     st.title(":material/biotech: ИИ Тегирование и Проверка")
