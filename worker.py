@@ -412,7 +412,7 @@ def fetch_and_save_orders(url):
             time.sleep(30)
 
 def sync_invoices():
-    print("⏳ Синхронизация инвойсов из Google Sheets...")
+    print("⏳ Синхронизация инвойсов из Google Sheets (последние 100 строк)...")
     try:
         # Авторизуемся через твой bot_api_key.json
         gc = gspread.service_account(filename=PATH_TO_GOOGLE_CREDS)
@@ -423,15 +423,23 @@ def sync_invoices():
 
         df.columns = df.columns.str.strip().str.lower()
 
-        # Поиск колонок (учитываем твой скриншот с таблицей)
+        # Поиск колонок
         supply_col = next((c for c in df.columns if 'supplyid' in c or 'поставк' in c), None)
         invoice_col = next((c for c in df.columns if 'инвойс' in c), None)
-        # Берем "Артикул", но пропускаем тот, где есть "wb"
         article_col = next((c for c in df.columns if 'артикул' in c and 'wb' not in c), None)
 
         if not all([supply_col, article_col, invoice_col]):
             print(f"❌ Колонки не найдены. Проверь заголовки в таблице.")
             return
+
+        # 🛠 УМНЫЙ ФИЛЬТР: Отсекаем полностью пустые строки, которые gspread часто цепляет со дна таблицы
+        df = df[
+            (df[supply_col].astype(str).str.strip() != '') & 
+            (df[article_col].astype(str).str.strip() != '')
+        ]
+
+        # 🚀 ОГРАНИЧЕНИЕ: Берем строго последние 100 реально заполненных строк
+        df = df.tail(100)
 
         # Очистка и подготовка данных
         df['s_id'] = df[supply_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
@@ -448,9 +456,9 @@ def sync_invoices():
                 """)
                 conn.execute(sql, {"sid": row['s_id'], "art": row['a_id'], "inv": row['i_id']})
                 
-        print("✅ Инвойсы обновлены в базе.")
+        print(f"✅ Инвойсы обновлены в базе (обработано последних строк: {len(df)}).")
     except Exception as e:
-        print(f"🚨 Ошибка: {e}")
+        print(f"🚨 Ошибка синхронизации инвойсов: {e}")
 
 def sync_assortment_matrix():
     print("⏳ Синхронизация ассортиментной матрицы из Google Sheets...")
