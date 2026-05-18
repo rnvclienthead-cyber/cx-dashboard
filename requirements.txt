@@ -1,8 +1,9 @@
 streamlit
 pandas
+numpy
 gspread
-plotly
 google-auth
+plotly
 aiohttp
 openpyxl
 python-calamine
@@ -15,6 +16,7 @@ requests
 boto3
 Pillow
 xlsxwriter
+python-dotenv
 kaleido==0.2.1
 playwright
 playwright-stealth
