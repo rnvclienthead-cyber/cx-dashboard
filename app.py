@@ -18,9 +18,11 @@ import os
 import urllib.request
 import xlsxwriter
 import requests
+import tempfile
 import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from sqlalchemy import create_engine, text
+from PIL import Image as PILImage
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
@@ -299,7 +301,7 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
     try:
         wb = openpyxl.load_workbook(template_path)
         sheet = wb.active
-    except Exception as e:
+    except Exception:
         return b""
 
     # 1. ЗАПОЛНЕНИЕ ДАННЫХ
@@ -316,66 +318,65 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
         'C8': data['desc_ru'], 'G8': data['cause_ru'],
         'L8': data.get('desc_cn', ''), 'P8': data.get('cause_cn', '')
     }
-    
     for cell, val in coords.items():
         safe_write(sheet, cell, val)
 
-    # 2. ВСТАВКА ГРАФИКОВ (Строго в 9 строку)
+    # 2. ГРАФИКИ (Строго 9-я строка)
     if chart_fig:
         try:
-            # Расширяем именно 9 строку
             sheet.row_dimensions[9].height = 170 
             img_bytes = chart_fig.to_image(format="png", width=700, height=320)
             
-            for anchor in ['B9', 'K9']: # Привязываем графики к 9 строке
+            for anchor in ['B9', 'K9']:
                 img_stream = io.BytesIO(img_bytes)
                 img = OpenpyxlImage(img_stream)
-                img.width, img.height = 350, 160 
+                img.width, img.height = 350, 160
                 sheet.add_image(img, anchor)
-        except Exception as e: 
-            pass
+        except: pass
 
-    # 3. ВСТАВКА ФОТОГРАФИЙ (С исправленным курсором памяти)
-    photo_row = 28 # Если в вашем шаблоне фото начинаются с другой строки - измените эту цифру
+    # 3. ФОТОГРАФИИ (100% рабочий метод через физические temp-файлы)
+    photo_row = 26 # Начинаем вставлять фото с 26 строки
+    temp_files = [] # Список для удаления временных файлов после генерации
     
     for cat_name, urls in data.get('photo_groups', {}).items():
         if urls:
-            safe_write(sheet, f'B{photo_row}', f"Категория дефекта: {cat_name}")
-            photo_row += 1
-            
-            # Задаем высоту строки для фото, чтобы они не наезжали на текст
-            sheet.row_dimensions[photo_row].height = 110
-            
+            # УБРАЛИ генерацию текста "Категория", теперь только фото
             col_indices = [2, 5, 8] # Колонки B, E, H
+            
             for idx, url in enumerate(urls[:3]):
                 try:
-                    # Скачиваем фото
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    resp = urllib.request.urlopen(req, timeout=5)
-                    image_data = resp.read()
-                    
-                    # Прогоняем через PIL для стабилизации формата
-                    pil_img = PILImage.open(io.BytesIO(image_data))
-                    pil_img.thumbnail((140, 140))
-                    
-                    # Сохраняем в память
-                    img_temp = io.BytesIO()
-                    pil_img.save(img_temp, format="PNG")
-                    
-                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем курсор в начало файла!
-                    img_temp.seek(0) 
-                    
-                    # Вставляем в Excel
-                    xl_img = OpenpyxlImage(img_temp)
-                    col_letter = openpyxl.utils.get_column_letter(col_indices[idx])
-                    sheet.add_image(xl_img, f'{col_letter}{photo_row}')
+                    # Загружаем надежно, обходя блокировки
+                    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+                    if resp.status_code == 200:
+                        # 1. Создаем физический временный файл на сервере
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                            tmp.write(resp.content)
+                            tmp_path = tmp.name
+                            temp_files.append(tmp_path)
+                        
+                        # 2. Прогоняем через PIL для корректного формата и размера
+                        pil_img = PILImage.open(tmp_path)
+                        pil_img.thumbnail((140, 140))
+                        pil_img.save(tmp_path)
+                        
+                        # 3. Вставляем физический файл в Excel
+                        xl_img = OpenpyxlImage(tmp_path)
+                        col_letter = openpyxl.utils.get_column_letter(col_indices[idx])
+                        sheet.add_image(xl_img, f'{col_letter}{photo_row}')
                 except Exception as e:
                     continue
-                    
-            photo_row += 8 # Сдвигаемся вниз для следующей категории
+            
+            photo_row += 8 # Отступаем вниз для следующей порции фото
 
     output = io.BytesIO()
     wb.save(output)
+    
+    # Очищаем память сервера от временных фото
+    for tmp_path in temp_files:
+        try:
+            os.remove(tmp_path)
+        except: pass
+        
     return output.getvalue()
 
 # ==========================================
@@ -1869,9 +1870,9 @@ elif page == "Уровень PPM":
                                     group_mask |= sku_details[str(cid)].astype(str).str.strip().str.lower().isin(valid_vals)
                                 
                                 # Забираем уже найденные фото из кэша
-                                for _, wb_url in prefetched_photos.get(cid, []):
-                                    if wb_url not in group_urls:
-                                        group_urls.append(wb_url)
+                                for s3_url, wb_url in prefetched_photos.get(cid, []):
+                                    if s3_url not in group_urls:
+                                        group_urls.append(s3_url)
                             
                             group_count = sku_details[group_mask].shape[0]
                             if group_count > 0:
