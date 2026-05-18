@@ -340,7 +340,7 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
         safe_write(sheet, cell, val)
 
     # ИСПРАВЛЕНИЕ: Включаем поддержку переноса строк (wrap_text) для ячеек инвойсов, описания и причин
-    wrap_align = Alignment(wrap_text=True, valign='vcenter')
+    wrap_align = Alignment(wrap_text=True, vertical='center')
     for cell_coord in ['G4', 'P4', 'C8', 'G8', 'L8', 'P8']:
         try:
             sheet[cell_coord].alignment = wrap_align
@@ -1826,7 +1826,7 @@ elif page == "Уровень PPM":
                     selected_row = table_agg.iloc[selected_indices[0]]
                     current_sku = selected_row['Артикул']
                     
-                    # 1. ЗАГРУЗКА ДАННЫХ И СТРОГАЯ ОЧИСТКА ИНВОЙСОВ
+                    # 1. ЗАГРУЗКА ДАННЫХ И ОЧИСТКА ИНВОЙСОВ (Только номера)
                     try:
                         df_sys_detail = load_cached_hybrid_data()
                         if len(date_range) == 2:
@@ -1837,19 +1837,20 @@ elif page == "Уровень PPM":
                             sku_details = df_sys_detail[df_sys_detail['Артикул продавца'] == current_sku].copy()
                         
                         valid_vals = ['1', '1.0', '+', 'true', 'да']
+                        bad_vals = ['nan', 'none', '', 'не указан', '0', '0.0', '---', '-', 'undefined', 'не закрытые инвойсы']
+                        
                         defect_mask = pd.Series(False, index=sku_details.index)
                         for i in range(1, 14):
                             cat_col = str(i)
                             if cat_col in sku_details.columns:
                                 defect_mask |= sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)
                         
-                        # Полностью исключаем "не закрытые инвойсы" и прочий мусор
-                        bad_vals = ['nan', 'none', '', 'не указан', '0', '0.0', '---', '-', 'undefined', 'не закрытые инвойсы']
+                        # Собираем только уникальные валидные инвойсы
                         defect_invs = sku_details.loc[defect_mask, 'Инвойс'].dropna().unique()
                         valid_invs = [str(inv).strip() for inv in defect_invs if str(inv).strip().lower() not in bad_vals]
                         
-                        # Перечисление строго через точку с запятой и перенос строки по вашему запросу
-                        auto_invoices = ";\n".join(valid_invs)
+                        # Перенос на новую строку
+                        auto_invoices = "\n".join(valid_invs)
                     except:
                         sku_details, auto_invoices = pd.DataFrame(), ""
 
@@ -1891,7 +1892,7 @@ elif page == "Уровень PPM":
                                             if len(urls) >= 6: break 
                                         prefetched_photos[i] = urls
 
-                    # 3. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ (Динамические причины брака)
+                    # 3. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ (Кэш оригиналов WB и динамические причины)
                     combined_issues = []
                     combined_causes_ru = []
                     combined_causes_cn = []
@@ -1905,6 +1906,7 @@ elif page == "Уровень PPM":
                                 if str(cid) in sku_details.columns:
                                     group_mask |= sku_details[str(cid)].astype(str).str.strip().str.lower().isin(valid_vals)
                                 
+                                # Берем wb_url для сохранения HD качества оригиналов
                                 for s3_url, wb_url in prefetched_photos.get(cid, []):
                                     if wb_url not in group_urls:
                                         group_urls.append(wb_url)
@@ -1913,44 +1915,91 @@ elif page == "Уровень PPM":
                             if group_count > 0:
                                 label_issue = f"{config['ru']} ({group_count})"
                                 combined_issues.append(label_issue)
-                                photo_payload[config['ru']] = group_urls[:5]
+                                photo_payload[config['ru']] = group_urls[:5] # Передаем до 5 фото
                                 
+                                # Собираем причины из словаря
                                 if 'cause_ru' in config and config['cause_ru'] not in combined_causes_ru:
                                     combined_causes_ru.append(config['cause_ru'])
                                 if 'cause_cn' in config and config['cause_cn'] not in combined_causes_cn:
                                     combined_causes_cn.append(config['cause_cn'])
 
-                    # Перенос на новую строку вместо слэшей
-                    auto_desc_ru = "\n".join(combined_issues) if combined_issues else "Дефекты не обнаружены"
-                    auto_cause_ru = "\n".join(combined_causes_ru) if combined_causes_ru else "Нарушение при производстве"
-                    auto_cause_cn = "\n".join(combined_causes_cn) if combined_causes_cn else "生产过程异常"
-
                     # 4. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Интерфейс)
-                    # ... [Этот блок отрисовки карточек на экране оставляйте без изменений] ...
+                    st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
+                    st.subheader(f":material/troubleshoot: Визуальная детализация брака: {current_sku}")
+                    
+                    if not sku_details.empty:
+                        has_data = False
+                        for i in range(1, 14):
+                            cat_col = str(i)
+                            if cat_col in sku_details.columns:
+                                cat_mask = sku_details[cat_col].astype(str).str.strip().str.lower().isin(valid_vals)
+                                count = sku_details[cat_mask].shape[0]
+                                if count > 0:
+                                    has_data = True
+                                    cat_name = CATEGORIES.get(i, f"Категория {i}") if 'CATEGORIES' in globals() else f"Категория {i}"
+                                    
+                                    with st.container():
+                                        st.markdown("<hr style='margin: 1em 0; border: none; border-bottom: 1px solid #e2e8f0;'/>", unsafe_allow_html=True)
+                                        c_text, c_media = st.columns([1.2, 1])
+                                        
+                                        cat_specific_df = sku_details[cat_mask]
+                                        invs = cat_specific_df['Инвойс'].dropna().unique()
+                                        invs_clean = [str(inv).strip() for inv in invs if str(inv).strip().lower() not in bad_vals]
+                                        inv_str = ", ".join(invs_clean) if invs_clean else "Не указан"
+
+                                        with c_text:
+                                            st.markdown(f"#### :material/report: {cat_name}")
+                                            st.markdown(f"**Количество:** {count} шт.")
+                                            st.markdown(f"**Инвойсы:** {inv_str}")
+                                        
+                                        with c_media:
+                                            urls = prefetched_photos.get(i, [])
+                                            if urls:
+                                                html_imgs = '<div style="display: flex; flex-wrap: wrap; gap: 8px;">'
+                                                for s3_url, wb_url in urls:
+                                                    html_imgs += f'<a href="{wb_url}" target="_blank"><img src="{s3_url}" class="photo-zoom" style="width: 70px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;"></a>'
+                                                html_imgs += '</div>'
+                                                st.markdown(html_imgs, unsafe_allow_html=True)
+                                            else:
+                                                st.caption("Нет уникального фото")
+                        if not has_data:
+                            st.info("Нет детализированных данных по категориям за выбранный период.")
+                    else:
+                        st.warning("За выбранный период данных по этому артикулу не найдено.")
 
                     # 5. ФОРМА ПРЕТЕНЗИИ И СКАЧИВАНИЕ
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
                     st.subheader(f":material/edit_document: Формирование рекламации: {current_sku}")
                     
-                    photos_ready = any(len(urls) > 0 for urls in photo_payload.values())
-                    can_download = (not combined_issues) or photos_ready
+                    # Перенос на новую строку вместо слэшей
+                    auto_desc_ru = "\n".join(combined_issues) if combined_issues else "Дефекты не обнаружены"
+                    auto_desc_cn = "\n".join([CLAIM_CATEGORIES_LOGIC[k]['cn'] for k in CLAIM_CATEGORIES_LOGIC if CLAIM_CATEGORIES_LOGIC[k]['ru'] in [x.split(' (')[0] for x in combined_issues]]) if 'CLAIM_CATEGORIES_LOGIC' in globals() and combined_issues else ""
+                    auto_cause_ru = "\n".join(combined_causes_ru) if combined_causes_ru else "Нарушение при производстве"
+                    auto_cause_cn = "\n".join(combined_causes_cn) if combined_causes_cn else "生产过程异常"
 
-                    # ВАЖНО: Добавлен суффикс _{current_sku} ко всем key, чтобы поля ввода очищались и обновлялись!
+                    # === ЛОГИКА УМНОЙ КНОПКИ ===
+                    needs_photos = len(combined_issues) > 0
+                    photos_ready = any(len(urls) > 0 for urls in photo_payload.values())
+                    can_download = (not needs_photos) or photos_ready
+
+                    # ИСПРАВЛЕНИЕ: Добавлен _{current_sku} к параметрам key!
                     cl1, cl2, cl3 = st.columns(3)
                     with cl1:
                         sup = st.text_input("Завод", value="Уточняется", key=f"cl_sup_{current_sku}")
                         num = st.text_input("Номер Рекламационного Акта", value="", placeholder="Введите номер...", key=f"cl_num_{current_sku}")
                     with cl2:
-                        inv_val = st.text_input("Инвойс (Invoice)", value=auto_invoices, key=f"cl_inv_{current_sku}")
+                        # Использован text_area для корректного отображения переносов строк в UI
+                        inv_val = st.text_area("Инвойс (Invoice)", value=auto_invoices, key=f"cl_inv_{current_sku}")
                         period_val = f"{date_range[0].strftime('%d.%m.%Y')} - {date_range[1].strftime('%d.%m.%Y')}" if len(date_range)==2 else "01.04.2026 - 30.04.2026"
                         per = st.text_input("Период (Period)", value=period_val, key=f"cl_per_{current_sku}")
                     with cl3:
                         d_ru = st.text_area("Описание дефектов (RU)", value=auto_desc_ru, key=f"cl_d_ru_{current_sku}")
+                        d_cn = st.text_area("Описание дефектов (CN)", value=auto_desc_cn, key=f"cl_d_cn_{current_sku}")
                         c_ru = st.text_area("Предварительная причина (RU)", value=auto_cause_ru, key=f"cl_cause_ru_{current_sku}")
 
                     c_data = {
                         "number": num, 
-                        "date": datetime.now().strftime("%d.%m.%Y"), 
+                        "date": datetime.now().strftime("%Y-%m-%d"), 
                         "supplier": sup,
                         "period": per, 
                         "invoice": inv_val, 
@@ -1960,17 +2009,17 @@ elif page == "Уровень PPM":
                         "defects": selected_row['Брак'],
                         "ppm_pct": round(selected_row['%'], 2), 
                         "desc_ru": d_ru, 
-                        "desc_cn": "", 
+                        "desc_cn": d_cn,
                         "cause_ru": c_ru, 
                         "cause_cn": auto_cause_cn, 
                         "photo_groups": photo_payload 
                     }
                     
                     if not can_download:
-                        st.error("📥 Скачивание заблокировано: фотографии еще подгружаются с серверов.")
+                        st.warning("⚠️ Ожидание загрузки фотографий или фото не найдены. Акт без фотографий не формируется.")
                     
                     st.download_button(
-                        label=f"📥 Скачать Рекламацию для {current_sku}" if can_download else "⏳ Ожидание фотографий...", 
+                        label=f"📥 Скачать Рекламацию для {current_sku}" if can_download else "⏳ Загрузите фото для скачивания", 
                         data=generate_claim_from_template(c_data, chart_fig=fig) if can_download else b"", 
                         file_name=f"RA_{num if num else 'draft'}_{current_sku}.xlsx", 
                         type="primary", 
