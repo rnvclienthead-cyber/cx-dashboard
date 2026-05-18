@@ -412,7 +412,7 @@ def fetch_and_save_orders(url):
             time.sleep(30)
 
 def sync_invoices():
-    print("⏳ Синхронизация инвойсов из Google Sheets (последние 100 строк)...")
+    print("⏳ Синхронизация инвойсов из Google Sheets (фильтр по столбцу E)...")
     try:
         # Авторизуемся через твой bot_api_key.json
         gc = gspread.service_account(filename=PATH_TO_GOOGLE_CREDS)
@@ -421,33 +421,49 @@ def sync_invoices():
         df = pd.DataFrame(sheet.get_all_records())
         if df.empty: return
 
+        # Приводим названия колонок к нижнему регистру для поиска совпадений
         df.columns = df.columns.str.strip().str.lower()
 
-        # Поиск колонок
+        # Находим базовые колонки поставки и артикула
         supply_col = next((c for c in df.columns if 'supplyid' in c or 'поставк' in c), None)
-        invoice_col = next((c for c in df.columns if 'инвойс' in c), None)
         article_col = next((c for c in df.columns if 'артикул' in c and 'wb' not in c), None)
+        
+        # 🎯 ОПРЕДЕЛЯЕМ СТОЛБЕЦ E (5-й по счету, индекс 4)
+        # Если таблица прочиталась корректно, df.columns[4] — это и есть заголовок столбца E
+        col_e = df.columns[4] if len(df.columns) > 4 else None
 
-        if not all([supply_col, article_col, invoice_col]):
-            print(f"❌ Колонки не найдены. Проверь заголовки в таблице.")
+        if not all([supply_col, article_col, col_e]):
+            print(f"❌ Критические колонки таблицы не найдены. Проверь структуру листа!")
             return
 
-        # 🛠 УМНЫЙ ФИЛЬТР: Отсекаем полностью пустые строки, которые gspread часто цепляет со дна таблицы
-        df = df[
+        # Принудительно очищаем столбец E от пробелов и переводим в текст
+        df[col_e] = df[col_e].astype(str).str.strip()
+
+        # Список маркеров мусора и ошибок, которые мы гарантированно пропускаем
+        bad_invoice_vals = ['nan', 'none', '', '0', '0.0', '-', '---', 'ошибка', 'undefined']
+
+        # 🛠 СТРОГИЙ ФИЛЬТР: Оставляем только те строки, где в Столбце E написан реальный инвойс
+        df_clean = df[
+            (~df[col_e].str.lower().isin(bad_invoice_vals)) & 
             (df[supply_col].astype(str).str.strip() != '') & 
             (df[article_col].astype(str).str.strip() != '')
-        ]
+        ].copy()
 
-        # 🚀 ОГРАНИЧЕНИЕ: Берем строго последние 100 реально заполненных строк
-        df = df.tail(100)
+        if df_clean.empty:
+            print("⚠️ После фильтрации столбца E не найдено ни одной валидной строки.")
+            return
 
-        # Очистка и подготовка данных
-        df['s_id'] = df[supply_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df['a_id'] = df[article_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df['i_id'] = df[invoice_col].astype(str).str.strip()
+        # 🚀 ВОТ ОНА ОПТИМИЗАЦИЯ: Теперь берем последние 100 строк из ОЧИЩЕННОГО датафрейма.
+        # Все 700 строк с ошибками остались выше фильтра и скрипт до них даже не дотронется!
+        df_to_process = df_clean.tail(100)
+
+        # Подготовка чистых данных для SQL
+        df_to_process['s_id'] = df_to_process[supply_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df_to_process['a_id'] = df_to_process[article_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df_to_process['i_id'] = df_to_process[col_e]
 
         with engine.begin() as conn:
-            for _, row in df.iterrows():
+            for _, row in df_to_process.iterrows():
                 sql = text("""
                     INSERT INTO wb_invoices (supply_id, supplier_article, invoice_num)
                     VALUES (:sid, :art, :inv)
@@ -456,9 +472,9 @@ def sync_invoices():
                 """)
                 conn.execute(sql, {"sid": row['s_id'], "art": row['a_id'], "inv": row['i_id']})
                 
-        print(f"✅ Инвойсы обновлены в базе (обработано последних строк: {len(df)}).")
+        print(f"✅ Инвойсы обновлены. Избежали ошибок и обработали последние {len(df_to_process)} рабочих строк.")
     except Exception as e:
-        print(f"🚨 Ошибка синхронизации инвойсов: {e}")
+        print(f"🚨 Ошибка в блоке инвойсов: {e}")
 
 def sync_assortment_matrix():
     print("⏳ Синхронизация ассортиментной матрицы из Google Sheets...")
