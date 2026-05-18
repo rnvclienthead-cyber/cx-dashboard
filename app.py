@@ -341,74 +341,64 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
     # 2. ГРАФИКИ (Строка 10, Высокое разрешение)
     if chart_fig:
         try:
-            # Устанавливаем высоту 10-й строки
             sheet.row_dimensions[10].height = 190 
-            # scale=2.5 делает картинку сверхчеткой (HD)
             img_bytes = chart_fig.to_image(format="png", width=750, height=350, scale=2.5)
             
             for anchor in ['B10', 'K10']:
-                img_stream = io.BytesIO(img_bytes)
+                img_stream = io.BytesIO(img_bytes) # Создаем независимый поток для каждого графика
                 img = OpenpyxlImage(img_stream)
-                # Визуальные размеры ячейки в Экселе
                 img.width, img.height = 370, 180
                 sheet.add_image(img, anchor)
         except Exception: 
             pass
 
     # 3. ФОТОГРАФИИ (Строки 11 и 12)
-    # Начинаем с 11 строки (Заголовок "Не соответствует")
     current_row = 11 
     
-    # Координаты колонок для 5 фотографий
     col_ru = [2, 4, 6, 8, 9]     # B, D, F, H, I
     col_cn = [11, 13, 15, 17, 18] # K, M, O, Q, R
     
     for cat_name, urls in data.get('photo_groups', {}).items():
         if urls:
-            # Подпись категории (Строка 11)
             safe_write(sheet, f'B{current_row}', f"Не соответствует: {cat_name}")
             safe_write(sheet, f'K{current_row}', f"缺陷类别: {cat_name}")
             
-            # Переходим на строку с фотографиями (Строка 12)
             photo_row = current_row + 1
-            # Делаем строку высокой, чтобы фото можно было детально рассмотреть
             sheet.row_dimensions[photo_row].height = 140 
             
             for idx, url in enumerate(urls[:5]):
                 try:
                     resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                     if resp.status_code == 200:
-                        # Сохраняем качество 1000x1000 (HD оригиналы)
                         pil_img = PILImage.open(io.BytesIO(resp.content))
                         pil_img.thumbnail((1000, 1000))
                         
                         img_buf = io.BytesIO()
                         pil_img.save(img_buf, format="PNG")
                         
-                        # --- ВСТАВКА В РУССКИЙ БЛОК ---
-                        img_buf.seek(0)
-                        xl_img_ru = OpenpyxlImage(img_buf)
-                        xl_img_ru.width, xl_img_ru.height = 130, 130 # Крупный визуальный размер
+                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Вытаскиваем "чистые" байты из буфера
+                        image_bytes = img_buf.getvalue()
+                        
+                        # --- ВСТАВКА В РУССКИЙ БЛОК (С независимым потоком) ---
+                        xl_img_ru = OpenpyxlImage(io.BytesIO(image_bytes))
+                        xl_img_ru.width, xl_img_ru.height = 130, 130 
                         col_letter_ru = openpyxl.utils.get_column_letter(col_ru[idx])
                         sheet.add_image(xl_img_ru, f"{col_letter_ru}{photo_row}")
                         
-                        # --- ВСТАВКА В КИТАЙСКИЙ БЛОК ---
-                        img_buf.seek(0)
-                        xl_img_cn = OpenpyxlImage(img_buf)
+                        # --- ВСТАВКА В КИТАЙСКИЙ БЛОК (С независимым потоком) ---
+                        xl_img_cn = OpenpyxlImage(io.BytesIO(image_bytes))
                         xl_img_cn.width, xl_img_cn.height = 130, 130
                         col_letter_cn = openpyxl.utils.get_column_letter(col_cn[idx])
                         sheet.add_image(xl_img_cn, f"{col_letter_cn}{photo_row}")
                 except Exception: 
                     continue
             
-            # Отступаем вниз на 3 строки для следующей категории (если их несколько)
-            # Например, следующая категория начнется со строки 15
             current_row += 4 
 
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
-
+    
 # ==========================================
 # ИИ ДВИЖОК
 # ==========================================
