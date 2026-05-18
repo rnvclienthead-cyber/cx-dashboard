@@ -26,6 +26,23 @@ from PIL import Image as PILImage
 
 st.set_page_config(page_title="CX AI Enterprise", layout="wide")
 
+# ==========================================
+# БЛОК ЗАГРУЗКИ ШАБЛОНА В ПАМЯТЬ СИСТЕМЫ
+# ==========================================
+with st.sidebar.expander("⚙️ Админ: Шаблон Рекламации"):
+    st.info("Загрузите пустой эталонный Excel-файл. Он сохранится на сервере.")
+    uploaded_template = st.file_uploader("Загрузить шаблон (.xlsx)", type=["xlsx"])
+    if uploaded_template:
+        with open("template_ra.xlsx", "wb") as f:
+            f.write(uploaded_template.read())
+        st.success("✅ Шаблон успешно сохранен в базу!")
+        
+    import os
+    if os.path.exists("template_ra.xlsx"):
+        st.caption("🟢 В системе активен загруженный шаблон.")
+    else:
+        st.error("🔴 Шаблон отсутствует. Загрузите его для работы генератора.")
+
 st.markdown("""
     <style>
     /* НАВИГАЦИЯ: Стилизуем кнопки под плоские пункты меню */
@@ -321,62 +338,75 @@ def generate_claim_from_template(data, chart_fig=None, template_path="template_r
     for cell, val in coords.items():
         safe_write(sheet, cell, val)
 
-    # 2. ГРАФИКИ (Строго 9-я строка)
+    # 2. ГРАФИКИ (Строка 10, Высокое разрешение)
     if chart_fig:
         try:
-            sheet.row_dimensions[9].height = 170 
-            img_bytes = chart_fig.to_image(format="png", width=700, height=320)
+            # Устанавливаем высоту 10-й строки
+            sheet.row_dimensions[10].height = 190 
+            # scale=2.5 делает картинку сверхчеткой (HD)
+            img_bytes = chart_fig.to_image(format="png", width=750, height=350, scale=2.5)
             
-            for anchor in ['B9', 'K9']:
+            for anchor in ['B10', 'K10']:
                 img_stream = io.BytesIO(img_bytes)
                 img = OpenpyxlImage(img_stream)
-                img.width, img.height = 350, 160
+                # Визуальные размеры ячейки в Экселе
+                img.width, img.height = 370, 180
                 sheet.add_image(img, anchor)
-        except: pass
+        except Exception: 
+            pass
 
-    # 3. ФОТОГРАФИИ (100% рабочий метод через физические temp-файлы)
-    photo_row = 26 # Начинаем вставлять фото с 26 строки
-    temp_files = [] # Список для удаления временных файлов после генерации
+    # 3. ФОТОГРАФИИ (Строки 11 и 12)
+    # Начинаем с 11 строки (Заголовок "Не соответствует")
+    current_row = 11 
+    
+    # Координаты колонок для 5 фотографий
+    col_ru = [2, 4, 6, 8, 9]     # B, D, F, H, I
+    col_cn = [11, 13, 15, 17, 18] # K, M, O, Q, R
     
     for cat_name, urls in data.get('photo_groups', {}).items():
         if urls:
-            # УБРАЛИ генерацию текста "Категория", теперь только фото
-            col_indices = [2, 5, 8] # Колонки B, E, H
+            # Подпись категории (Строка 11)
+            safe_write(sheet, f'B{current_row}', f"Не соответствует: {cat_name}")
+            safe_write(sheet, f'K{current_row}', f"缺陷类别: {cat_name}")
             
-            for idx, url in enumerate(urls[:3]):
+            # Переходим на строку с фотографиями (Строка 12)
+            photo_row = current_row + 1
+            # Делаем строку высокой, чтобы фото можно было детально рассмотреть
+            sheet.row_dimensions[photo_row].height = 140 
+            
+            for idx, url in enumerate(urls[:5]):
                 try:
-                    # Загружаем надежно, обходя блокировки
                     resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                     if resp.status_code == 200:
-                        # 1. Создаем физический временный файл на сервере
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                            tmp.write(resp.content)
-                            tmp_path = tmp.name
-                            temp_files.append(tmp_path)
+                        # Сохраняем качество 1000x1000 (HD оригиналы)
+                        pil_img = PILImage.open(io.BytesIO(resp.content))
+                        pil_img.thumbnail((1000, 1000))
                         
-                        # 2. Прогоняем через PIL для корректного формата и размера
-                        pil_img = PILImage.open(tmp_path)
-                        pil_img.thumbnail((140, 140))
-                        pil_img.save(tmp_path)
+                        img_buf = io.BytesIO()
+                        pil_img.save(img_buf, format="PNG")
                         
-                        # 3. Вставляем физический файл в Excel
-                        xl_img = OpenpyxlImage(tmp_path)
-                        col_letter = openpyxl.utils.get_column_letter(col_indices[idx])
-                        sheet.add_image(xl_img, f'{col_letter}{photo_row}')
-                except Exception as e:
+                        # --- ВСТАВКА В РУССКИЙ БЛОК ---
+                        img_buf.seek(0)
+                        xl_img_ru = OpenpyxlImage(img_buf)
+                        xl_img_ru.width, xl_img_ru.height = 130, 130 # Крупный визуальный размер
+                        col_letter_ru = openpyxl.utils.get_column_letter(col_ru[idx])
+                        sheet.add_image(xl_img_ru, f"{col_letter_ru}{photo_row}")
+                        
+                        # --- ВСТАВКА В КИТАЙСКИЙ БЛОК ---
+                        img_buf.seek(0)
+                        xl_img_cn = OpenpyxlImage(img_buf)
+                        xl_img_cn.width, xl_img_cn.height = 130, 130
+                        col_letter_cn = openpyxl.utils.get_column_letter(col_cn[idx])
+                        sheet.add_image(xl_img_cn, f"{col_letter_cn}{photo_row}")
+                except Exception: 
                     continue
             
-            photo_row += 8 # Отступаем вниз для следующей порции фото
+            # Отступаем вниз на 3 строки для следующей категории (если их несколько)
+            # Например, следующая категория начнется со строки 15
+            current_row += 4 
 
     output = io.BytesIO()
     wb.save(output)
-    
-    # Очищаем память сервера от временных фото
-    for tmp_path in temp_files:
-        try:
-            os.remove(tmp_path)
-        except: pass
-        
     return output.getvalue()
 
 # ==========================================
@@ -1857,7 +1887,7 @@ elif page == "Уровень PPM":
                                             if len(urls) >= 6: break # Берем до 6 фото для UI
                                         prefetched_photos[i] = urls
 
-                    # 3. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ (Берем из предзагруженного кэша)
+                    # 3. ПОДГОТОВКА ДАННЫХ ДЛЯ ЭКСЕЛЯ
                     combined_issues = []
                     photo_payload = {}
                     
@@ -1869,16 +1899,16 @@ elif page == "Уровень PPM":
                                 if str(cid) in sku_details.columns:
                                     group_mask |= sku_details[str(cid)].astype(str).str.strip().str.lower().isin(valid_vals)
                                 
-                                # Забираем уже найденные фото из кэша
+                                # ИЗМЕНЕНИЕ 1: Берем wb_url (оригиналы высокого качества)
                                 for s3_url, wb_url in prefetched_photos.get(cid, []):
-                                    if s3_url not in group_urls:
-                                        group_urls.append(s3_url)
+                                    if wb_url not in group_urls:
+                                        group_urls.append(wb_url)
                             
                             group_count = sku_details[group_mask].shape[0]
                             if group_count > 0:
                                 combined_issues.append(f"{config['ru']} ({group_count})")
-                                # Передаем только первые 3 фотки в Excel
-                                photo_payload[config['ru']] = group_urls[:3]
+                                # ИЗМЕНЕНИЕ 2: Передаем до 5 фотографий вместо 3
+                                photo_payload[config['ru']] = group_urls[:5]
 
                     # 4. ВИЗУАЛЬНАЯ ДЕТАЛИЗАЦИЯ (Интерфейс)
                     st.markdown("<hr style='margin: 2em 0; border: none; border-bottom: 1px solid #cbd5e1;'/>", unsafe_allow_html=True)
