@@ -2237,7 +2237,21 @@ elif page == "Рейтинг товаров":
 elif page == "Системный Журнал":
     st.title(":material/receipt_long: Системный Журнал (SQL Edition)")
     
-    if st.button("🔄 Обновить журнал"): 
+    render_system_monitor()
+    st.markdown("---")
+    
+    # === БЛОК ОТОБРАЖЕНИЯ ОТЧЕТА СКОРОСТИ ===
+    if os.path.exists("speed_report.html"):
+        st.markdown("### ⏱️ Интерактивный анализ скорости кода")
+        with open("speed_report.html", "r", encoding="utf-8") as f:
+            html_report = f.read()
+        
+        # Встраиваем HTML-отчет прямо в интерфейс
+        st.components.v1.html(html_report, height=600, scrolling=True)
+        st.markdown("---")
+    # =======================================
+    
+    if st.button("🔄 Обновить журнал", key="btn_upd_log"): 
         st.rerun()
 
     if engine:
