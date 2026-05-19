@@ -2,9 +2,8 @@ import os
 import asyncio
 import re
 import random
-print("DEBUG: Скрипт успешно запущен и дошел до импорта...")
 import sys
-# Принудительный сброс буфера вывода
+# ЭТА СТРОКА ДОБАВЛЕНА ДЛЯ РЕШЕНИЯ ПРОБЛЕМЫ ЛОГОВ В КРОНЕ
 sys.stdout.flush()
 from datetime import datetime
 from sqlalchemy import create_engine, text
