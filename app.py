@@ -1178,12 +1178,18 @@ elif page == "Модерация":
 
     if engine:
         st.markdown("### 🔍 Фильтры обращений")
-        c1, c2 = st.columns(2)
-        filter_mode = c1.radio("Показать обращения:", ["Все ожидающие модерации", "С замечаниями от Аудитора"], horizontal=True)
         
-        # ПУНКТ 1: Добавляем фильтр по категориям
+        # 1. Расчет дат для дефолтного фильтра (Текущая неделя: с понедельника по сегодня)
+        today = datetime.now().date()
+        start_of_week = today - timedelta(days=today.weekday())
+        
+        # Распределяем фильтры на 3 колонки для красивого дашборда
+        c1, c2, c3 = st.columns(3)
+        date_range = c1.date_input("Период заявок:", [start_of_week, today], format="DD.MM.YYYY", key="mod_date_filter")
+        filter_mode = c2.radio("Показать обращения:", ["Все ожидающие", "С замечаниями от Аудитора"], horizontal=False)
+        
         cat_options = ["Все категории"] + list(CATEGORIES.values())
-        selected_cat_filter = c2.selectbox("Фильтр по категории ИИ:", cat_options)
+        selected_cat_filter = c3.selectbox("Фильтр по категории ИИ:", cat_options)
         
         query = """
             SELECT *
@@ -1191,17 +1197,36 @@ elif page == "Модерация":
             WHERE ("1" OR "2" OR "3" OR "4" OR "5" OR "6" OR "7" OR "8" OR "9" OR "10" OR "11" OR "12" OR "13")
             AND ("Корректировка" IS NULL OR "Корректировка" = '')
         """
-        if filter_mode == "С замечаниями от Аудитора": query += " AND UPPER(\"Аудит\") LIKE '%ОШИБКА%'"
+        if "замечаниями" in filter_mode: query += " AND UPPER(\"Аудит\") LIKE '%ОШИБКА%'"
         
         to_review = pd.read_sql(query, engine)
-        reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
         
-        # ПРИМЕНЯЕМ ФИЛЬТР КАТЕГОРИИ
-        if selected_cat_filter != "Все категории" and not to_review.empty:
-            cat_id_str = str(reverse_cats.get(selected_cat_filter.lower()))
-            if cat_id_str in to_review.columns:
-                to_review = to_review[to_review[cat_id_str].astype(str).str.lower().isin(['1', '1.0', '+', 'true', 'да'])]
+        if not to_review.empty:
+            # 2. ФИЛЬТРАЦИЯ ТОЛЬКО ОДОБРЕННЫХ (единая логика с остальными блоками)
+            valid_statuses = ['одобрено', '2', '2.0', 'да', 'true']
+            to_review = to_review[
+                to_review['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid_statuses) |
+                to_review['Статус товара'].astype(str).str.strip().str.lower().isin(valid_statuses)
+            ]
+            
+            # 3. ФИЛЬТРАЦИЯ ПО ДАТЕ
+            date_col = next((c for c in to_review.columns if 'оформления заявки' in str(c).lower()), None)
+            if date_col and len(date_range) == 2:
+                to_review['Дата_ДТ'] = pd.to_datetime(to_review[date_col], errors='coerce')
+                to_review = to_review[
+                    (to_review['Дата_ДТ'].dt.date >= date_range[0]) & 
+                    (to_review['Дата_ДТ'].dt.date <= date_range[1])
+                ]
+
+            reverse_cats = {v.strip().lower(): k for k, v in CATEGORIES.items()}
+            
+            # 4. ФИЛЬТРАЦИЯ ПО КАТЕГОРИИ
+            if selected_cat_filter != "Все категории" and not to_review.empty:
+                cat_id_str = str(reverse_cats.get(selected_cat_filter.lower()))
+                if cat_id_str in to_review.columns:
+                    to_review = to_review[to_review[cat_id_str].astype(str).str.lower().isin(['1', '1.0', '+', 'true', 'да'])]
         
+        # Если после всех фильтров еще остались данные — выводим
         if not to_review.empty:
             total_items = len(to_review)
             ITEMS_PER_PAGE = 20
@@ -1252,16 +1277,12 @@ elif page == "Модерация":
                                 st.rerun()
 
                 with col_media:
-                    # НОВАЯ ЛОГИКА: Запрашиваем медиа и разделяем пары превью|оригинал
                     raw_photos, raw_videos = get_media_for_srid(srid)
                     
-                    # Обработка фото (делим строку на группы "превью|оригинал")
                     photo_groups = raw_photos.split()
-                    # Обработка видео
                     video_urls = re.findall(r'(?:https?:)?//[^\s"\'\;\]\[,<>]+', raw_videos)
                     
                     if photo_groups:
-                        # Стили пишем без лишних отступов в начале строк
                         html_imgs = '<style>.mod-zoom { transition: transform 0.2s ease; cursor: pointer; border-radius: 8px; object-fit: cover; } .mod-zoom:hover { transform: scale(2.5); z-index: 9999; position: relative; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }</style>'
                         html_imgs += '<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">'
                         
@@ -1271,7 +1292,6 @@ elif page == "Модерация":
                             else:
                                 s3_url = wb_url = group
                             
-                            # ВАЖНО: Вся f-строка должна быть либо в одну линию, либо без пробелов в начале каждой строки
                             html_imgs += f'<div style="text-align: center; width: 130px;"><a href="{wb_url}" target="_blank" rel="noreferrer noopener"><img src="{s3_url}" class="mod-zoom" style="width: 130px; height: 130px;" referrerpolicy="no-referrer"></a><a href="{wb_url}" download target="_blank" style="text-decoration:none; font-size:10px; color:#3498db; display:block; margin-top:5px;">📥 Оригинал</a></div>'
                         
                         html_imgs += '</div>'
@@ -1285,7 +1305,7 @@ elif page == "Модерация":
             st.markdown("---")
             render_pagination(total_pages, key_prefix="bottom")
         else: 
-            st.success("🎉 Очередь пуста! Все обращения проверены.")
+            st.success("🎉 Очередь пуста! Все обращения проверены или не попадают под заданные фильтры.")
 
 elif page == "Отчет производства":
     st.title(":material/insights: Отчет производства")
