@@ -19,6 +19,7 @@ import urllib.request
 import xlsxwriter
 import requests
 import tempfile
+import psutil
 import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Alignment
@@ -194,6 +195,31 @@ CLAIM_CATEGORIES_LOGIC = {
 # ==========================================
 # БАЗОВЫЕ ФУНКЦИИ 
 # ==========================================
+
+@st.fragment
+def render_system_monitor():
+    """Виджет мониторинга ресурсов сервера (RAM, CPU, Disk)"""
+    st.markdown("### 🖥️ Мониторинг ресурсов сервера")
+    try:
+        cpu_usage = psutil.cpu_percent(interval=0.1)
+        ram_info = psutil.virtual_memory()
+        disk_info = psutil.disk_usage('/')
+        
+        c1, c2, c3 = st.columns(3)
+        
+        # Подсвечиваем красным, если нагрузка больше 85%
+        cpu_color = "normal" if cpu_usage < 85 else "inverse"
+        ram_color = "normal" if ram_info.percent < 85 else "inverse"
+        
+        c1.metric("Нагрузка CPU", f"{cpu_usage}%", delta="Критично" if cpu_usage >= 85 else "ОК", delta_color=cpu_color)
+        c2.metric("Оперативная память (RAM)", f"{ram_info.used / (1024**3):.1f} / {ram_info.total / (1024**3):.1f} GB", f"{ram_info.percent}% загружено", delta_color=ram_color)
+        c3.metric("Свободно на диске", f"{disk_info.free / (1024**3):.1f} GB")
+
+        if st.button("🔄 Обновить метрики сервера", key="btn_refresh_sys"):
+            st.rerun()
+    except Exception as e:
+        st.error(f"⚠️ Ошибка получения системных метрик: {e}")
+        
 def safe_read(file_obj):
     bytes_data = file_obj.getvalue()
     name = file_obj.name.lower()
