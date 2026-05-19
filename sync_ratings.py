@@ -2,7 +2,10 @@ import os
 import asyncio
 import re
 import random
+print("DEBUG: Скрипт успешно запущен и дошел до импорта...")
 import sys
+# Принудительный сброс буфера вывода
+sys.stdout.flush()
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from playwright.async_api import async_playwright
