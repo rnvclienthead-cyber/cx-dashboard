@@ -23,9 +23,13 @@ import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Alignment
 from sqlalchemy import create_engine, text
+from pyinstrument import Profiler
 from PIL import Image as PILImage
 
 st.set_page_config(page_title="CX Видовито", page_icon="favicon.png", layout="wide")
+
+profiler = Profiler()
+profiler.start()
 
 # ==========================================
 # БЛОК ЗАГРУЗКИ ШАБЛОНА В ПАМЯТЬ СИСТЕМЫ
@@ -2262,3 +2266,6 @@ elif page == "Системный Журнал":
             st.error(f"Ошибка чтения логов из SQL: {e}")
     else:
         st.warning("База данных не подключена. Проверьте DB_URL.")
+
+profiler.stop()
+profiler.write_html("speed_report.html")
