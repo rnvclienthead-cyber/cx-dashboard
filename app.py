@@ -29,8 +29,12 @@ from PIL import Image as PILImage
 
 st.set_page_config(page_title="CX Видовито", page_icon="favicon.png", layout="wide")
 
-profiler = Profiler()
-profiler.start()
+# Безопасный старт профайлера (отключаем конфликтный async-режим)
+profiler = Profiler(async_mode='disabled')
+try:
+    profiler.start()
+except RuntimeError:
+    pass # Игнорируем ошибку, если Streamlit не успел закрыть прошлый сеанс
 
 # ==========================================
 # БЛОК ЗАГРУЗКИ ШАБЛОНА В ПАМЯТЬ СИСТЕМЫ
@@ -2307,5 +2311,9 @@ elif page == "Системный Журнал":
     else:
         st.warning("База данных не подключена. Проверьте DB_URL.")
 
-profiler.stop()
-profiler.write_html("speed_report.html")
+# Безопасная остановка и сохранение
+try:
+    profiler.stop()
+    profiler.write_html("speed_report.html")
+except Exception:
+    pass
