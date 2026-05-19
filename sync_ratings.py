@@ -2,10 +2,14 @@ import os
 import asyncio
 import re
 import random
+import sys
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
+
+os.chdir('/root/my_project')
+sys.path.append('/root/my_project')
 
 DB_URL = os.environ.get("DB_URL", "").strip()
 
