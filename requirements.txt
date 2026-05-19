@@ -21,3 +21,4 @@ kaleido==0.2.1
 playwright
 playwright-stealth
 psutil
+pyinstrument
