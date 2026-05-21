@@ -1,9 +1,11 @@
-# backend/main.py
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from .database import get_db
+
+# Импортируем разделенные, изолированные роутеры аналитики брака и PPM
+from .routers import claims, ai, system, production, ppm
 
 # Инициализируем приложение
 app = FastAPI(
@@ -12,14 +14,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Настройка CORS (разрешаем запросы с любых доменов - потом можно будет сузить до cxvo.ru)
+# Настройка CORS для стабильного общения фронтенда и бэкенда
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
+
+# Подключаем маршруты к серверу
+app.include_router(claims.router)
+app.include_router(ai.router)
+app.include_router(system.router)
+app.include_router(production.router)  # Новый роутер отчетов производства
+app.include_router(ppm.router)         # Новый роутер коэффициентов PPM
 
 # --- ТЕСТОВЫЕ МАРШРУТЫ ---
 
