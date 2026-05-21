@@ -16,27 +16,30 @@ load_dotenv()
 
 # --- НАСТРОЙКИ ОСНОВНЫЕ ---
 WB_API_KEY = os.getenv("WB_API_KEY", "").strip()
-DB_URL = os.getenv("DB_URL", "").strip()
 
-# --- НОВЫЕ НАСТРОЙКИ ДЛЯ ИНВОЙСОВ ---
-# Используем ПОЛНЫЙ путь, чтобы не путаться в папках терминала
+# Строки подключения к обеим базам данных
+URL_SUPABASE = "postgresql://postgres.wdcrihtjabrkzgsxezjb:RDB[r6o&BA0qSlVVGjb-@aws-1-eu-central-1.pooler.supabase.com:6543/postgres"
+URL_LOCAL_VPS = "postgresql://db_user:RDB_r6o_BA0qSlVVGjb_2026@127.0.0.1:5432/cx_dashboard"
+
+# Создаем два движка
+engine_supabase = create_engine(URL_SUPABASE)
+engine_local = create_engine(URL_LOCAL_VPS)
+
+headers = {"Authorization": WB_API_KEY, "Content-Type": "application/json"}
+
+# --- НАСТРОЙКИ ДЛЯ ИНВОЙСОВ ---
 PATH_TO_GOOGLE_CREDS = "/root/my_project/bot_api_key.json" 
 SPREADSHEET_ID_INVOICES = os.getenv("SPREADSHEET_ID_INVOICES")
 
-# Проверка перед стартом
 if not os.path.exists(PATH_TO_GOOGLE_CREDS):
     print(f"❌ ФАЙЛ НЕ НАЙДЕН ПО ПУТИ: {PATH_TO_GOOGLE_CREDS}")
 
-engine = create_engine(DB_URL)
-headers = {"Authorization": WB_API_KEY, "Content-Type": "application/json"}
-
-# --- НАСТРОЙКИ S3 ХРАНИЛИЩА (Яндекс Cloud, Timeweb, Selectel) ---
+# --- НАСТРОЙКИ S3 ХРАНИЛИЩА ---
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "https://storage.yandexcloud.net").strip()
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "").strip()
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "").strip()
 BUCKET_NAME = os.getenv("BUCKET_NAME", "cx-dashboard-media").strip()
 
-# Инициализация клиента S3 (если ключи заданы)
 s3_client = None
 if S3_ACCESS_KEY and S3_SECRET_KEY:
     s3_client = boto3.client(
@@ -47,19 +50,13 @@ if S3_ACCESS_KEY and S3_SECRET_KEY:
         region_name='ru-central1'
     )
 
-# =========================================
-# УТИЛИТЫ И РАБОТА С МЕДИА
-# =========================================
 def safe_str(val):
     if val is None or str(val).lower() in ['nan', 'none', 'null', '']: return None
     return str(val).strip()
 
 def create_and_upload_thumbnail(wb_image_url):
     if not wb_image_url or not wb_image_url.startswith('http'): return wb_image_url
-        
-    # Проверка: видит ли воркер ключи вообще?
     if not S3_ACCESS_KEY or not S3_SECRET_KEY:
-        print("    ⚠️ ПРОПУСК: Воркер не видит ключи S3_ACCESS_KEY или S3_SECRET_KEY из GitHub Secrets!")
         return wb_image_url
 
     try:
@@ -69,7 +66,6 @@ def create_and_upload_thumbnail(wb_image_url):
         image = Image.open(io.BytesIO(response.content))
         if image.mode in ("RGBA", "P"): image = image.convert("RGB")
             
-        # Настройки высокого качества
         image.thumbnail((1000, 1000))
         buffer = io.BytesIO()
         image.save(buffer, format="JPEG", optimize=True, quality=90)
@@ -79,26 +75,20 @@ def create_and_upload_thumbnail(wb_image_url):
         s3_client.upload_fileobj(buffer, BUCKET_NAME, file_name, ExtraArgs={'ContentType': 'image/jpeg'})
         
         s3_url = f"https://{BUCKET_NAME}.storage.yandexcloud.net/{file_name}"
-        # Возвращаем связку для базы
         return f"{s3_url}|{wb_image_url}"
     except Exception as e:
-        print(f" Ошибка: {e}")
+        print(f" Ошибка обработки фото {wb_image_url}: {e}")
         return wb_image_url
-        
-    except Exception as e:
-        print(f"    ❌ Ошибка обработки фото {wb_image_url}: {e}")
-        return wb_image_url # В случае сбоя возвращаем оригинал WB
 
 # =========================================
 # 1. СИНХРОНИЗАЦИЯ ПРЕТЕНЗИЙ
 # =========================================
 def fetch_wb_claims():
     print("⏳ Запрашиваем ВСЕ претензии с WB...")
-    
-    # 🌟 УМНЫЙ КЭШ: Достаем уже обработанные фото из базы, чтобы не сжимать их повторно
     existing_photos_map = {}
     try:
-        with engine.connect() as conn:
+        # Кэш фото читаем из локальной базы, так как это быстрее
+        with engine_local.connect() as conn:
             existing_df = pd.read_sql("SELECT srid, photos FROM wb_claims WHERE photos IS NOT NULL AND photos != ''", conn)
             existing_photos_map = dict(zip(existing_df['srid'].astype(str), existing_df['photos'].astype(str)))
     except Exception as e:
@@ -115,16 +105,13 @@ def fetch_wb_claims():
         while True:
             try:
                 response = requests.get(claims_url, headers=headers, params=params, timeout=30)
-                
                 if response.status_code == 429:
-                    print(f"⚠️ WB просит подождать (Лимит 429). Спим 30 секунд...")
                     time.sleep(30)
                     continue
                     
                 response.raise_for_status()
                 res = response.json()
                 batch = res.get("claims", [])
-                
                 if not batch: break
                 
                 for item in batch:
@@ -142,13 +129,10 @@ def fetch_wb_claims():
                         elif 'отклон' in ex_lower or 'отказ' in ex_lower: mapped = 'Отказ'
                         elif 'рассмотр' in ex_lower: mapped = 'На рассмотрении'
                     
-                    # === ОБРАБОТКА МЕДИА ===
                     final_photos = ""
-                    # Если фото уже сжаты и есть в БД - просто берем их
                     if srid in existing_photos_map and existing_photos_map[srid] not in ['nan', 'None']:
                         final_photos = existing_photos_map[srid]
                     else:
-                        # Собираем ссылки на фото от WB
                         raw_photos = item.get("photos", [])
                         photo_urls = []
                         if isinstance(raw_photos, list):
@@ -157,12 +141,10 @@ def fetch_wb_claims():
                                 elif isinstance(p, dict) and p.get("fullSize"): photo_urls.append(p.get("fullSize"))
                                 elif isinstance(p, str): photo_urls.append(p)
                         
-                        # Сжимаем и грузим
                         if photo_urls:
                             compressed_urls = [create_and_upload_thumbnail(u) for u in photo_urls if u]
                             final_photos = " ".join(compressed_urls)
                     
-                    # Собираем ссылки на видео (их не сжимаем)
                     raw_videos = item.get("video") or item.get("videos") or []
                     video_urls = []
                     if isinstance(raw_videos, str): video_urls = [raw_videos]
@@ -181,11 +163,9 @@ def fetch_wb_claims():
                         "claim_type": item.get("claim_type"),
                         "is_archive": archive == "true",
                         "last_sync": datetime.now(),
-                        "photos": final_photos,      # Новое поле!
-                        "video_paths": final_videos  # Новое поле!
+                        "photos": final_photos,
+                        "video_paths": final_videos
                     })
-                
-                print(f"📦 Скачано претензий: {len(all_claims)}...")
                 
                 if len(batch) < 100: break
                 params["offset"] += 100
@@ -195,9 +175,7 @@ def fetch_wb_claims():
             except Exception as e:
                 error_counter += 1
                 print(f"⚠️ Системная ошибка претензий ({error_counter}/{max_errors}): {e}")
-                if error_counter >= max_errors:
-                    print("🚨 Слишком много ошибок подряд. Принудительно останавливаем.")
-                    break
+                if error_counter >= max_errors: break
                 time.sleep(10)
                 
     df = pd.DataFrame(all_claims)
@@ -206,12 +184,8 @@ def fetch_wb_claims():
     return df
 
 def sync_claims_to_db(df):
-    if df is None or df.empty:
-        print("⚠️ Претензий для сохранения не найдено.")
-        return
+    if df is None or df.empty: return
         
-    df.to_sql('temp_wb_claims', engine, if_exists='replace', index=False)
-    # Добавлены поля photos и video_paths в UPSERT
     upsert_sql = """
     INSERT INTO wb_claims (srid, claim_id, created_dt, supplier_article, nm_id, user_comment, status, status_ex, claim_type, is_archive, last_sync, photos, video_paths)
     SELECT DISTINCT ON (srid) srid, claim_id, CAST(created_dt AS TIMESTAMP), supplier_article, nm_id, user_comment, status, status_ex, claim_type, CAST(is_archive AS BOOLEAN), CAST(last_sync AS TIMESTAMP), photos, video_paths
@@ -224,25 +198,31 @@ def sync_claims_to_db(df):
         photos = CASE WHEN EXCLUDED.photos != '' THEN EXCLUDED.photos ELSE wb_claims.photos END,
         video_paths = CASE WHEN EXCLUDED.video_paths != '' THEN EXCLUDED.video_paths ELSE wb_claims.video_paths END;
     """
-    with engine.begin() as conn:
-        conn.execute(text(upsert_sql))
-        conn.execute(text("DROP TABLE temp_wb_claims;"))
-    print(f"📥 UPSERT: Синхронизируем {len(df)} претензий...")
+    for name, eng in [("Supabase", engine_supabase), ("Local VPS", engine_local)]:
+        try:
+            df.to_sql('temp_wb_claims', eng, if_exists='replace', index=False)
+            with eng.begin() as conn:
+                conn.execute(text(upsert_sql))
+                conn.execute(text("DROP TABLE temp_wb_claims;"))
+            print(f"📥 [DUAL WRITE] Претензии синхронизированы в {name}")
+        except Exception as e:
+            print(f"❌ Ошибка записи претензий в {name}: {e}")
 
 # =========================================
 # 2. СИНХРОНИЗАЦИЯ ЛОГИСТИКИ (ПРОДАЖИ)
 # =========================================
 def get_logistics_start_date(doc_type):
     query = text(f"SELECT MAX(last_change_date) FROM wb_logistics WHERE doc_type = '{doc_type}'")
-    with engine.connect() as conn:
-        result = conn.execute(query).scalar()
-        if result:
-            return (result - timedelta(days=5)).strftime("%Y-%m-%dT00:00:00")
+    try:
+        with engine_local.connect() as conn:
+            result = conn.execute(query).scalar()
+            if result:
+                return (result - timedelta(days=5)).strftime("%Y-%m-%dT00:00:00")
+    except: pass
     return "2025-10-01T00:00:00"
 
 def sync_chunk_to_db(df):
     if df.empty: return
-    df.to_sql('temp_wb_logistics', engine, if_exists='replace', index=False)
     upsert_sql = """
     INSERT INTO wb_logistics (srid, doc_type, dt, supplier_article, nm_id, warehouse_name, category, subject, brand, is_cancel, last_change_date, income_id, last_sync)
     SELECT DISTINCT ON (srid) srid, doc_type, CAST(dt AS TIMESTAMP), supplier_article, nm_id, warehouse_name, category, subject, brand, CAST(is_cancel AS BOOLEAN), CAST(last_change_date AS TIMESTAMP), income_id, CAST(last_sync AS TIMESTAMP)
@@ -254,9 +234,14 @@ def sync_chunk_to_db(df):
         income_id = COALESCE(EXCLUDED.income_id, wb_logistics.income_id),
         last_sync = EXCLUDED.last_sync;
     """
-    with engine.begin() as conn:
-        conn.execute(text(upsert_sql))
-        conn.execute(text("DROP TABLE temp_wb_logistics;"))
+    for name, eng in [("Supabase", engine_supabase), ("Local VPS", engine_local)]:
+        try:
+            df.to_sql('temp_wb_logistics', eng, if_exists='replace', index=False)
+            with eng.begin() as conn:
+                conn.execute(text(upsert_sql))
+                conn.execute(text("DROP TABLE temp_wb_logistics;"))
+        except Exception as e:
+            print(f"❌ Ошибка записи логистики в {name}: {e}")
 
 def fetch_and_save_logistics(url, doc_type):
     date_from = get_logistics_start_date(doc_type)
@@ -269,60 +254,39 @@ def fetch_and_save_logistics(url, doc_type):
         try:
             response = requests.get(url, headers=headers, params=params, timeout=60)
             request_count += 1
-            
             if response.status_code == 429:
-                print("⚠️ WB Лимит 429: Ждем 65 сек...")
                 time.sleep(65)
                 continue
                 
             response.raise_for_status()
             res = response.json()
-            if not res or not isinstance(res, list): 
-                print(f"✅ {doc_type} успешно загружены!")
-                break
+            if not res or not isinstance(res, list): break
             
             chunk_data = []
             for item in res:
                 srid = safe_str(item.get("srid") or item.get("saleID"))
                 if not srid: continue
-                
                 chunk_data.append({
-                    "srid": srid, 
-                    "doc_type": doc_type,
-                    "dt": item.get("date"),
+                    "srid": srid, "doc_type": doc_type, "dt": item.get("date"),
                     "supplier_article": safe_str(item.get("supplierArticle") or item.get("saName")),
-                    "nm_id": item.get("nmId"),
-                    "warehouse_name": item.get("warehouseName"),
-                    "category": item.get("category"),
-                    "subject": item.get("subject"),
-                    "brand": item.get("brand"),
-                    "is_cancel": item.get("isCancel", False),
-                    "last_change_date": item.get("lastChangeDate"),
-                    "income_id": item.get("incomeID")
+                    "nm_id": item.get("nmId"), "warehouse_name": item.get("warehouseName"),
+                    "category": item.get("category"), "subject": item.get("subject"),
+                    "brand": item.get("brand"), "is_cancel": item.get("isCancel", False),
+                    "last_change_date": item.get("lastChangeDate"), "income_id": item.get("incomeID")
                 })
             
             df_chunk = pd.DataFrame(chunk_data)
             if not df_chunk.empty:
                 df_chunk = df_chunk.drop_duplicates(subset=['srid'], keep='last')
-                df_chunk['last_sync'] = pd.Timestamp.now() # ДОБАВИЛИ ВРЕМЯ
+                df_chunk['last_sync'] = pd.Timestamp.now()
                 sync_chunk_to_db(df_chunk)
                 
-            print(f"📥 Сохранена пачка {doc_type} ({len(df_chunk)} строк). Текущая дата: {current_from}")
-            
+            print(f"📥 Сохранена пачка {doc_type} ({len(df_chunk)} строк).")
             last_change = res[-1].get("lastChangeDate")
-            if not last_change or last_change == current_from: 
-                print(f"✅ {doc_type} успешно загружены!")
-                break
-                
+            if not last_change or last_change == current_from: break
             current_from = last_change
-            
-            if request_count >= 9:
-                time.sleep(62)
-            else:
-                time.sleep(3)
-            
+            time.sleep(62 if request_count >= 9 else 3)
         except Exception as e:
-            print(f"⚠️ Ошибка логистики: {e}. Повтор через 30 сек...")
             time.sleep(30)
 
 # =========================================
@@ -330,15 +294,16 @@ def fetch_and_save_logistics(url, doc_type):
 # =========================================
 def get_orders_start_date():
     query = text("SELECT MAX(last_change_date) FROM wb_orders")
-    with engine.connect() as conn:
-        result = conn.execute(query).scalar()
-        if result:
-            return (result - timedelta(days=5)).strftime("%Y-%m-%dT00:00:00")
+    try:
+        with engine_local.connect() as conn:
+            result = conn.execute(query).scalar()
+            if result:
+                return (result - timedelta(days=5)).strftime("%Y-%m-%dT00:00:00")
+    except: pass
     return "2026-04-01T00:00:00"
 
 def sync_orders_chunk_to_db(df):
     if df.empty: return
-    df.to_sql('temp_wb_orders', engine, if_exists='replace', index=False)
     upsert_sql = """
     INSERT INTO wb_orders (srid, dt, supplier_article, cancel_dt, last_change_date, last_sync)
     SELECT DISTINCT ON (srid) srid, CAST(dt AS TIMESTAMP), supplier_article, 
@@ -349,9 +314,14 @@ def sync_orders_chunk_to_db(df):
         last_change_date = EXCLUDED.last_change_date,
         last_sync = EXCLUDED.last_sync;
     """
-    with engine.begin() as conn:
-        conn.execute(text(upsert_sql))
-        conn.execute(text("DROP TABLE temp_wb_orders;"))
+    for name, eng in [("Supabase", engine_supabase), ("Local VPS", engine_local)]:
+        try:
+            df.to_sql('temp_wb_orders', eng, if_exists='replace', index=False)
+            with eng.begin() as conn:
+                conn.execute(text(upsert_sql))
+                conn.execute(text("DROP TABLE temp_wb_orders;"))
+        except Exception as e:
+            print(f"❌ Ошибка записи заказов в {name}: {e}")
 
 def fetch_and_save_orders(url):
     date_from = get_orders_start_date()
@@ -364,121 +334,86 @@ def fetch_and_save_orders(url):
         try:
             response = requests.get(url, headers=headers, params=params, timeout=60)
             request_count += 1
-            
             if response.status_code == 429:
-                print("⚠️ WB Лимит 429: Включаем режим '1 запрос в минуту'. Ждем 65 сек...")
                 time.sleep(65)
                 continue
                 
             res = response.json()
-            if not res or not isinstance(res, list): 
-                print("✅ Все заказы успешно загружены!")
-                break
+            if not res or not isinstance(res, list): break
             
             chunk_data = []
             for item in res:
                 srid = safe_str(item.get("srid"))
                 if not srid: continue
-                
                 cancel_dt = item.get("cancelDate")
-                is_cancel = item.get("isCancel", False)
-                if not is_cancel or str(cancel_dt).startswith("0001"):
+                if item.get("isCancel", False) is False or str(cancel_dt).startswith("0001"):
                     cancel_dt = None
 
                 chunk_data.append({
-                    "srid": srid, 
-                    "dt": item.get("date"),
+                    "srid": srid, "dt": item.get("date"),
                     "supplier_article": safe_str(item.get("supplierArticle") or item.get("saName")),
-                    "cancel_dt": cancel_dt,
-                    "last_change_date": item.get("lastChangeDate")
+                    "cancel_dt": cancel_dt, "last_change_date": item.get("lastChangeDate")
                 })
             
             df_chunk = pd.DataFrame(chunk_data).drop_duplicates(subset=['srid'], keep='last')
-            df_chunk['last_sync'] = pd.Timestamp.now() # ДОБАВИЛИ ВРЕМЯ
+            df_chunk['last_sync'] = pd.Timestamp.now()
             sync_orders_chunk_to_db(df_chunk)
-            print(f"📥 Сохранена пачка заказов ({len(df_chunk)} строк). Текущая дата: {current_from}")
+            print(f"📥 Сохранена пачка заказов ({len(df_chunk)} строк).")
             
             last_change = res[-1].get("lastChangeDate")
-            
-            if not last_change or last_change == current_from: 
-                print("✅ Все заказы успешно загружены!")
-                break
-                
+            if not last_change or last_change == current_from: break
             current_from = last_change
-            
-            if request_count >= 9:
-                time.sleep(62)
-            else:
-                time.sleep(3)
-            
+            time.sleep(62 if request_count >= 9 else 3)
         except Exception as e:
-            print(f"⚠️ Ошибка заказов: {e}. Повтор через 30 секунд...")
             time.sleep(30)
 
 def sync_invoices():
-    print("⏳ Синхронизация инвойсов из Google Sheets (фильтр по столбцу E)...")
+    print("⏳ Синхронизация инвойсов из Google Sheets...")
     try:
-        # Авторизуемся через твой bot_api_key.json
         gc = gspread.service_account(filename=PATH_TO_GOOGLE_CREDS)
         sheet = gc.open_by_key(SPREADSHEET_ID_INVOICES).get_worksheet(0)
         
         df = pd.DataFrame(sheet.get_all_records())
         if df.empty: return
 
-        # Приводим названия колонок к нижнему регистру для поиска совпадений
         df.columns = df.columns.str.strip().str.lower()
-
-        # Находим базовые колонки поставки и артикула
         supply_col = next((c for c in df.columns if 'supplyid' in c or 'поставк' in c), None)
         article_col = next((c for c in df.columns if 'артикул' in c and 'wb' not in c), None)
-        
-        # 🎯 ОПРЕДЕЛЯЕМ СТОЛБЕЦ E (5-й по счету, индекс 4)
-        # Если таблица прочиталась корректно, df.columns[4] — это и есть заголовок столбца E
         col_e = df.columns[4] if len(df.columns) > 4 else None
 
-        if not all([supply_col, article_col, col_e]):
-            print(f"❌ Критические колонки таблицы не найдены. Проверь структуру листа!")
-            return
+        if not all([supply_col, article_col, col_e]): return
 
-        # Принудительно очищаем столбец E от пробелов и переводим в текст
         df[col_e] = df[col_e].astype(str).str.strip()
-
-        # Список маркеров мусора и ошибок, которые мы гарантированно пропускаем
         bad_invoice_vals = ['nan', 'none', '', '0', '0.0', '-', '---', 'ошибка', 'undefined']
 
-        # 🛠 СТРОГИЙ ФИЛЬТР: Оставляем только те строки, где в Столбце E написан реальный инвойс
         df_clean = df[
             (~df[col_e].str.lower().isin(bad_invoice_vals)) & 
             (df[supply_col].astype(str).str.strip() != '') & 
             (df[article_col].astype(str).str.strip() != '')
         ].copy()
 
-        if df_clean.empty:
-            print("⚠️ После фильтрации столбца E не найдено ни одной валидной строки.")
-            return
-
-        # 🚀 ВОТ ОНА ОПТИМИЗАЦИЯ: Теперь берем последние 100 строк из ОЧИЩЕННОГО датафрейма.
-        # Все 700 строк с ошибками остались выше фильтра и скрипт до них даже не дотронется!
+        if df_clean.empty: return
         df_to_process = df_clean.tail(100)
 
-        # Подготовка чистых данных для SQL
         df_to_process['s_id'] = df_to_process[supply_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df_to_process['a_id'] = df_to_process[article_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df_to_process['i_id'] = df_to_process[col_e]
 
-        with engine.begin() as conn:
-            for _, row in df_to_process.iterrows():
-                sql = text("""
-                    INSERT INTO wb_invoices (supply_id, supplier_article, invoice_num, last_sync)
-                    VALUES (:sid, :art, :inv, CURRENT_TIMESTAMP)
-                    ON CONFLICT (supply_id, supplier_article) 
-                    DO UPDATE SET 
-                        invoice_num = EXCLUDED.invoice_num,
-                        last_sync = EXCLUDED.last_sync
-                """)
-                conn.execute(sql, {"sid": row['s_id'], "art": row['a_id'], "inv": row['i_id']})
-                
-        print(f"✅ Инвойсы обновлены. Избежали ошибок и обработали последние {len(df_to_process)} рабочих строк.")
+        sql = text("""
+            INSERT INTO wb_invoices (supply_id, supplier_article, invoice_num, last_sync)
+            VALUES (:sid, :art, :inv, CURRENT_TIMESTAMP)
+            ON CONFLICT (supply_id, supplier_article) 
+            DO UPDATE SET invoice_num = EXCLUDED.invoice_num, last_sync = EXCLUDED.last_sync
+        """)
+        
+        for name, eng in [("Supabase", engine_supabase), ("Local VPS", engine_local)]:
+            try:
+                with eng.begin() as conn:
+                    for _, row in df_to_process.iterrows():
+                        conn.execute(sql, {"sid": row['s_id'], "art": row['a_id'], "inv": row['i_id']})
+                print(f"✅ Инвойсы синхронизированы в {name}")
+            except Exception as e:
+                print(f"❌ Ошибка инвойсов в {name}: {e}")
     except Exception as e:
         print(f"🚨 Ошибка в блоке инвойсов: {e}")
 
@@ -486,87 +421,62 @@ def sync_assortment_matrix():
     print("⏳ Синхронизация ассортиментной матрицы из Google Sheets...")
     try:
         gc = gspread.service_account(filename=PATH_TO_GOOGLE_CREDS)
-        # Берем ВТОРОЙ лист (индекс 1). Индекс 0 — это инвойсы.
         sheet = gc.open_by_key(SPREADSHEET_ID_INVOICES).get_worksheet(1)
         
         df = pd.DataFrame(sheet.get_all_records())
-        if df.empty: 
-            print("⚠️ Второй лист с матрицей пуст.")
-            return
+        if df.empty: return
 
         df.columns = df.columns.str.strip().str.lower()
-
-        # Умный поиск колонок по ключевым словам
         article_col = next((c for c in df.columns if 'артикул' in c and 'wb' not in c), None)
         name_ru_col = next((c for c in df.columns if 'наименование' in c and 'кит' not in c), None)
         name_cn_col = next((c for c in df.columns if 'китайск' in c or ('наименование' in c and 'кит' in c)), None)
         manuf_col = next((c for c in df.columns if 'завод' in c or 'производитель' in c), None)
 
-        if not article_col:
-            print("❌ Колонка с артикулом не найдена на листе ассортиментной матрицы.")
-            return
+        if not article_col: return
 
-        # Автоматическое создание таблицы, если её еще нет в Supabase
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS wb_assortment (
-            supplier_article TEXT PRIMARY KEY,
-            name_ru TEXT,
-            name_cn TEXT,
-            manufacturer TEXT,
-            last_sync TIMESTAMP
+            supplier_article TEXT PRIMARY KEY, name_ru TEXT, name_cn TEXT, manufacturer TEXT, last_sync TIMESTAMP
         );
         """
+        upsert_sql = text("""
+            INSERT INTO wb_assortment (supplier_article, name_ru, name_cn, manufacturer, last_sync)
+            VALUES (:art, :n_ru, :n_cn, :manuf, CURRENT_TIMESTAMP)
+            ON CONFLICT (supplier_article) 
+            DO UPDATE SET name_ru = EXCLUDED.name_ru, name_cn = EXCLUDED.name_cn, manufacturer = EXCLUDED.manufacturer, last_sync = EXCLUDED.last_sync
+        """)
         
-        with engine.begin() as conn:
-            conn.execute(text(create_table_sql))
-
-            for _, row in df.iterrows():
-                art = str(row.get(article_col, '')).strip()
-                if not art or art.lower() in ['nan', 'none', '']: continue
-                
-                n_ru = str(row.get(name_ru_col, '')).strip() if name_ru_col else ''
-                n_cn = str(row.get(name_cn_col, '')).strip() if name_cn_col else ''
-                manuf = str(row.get(manuf_col, '')).strip() if manuf_col else ''
-
-                # UPSERT данных
-                sql = text("""
-                    INSERT INTO wb_assortment (supplier_article, name_ru, name_cn, manufacturer, last_sync)
-                    VALUES (:art, :n_ru, :n_cn, :manuf, CURRENT_TIMESTAMP)
-                    ON CONFLICT (supplier_article) 
-                    DO UPDATE SET 
-                        name_ru = EXCLUDED.name_ru,
-                        name_cn = EXCLUDED.name_cn,
-                        manufacturer = EXCLUDED.manufacturer,
-                        last_sync = EXCLUDED.last_sync
-                """)
-                conn.execute(sql, {"art": art, "n_ru": n_ru, "n_cn": n_cn, "manuf": manuf})
-                
-        print("✅ Ассортиментная матрица успешно обновлена в базе.")
+        for name, eng in [("Supabase", engine_supabase), ("Local VPS", engine_local)]:
+            try:
+                with eng.begin() as conn:
+                    conn.execute(text(create_table_sql))
+                    for _, row in df.iterrows():
+                        art = str(row.get(article_col, '')).strip()
+                        if not art or art.lower() in ['nan', 'none', '']: continue
+                        n_ru = str(row.get(name_ru_col, '')).strip() if name_ru_col else ''
+                        n_cn = str(row.get(name_cn_col, '')).strip() if name_cn_col else ''
+                        manuf = str(row.get(manuf_col, '')).strip() if manuf_col else ''
+                        conn.execute(upsert_sql, {"art": art, "n_ru": n_ru, "n_cn": n_cn, "manuf": manuf})
+                print(f"✅ Ассортиментная матрица синхронизирована в {name}")
+            except Exception as e:
+                print(f"❌ Ошибка матрицы в {name}: {e}")
     except Exception as e:
         print(f"🚨 Ошибка синхронизации матрицы: {e}")
 
-# =========================================
-# ЗАПУСК
-# =========================================
 if __name__ == "__main__":
-    print("🚀 СТАРТ ЧИСТОГО ВОРКЕРА")
+    print("🚀 СТАРТ ЧИСТОГО ВОРКЕРА (РЕЖИМ ДВОЙНОЙ ЗАПИСИ)")
     try:
-        # 0. Качаем инвойсы из Google
         sync_invoices()
         sync_assortment_matrix()
-        
-        # 1. Качаем претензии
         sync_claims_to_db(fetch_wb_claims())
         
-        # 2. Качаем продажи
         sales_url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
         fetch_and_save_logistics(sales_url, "SALE")
         
-        # 3. Качаем заказы
         orders_url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
         fetch_and_save_orders(orders_url)
         
-        print("🏁 СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА УСПЕШНО")
+        print("🏁 СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА УСПЕШНО НА ВСЕХ БАЗАХ ДАННЫХ")
     except Exception as e:
         print(f"💥 ОШИБКА: {e}")
         sys.exit(1)
