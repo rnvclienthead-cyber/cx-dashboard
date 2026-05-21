@@ -11,7 +11,7 @@ USE_SUPABASE = False
 
 # 1. Конфигурация строк подключения
 SUPABASE_URL = "postgresql://postgres.wdcrihtjabrkzgsxezjb:RDB[r6o&BA0qSlVVGjb-@aws-1-eu-central-1.pooler.supabase.com:6543/postgres"
-LOCAL_VPS_URL = "postgresql://db_user:RDB_r6o_BA0qSlVVGjb_2026@127.0.0.1:5432/cx_dashboard"
+LOCAL_VPS_URL = "postgresql://db_user:RDB_r6o_BA0qSlVVGjb_2026@185.225.34.94:5432/cx_dashboard"
 
 # 2. Автоматический выбор движка на основе бэкдора
 if USE_SUPABASE:
