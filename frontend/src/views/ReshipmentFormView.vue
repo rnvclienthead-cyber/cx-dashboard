@@ -2,8 +2,6 @@
 import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import IMask from 'imask'
 import { PackageCheck, CheckCircle2, AlertCircle, Loader2, Upload, X, Info, Send } from 'lucide-vue-next'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 const FORM_BASE = 'http://box.vidovito.com'
@@ -23,7 +21,7 @@ let prevTitle = ''
 let prevFavicon = ''
 
 onUnmounted(() => {
-  if (mapInstance) { mapInstance.remove(); mapInstance = null }
+  if (mapInstance) { mapInstance.destroy(); mapInstance = null }
   if (isVidovitoDomain) {
     document.title = prevTitle
     const favicon = document.querySelector("link[rel='icon']")
@@ -75,7 +73,7 @@ const form = reactive({
   personal_data_consent: false,
 })
 
-// ── ПВЗ СДЭК + Карта ──────────────────────────────────────────────────────────
+// ── ПВЗ СДЭК + Яндекс Карты ───────────────────────────────────────────────────
 const pvzCityQuery = ref('')
 const pvzList      = ref([])
 const pvzLoading   = ref(false)
@@ -85,19 +83,51 @@ let pvzDebounce = null
 let mapInstance = null
 let mapMarkers  = []
 
-const _markerHtml = (selected) => selected
-  ? `<div style="width:32px;height:32px;border-radius:50%;background:#F5C000;border:3px solid #1E2235;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,.4);cursor:pointer"><div style="width:11px;height:11px;background:#1E2235;border-radius:50%"></div></div>`
-  : `<div style="width:26px;height:26px;border-radius:50%;background:#fff;border:3px solid #6B7280;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.2);cursor:pointer"><div style="width:9px;height:9px;background:#6B7280;border-radius:50%"></div></div>`
+const _loadYmaps = () => new Promise((resolve, reject) => {
+  if (window.ymaps) { window.ymaps.ready(resolve); return }
+  const key = import.meta.env.VITE_YANDEX_MAPS_KEY || ''
+  const script = document.createElement('script')
+  script.src = `https://api-maps.yandex.ru/2.1/?${key ? 'apikey=' + key + '&' : ''}lang=ru_RU`
+  script.onload  = () => window.ymaps.ready(resolve)
+  script.onerror = reject
+  document.head.appendChild(script)
+})
 
-const _icon = (selected) => L.divIcon({ html: _markerHtml(selected), className: '', iconSize: [32, 32], iconAnchor: [16, 16] })
+const _initYMap = async (pts) => {
+  if (!pts.length || !mapRef.value) return
+  try { await _loadYmaps() } catch { return }
+  const ym = window.ymaps
+  if (mapInstance) { mapInstance.destroy(); mapInstance = null; mapMarkers = [] }
+  mapInstance = new ym.Map(mapRef.value, {
+    center: [pts[0].lat, pts[0].lng],
+    zoom: 12,
+    controls: ['zoomControl'],
+  })
+  pts.forEach(p => {
+    const pm = new ym.Placemark([p.lat, p.lng], {
+      hintContent: p.name,
+      balloonContentHeader: p.name,
+      balloonContentBody: p.address + (p.work_time ? `<br><small style="color:#6B7280">${p.work_time}</small>` : ''),
+    }, { preset: 'islands#grayDotIcon' })
+    pm.events.add('click', () => { selectPvz(p); mapInstance.balloon.close() })
+    mapInstance.geoObjects.add(pm)
+    mapMarkers.push({ pm, p })
+  })
+  try {
+    await mapInstance.setBounds(mapInstance.geoObjects.getBounds(), {
+      checkZoomRange: true, zoomMargin: 50, duration: 400,
+    })
+  } catch {}
+}
 
 const selectPvz = (pvz) => {
   selectedPvz.value       = pvz
   form.client_pvz_code    = pvz.code
   form.client_pvz_address = pvz.address
   form.client_pvz_city    = pvzCityQuery.value
-  mapMarkers.forEach(({ marker, p }) => marker.setIcon(_icon(p.code === pvz.code)))
-  if (mapInstance) mapInstance.closePopup()
+  mapMarkers.forEach(({ pm, p }) =>
+    pm.options.set('preset', p.code === pvz.code ? 'islands#yellowDotIcon' : 'islands#grayDotIcon')
+  )
 }
 
 const clearPvz = () => {
@@ -105,13 +135,13 @@ const clearPvz = () => {
   form.client_pvz_code    = ''
   form.client_pvz_address = ''
   form.client_pvz_city    = ''
-  mapMarkers.forEach(({ marker }) => marker.setIcon(_icon(false)))
+  mapMarkers.forEach(({ pm }) => pm.options.set('preset', 'islands#grayDotIcon'))
 }
 
 const onPvzCityInput = () => {
   clearPvz()
   pvzList.value = []
-  if (mapInstance) { mapInstance.remove(); mapInstance = null; mapMarkers = [] }
+  if (mapInstance) { mapInstance.destroy(); mapInstance = null; mapMarkers = [] }
   if (pvzCityQuery.value.length < 2) return
   clearTimeout(pvzDebounce)
   pvzDebounce = setTimeout(async () => {
@@ -127,22 +157,8 @@ const onPvzCityInput = () => {
 
 watch(pvzList, async (list) => {
   await nextTick()
-  if (!list.length || !mapRef.value) return
   const pts = list.filter(p => p.lat && p.lng)
-  if (!pts.length) return
-  if (mapInstance) { mapInstance.remove(); mapInstance = null; mapMarkers = [] }
-  mapInstance = L.map(mapRef.value, { scrollWheelZoom: false, zoomControl: true })
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://openstreetmap.org">OSM</a>', maxZoom: 19
-  }).addTo(mapInstance)
-  const bounds = []
-  pts.forEach(p => {
-    const marker = L.marker([p.lat, p.lng], { icon: _icon(false) }).addTo(mapInstance)
-    marker.on('click', () => selectPvz(p))
-    mapMarkers.push({ marker, p })
-    bounds.push([p.lat, p.lng])
-  })
-  mapInstance.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 })
+  await _initYMap(pts)
 })
 
 const PROBLEM_TYPES = ['Некомплект', 'Брак', 'Нужна другая деталь']
