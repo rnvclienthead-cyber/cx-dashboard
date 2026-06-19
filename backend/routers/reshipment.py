@@ -806,6 +806,23 @@ def ship_yandex_auto(req_id: int, processed_by: Optional[str] = None, db: Sessio
     }
 
 
+@router.post("/requests/{req_id}/mark-returned")
+def mark_returned(req_id: int, processed_by: Optional[str] = None, db: Session = Depends(get_db)):
+    """Отмечает что посылка вернулась на склад (статус shipped → returned)."""
+    row = _check_exists(req_id, db)
+    if row["status"] != "shipped":
+        raise HTTPException(status_code=400, detail="Заявка должна быть в статусе 'отправлена'")
+
+    db.execute(text("""
+        UPDATE reshipment_requests SET
+            status = 'returned',
+            processed_by = COALESCE(:by, processed_by)
+        WHERE id = :id
+    """), {"by": processed_by, "id": req_id})
+    db.commit()
+    return {"status": "success", "message": f"Заявка #{req_id} отмечена как возвращённая"}
+
+
 @router.post("/requests/{req_id}/request-review")
 def request_review(req_id: int, db: Session = Depends(get_db)):
     _check_exists(req_id, db)

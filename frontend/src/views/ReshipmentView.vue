@@ -50,6 +50,7 @@ const visibleFilters = computed(() => {
     { value: 'rejected', label: 'Отклонены' },
     { value: 'shipped',  label: 'Отправлены' },
     { value: 'delivered',label: 'Получены' },
+    { value: 'returned', label: 'Вернулись' },
   ]
 })
 
@@ -60,6 +61,7 @@ const statusMeta = {
   rejected:  { label: 'Отклонена',    color: 'bg-rose-100 text-rose-700' },
   shipped:   { label: 'Отправлена',   color: 'bg-violet-100 text-violet-700' },
   delivered: { label: 'Получена',     color: 'bg-slate-100 text-slate-600' },
+  returned:  { label: 'Вернулась',    color: 'bg-orange-100 text-orange-700' },
 }
 
 // ── Состояние панели ──────────────────────────────────────────────────────────
@@ -73,11 +75,19 @@ const estimatedCost = ref(null)
 const lastShipResult = ref(null)
 
 const FORM_URL = 'http://box.vidovito.com'
+const TEMPLATE_MSG = 'Здравствуйте! У нас появилась возможность отправить вам недостающую деталь. Для этого просим заполнить форму http://box.vidovito.com.'
 
 const copyFormUrl = async () => {
   await navigator.clipboard.writeText(FORM_URL)
   copiedForm.value = true
   setTimeout(() => { copiedForm.value = false }, 2000)
+}
+
+const copiedTemplate = ref(false)
+const copyTemplate = async () => {
+  await navigator.clipboard.writeText(TEMPLATE_MSG)
+  copiedTemplate.value = true
+  setTimeout(() => { copiedTemplate.value = false }, 2000)
 }
 
 // ── Формы ─────────────────────────────────────────────────────────────────────
@@ -169,6 +179,7 @@ const select = (req) => {
   rejectForm.value          = { moderator_comment: '' }
   warehouseRejectForm.value = { rejection_reason: '' }
   yandexForm.value          = { track_number: '', shipping_cost: '' }
+  if (['new', 'matched'].includes(req.status) && isCS.value) loadCost()
 }
 
 const reload = async () => {
@@ -290,19 +301,49 @@ const doBulkMarkShipped = async () => {
 }
 
 // ── Склад: скачать список к упаковке ─────────────────────────────────────────
-const downloadPacklist = () => {
-  const token = localStorage.getItem('auth_token')
-  const url = `${API_BASE}/api/v1/reshipment/warehouse/packlist`
+const downloadPacklist = async () => {
+  const token = localStorage.getItem('token')
+  const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/packlist`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `packlist_${new Date().toISOString().slice(0,10)}.xlsx`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// ── Склад: печать этикеток PDF ────────────────────────────────────────────────
+const downloadLabels = async (ids = []) => {
+  const token = localStorage.getItem('token')
+  const idsParam = ids.length ? `?ids=${ids.join(',')}` : ''
+  const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/labels${idsParam}`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.target = '_blank'
   a.click()
+  URL.revokeObjectURL(url)
 }
 
-// ── Склад: печать этикеток PDF ────────────────────────────────────────────────
-const downloadLabels = (ids = []) => {
-  const idsParam = ids.length ? `?ids=${ids.join(',')}` : ''
-  window.open(`${API_BASE}/api/v1/reshipment/warehouse/labels${idsParam}`, '_blank')
+// ── Склад: отметить посылку как вернувшуюся ──────────────────────────────────
+const doMarkReturned = async () => {
+  panelLoading.value = true
+  try {
+    await apiFetch(
+      `${API_BASE}/api/v1/reshipment/requests/${selected.value.id}/mark-returned?processed_by=${encodeURIComponent(username.value)}`,
+      { method: 'POST' }
+    )
+    panel.value = null
+    await reload()
+    selected.value = requests.value.find(r => r.id === selected.value?.id) || null
+  } catch (e) { alert(e.message) }
+  finally { panelLoading.value = false }
 }
 
 // ── Утилиты ────────────────────────────────────────────────────────────────
@@ -344,13 +385,19 @@ onMounted(() => {
         <div class="flex items-center justify-between mb-3">
           <div>
             <h1 class="text-base font-bold text-slate-800 flex items-center gap-2">
-              <PackageCheck class="w-4 h-4 text-emerald-600" /> Отправки
+              <PackageCheck class="w-4 h-4 text-emerald-600" /> Отправка деталей
             </h1>
             <p class="text-[10px] text-slate-400 mt-0.5">
               {{ userRole === 'cs_manager' ? 'Менеджер КС' : userRole === 'warehouse_manager' ? 'Менеджер склада' : 'Все заявки' }}
             </p>
           </div>
           <div class="flex items-center gap-1">
+            <button @click="copyTemplate" :title="copiedTemplate ? 'Скопировано!' : 'Скопировать шаблон сообщения клиенту'"
+              :class="['p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium',
+                copiedTemplate ? 'bg-violet-100 text-violet-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600']">
+              <Copy class="w-3.5 h-3.5" />
+              <span class="hidden xl:inline">{{ copiedTemplate ? 'Скопировано' : 'Шаблон' }}</span>
+            </button>
             <button @click="copyFormUrl" :title="copiedForm ? 'Скопировано!' : 'Скопировать ссылку на форму клиента'"
               :class="['p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium',
                 copiedForm ? 'bg-emerald-100 text-emerald-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600']">
@@ -674,6 +721,31 @@ onMounted(() => {
               «К сожалению, в данный момент нет возможности отправить деталь. Предлагаем оформить возврат.»
             </div>
           </div>
+        </div>
+
+        <!-- Расчётная стоимость СДЭК (до одобрения) -->
+        <div v-if="isCS && ['new','matched'].includes(selected.status) && (estimatedCost || costLoading)"
+          class="bg-emerald-50 rounded-xl border border-emerald-200 p-3 mb-4 flex items-center gap-3">
+          <div class="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center flex-shrink-0">
+            <Truck class="w-4 h-4 text-emerald-600" />
+          </div>
+          <div>
+            <p class="text-xs text-emerald-600 font-semibold uppercase tracking-wider">Расчётная стоимость СДЭК</p>
+            <div v-if="costLoading" class="flex items-center gap-1.5 text-emerald-700 text-sm mt-0.5">
+              <Loader2 class="w-3.5 h-3.5 animate-spin" /> Запрашиваем...
+            </div>
+            <p v-else class="text-lg font-bold text-emerald-800">{{ fmtCost(estimatedCost) }}</p>
+          </div>
+        </div>
+
+        <!-- Кнопка "Посылка вернулась" -->
+        <div v-if="selected.status === 'shipped' && (isCS || isWarehouse) && !panel" class="mb-4">
+          <button @click="doMarkReturned" :disabled="panelLoading"
+            class="flex items-center gap-2 px-4 py-2.5 bg-orange-50 hover:bg-orange-100 disabled:opacity-60 text-orange-700 text-sm font-semibold rounded-xl border border-orange-200 transition-colors">
+            <Loader2 v-if="panelLoading" class="w-4 h-4 animate-spin" />
+            <PackageCheck v-else class="w-4 h-4" />
+            Посылка вернулась
+          </button>
         </div>
 
         <!-- ── Действия КС ────────────────────────────────────────────────── -->

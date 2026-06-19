@@ -386,10 +386,10 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
             isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
           ]"
           active-class="bg-emerald-50 text-emerald-700 font-semibold"
-          :title="isCollapsed ? 'Отправки' : ''"
+          :title="isCollapsed ? 'Отправка деталей' : ''"
         >
           <PackageCheck class="w-4 h-4 flex-shrink-0" />
-          <span v-if="!isCollapsed">Отправки</span>
+          <span v-if="!isCollapsed">Отправка деталей</span>
         </RouterLink>
 
         <div v-if="!isCollapsed && (permissionsStore.can('admin_panel') || permissionsStore.can('logs'))" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">

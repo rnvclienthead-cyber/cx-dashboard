@@ -66,13 +66,45 @@ const form = reactive({
   product_category: '',
   problem_type:     '',
   items_to_send:    '',
-  address_postal:   '',
-  address_region:   '',
-  address_city:     '',
-  address_street:   '',
-  address_house:    '',
+  client_pvz_code:    '',
+  client_pvz_address: '',
+  client_pvz_city:    '',
   personal_data_consent: false,
 })
+
+// ── ПВЗ СДЭК ──────────────────────────────────────────────────────────────────
+const pvzCityQuery  = ref('')
+const pvzList       = ref([])
+const pvzLoading    = ref(false)
+const selectedPvz   = ref(null)
+let pvzDebounce = null
+
+const onPvzCityInput = () => {
+  selectedPvz.value = null
+  form.client_pvz_code    = ''
+  form.client_pvz_address = ''
+  form.client_pvz_city    = ''
+  pvzList.value = []
+  if (pvzCityQuery.value.length < 2) return
+  clearTimeout(pvzDebounce)
+  pvzDebounce = setTimeout(async () => {
+    pvzLoading.value = true
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/reshipment/pvz?city=${encodeURIComponent(pvzCityQuery.value)}`)
+      const data = await res.json()
+      pvzList.value = data.data || []
+    } catch { pvzList.value = [] }
+    finally { pvzLoading.value = false }
+  }, 600)
+}
+
+const selectPvz = (pvz) => {
+  selectedPvz.value     = pvz
+  form.client_pvz_code    = pvz.code
+  form.client_pvz_address = pvz.address
+  form.client_pvz_city    = pvzCityQuery.value
+  pvzList.value = []
+}
 
 const PROBLEM_TYPES = ['Некомплект', 'Брак', 'Нужна другая деталь']
 
@@ -102,37 +134,6 @@ const onFilesSelected = async (event) => {
 
 const removeFile = (idx) => uploadedFiles.value.splice(idx, 1)
 
-const DADATA_KEY = import.meta.env.VITE_DADATA_KEY || ''
-const addressSuggestions = ref([])
-const addressQuery = ref('')
-let addressDebounce = null
-
-const onAddressInput = () => {
-  if (!DADATA_KEY || addressQuery.value.length < 3) { addressSuggestions.value = []; return }
-  clearTimeout(addressDebounce)
-  addressDebounce = setTimeout(async () => {
-    try {
-      const res = await fetch('https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Token ${DADATA_KEY}` },
-        body: JSON.stringify({ query: addressQuery.value, count: 5, from_bound: { value: 'city' }, to_bound: { value: 'house' } }),
-      })
-      const data = await res.json()
-      addressSuggestions.value = data.suggestions || []
-    } catch {}
-  }, 300)
-}
-
-const selectSuggestion = (s) => {
-  const d = s.data
-  form.address_postal = d.postal_code || ''
-  form.address_region = d.region_with_type || ''
-  form.address_city   = d.city_with_type || d.settlement_with_type || ''
-  form.address_street = d.street_with_type || ''
-  form.address_house  = [d.house_type, d.house, d.block_type, d.block].filter(Boolean).join(' ')
-  addressQuery.value = s.value
-  addressSuggestions.value = []
-}
 
 const errors = reactive({})
 
@@ -147,6 +148,7 @@ const validate = () => {
                                     errors.address = 'Укажите хотя бы город и улицу'
   if (uploadedFiles.value.filter(f => f.url).length === 0)
                                     errors.photos = 'Прикрепите хотя бы одну фотографию'
+  if (!form.client_pvz_code)        errors.pvz = 'Выберите пункт выдачи СДЭК'
   if (!form.personal_data_consent)  errors.personal_data_consent = 'Необходимо согласие'
   return Object.keys(errors).length === 0
 }
@@ -158,20 +160,18 @@ const submit = async () => {
   const photoFiles = JSON.stringify(uploadedFiles.value.filter(f => f.url).map(f => f.url))
 
   const fd = new FormData()
-  fd.append('customer_name',     form.customer_name.trim())
-  fd.append('customer_phone',    form.customer_phone)
-  fd.append('customer_email',    form.customer_email || '')
-  fd.append('product_category',  form.product_category || '')
-  fd.append('problem_type',      form.problem_type)
-  fd.append('items_to_send',     form.items_to_send.trim())
-  fd.append('address_postal',    form.address_postal || '')
-  fd.append('address_region',    form.address_region || '')
-  fd.append('address_city',      form.address_city || '')
-  fd.append('address_street',    form.address_street || '')
-  fd.append('address_house',     form.address_house || '')
+  fd.append('customer_name',      form.customer_name.trim())
+  fd.append('customer_phone',     form.customer_phone)
+  fd.append('customer_email',     form.customer_email || '')
+  fd.append('product_category',   form.product_category || '')
+  fd.append('problem_type',       form.problem_type)
+  fd.append('items_to_send',      form.items_to_send.trim())
+  fd.append('client_pvz_code',    form.client_pvz_code || '')
+  fd.append('client_pvz_address', form.client_pvz_address || '')
+  fd.append('client_pvz_city',    form.client_pvz_city || '')
   fd.append('personal_data_consent', 'true')
-  fd.append('photo_files',       photoFiles)
-  fd.append('honeypot',          '')
+  fd.append('photo_files',        photoFiles)
+  fd.append('honeypot',           '')
   if (wbChatId.value) fd.append('wb_chat_id', wbChatId.value)
   if (salebotClientId.value) fd.append('salebot_client_id', salebotClientId.value)
 
@@ -382,7 +382,7 @@ const submit = async () => {
                 <span class="text-sm font-bold" style="color:#1E2235;">Фото <span style="color:#EF4444;">*</span></span>
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
-              <p class="text-xs mb-3" style="color:#9CA3AF;">Сфотографируйте содержимое упаковки и инструкцию с комплектацией</p>
+              <p class="text-xs mb-3" style="color:#9CA3AF;">Сфотографируйте недостающую деталь и страницу с комплектацией из инструкции к товару</p>
 
               <div v-if="uploadedFiles.length" class="space-y-2 mb-3">
                 <div v-for="(f, i) in uploadedFiles" :key="i"
@@ -415,40 +415,60 @@ const submit = async () => {
               <p v-if="errors.photos" class="text-xs mt-1" style="color:#EF4444;">{{ errors.photos }}</p>
             </div>
 
-            <!-- Адрес -->
+            <!-- ПВЗ СДЭК -->
             <div>
               <div class="flex items-center gap-2 mb-4">
                 <span class="text-xs font-bold uppercase tracking-widest" style="color:#F5C000;">{{ categories.length ? '06' : '05' }}</span>
-                <span class="text-sm font-bold" style="color:#1E2235;">Адрес доставки</span>
+                <span class="text-sm font-bold" style="color:#1E2235;">Пункт выдачи СДЭК <span style="color:#EF4444;">*</span></span>
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
 
-              <div class="relative">
-                <input v-model="addressQuery" @input="onAddressInput" type="text"
-                  placeholder="Начните вводить город, улицу, дом..."
-                  class="form-input w-full px-4 py-3 rounded-2xl border text-sm outline-none transition-colors"
-                  :style="errors.address ? 'border-color:#FCA5A5; background:#FEF2F2;' : 'border-color:#E5E7EB;'" />
+              <!-- Поиск города -->
+              <input v-model="pvzCityQuery" @input="onPvzCityInput" type="text"
+                placeholder="Введите ваш город..."
+                class="form-input w-full px-4 py-3 rounded-2xl border text-sm outline-none transition-colors mb-2"
+                :style="errors.pvz && !pvzCityQuery ? 'border-color:#FCA5A5; background:#FEF2F2;' : 'border-color:#E5E7EB;'" />
 
-                <div v-if="addressSuggestions.length"
-                  class="absolute z-10 w-full mt-1 bg-white rounded-2xl overflow-hidden"
-                  style="box-shadow:0 8px 24px rgba(0,0,0,0.12); border:1px solid #E5E7EB;">
-                  <button v-for="s in addressSuggestions" :key="s.value" type="button"
-                    @click="selectSuggestion(s)"
-                    class="w-full text-left px-4 py-3 text-sm border-b last:border-0 transition-colors"
-                    style="border-color:#F3F4F6; color:#374151;"
-                    @mouseenter="$event.target.style.background='#FFF8D6'"
-                    @mouseleave="$event.target.style.background=''">
-                    {{ s.value }}
+              <!-- Загрузка -->
+              <div v-if="pvzLoading" class="flex items-center gap-2 px-4 py-3 text-sm" style="color:#9CA3AF;">
+                <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="60" stroke-dashoffset="20"/>
+                </svg>
+                Ищем пункты выдачи...
+              </div>
+
+              <!-- Список ПВЗ -->
+              <div v-if="pvzList.length && !selectedPvz"
+                class="rounded-2xl overflow-hidden"
+                style="border:1px solid #E5E7EB; max-height:260px; overflow-y:auto;">
+                <button v-for="pvz in pvzList" :key="pvz.code" type="button"
+                  @click="selectPvz(pvz)"
+                  class="w-full text-left px-4 py-3 border-b last:border-0 transition-colors"
+                  style="border-color:#F3F4F6;"
+                  @mouseenter="$event.currentTarget.style.background='#FFF8D6'"
+                  @mouseleave="$event.currentTarget.style.background=''">
+                  <div class="text-sm font-semibold" style="color:#1E2235;">{{ pvz.name }}</div>
+                  <div class="text-xs mt-0.5" style="color:#6B7280;">{{ pvz.address }}</div>
+                  <div v-if="pvz.work_time" class="text-xs mt-0.5" style="color:#9CA3AF;">{{ pvz.work_time }}</div>
+                </button>
+              </div>
+
+              <!-- Выбранный ПВЗ -->
+              <div v-if="selectedPvz" class="mt-1 px-4 py-3 rounded-2xl" style="background:#FFF8D6; border:1.5px solid #F5C000;">
+                <div class="flex items-start justify-between gap-2">
+                  <div>
+                    <div class="text-sm font-bold" style="color:#1E2235;">{{ selectedPvz.name }}</div>
+                    <div class="text-xs mt-0.5" style="color:#6B7280;">{{ selectedPvz.address }}</div>
+                    <div v-if="selectedPvz.work_time" class="text-xs mt-0.5" style="color:#9CA3AF;">{{ selectedPvz.work_time }}</div>
+                  </div>
+                  <button type="button" @click="selectedPvz = null; form.client_pvz_code = ''; pvzList = []"
+                    class="flex-shrink-0 text-xs px-2 py-1 rounded-xl" style="color:#92700A; background:#F5C00022;">
+                    Изменить
                   </button>
                 </div>
               </div>
 
-              <div v-if="form.address_city" class="mt-2 px-4 py-2.5 rounded-2xl flex items-center gap-2 text-xs font-medium"
-                style="background:#FFF8D6; color:#92700A;">
-                <CheckCircle2 class="w-3.5 h-3.5 flex-shrink-0" style="color:#F5C000;" />
-                {{ [form.address_postal, form.address_region, form.address_city, form.address_street, form.address_house].filter(Boolean).join(', ') }}
-              </div>
-              <p v-if="errors.address" class="text-xs mt-1" style="color:#EF4444;">{{ errors.address }}</p>
+              <p v-if="errors.pvz" class="text-xs mt-1" style="color:#EF4444;">{{ errors.pvz }}</p>
             </div>
 
             <!-- Согласие -->
