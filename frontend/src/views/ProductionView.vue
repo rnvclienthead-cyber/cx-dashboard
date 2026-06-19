@@ -488,8 +488,8 @@ onMounted(fetchData)
       <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
         <div class="p-5 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
           <div class="flex items-center gap-2"><LayoutGrid class="w-4 h-4 text-blue-500" /><h2 class="text-sm font-black text-slate-700 uppercase">Матрица проблем</h2></div>
-          <!-- Переключатель карт: только для ЯМ (у WB нет причин Маркета) -->
-          <div v-if="platformStore.platform === 'ym'" class="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
+          <!-- Переключатель карт: ЯМ и Ozon -->
+          <div v-if="platformStore.platform === 'ym' || platformStore.platform === 'ozon'" class="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
             <button
               @click="matrixMode = 'ai'"
               :class="['px-3 py-1.5 text-[11px] font-bold rounded-lg transition-all', matrixMode === 'ai' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700']"

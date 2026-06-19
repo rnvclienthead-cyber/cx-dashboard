@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import {
   Database, Bot, ClipboardCheck, BrainCircuit, ScrollText, MessageSquare,
@@ -15,12 +15,8 @@ const permissionsStore = usePermissionsStore()
 const isCollapsed  = ref(false)
 const isMobileOpen = ref(false)
 
-const platformOptions = [
-  { value: 'wb',   label: 'WB' },
-  { value: 'ym',   label: 'ЯМ' },
-  { value: 'ozon', label: 'ОЗ' },
-  { value: 'all',  label: 'Все' },
-]
+// Доступные площадки (из прав текущего пользователя)
+const availablePlatforms = computed(() => permissionsStore.allowedMarketplaces)
 
 onMounted(() => {
   const saved = localStorage.getItem('sidebar_collapsed')
@@ -29,6 +25,13 @@ onMounted(() => {
 
 watch(isCollapsed, (val) => {
   localStorage.setItem('sidebar_collapsed', String(val))
+})
+
+// Авто-выбор площадки, если у пользователя только одна
+watch(() => permissionsStore.loaded, (loaded) => {
+  if (loaded && availablePlatforms.value.length === 1) {
+    platformStore.setPlatform(availablePlatforms.value[0])
+  }
 })
 
 const toggleCollapse = () => { isCollapsed.value = !isCollapsed.value }
@@ -85,11 +88,28 @@ const submitChangePw = async () => {
 }
 
 const cyclePlatform = () => {
-  const order = ['wb', 'ym', 'ozon', 'all']
+  const order = availablePlatforms.value
   const next = order[(order.indexOf(platformStore.platform) + 1) % order.length]
   platformStore.setPlatform(next)
 }
-const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'ОЗ', all: 'Все' }
+
+const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'OZON', all: 'Все' }
+
+const platformBorder = {
+  wb:   'border-purple-400',
+  ym:   'border-orange-400',
+  ozon: 'border-blue-500',
+  all:  'border-slate-300',
+}
+const platformTextColor = {
+  wb:   'text-purple-700',
+  ym:   'text-orange-600',
+  ozon: 'text-blue-600',
+  all:  'text-slate-600',
+}
+
+// PNG-логотипы брендов
+const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons/ozon.png' }
 </script>
 
 <template>
@@ -129,7 +149,7 @@ const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'ОЗ', all: 'Все' }
             <ChevronLeft class="w-4 h-4" />
           </button>
         </div>
-        <!-- Логотип свёрнутый: "Во" горизонтально + кнопка развернуть -->
+        <!-- Логотип свёрнутый -->
         <div v-else class="flex flex-col items-center gap-2">
           <span class="text-[#222D3D] font-black text-lg leading-none whitespace-nowrap" style="font-family: 'Montserrat', sans-serif;">
             В<span class="relative inline-block">о<svg class="absolute bottom-[-3px] left-1/2 -translate-x-1/2 w-2.5 h-1.5 text-[#FFC107]" viewBox="0 0 24 12" fill="none"><path d="M2 2 Q12 14 22 2" stroke="currentColor" stroke-width="5" stroke-linecap="round"/></svg></span>
@@ -140,35 +160,63 @@ const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'ОЗ', all: 'Все' }
         </div>
       </div>
 
-      <!-- Переключатель платформ -->
-      <div class="border-b border-slate-200 flex-shrink-0" :class="isCollapsed ? 'px-2 py-2' : 'px-4 py-3'">
-        <!-- Развёрнутый: три кнопки -->
+      <!-- Переключатель платформ (скрыт, если доступна только одна) -->
+      <div v-if="availablePlatforms.length > 1"
+           class="border-b border-slate-200 flex-shrink-0"
+           :class="isCollapsed ? 'px-2 py-2' : 'px-3 py-3'">
+
+        <!-- Развёрнутый: карточки-кнопки платформ -->
         <template v-if="!isCollapsed">
-          <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Площадка</p>
-          <div class="flex rounded-lg overflow-hidden border border-slate-200 text-[11px] font-semibold">
+          <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-2 px-0.5">Площадка</p>
+          <div class="grid gap-1.5"
+               :class="availablePlatforms.length === 2 ? 'grid-cols-2'
+                     : availablePlatforms.length === 3 ? 'grid-cols-3'
+                     : 'grid-cols-2'">
             <button
-              v-for="opt in platformOptions"
-              :key="opt.value"
-              @click="platformStore.setPlatform(opt.value)"
+              v-for="p in availablePlatforms"
+              :key="p"
+              @click="platformStore.setPlatform(p)"
+              :title="platformLabel[p]"
               :class="[
-                'flex-1 py-1.5 text-center transition-colors',
-                platformStore.platform === opt.value
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-white text-slate-500 hover:bg-slate-50'
+                'flex items-center justify-center p-1.5 rounded-xl border-2 transition-all duration-200',
+                platformStore.platform === p
+                  ? [platformBorder[p], 'bg-white shadow-md scale-105']
+                  : 'border-transparent bg-slate-50 hover:bg-white hover:border-slate-200 hover:shadow-sm'
               ]"
             >
-              {{ opt.label }}
+              <img v-if="p !== 'all'"
+                   :src="platformImgSrc[p]"
+                   :alt="platformLabel[p]"
+                   :class="['w-9 h-9 rounded-lg object-cover transition-all duration-300',
+                            platformStore.platform !== p ? 'grayscale opacity-35' : '']" />
+              <div v-else
+                   :class="['grid grid-cols-2 gap-0.5 w-9 h-9 p-1 rounded-lg bg-slate-100 transition-all duration-300',
+                            platformStore.platform !== 'all' ? 'grayscale opacity-35' : '']">
+                <img src="/icons/wb.png"   class="w-full h-full rounded-sm object-cover" />
+                <img src="/icons/ym.png"   class="w-full h-full rounded-sm object-cover" />
+                <img src="/icons/ozon.png" class="w-full h-full rounded-sm object-cover" />
+                <div class="w-full h-full rounded-sm bg-slate-300" />
+              </div>
             </button>
           </div>
         </template>
+
         <!-- Свёрнутый: одна кнопка-цикл -->
         <button
           v-else
           @click="cyclePlatform"
-          class="w-full py-1.5 rounded-lg border border-slate-200 bg-emerald-600 text-white text-[10px] font-black tracking-wide text-center hover:bg-emerald-700 transition-colors"
-          :title="`Площадка: ${platformLabel[platformStore.platform]} (нажмите для переключения)`"
+          class="w-full py-1.5 rounded-xl border border-slate-200 bg-white flex items-center justify-center hover:bg-slate-50 transition-colors shadow-sm"
+          :title="`${platformLabel[platformStore.platform]} — нажмите для смены`"
         >
-          {{ platformLabel[platformStore.platform] }}
+          <img v-if="platformStore.platform !== 'all'"
+               :src="platformImgSrc[platformStore.platform]"
+               class="w-8 h-8 rounded-lg object-cover" />
+          <div v-else class="grid grid-cols-2 gap-0.5 w-8 h-8 p-0.5 rounded-lg bg-slate-100">
+            <img src="/icons/wb.png"   class="w-full h-full rounded-sm object-cover" />
+            <img src="/icons/ym.png"   class="w-full h-full rounded-sm object-cover" />
+            <img src="/icons/ozon.png" class="w-full h-full rounded-sm object-cover" />
+            <div class="w-full h-full rounded-sm bg-slate-300" />
+          </div>
         </button>
       </div>
 
@@ -187,20 +235,6 @@ const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'ОЗ', all: 'Все' }
         >
           <LineChart class="w-4 h-4 flex-shrink-0" />
           <span v-if="!isCollapsed">Главный дашборд</span>
-        </RouterLink>
-
-        <RouterLink
-          v-if="permissionsStore.can('admin_panel')"
-          to="/admin"
-          :class="[
-            'flex items-center rounded-lg text-sm text-red-600 hover:bg-red-50 font-bold transition-colors mt-4 border border-red-100',
-            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
-          ]"
-          active-class="bg-red-100 text-red-700 border-red-200"
-          :title="isCollapsed ? 'Панель управления' : ''"
-        >
-          <ShieldAlert class="w-4 h-4 flex-shrink-0" />
-          <span v-if="!isCollapsed">Панель управления</span>
         </RouterLink>
 
         <div v-if="!isCollapsed && permissionsStore.can('sync')" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-2 px-2">
@@ -262,20 +296,6 @@ const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'ОЗ', all: 'Все' }
         >
           <BrainCircuit class="w-4 h-4 flex-shrink-0" />
           <span v-if="!isCollapsed">Обучение ИИ</span>
-        </RouterLink>
-
-        <RouterLink
-          v-if="permissionsStore.can('logs')"
-          to="/logs"
-          :class="[
-            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
-            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
-          ]"
-          active-class="bg-blue-50 text-blue-700 font-semibold"
-          :title="isCollapsed ? 'Журнал событий' : ''"
-        >
-          <ScrollText class="w-4 h-4 flex-shrink-0" />
-          <span v-if="!isCollapsed">Журнал событий</span>
         </RouterLink>
 
         <div v-if="!isCollapsed && permissionsStore.can('production')" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
@@ -340,20 +360,6 @@ const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'ОЗ', all: 'Все' }
         </RouterLink>
 
         <RouterLink
-          v-if="permissionsStore.can('reshipment')"
-          to="/reshipment"
-          :class="[
-            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
-            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
-          ]"
-          active-class="bg-emerald-50 text-emerald-700 font-semibold"
-          :title="isCollapsed ? 'Доотправки' : ''"
-        >
-          <PackageCheck class="w-4 h-4 flex-shrink-0" />
-          <span v-if="!isCollapsed">Доотправки</span>
-        </RouterLink>
-
-        <RouterLink
           v-if="permissionsStore.can('finances')"
           to="/finances"
           :class="[
@@ -365,6 +371,58 @@ const platformLabel = { wb: 'WB', ym: 'ЯМ', ozon: 'ОЗ', all: 'Все' }
         >
           <BadgeDollarSign class="w-4 h-4 flex-shrink-0" />
           <span v-if="!isCollapsed">Финансовые потери</span>
+        </RouterLink>
+
+        <div v-if="!isCollapsed && permissionsStore.can('reshipment')" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
+          Функциональный блок
+        </div>
+        <div v-else-if="isCollapsed && permissionsStore.can('reshipment')" class="border-t border-slate-100 my-2"></div>
+
+        <RouterLink
+          v-if="permissionsStore.can('reshipment')"
+          to="/reshipment"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-emerald-50 text-emerald-700 font-semibold"
+          :title="isCollapsed ? 'Отправки' : ''"
+        >
+          <PackageCheck class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">Отправки</span>
+        </RouterLink>
+
+        <div v-if="!isCollapsed && (permissionsStore.can('admin_panel') || permissionsStore.can('logs'))" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
+          Административный блок
+        </div>
+        <div v-else-if="isCollapsed && (permissionsStore.can('admin_panel') || permissionsStore.can('logs'))" class="border-t border-slate-100 my-2"></div>
+
+        <RouterLink
+          v-if="permissionsStore.can('admin_panel')"
+          to="/admin"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-red-50 text-red-700 font-semibold"
+          :title="isCollapsed ? 'Панель управления' : ''"
+        >
+          <ShieldAlert class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">Панель управления</span>
+        </RouterLink>
+
+        <RouterLink
+          v-if="permissionsStore.can('logs')"
+          to="/logs"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-blue-50 text-blue-700 font-semibold"
+          :title="isCollapsed ? 'Журнал событий' : ''"
+        >
+          <ScrollText class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">Журнал событий</span>
         </RouterLink>
 
       </nav>

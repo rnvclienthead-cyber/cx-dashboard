@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="90" fill="#253347"/>
+  <!-- B -->
+  <text x="52" y="320" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="310" fill="#F5C000">B</text>
+  <!-- o (меньше и чуть ниже) -->
+  <text x="255" y="320" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="220" fill="#F5C000">o</text>
+  <!-- улыбка -->
+  <path d="M175 400 Q256 470 340 400" stroke="white" stroke-width="36" stroke-linecap="round" fill="none"/>
+</svg>

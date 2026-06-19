@@ -675,8 +675,32 @@ const groupMetrics = computed(() => {
       }
   })
 
+  // PPM группы = взвешенное среднее баров чарта:
+  // для каждого месяца берём System если есть (синий бар), иначе External (серый).
+  // Это точно соответствует тому что видит пользователь на графике.
+  const startYM = (startDate.value || '').slice(0, 7)
+  const endYM   = (endDate.value   || '').slice(0, 7)
+  const gMonthSrc = {}   // g -> { month -> { System: {o,d}, External: {o,d} } }
+  ;['A','B','C'].forEach(g => { gMonthSrc[g] = {} })
+  rawDataset.value.forEach(d => {
+    const m = (d['month_dt'] || '').slice(0, 7)
+    if (!m || m < startYM || m > endYM) return
+    const sku = String(d['article'] || '').trim()
+    const g   = periodSkuAbc.value[sku] || 'C'
+    const src = d['source'] || 'System'
+    if (!gMonthSrc[g][m]) gMonthSrc[g][m] = {}
+    if (!gMonthSrc[g][m][src]) gMonthSrc[g][m][src] = { o: 0, d: 0 }
+    gMonthSrc[g][m][src].o += Number(d['orders'])  || 0
+    gMonthSrc[g][m][src].d += Number(d['defects']) || 0
+  })
   Object.keys(result).forEach(k => {
-    result[k].ppm = result[k].orders > 0 ? Math.floor((result[k].defects / result[k].orders) * 1000000) : 0
+    let totO = 0, totD = 0
+    Object.values(gMonthSrc[k]).forEach(srcs => {
+      const src = (srcs['System']?.o || 0) > 0 ? 'System' : 'External'
+      totO += srcs[src]?.o || 0
+      totD += srcs[src]?.d || 0
+    })
+    result[k].ppm = totO > 0 ? Math.floor((totD / totO) * 1000000) : 0
     result[k].badSkus.sort((a, b) => b.ppm - a.ppm)
   })
 
@@ -720,6 +744,13 @@ const processedTableData = computed(() => {
 const skuOptions = computed(() => ['Все', ...Array.from(new Set(rawDataset.value.map(d => d['article'])))].sort())
 const filteredSkuList = computed(() => skuOptions.value.filter(s => String(s).toLowerCase().includes(skuSearch.value.toLowerCase())))
 
+// Маппинг SKU → период-ABC (из baseTableData, тот же пересчёт что в карточках)
+const periodSkuAbc = computed(() => {
+  const map = {}
+  baseTableData.value.forEach(row => { map[String(row['Артикул']).trim()] = row['ABC_Группа'] })
+  return map
+})
+
 const buildChart = () => {
   if (!trendChart.value) return
   try {
@@ -731,7 +762,7 @@ const buildChart = () => {
         if (dMonth > endYMD) return false 
 
         if (targetSku) return String(d['article']).trim().toLowerCase() === String(targetSku).trim().toLowerCase()
-        if (selectedGroupFilter.value) return d['abc_group'] === selectedGroupFilter.value
+        if (selectedGroupFilter.value) return (periodSkuAbc.value[String(d['article']).trim()] || 'C') === selectedGroupFilter.value
         return true
     })
 

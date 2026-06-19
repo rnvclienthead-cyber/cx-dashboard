@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, watch, onBeforeUnmount } from 'vue'
-import { Tag, ShieldCheck, Play, Loader2, Cpu, RefreshCw, MessageSquarePlus } from 'lucide-vue-next'
+import { Tag, ShieldCheck, Play, Loader2, Cpu, RefreshCw, MessageSquarePlus, Zap, Target } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
 
@@ -10,8 +10,15 @@ const activeTab = ref('tagging') // 'tagging', 'audit', 'feedback'
 
 // Настройки
 const batchSize = ref(10)
-const selectedModel = ref('YandexGPT Lite')
-const models = ['YandexGPT Lite', 'YandexGPT Pro', 'Grok (xAI)']
+const selectedModel = ref('yandex-lite')
+const models = [
+  { key: 'yandex-lite',   label: 'YandexGPT Lite',         icon: Zap,    hint: 'Быстрый · дешевле', cost: 0.08, currency: '₽' },
+  { key: 'yandex-pro',    label: 'YandexGPT Pro',          icon: Target, hint: 'Точный · качество',  cost: 0.40, currency: '₽' },
+  { key: 'claude-haiku',  label: 'Claude Haiku (Быстрый)', icon: Zap,    hint: 'Быстрый · дешевле', cost: 0.05, currency: '$' },
+  { key: 'claude-sonnet', label: 'Claude Sonnet (Точный)', icon: Target, hint: 'Точный · качество',  cost: 0.25, currency: '$' },
+]
+
+const activeModel = computed(() => models.find(m => m.key === selectedModel.value) || models[0])
 
 const isProcessing = ref(false)
 const progress = ref(0)
@@ -23,6 +30,21 @@ const isStatsLoading = ref(true)
 
 let pollingInterval = null
 const initialCount = ref(0)
+
+const BG_JOB_KEY = 'cx_ai_job'
+
+function saveJob() {
+  localStorage.setItem(BG_JOB_KEY, JSON.stringify({
+    initialCount: initialCount.value,
+    tab: activeTab.value,
+    platform: platformStore.platform,
+    startedAt: Date.now()
+  }))
+}
+
+function clearJob() {
+  localStorage.removeItem(BG_JOB_KEY)
+}
 
 const fetchStats = async () => {
   isStatsLoading.value = true
@@ -42,12 +64,26 @@ const fetchStats = async () => {
   }
 }
 
-onMounted(() => {
-  fetchStats()
+onMounted(async () => {
+  await fetchStats()
+  const saved = localStorage.getItem(BG_JOB_KEY)
+  if (saved) {
+    const job = JSON.parse(saved)
+    const age = Date.now() - job.startedAt
+    if (age < 3_600_000 && job.platform === platformStore.platform) {
+      initialCount.value = job.initialCount
+      isProcessing.value = true
+      activeTab.value = job.tab
+      startPolling()
+    } else {
+      clearJob()
+    }
+  }
 })
 
 watch(() => platformStore.platform, () => {
   stopPolling()
+  clearJob()
   resultMessage.value = null
   activeTab.value = 'tagging'
   fetchStats()
@@ -56,14 +92,33 @@ watch(() => platformStore.platform, () => {
 watch(activeTab, () => {
   resultMessage.value = null
   stopPolling()
+  clearJob()
 })
-onBeforeUnmount(stopPolling)
+
+onBeforeUnmount(() => {
+  if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null }
+})
 
 function stopPolling() {
-  if (pollingInterval) clearInterval(pollingInterval)
-  pollingInterval = null
+  if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null }
   isProcessing.value = false
   progress.value = 0
+}
+
+function startPolling() {
+  pollingInterval = setInterval(async () => {
+    await fetchStats()
+    const processed = initialCount.value - currentCount.value
+    progress.value = Math.min(100, processed > 0 ? Math.floor((processed / initialCount.value) * 100) : 0)
+    statusText.value = `Успешно обработано: ${processed} из ${initialCount.value} шт.`
+    if (currentCount.value === 0 || progress.value >= 100) {
+      stopPolling()
+      clearJob()
+      progress.value = 100
+      statusText.value = 'Завершено!'
+      resultMessage.value = { type: 'success', text: 'Все доступные данные были успешно обработаны ИИ.' }
+    }
+  }, 5000)
 }
 
 const currentCount = computed(() => {
@@ -73,12 +128,10 @@ const currentCount = computed(() => {
 })
 
 const estimatedCost = computed(() => {
-  const baseCost = selectedModel.value.includes('Lite') ? 0.08 : selectedModel.value.includes('Pro') ? 0.40 : 0.50
-  if (activeTab.value === 'feedback') {
-     // Учитываем, что умный фильтр пропустит ~25% (все плохие оценки и длинные хорошие отзывы)
-     return ((currentCount.value * 0.25) * baseCost).toFixed(2)
-  }
-  return (currentCount.value * baseCost).toFixed(2)
+  const { cost, currency } = activeModel.value
+  const count = activeTab.value === 'feedback' ? currentCount.value * 0.25 : currentCount.value
+  const decimals = currency === '$' ? 3 : 2
+  return { value: (count * cost).toFixed(decimals), currency }
 })
 
 const startProcess = async () => {
@@ -88,9 +141,10 @@ const startProcess = async () => {
   progress.value = 0
   resultMessage.value = null
   initialCount.value = currentCount.value
+  saveJob()
 
-  const modelKey = selectedModel.value.includes('Lite') ? 'yandex-lite' : selectedModel.value.includes('Pro') ? 'yandex-pro' : 'grok'
-  
+  const modelKey = selectedModel.value
+
   let endpoint = ''
   if (activeTab.value === 'tagging')
     endpoint = `/api/v1/ai/start-tagging?platform=${platformStore.platform}&model=${modelKey}&batch_size=${batchSize.value}`
@@ -104,25 +158,13 @@ const startProcess = async () => {
     const response = await apiFetch(endpoint, { method: 'POST' })
 
     if (response.ok) {
-      pollingInterval = setInterval(async () => {
-        await fetchStats()
-        const processed = initialCount.value - currentCount.value
-        progress.value = Math.min(100, processed > 0 ? Math.floor((processed / initialCount.value) * 100) : 0)
-        
-        statusText.value = `Успешно обработано: ${processed} из ${initialCount.value} шт.`
-
-        if (currentCount.value === 0 || progress.value >= 100) {
-          stopPolling()
-          progress.value = 100
-          statusText.value = 'Завершено!'
-          resultMessage.value = { type: 'success', text: 'Все доступные данные были успешно обработаны ИИ.' }
-        }
-      }, 5000)
+      startPolling()
     } else {
       throw new Error('Ошибка сервера')
     }
   } catch (err) {
     stopPolling()
+    clearJob()
     resultMessage.value = { type: 'error', text: 'Сбой соединения с сервером ИИ.' }
   }
 }
@@ -166,9 +208,14 @@ const startProcess = async () => {
           <div>
             <label class="block text-sm font-bold text-slate-700 mb-2">Модель нейросети:</label>
             <div class="flex flex-col gap-2">
-              <label v-for="model in models" :key="model" class="flex items-center gap-3 p-3 border rounded-lg cursor-pointer hover:bg-slate-50 transition-colors" :class="{'border-indigo-500 bg-indigo-50': selectedModel === model}">
-                <input type="radio" :value="model" v-model="selectedModel" class="w-4 h-4 text-indigo-600 border-slate-300">
-                <span class="text-sm font-medium text-slate-700">{{ model }}</span>
+              <label v-for="model in models" :key="model.key" class="flex items-center gap-3 p-3 border rounded-lg cursor-pointer hover:bg-slate-50 transition-colors" :class="{'border-indigo-500 bg-indigo-50': selectedModel === model.key}">
+                <input type="radio" :value="model.key" v-model="selectedModel" class="w-4 h-4 text-indigo-600 border-slate-300">
+                <component :is="model.icon" class="w-4 h-4 text-slate-400 flex-shrink-0" />
+                <div class="flex-1 min-w-0">
+                  <span class="text-sm font-medium text-slate-700">{{ model.label }}</span>
+                  <span class="ml-2 text-xs text-slate-400">{{ model.hint }}</span>
+                </div>
+                <span class="text-xs font-semibold text-slate-500">{{ model.cost }} {{ model.currency }}/шт.</span>
               </label>
             </div>
           </div>
@@ -211,7 +258,7 @@ const startProcess = async () => {
 
               <div class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
                 <span class="text-sm font-medium text-slate-600">Ориентировочный расход:</span>
-                <span class="font-bold text-slate-800">~{{ estimatedCost }} руб.</span>
+                <span class="font-bold text-slate-800">~{{ estimatedCost.value }} {{ estimatedCost.currency }}</span>
               </div>
 
               <p v-if="activeTab === 'audit'" class="text-[11px] text-slate-400 mt-3 leading-relaxed">

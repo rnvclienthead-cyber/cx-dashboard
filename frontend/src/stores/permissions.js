@@ -10,6 +10,17 @@ export const usePermissionsStore = defineStore('permissions', () => {
   const can = (module) => !!permissions.value[module]
   const marketplace = (module) => permissions.value[module] || null
 
+  // Какие площадки доступны пользователю для переключения
+  const allowedMarketplaces = computed(() => {
+    if (['admin', 'moderator'].includes(role.value)) return ['wb', 'ym', 'ozon', 'all']
+    if (!loaded.value) return ['wb', 'ym', 'ozon', 'all']
+    const vals = new Set(Object.values(permissions.value).filter(Boolean))
+    if (vals.size === 0 || vals.has('all')) return ['wb', 'ym', 'ozon', 'all']
+    const specific = [...vals]
+    if (specific.length === 1) return specific
+    return ['wb', 'ym', 'ozon', 'all'].filter(p => specific.includes(p) || p === 'all')
+  })
+
   const isAdmin     = computed(() => role.value === 'admin')
   const isCS        = computed(() => ['cs_manager', 'admin', 'moderator'].includes(role.value))
   const isWarehouse = computed(() => ['warehouse_manager', 'admin', 'moderator'].includes(role.value))
@@ -33,5 +44,5 @@ export const usePermissionsStore = defineStore('permissions', () => {
     role.value = ''; permissions.value = {}; loaded.value = false
   }
 
-  return { role, permissions, loaded, can, marketplace, isAdmin, isCS, isWarehouse, load, clear }
+  return { role, permissions, loaded, can, marketplace, allowedMarketplaces, isAdmin, isCS, isWarehouse, load, clear }
 })

@@ -4,8 +4,10 @@ import Plotly from 'plotly.js-dist-min'
 import { Calendar, Search, Star, Package, X, TrendingUp, TrendingDown, ChevronLeft, ChevronRight, Check, ChevronsUpDown, ChevronUp, ChevronDown as ChevronDownIcon, Upload } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+import { usePermissionsStore } from '../stores/permissions'
 
 const platformStore = usePlatformStore()
+const permissionsStore = usePermissionsStore()
 const ratingsData    = ref([])
 const loading        = ref(true)
 const ymSummary      = ref([])
@@ -944,7 +946,7 @@ const ratingColor  = (r) => r >= 4.5 ? 'text-green-600' : r >= 4.0 ? 'text-lime-
           </h3>
           <div class="flex items-center gap-3">
             <span class="text-xs text-slate-400">{{ ymSummary[0]?.snapshot_date ? 'Снимок: ' + formatDateDisplay(ymSummary[0].snapshot_date) : '' }}</span>
-            <label class="cursor-pointer flex items-center gap-1.5 text-xs font-semibold text-yellow-700 bg-yellow-50 border border-yellow-200 px-3 py-1.5 rounded-xl hover:bg-yellow-100 transition-colors">
+            <label v-if="permissionsStore.isAdmin" class="cursor-pointer flex items-center gap-1.5 text-xs font-semibold text-yellow-700 bg-yellow-50 border border-yellow-200 px-3 py-1.5 rounded-xl hover:bg-yellow-100 transition-colors">
               <Upload class="w-3.5 h-3.5" />
               Загрузить XLSX
               <input type="file" accept=".xlsx" class="hidden" @change="uploadYmXlsx" />

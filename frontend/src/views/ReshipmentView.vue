@@ -72,7 +72,7 @@ const costLoading  = ref(false)
 const estimatedCost = ref(null)
 const lastShipResult = ref(null)
 
-const FORM_URL = 'https://cxvo.ru/reshipment/form'
+const FORM_URL = 'http://box.vidovito.com'
 
 const copyFormUrl = async () => {
   await navigator.clipboard.writeText(FORM_URL)
@@ -344,7 +344,7 @@ onMounted(() => {
         <div class="flex items-center justify-between mb-3">
           <div>
             <h1 class="text-base font-bold text-slate-800 flex items-center gap-2">
-              <PackageCheck class="w-4 h-4 text-emerald-600" /> Доотправки
+              <PackageCheck class="w-4 h-4 text-emerald-600" /> Отправки
             </h1>
             <p class="text-[10px] text-slate-400 mt-0.5">
               {{ userRole === 'cs_manager' ? 'Менеджер КС' : userRole === 'warehouse_manager' ? 'Менеджер склада' : 'Все заявки' }}
@@ -753,49 +753,30 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- ── Действия склада ─────────────────────────────────────────────── -->
-        <template v-if="isWarehouse && selected.status === 'approved' && !panel">
+        <!-- ── Панель склада (только warehouse_manager) ─────────────────────── -->
+        <template v-if="userRole === 'warehouse_manager' && selected.status === 'approved'">
           <div class="bg-violet-50 rounded-xl border border-violet-200 p-4">
-            <p class="text-xs font-bold text-violet-500 uppercase tracking-wider mb-1">К отправке</p>
+            <p class="text-xs font-bold text-violet-500 uppercase tracking-wider mb-2">К отправке</p>
             <p v-if="selected.moderator_comment" class="text-sm text-violet-700 mb-3 italic">«{{ selected.moderator_comment }}»</p>
-            <div v-if="selected.cdek_cost" class="mb-3 text-sm">
-              <span class="text-violet-500">Расчётная стоимость (СДЭК):</span>
-              <span class="font-bold text-violet-800 ml-1">{{ fmtCost(selected.cdek_cost) }}</span>
-            </div>
-            <div v-if="selected.address_city" class="mb-3 text-xs text-violet-600">
-              <MapPin class="w-3 h-3 inline mr-1" />
-              {{ [selected.address_city, selected.address_street, selected.address_house].filter(Boolean).join(', ') }}
-            </div>
-            <!-- СДЭК UUID (создан при одобрении) -->
             <div v-if="selected.cdek_uuid" class="mb-3 text-xs bg-violet-100 rounded-lg px-3 py-2 text-violet-700 font-mono break-all">
-              СДЭК заказ: {{ selected.cdek_uuid }}
-            </div>
-            <div v-else class="mb-3 text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2">
-              СДЭК заказ не создан — проверьте настройки или создайте вручную в ЛК
+              СДЭК заказ создан ✓
             </div>
             <div class="flex flex-wrap gap-2">
-              <!-- Этикетка -->
               <button @click="downloadLabels([selected.id])"
-                class="flex items-center gap-2 px-3 py-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold rounded-xl transition-colors">
-                <Printer class="w-4 h-4" /> Этикетка
+                class="flex items-center gap-2 px-3 py-2.5 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold rounded-xl transition-colors">
+                <Printer class="w-4 h-4" /> Этикетка PDF
               </button>
-              <!-- Сдано на ПВЗ -->
               <button @click="doMarkShipped(selected.id)" :disabled="panelLoading"
                 class="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-sm font-semibold rounded-xl transition-colors">
                 <Loader2 v-if="panelLoading" class="w-4 h-4 animate-spin" />
                 <CheckCircle2 v-else class="w-4 h-4" /> Сдано на ПВЗ
               </button>
-              <!-- Нет детали -->
-              <button @click="panel = 'warehouse_reject'"
-                class="flex items-center gap-2 px-4 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-xl border border-rose-200 transition-colors">
-                <XCircle class="w-4 h-4" /> Нет детали
-              </button>
             </div>
           </div>
         </template>
 
-        <!-- Панель отклонения склада -->
-        <div v-if="panel === 'warehouse_reject'" class="bg-rose-50 rounded-xl border border-rose-200 p-5 mt-4">
+        <!-- Панель отклонения склада (скрыта — решения принимает менеджер КС) -->
+        <div v-if="false && panel === 'warehouse_reject'" class="bg-rose-50 rounded-xl border border-rose-200 p-5 mt-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-sm font-bold text-rose-700 flex items-center gap-2">
               <AlertTriangle class="w-4 h-4" /> Отклонение (склад)
