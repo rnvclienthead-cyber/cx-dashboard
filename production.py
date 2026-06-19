@@ -76,7 +76,7 @@ def _ym_subreason_ru(code: str) -> str:
 
 @router.get("/production-claims")
 def get_production_claims(
-    platform: str = Query("wb", pattern="^(wb|ym|ozon|all)$"),
+    platform: str = Query("wb", pattern="^(wb|ym|all)$"),
     db: Session = Depends(get_db),
 ):
     cache_key = f"production-claims-{platform}"
@@ -129,33 +129,37 @@ def get_production_claims(
         #   • photos         — пробел-разделённые URL статичных фото (/static/ym_returns/…)
         if platform in ("ym", "all"):
             with db.bind.connect() as conn:
+                # ── Эвристический матч возврат → инвойс ──────────────────────────
+                # Алгоритм: берём поставку с тем же SKU на тот же склад,
+                # дата которой < даты заказа → берём самую последнюю такую.
+                # Форматы supply_id в wb_invoices:
+                #   "30725002"     = marketplaceRequestId
+                #   "ВРЦ-8299161"  = ВРЦ- + request_id (VDC-родительская)
+                # parent_request_id покрывает VDC-дочерние через родителя.
                 try:
                     inv_rows = conn.execute(text("""
                         SELECT DISTINCT ON (r.return_id)
                             r.return_id,
-                            inv.invoice_num,
-                            inv.supply_id
+                            COALESCE(inv.invoice_num, 'ЯМ') AS invoice_num
                         FROM ym_returns r
                         JOIN ym_orders  o  ON o.order_id = r.order_id
                                           AND o.supplier_article = r.supplier_article
                         JOIN ym_supply_items si ON si.offer_id = r.supplier_article
                         JOIN ym_supplies     s  ON s.request_id = si.request_id
                                                AND s.requested_date < o.created_at
-                        JOIN wb_invoices inv ON (
+                        LEFT JOIN wb_invoices inv ON (
                             inv.supply_id = s.marketplace_request_id
                             OR inv.supply_id = 'ВРЦ-' || s.request_id::text
                             OR (s.parent_request_id IS NOT NULL
                                 AND inv.supply_id = 'ВРЦ-' || s.parent_request_id::text)
                         ) AND inv.marketplace = 'ym'
-                          AND inv.invoice_num NOT IN ('', '0')
                         WHERE r.supplier_article IS NOT NULL
+                          AND r.supplier_article != ''
                         ORDER BY r.return_id, s.requested_date DESC
                     """)).mappings().all()
                     ym_invoice_map = {row["return_id"]: row["invoice_num"] for row in inv_rows}
-                    ym_supply_map  = {row["return_id"]: row["supply_id"]  for row in inv_rows}
                 except Exception:
                     ym_invoice_map = {}
-                    ym_supply_map  = {}
                 ym_rows = conn.execute(text("""
                     SELECT
                         return_id, order_id, supplier_article,
@@ -206,7 +210,7 @@ def get_production_claims(
                     "Статус товара":                   status_ru,
                     "SRID":                            str(r["return_id"]),
                     "Дата заказа":                     r["created_at"].isoformat() if r["created_at"] else None,
-                    "Номер поставки":                  ym_supply_map.get(r["return_id"], "ЯМ"),
+                    "Номер поставки":                  "ЯМ",
                     "Комментарий покупателя":          r["return_comment"] or "",
                     # photos уже включены — фронтенд не будет вызывать claim-media
                     "photos":                          r["photos"] or "",
@@ -223,64 +227,6 @@ def get_production_claims(
                     row["Похожий отзыв"]       = fb["text"]
                     row["Похожий отзыв оценка"] = fb["valuation"]
                 # Читаем cat_1..cat_13 напрямую (ИИ-тегирование заполнит позже)
-                for i in range(1, 14):
-                    val = r.get(f"cat_{i}")
-                    row[str(i)] = 1 if val else 0
-                all_rows.append(row)
-
-        # ── OZON ─────────────────────────────────────────────────────────────
-        if platform in ("ozon", "all"):
-            with db.bind.connect() as conn:
-
-                oz_rows = conn.execute(text("""
-                    SELECT
-                        return_id, order_id, order_number, posting_number,
-                        supplier_article, product_name,
-                        return_reason, status_sys, status_ru,
-                        is_opened, return_date,
-                        cat_1,  cat_2,  cat_3,  cat_4,  cat_5,
-                        cat_6,  cat_7,  cat_8,  cat_9,  cat_10,
-                        cat_11, cat_12, cat_13
-                    FROM ozon_returns
-                    WHERE supplier_article IS NOT NULL
-                      AND supplier_article != ''
-                      AND status_sys IN (
-                          'ReturnedToOzon','Utilized','WriteOff','ReceivedBySeller','Lost'
-                      )
-                      AND return_reason IN (
-                          'Товар в неполной комплектации',
-                          'Покупатель отказался при вручении: неполная комплектация',
-                          'Упаковка и товар повреждены',
-                          'Товар не работает / брак',
-                          'Покупатель отказался при вручении: недоволен качеством товара',
-                          'Покупатель получил не те товары',
-                          'Покупатель отказался при вручении: в заказе не тот товар',
-                          'Товар поврежден, но упаковка цела',
-                          'Товар сломался при эксплуатации',
-                          'Блокирующее повреждение',
-                          'Неправильно указаны ОВХ товара',
-                          'Товар поддельный',
-                          'Изменил решение о покупке/Товар не подошёл'
-                      )
-                """)).mappings().all()
-
-            for r in oz_rows:
-                row = {
-                    "Артикул продавца":               r["supplier_article"],
-                    "Инвойс":                         "OZON",
-                    "claim_date_iso":                  r["return_date"].strftime("%Y-%m-%d") if r["return_date"] else None,
-                    "Решение по возврату покупателю":  r["status_ru"] or "На складе Ozon",
-                    "Статус товара":                   r["status_ru"] or "На складе Ozon",
-                    "SRID":                            str(r["return_id"]),
-                    "Дата заказа":                     r["return_date"].isoformat() if r["return_date"] else None,
-                    "Номер поставки":                  "OZON",
-                    "Комментарий покупателя":          "",
-                    "photos":                          "",
-                    "platform":                        "ozon",
-                    "Причина ЯМ":                      r.get("return_reason") or "",
-                    "Субпричина ЯМ":                   "",
-                    "Название товара":                 r.get("product_name") or "",
-                }
                 for i in range(1, 14):
                     val = r.get(f"cat_{i}")
                     row[str(i)] = 1 if val else 0

@@ -4,10 +4,12 @@ from sqlalchemy import text
 from pydantic import BaseModel
 from typing import Dict, Any
 from ..database import get_db
+from .auth import get_current_user
 
 router = APIRouter(
     prefix="/api/v1/claims",
-    tags=["Claims / Заявки на модерацию"]
+    tags=["Claims / Заявки на модерацию"], 
+    dependencies=[Depends(get_current_user)]
 )
 
 class ModerationUpdate(BaseModel):

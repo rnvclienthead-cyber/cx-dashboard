@@ -1,3 +1,15 @@
+# окружение и секреты
 .env
+backend/.env
+bot_api_key.json
+*credentials*.json
+.vscode/
+
+# python
 __pycache__/
 *.pyc
+
+# системный мусор
+.DS_Store
+**/.DS_Store
+*.rtf

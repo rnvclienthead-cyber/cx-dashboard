@@ -11,7 +11,7 @@ from playwright_stealth import Stealth
 URL_SUPABASE = "postgresql+psycopg2://postgres.wdcrihtjabrkzgsxezjb:RDB[r6o&BA0qSlVVGjb-@aws-1-eu-central-1.pooler.supabase.com:6543/postgres"
 
 # БАЗА №2: Локальная база на VPS (Впишите сюда внешний IP-адрес вашего сервера Beget)
-URL_LOCAL_VPS = "postgresql+psycopg2://db_user:RDB_r6o_BA0qSlVVGjb_2026@185.225.34.94:5432/cx_dashboard"
+URL_LOCAL_VPS = "postgresql+psycopg2://db_user:RDB_r6o_BA0qSlVVGjb_2026@localhost:5432/cx_dashboard"
 
 def get_wb_cards_mapping_from_db(engine):
     """Получает связку nmId -> Артикул продавца из таблицы wb_logistics"""

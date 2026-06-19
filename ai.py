@@ -24,30 +24,6 @@ CATEGORIES = {
     13: "Следы использования / Б/У"
 }
 
-def _repair_json(s: str) -> str:
-    """Дописывает незакрытые скобки в обрезанном ответе нейросети."""
-    stack = []
-    in_string = False
-    escape_next = False
-    for ch in s:
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == '\\' and in_string:
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch in '{[':
-            stack.append('}' if ch == '{' else ']')
-        elif ch in '}]' and stack and stack[-1] == ch:
-            stack.pop()
-    return s + ''.join(reversed(stack))
-
-
 def parse_ai_response(text_data: str) -> List[Dict[str, Any]]:
     try:
         clean_text = re.sub(r'```json|```', '', str(text_data)).strip()
@@ -55,14 +31,8 @@ def parse_ai_response(text_data: str) -> List[Dict[str, Any]]:
         end = max(clean_text.rfind(']'), clean_text.rfind('}')) + 1
         if start >= 0 and end > 0:
             clean_text = clean_text[start:end]
-
-        # Пробуем парсить как есть; если упало — пробуем восстановить обрезанный JSON
-        try:
-            parsed = json.loads(clean_text)
-        except json.JSONDecodeError:
-            clean_text = _repair_json(clean_text)
-            parsed = json.loads(clean_text)
-
+            
+        parsed = json.loads(clean_text)
         if isinstance(parsed, dict): return parsed.get('results', [])
         elif isinstance(parsed, list): return parsed
         return [{"error": f"Неожиданный формат: {type(parsed)}"}]
@@ -99,73 +69,11 @@ def add_system_log_db(db: Session, action: str, status: str, details: str = ""):
 # ==========================================
 @router.get("/stats")
 def get_ai_stats(
-    platform: str = Query("wb", pattern="^(wb|ym|ozon|all)$"),
+    platform: str = Query("wb", pattern="^(wb|ym|all)$"),
     db: Session = Depends(get_db)
 ):
     try:
-        if platform == "ozon":
-            untagged = db.execute(text("""
-                SELECT COUNT(*) FROM ozon_returns
-                WHERE return_date >= '2026-05-01'
-                  AND (return_reason ILIKE '%качеств%' OR return_reason ILIKE '%брак%'
-                    OR return_reason ILIKE '%комплект%' OR return_reason ILIKE '%дефект%'
-                    OR return_reason ILIKE '%поврежден%')
-                  AND cat_1  IS NULL AND cat_2  IS NULL AND cat_3  IS NULL
-                  AND cat_4  IS NULL AND cat_5  IS NULL AND cat_6  IS NULL
-                  AND cat_7  IS NULL AND cat_8  IS NULL AND cat_9  IS NULL
-                  AND cat_10 IS NULL AND cat_11 IS NULL AND cat_12 IS NULL
-                  AND cat_13 IS NULL
-                  AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
-            """)).scalar() or 0
-            unaudited = db.execute(text("""
-                SELECT COUNT(*) FROM ozon_returns
-                WHERE (
-                    COALESCE(cat_1,FALSE) OR COALESCE(cat_2,FALSE) OR COALESCE(cat_3,FALSE)
-                 OR COALESCE(cat_4,FALSE) OR COALESCE(cat_5,FALSE) OR COALESCE(cat_6,FALSE)
-                 OR COALESCE(cat_7,FALSE) OR COALESCE(cat_8,FALSE) OR COALESCE(cat_9,FALSE)
-                 OR COALESCE(cat_10,FALSE) OR COALESCE(cat_11,FALSE) OR COALESCE(cat_12,FALSE)
-                 OR COALESCE(cat_13,FALSE)
-                )
-                AND (correction IS NULL OR TRIM(correction) = '')
-            """)).scalar() or 0
-            log_res = db.execute(text("""
-                SELECT action, status, details FROM system_logs
-                WHERE action LIKE '%ozon%' OR action LIKE '%OZON%' OR action LIKE '%Ozon%'
-                ORDER BY id DESC LIMIT 1
-            """)).fetchone()
-            return {
-                "status": "success",
-                "untagged_count":     int(untagged),
-                "unaudited_count":    int(unaudited),
-                "untagged_feedbacks": 0,
-                "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
-            }
-
         if platform == "ym":
-            # Возвраты ЯМ без тегов (есть текст, но ни одна cat_N не проставлена)
-            untagged = db.execute(text("""
-                SELECT COUNT(*) FROM ym_returns
-                WHERE return_comment IS NOT NULL AND return_comment != ''
-                  AND cat_1  IS NULL AND cat_2  IS NULL AND cat_3  IS NULL
-                  AND cat_4  IS NULL AND cat_5  IS NULL AND cat_6  IS NULL
-                  AND cat_7  IS NULL AND cat_8  IS NULL AND cat_9  IS NULL
-                  AND cat_10 IS NULL AND cat_11 IS NULL AND cat_12 IS NULL
-                  AND cat_13 IS NULL
-                  AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
-            """)).scalar() or 0
-            # Возвраты ЯМ с тегами, но не прошедшие ручной аудит
-            unaudited = db.execute(text("""
-                SELECT COUNT(*) FROM ym_returns
-                WHERE (
-                    COALESCE(cat_1,FALSE) OR COALESCE(cat_2,FALSE) OR COALESCE(cat_3,FALSE)
-                 OR COALESCE(cat_4,FALSE) OR COALESCE(cat_5,FALSE) OR COALESCE(cat_6,FALSE)
-                 OR COALESCE(cat_7,FALSE) OR COALESCE(cat_8,FALSE) OR COALESCE(cat_9,FALSE)
-                 OR COALESCE(cat_10,FALSE) OR COALESCE(cat_11,FALSE) OR COALESCE(cat_12,FALSE)
-                 OR COALESCE(cat_13,FALSE)
-                )
-                AND (correction IS NULL OR TRIM(correction) = '')
-            """)).scalar() or 0
-            # Отзывы ЯМ без VOC-тегов
             untagged_feedbacks = db.execute(text("""
                 SELECT COUNT(*) FROM ym_feedbacks
                 WHERE ai_tags IS NULL OR NOT (ai_tags ? 'processed')
@@ -177,9 +85,9 @@ def get_ai_stats(
             """)).fetchone()
             return {
                 "status": "success",
-                "untagged_count":    int(untagged),
-                "unaudited_count":   int(unaudited),
-                "untagged_feedbacks": int(untagged_feedbacks),
+                "untagged_count": 0,
+                "unaudited_count": 0,
+                "untagged_feedbacks": untagged_feedbacks,
                 "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
             }
 
@@ -255,22 +163,6 @@ async def fetch_ai_tags(session: aiohttp.ClientSession, batch: List[Dict[str, An
             except Exception as e:
                 if attempt == 2: return [{"error": str(e)}]
                 await asyncio.sleep(5)
-
-    elif "claude" in model_key:
-        try:
-            import anthropic as _anthropic
-            _client = _anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-            _model = "claude-haiku-4-5-20251001" if model_key == "claude-haiku" else "claude-sonnet-4-6"
-            msg = await _client.messages.create(
-                model=_model,
-                max_tokens=2000,
-                system=system_prompt,
-                messages=[{"role": "user", "content": content}],
-            )
-            return parse_ai_response(msg.content[0].text)
-        except Exception as e:
-            return [{"error": f"Claude ошибка: {str(e)}"}]
-
     return []
 
 # ==========================================
@@ -338,22 +230,6 @@ async def fetch_ai_feedback_tags(session: aiohttp.ClientSession, batch: List[Dic
             except Exception as e:
                 if attempt == 2: return [{"error": str(e)}]
                 await asyncio.sleep(3)
-
-    elif "claude" in model_key:
-        try:
-            import anthropic as _anthropic
-            _client = _anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-            _model = "claude-haiku-4-5-20251001" if model_key == "claude-haiku" else "claude-sonnet-4-6"
-            msg = await _client.messages.create(
-                model=_model,
-                max_tokens=2000,
-                system=system_prompt,
-                messages=[{"role": "user", "content": content}],
-            )
-            return parse_ai_response(msg.content[0].text)
-        except Exception as e:
-            return [{"error": f"Claude ошибка: {str(e)}"}]
-
     return []
 
 # --- ФОНОВЫЕ ЗАДАЧИ ---
@@ -419,12 +295,6 @@ async def process_tagging_task(model_key: str, batch_size: int):
                     db.commit()
                     add_system_log_db(db, f"Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING", f"Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details))
                     await asyncio.sleep(3)
-                else:
-                    for row in chunk:
-                        db.execute(text("UPDATE wb_claims SET audit_status = 'Пропущено ИИ' WHERE srid = :srid"), {"srid": str(row[0])})
-                    db.commit()
-                    add_system_log_db(db, f"Пачка {i}", "WARNING", f"ИИ вернул пустой ответ, пропущено {len(chunk)} записей")
-                    await asyncio.sleep(5)
     except Exception as e: print(f"Ошибка тегирования: {e}")
     finally: db.close()
 
@@ -622,230 +492,9 @@ async def process_ym_feedback_tagging_task(model_key: str, batch_size: int):
         db.close()
 
 
-# ==========================================
-# НЕЙРОСЕТЬ: ТЕГИРОВАНИЕ ВОЗВРАТОВ ЯМ (cat_1..cat_13)
-# Логика аналогична WB-претензиям — те же категории, тот же AI-промпт
-# ==========================================
-async def process_ym_tagging_task(model_key: str, batch_size: int):
-    db = SessionLocal()
-    try:
-        # Берём возвраты с текстом, у которых ещё нет ни одного тега
-        rows = db.execute(text("""
-            SELECT return_id, supplier_article, return_comment
-            FROM ym_returns
-            WHERE return_comment IS NOT NULL AND return_comment != ''
-              AND cat_1  IS NULL AND cat_2  IS NULL AND cat_3  IS NULL
-              AND cat_4  IS NULL AND cat_5  IS NULL AND cat_6  IS NULL
-              AND cat_7  IS NULL AND cat_8  IS NULL AND cat_9  IS NULL
-              AND cat_10 IS NULL AND cat_11 IS NULL AND cat_12 IS NULL
-              AND cat_13 IS NULL
-              AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
-            ORDER BY created_at DESC
-        """)).fetchall()
-
-        total_rows = len(rows)
-        if total_rows == 0:
-            add_system_log_db(db, "ИИ Разметка ЯМ", "INFO", "Нет возвратов для тегирования")
-            return
-
-        add_system_log_db(db, "ИИ Разметка ЯМ: Старт", "INFO",
-                          f"Запущено тегирование {total_rows} возвратов ЯМ через {model_key}")
-
-        async with aiohttp.ClientSession() as session:
-            for i in range(0, total_rows, batch_size):
-                chunk = rows[i:i + batch_size]
-
-                # Контекст из базы знаний
-                memory_list = []
-                for row in chunk:
-                    if row[2]:
-                        mem = find_similar_examples_sql(str(row[2]), db, top_n=2)
-                        if mem and "Прямых совпадений" not in mem:
-                            memory_list.append(mem)
-                chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
-
-                batch_to_send = []
-                id_map = {}
-                for idx, row in enumerate(chunk):
-                    ref_id = f"REF_{idx}"
-                    id_map[ref_id] = str(row[0])   # return_id
-                    text_to_ai = f"Артикул: {row[1]}. Комментарий к возврату: {row[2]}"
-                    batch_to_send.append({"id": ref_id, "text": text_to_ai})
-
-                results = await fetch_ai_tags(session, batch_to_send, chunk_memory, model_key)
-
-                if results:
-                    saved_count = 0
-                    batch_details = []
-                    for res in results:
-                        if "error" in res:
-                            batch_details.append(f"❌ Ошибка ИИ: {res.get('error')}")
-                            continue
-
-                        num_match = re.search(r'\d+', str(res.get('id', '')).upper())
-                        if not num_match:
-                            continue
-
-                        real_rid = id_map.get(f"REF_{num_match.group()}")
-                        cats_array = res.get('category_ids', [])
-
-                        if real_rid:
-                            if cats_array:
-                                updates = [
-                                    f"cat_{re.search(r'\d+', str(c)).group()} = true"
-                                    for c in cats_array if re.search(r'\d+', str(c))
-                                ]
-                                if updates:
-                                    db.execute(
-                                        text(f"UPDATE ym_returns SET {', '.join(updates)} WHERE return_id = :rid"),
-                                        {"rid": real_rid}
-                                    )
-                                    saved_count += 1
-                                    batch_details.append(f"✅ {real_rid}: теги {cats_array}")
-                            else:
-                                db.execute(
-                                    text("UPDATE ym_returns SET audit_status = 'Пропущено ИИ' WHERE return_id = :rid"),
-                                    {"rid": real_rid}
-                                )
-                                batch_details.append(f"⚠️ {real_rid}: ИИ пропустил")
-
-                    db.commit()
-                    add_system_log_db(
-                        db, f"ЯМ Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING",
-                        f"Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
-                    )
-                    await asyncio.sleep(3)
-                else:
-                    for row in chunk:
-                        db.execute(text("UPDATE ym_returns SET audit_status = 'Пропущено ИИ' WHERE return_id = :rid"), {"rid": str(row[0])})
-                    db.commit()
-                    add_system_log_db(db, f"ЯМ Пачка {i}", "WARNING", f"ИИ вернул пустой ответ, пропущено {len(chunk)} записей")
-                    await asyncio.sleep(5)
-
-    except Exception as e:
-        add_system_log_db(db, "ИИ Разметка ЯМ: FATAL", "ERROR", f"Сбой воркера: {str(e)}")
-    finally:
-        db.close()
-
-
-async def process_ozon_tagging_task(model_key: str, batch_size: int):
-    """Тегирует возвраты Ozon по полю return_reason (причина на русском)."""
-    db = SessionLocal()
-    try:
-        rows = db.execute(text("""
-            SELECT return_id, supplier_article, return_reason, product_name
-            FROM ozon_returns
-            WHERE return_date >= '2026-05-01'
-              AND (return_reason ILIKE '%качеств%' OR return_reason ILIKE '%брак%'
-                OR return_reason ILIKE '%некомплект%' OR return_reason ILIKE '%дефект%'
-                OR return_reason ILIKE '%повреждени%')
-              AND cat_1  IS NULL AND cat_2  IS NULL AND cat_3  IS NULL
-              AND cat_4  IS NULL AND cat_5  IS NULL AND cat_6  IS NULL
-              AND cat_7  IS NULL AND cat_8  IS NULL AND cat_9  IS NULL
-              AND cat_10 IS NULL AND cat_11 IS NULL AND cat_12 IS NULL
-              AND cat_13 IS NULL
-              AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
-            ORDER BY return_date DESC
-        """)).fetchall()
-
-        total_rows = len(rows)
-        if total_rows == 0:
-            add_system_log_db(db, "ИИ Разметка OZON", "INFO", "Нет возвратов для тегирования")
-            return
-
-        add_system_log_db(db, "ИИ Разметка OZON: Старт", "INFO",
-                          f"Запущено тегирование {total_rows} возвратов Ozon через {model_key}")
-
-        async with aiohttp.ClientSession() as session:
-            for i in range(0, total_rows, batch_size):
-                chunk = rows[i:i + batch_size]
-
-                memory_list = []
-                for row in chunk:
-                    if row[2]:
-                        mem = find_similar_examples_sql(str(row[2]), db, top_n=2)
-                        if mem and "Прямых совпадений" not in mem:
-                            memory_list.append(mem)
-                chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
-
-                batch_to_send = []
-                id_map = {}
-                for idx, row in enumerate(chunk):
-                    ref_id = f"REF_{idx}"
-                    id_map[ref_id] = str(row[0])
-                    product_info = row[3] or row[1]
-                    batch_to_send.append({"id": ref_id, "text": f"Причина возврата: {row[2]}. Товар: {product_info}"})
-
-                results = await fetch_ai_tags(session, batch_to_send, chunk_memory, model_key)
-
-                if results:
-                    saved_count = 0
-                    batch_details = []
-                    for res in results:
-                        if "error" in res:
-                            batch_details.append(f"❌ Ошибка ИИ: {res.get('error')}")
-                            continue
-
-                        num_match = re.search(r'\d+', str(res.get('id', '')).upper())
-                        if not num_match:
-                            continue
-
-                        real_rid = id_map.get(f"REF_{num_match.group()}")
-                        cats_array = res.get('category_ids', [])
-
-                        if real_rid:
-                            if cats_array:
-                                updates = [
-                                    f"cat_{re.search(r'\d+', str(c)).group()} = true"
-                                    for c in cats_array if re.search(r'\d+', str(c))
-                                ]
-                                if updates:
-                                    db.execute(
-                                        text(f"UPDATE ozon_returns SET {', '.join(updates)} WHERE return_id = :rid"),
-                                        {"rid": real_rid}
-                                    )
-                                    saved_count += 1
-                                    batch_details.append(f"✅ {real_rid}: теги {cats_array}")
-                            else:
-                                db.execute(
-                                    text("UPDATE ozon_returns SET audit_status = 'Пропущено ИИ' WHERE return_id = :rid"),
-                                    {"rid": real_rid}
-                                )
-                                batch_details.append(f"⚠️ {real_rid}: ИИ пропустил")
-
-                    db.commit()
-                    add_system_log_db(
-                        db, f"OZON Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING",
-                        f"Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
-                    )
-                    await asyncio.sleep(3)
-                else:
-                    for row in chunk:
-                        db.execute(text("UPDATE ozon_returns SET audit_status = 'Пропущено ИИ' WHERE return_id = :rid"), {"rid": str(row[0])})
-                    db.commit()
-                    add_system_log_db(db, f"OZON Пачка {i}", "WARNING", f"ИИ вернул пустой ответ, пропущено {len(chunk)} записей")
-                    await asyncio.sleep(5)
-
-    except Exception as e:
-        add_system_log_db(db, "ИИ Разметка OZON: FATAL", "ERROR", f"Сбой воркера: {str(e)}")
-    finally:
-        db.close()
-
-
 # --- ЭНДПОИНТЫ ЗАПУСКА ---
 @router.post("/start-tagging")
-def start_tagging(
-    platform: str = "wb",
-    model: str = "yandex-lite",
-    batch_size: int = 10,
-    background_tasks: BackgroundTasks = None
-):
-    if platform == "ym":
-        background_tasks.add_task(process_ym_tagging_task, model, batch_size)
-        return {"status": "started", "message": "Разметка возвратов ЯМ запущена в фоне."}
-    if platform == "ozon":
-        background_tasks.add_task(process_ozon_tagging_task, model, batch_size)
-        return {"status": "started", "message": "Разметка возвратов Ozon запущена в фоне."}
+def start_tagging(model: str = "yandex-lite", batch_size: int = 10, background_tasks: BackgroundTasks = None):
     background_tasks.add_task(process_tagging_task, model, batch_size)
     return {"status": "started", "message": "Процесс разметки запущен в фоне."}
 
@@ -860,8 +509,6 @@ def start_feedback_tagging(
     batch_size: int = 15,
     background_tasks: BackgroundTasks = None
 ):
-    if platform == "ozon":
-        return {"status": "skipped", "message": "Отзывы Ozon недоступны (требуется подписка)."}
     if platform == "ym":
         background_tasks.add_task(process_ym_feedback_tagging_task, model, batch_size)
         return {"status": "started", "message": "Разметка отзывов ЯМ запущена."}
@@ -878,7 +525,6 @@ class ModerationAction(BaseModel):
     srid: str
     action: str
     categories: List[int] = []
-    platform: str = "wb"
 
 class KnowledgeItem(BaseModel):
     content: str
@@ -888,236 +534,50 @@ class FeedbackKnowledgeBulk(BaseModel):
     items: List[Dict[str, Any]]
 
 @router.get("/moderation/queue")
-def get_moderation_queue(
-    platform: str = Query("wb", pattern="^(wb|ym|ozon)$"),
-    db: Session = Depends(get_db)
-):
+def get_moderation_queue(db: Session = Depends(get_db)):
+    query = text("""
+        SELECT 
+            srid as srid, created_dt as claim_date, supplier_article as sku, user_comment as comment, audit_status as audit_status,
+            cat_1, cat_2, cat_3, cat_4, cat_5, cat_6, cat_7, cat_8, cat_9, cat_10, cat_11, cat_12, cat_13
+        FROM wb_claims
+        WHERE (cat_1 OR cat_2 OR cat_3 OR cat_4 OR cat_5 OR cat_6 OR cat_7 OR cat_8 OR cat_9 OR cat_10 OR cat_11 OR cat_12 OR cat_13)
+        AND (correction IS NULL OR TRIM(correction) = '')
+        AND (LOWER(TRIM(status)) IN ('одобрено', '2', '2.0', 'да', 'true') 
+             OR LOWER(TRIM(status_ex)) IN ('одобрено', '2', '2.0', 'да', 'true'))
+        ORDER BY created_dt DESC LIMIT 500
+    """)
     try:
-        if platform == "ozon":
-            query = text("""
-                SELECT
-                    return_id::text AS srid, return_date AS claim_date,
-                    supplier_article AS sku,
-                    COALESCE(return_reason, '') AS comment,
-                    audit_status,
-                    NULL AS photos,
-                    cat_1, cat_2, cat_3, cat_4, cat_5, cat_6, cat_7,
-                    cat_8, cat_9, cat_10, cat_11, cat_12, cat_13
-                FROM ozon_returns
-                WHERE (
-                    COALESCE(cat_1,FALSE) OR COALESCE(cat_2,FALSE) OR COALESCE(cat_3,FALSE)
-                 OR COALESCE(cat_4,FALSE) OR COALESCE(cat_5,FALSE) OR COALESCE(cat_6,FALSE)
-                 OR COALESCE(cat_7,FALSE) OR COALESCE(cat_8,FALSE) OR COALESCE(cat_9,FALSE)
-                 OR COALESCE(cat_10,FALSE) OR COALESCE(cat_11,FALSE) OR COALESCE(cat_12,FALSE)
-                 OR COALESCE(cat_13,FALSE)
-                )
-                AND (correction IS NULL OR TRIM(correction) = '')
-                ORDER BY return_date DESC LIMIT 500
-            """)
-        elif platform == "ym":
-            query = text("""
-                SELECT
-                    return_id::text AS srid, created_at AS claim_date,
-                    supplier_article AS sku, return_comment AS comment, audit_status,
-                    photos,
-                    cat_1, cat_2, cat_3, cat_4, cat_5, cat_6, cat_7,
-                    cat_8, cat_9, cat_10, cat_11, cat_12, cat_13
-                FROM ym_returns
-                WHERE (
-                    COALESCE(cat_1,FALSE) OR COALESCE(cat_2,FALSE) OR COALESCE(cat_3,FALSE)
-                 OR COALESCE(cat_4,FALSE) OR COALESCE(cat_5,FALSE) OR COALESCE(cat_6,FALSE)
-                 OR COALESCE(cat_7,FALSE) OR COALESCE(cat_8,FALSE) OR COALESCE(cat_9,FALSE)
-                 OR COALESCE(cat_10,FALSE) OR COALESCE(cat_11,FALSE) OR COALESCE(cat_12,FALSE)
-                 OR COALESCE(cat_13,FALSE)
-                )
-                AND (correction IS NULL OR TRIM(correction) = '')
-                ORDER BY created_at DESC LIMIT 500
-            """)
-        else:
-            query = text("""
-                SELECT
-                    srid, created_dt AS claim_date, supplier_article AS sku,
-                    user_comment AS comment, audit_status,
-                    cat_1, cat_2, cat_3, cat_4, cat_5, cat_6, cat_7,
-                    cat_8, cat_9, cat_10, cat_11, cat_12, cat_13
-                FROM wb_claims
-                WHERE (cat_1 OR cat_2 OR cat_3 OR cat_4 OR cat_5 OR cat_6 OR cat_7 OR cat_8 OR cat_9 OR cat_10 OR cat_11 OR cat_12 OR cat_13)
-                AND (correction IS NULL OR TRIM(correction) = '')
-                ORDER BY created_dt DESC LIMIT 500
-            """)
         with db.bind.connect() as conn:
             rows = conn.execute(query).mappings().all()
             return {"status": "success", "data": [dict(row) for row in rows]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    
 @router.post("/moderation/action")
 def process_moderation_action(payload: ModerationAction, db: Session = Depends(get_db)):
-    platform = getattr(payload, 'platform', 'wb')
     try:
         with db.bind.connect() as conn:
-            if platform == "ozon":
-                if payload.action == "confirm":
-                    conn.execute(text("UPDATE ozon_returns SET correction = 'Подтверждено' WHERE return_id::text = :srid"), {"srid": payload.srid})
-                elif payload.action == "correct":
-                    updates = [f"cat_{i} = FALSE" for i in range(1, 14)]
-                    for cat_id in payload.categories:
-                        updates[cat_id - 1] = f"cat_{cat_id} = TRUE"
-                    correction_text = "; ".join([CATEGORIES[i] for i in payload.categories])
-                    update_sql = f"UPDATE ozon_returns SET {', '.join(updates)}, correction = :corr WHERE return_id::text = :srid"
-                    conn.execute(text(update_sql), {"corr": correction_text, "srid": payload.srid})
-                    claim_text = conn.execute(text("SELECT return_reason FROM ozon_returns WHERE return_id::text = :srid"), {"srid": payload.srid}).scalar()
-                    if claim_text:
-                        conn.execute(text("""
-                            INSERT INTO ai_knowledge_base (content, tags, source)
-                            VALUES (:txt, :tgs, 'manual')
-                            ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags
-                        """), {"txt": claim_text, "tgs": correction_text})
-            elif platform == "ym":
-                if payload.action == "confirm":
-                    conn.execute(text("UPDATE ym_returns SET correction = 'Подтверждено' WHERE return_id::text = :srid"), {"srid": payload.srid})
-                elif payload.action == "correct":
-                    updates = [f"cat_{i} = FALSE" for i in range(1, 14)]
-                    for cat_id in payload.categories:
-                        updates[cat_id - 1] = f"cat_{cat_id} = TRUE"
-                    correction_text = "; ".join([CATEGORIES[i] for i in payload.categories])
-                    update_sql = f"UPDATE ym_returns SET {', '.join(updates)}, correction = :corr WHERE return_id::text = :srid"
-                    conn.execute(text(update_sql), {"corr": correction_text, "srid": payload.srid})
-                    claim_text = conn.execute(text("SELECT return_comment FROM ym_returns WHERE return_id::text = :srid"), {"srid": payload.srid}).scalar()
-                    if claim_text:
-                        conn.execute(text("""
-                            INSERT INTO ai_knowledge_base (content, tags, source)
-                            VALUES (:txt, :tgs, 'manual')
-                            ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags
-                        """), {"txt": claim_text, "tgs": correction_text})
-            else:
-                if payload.action == "confirm":
-                    conn.execute(text("UPDATE wb_claims SET correction = 'Подтверждено' WHERE srid = :srid"), {"srid": payload.srid})
-                elif payload.action == "correct":
-                    updates = [f"cat_{i} = False" for i in range(1, 14)]
-                    for cat_id in payload.categories:
-                        updates[cat_id - 1] = f"cat_{cat_id} = True"
-                    correction_text = "; ".join([CATEGORIES[i] for i in payload.categories])
-                    update_sql = f"UPDATE wb_claims SET {', '.join(updates)}, correction = :corr WHERE srid = :srid"
-                    conn.execute(text(update_sql), {"corr": correction_text, "srid": payload.srid})
-                    claim_text = conn.execute(text("SELECT user_comment FROM wb_claims WHERE srid = :srid"), {"srid": payload.srid}).scalar()
-                    if claim_text:
-                        conn.execute(text("""
-                            INSERT INTO ai_knowledge_base (content, tags, source)
-                            VALUES (:txt, :tgs, 'manual')
-                            ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags
-                        """), {"txt": claim_text, "tgs": correction_text})
-            conn.commit()
-            add_system_log_db(db, "Модерация", "SUCCESS", f"SRID {payload.srid} ({platform}): {payload.action}")
-            return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# =====================================================================
-# МОДЕРАЦИЯ ОТЗЫВОВ (VOC)
-# =====================================================================
-VOC_TAGS = [
-    "КОНСТРУКЦИЯ: Хлипкость и Неустойчивость",
-    "КОНСТРУКЦИЯ: Слабые узлы и Соединения",
-    "КОНСТРУКЦИЯ: Тонкий металл / Пластик",
-    "ЭРГОНОМИКА: Мало места / Вместимость",
-    "ЭРГОНОМИКА: Несоответствие размерам вещей",
-    "ЭРГОНОМИКА: Неудобная форма изделия",
-    "ФУНКЦИОНАЛ: Нет стопоров на колесах",
-    "ФУНКЦИОНАЛ: Нехватка бортов/защиты",
-    "ФУНКЦИОНАЛ: Запрос нового элемента",
-    "СБОРКА: Непонятная инструкция",
-    "СБОРКА: Несовпадение пазов/отверстий",
-    "СБОРКА: Тяжелый физический монтаж",
-    "ОЖИДАНИЯ: Отличие цвета от фото",
-    "ОЖИДАНИЯ: Ощущение дешевизны вживую",
-]
-
-class FeedbackModerationAction(BaseModel):
-    id: str
-    action: str
-    tags: List[str] = []
-    suggestion: str = ""
-    platform: str = "wb"
-
-@router.get("/feedback-moderation/queue")
-def get_feedback_moderation_queue(
-    platform: str = Query("wb", pattern="^(wb|ym)$"),
-    db: Session = Depends(get_db)
-):
-    try:
-        if platform == "ym":
-            query = text("""
-                SELECT
-                    id::text AS id,
-                    TRIM(CONCAT_WS(' ', NULLIF(pro_text,''), NULLIF(contra_text,''), NULLIF(comment,''))) AS text,
-                    valuation,
-                    ai_tags
-                FROM ym_feedbacks
-                WHERE ai_tags ? 'processed'
-                  AND NOT (ai_tags ? 'confirmed')
-                  AND jsonb_array_length(ai_tags->'tags') > 0
-                ORDER BY id DESC LIMIT 200
-            """)
-        else:
-            query = text("""
-                SELECT id::text AS id, text, valuation, ai_tags
-                FROM wb_feedbacks
-                WHERE ai_tags ? 'processed'
-                  AND NOT (ai_tags ? 'confirmed')
-                  AND jsonb_array_length(ai_tags->'tags') > 0
-                ORDER BY id DESC LIMIT 200
-            """)
-        with db.bind.connect() as conn:
-            rows = conn.execute(query).mappings().all()
-            result = []
-            for row in rows:
-                r = dict(row)
-                if isinstance(r.get('ai_tags'), str):
-                    r['ai_tags'] = json.loads(r['ai_tags'])
-                result.append(r)
-            return {"status": "success", "data": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/feedback-moderation/action")
-def process_feedback_moderation_action(payload: FeedbackModerationAction, db: Session = Depends(get_db)):
-    try:
-        table = "ym_feedbacks" if payload.platform == "ym" else "wb_feedbacks"
-        text_col = "TRIM(CONCAT_WS(' ', NULLIF(pro_text,''), NULLIF(contra_text,''), NULLIF(comment,'')))" if payload.platform == "ym" else "text"
-        with db.bind.connect() as conn:
-            row = conn.execute(
-                text(f"SELECT {text_col} AS feedback_text, ai_tags FROM {table} WHERE id::text = :id"),
-                {"id": payload.id}
-            ).fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Отзыв не найден")
-
-            current = row.ai_tags if isinstance(row.ai_tags, dict) else json.loads(row.ai_tags or '{}')
-            current["confirmed"] = True
-
-            if payload.action == "correct":
-                current["tags"] = payload.tags
-                current["suggestion"] = payload.suggestion
-                if payload.tags and row.feedback_text:
-                    tags_str = ", ".join(payload.tags)
+            if payload.action == "confirm":
+                conn.execute(text("UPDATE wb_claims SET correction = 'Подтверждено' WHERE srid = :srid"), {"srid": payload.srid})
+            elif payload.action == "correct":
+                updates = [f"cat_{i} = False" for i in range(1, 14)]
+                for cat_id in payload.categories:
+                    updates[cat_id - 1] = f"cat_{cat_id} = True"
+                correction_text = "; ".join([CATEGORIES[i] for i in payload.categories])
+                
+                update_sql = f"UPDATE wb_claims SET {', '.join(updates)}, correction = :corr WHERE srid = :srid"
+                conn.execute(text(update_sql), {"corr": correction_text, "srid": payload.srid})
+                
+                claim_text = conn.execute(text("SELECT user_comment FROM wb_claims WHERE srid = :srid"), {"srid": payload.srid}).scalar()
+                if claim_text:
                     conn.execute(text("""
-                        INSERT INTO ai_feedback_knowledge_base (content, tags, suggestion, source)
-                        VALUES (:content, :tags, :sugg, 'manual')
-                        ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags, suggestion = EXCLUDED.suggestion
-                    """), {"content": row.feedback_text, "tags": tags_str, "sugg": payload.suggestion})
-
-            conn.execute(
-                text(f"UPDATE {table} SET ai_tags = CAST(:tags AS jsonb) WHERE id::text = :id"),
-                {"tags": json.dumps(current, ensure_ascii=False), "id": payload.id}
-            )
+                        INSERT INTO ai_knowledge_base (content, tags, source) 
+                        VALUES (:txt, :tgs, 'manual')
+                        ON CONFLICT (content) DO UPDATE SET tags = EXCLUDED.tags
+                    """), {"txt": claim_text, "tgs": correction_text})
             conn.commit()
-            add_system_log_db(db, "Модерация отзывов", "SUCCESS", f"ID {payload.id} ({payload.platform}): {payload.action}")
+            add_system_log_db(db, "Модерация", "SUCCESS", f"SRID {payload.srid}: {payload.action}")
             return {"status": "success"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 # =====================================================================
 # БАЗА ЗНАНИЙ (ОБУЧЕНИЕ ИИ)

@@ -11,7 +11,7 @@ URL_SUPABASE = "postgresql://postgres.wdcrihtjabrkzgsxezjb:RDB[r6o&BA0qSlVVGjb-@
 
 # Назначение (VPS Beget)
 # 💡 Впишите сюда тот же внешний IP-адрес вашего сервера, что и в прошлых скриптах
-URL_LOCAL_VPS = "postgresql://db_user:RDB_r6o_BA0qSlVVGjb_2026@185.225.34.94:5432/cx_dashboard"
+URL_LOCAL_VPS = "postgresql://db_user:RDB_r6o_BA0qSlVVGjb_2026@72.56.240.22:5432/cx_dashboard"
 
 # Список всех таблиц, которые нужно держать в 100% идентичном состоянии
 TABLES_TO_SYNC = [
