@@ -94,6 +94,8 @@ def get_pvz_list(city_name: str) -> list[dict]:
             "address":   loc.get("address_full", loc.get("address", "")),
             "work_time": p.get("work_time", ""),
             "phone":     p.get("phones", [{}])[0].get("number", "") if p.get("phones") else "",
+            "lat":       loc.get("latitude"),
+            "lng":       loc.get("longitude"),
         })
     return result
 

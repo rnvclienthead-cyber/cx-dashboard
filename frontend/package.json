@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "imask": "^7.6.1",
+    "leaflet": "^1.9.4",
     "pinia": "^3.0.4",
     "plotly.js-dist-min": "^3.5.1",
     "vue": "^3.5.32",

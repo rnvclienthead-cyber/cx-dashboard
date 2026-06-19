@@ -1,7 +1,9 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import IMask from 'imask'
 import { PackageCheck, CheckCircle2, AlertCircle, Loader2, Upload, X, Info, Send } from 'lucide-vue-next'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 const FORM_BASE = 'http://box.vidovito.com'
@@ -21,6 +23,7 @@ let prevTitle = ''
 let prevFavicon = ''
 
 onUnmounted(() => {
+  if (mapInstance) { mapInstance.remove(); mapInstance = null }
   if (isVidovitoDomain) {
     document.title = prevTitle
     const favicon = document.querySelector("link[rel='icon']")
@@ -72,19 +75,43 @@ const form = reactive({
   personal_data_consent: false,
 })
 
-// ── ПВЗ СДЭК ──────────────────────────────────────────────────────────────────
-const pvzCityQuery  = ref('')
-const pvzList       = ref([])
-const pvzLoading    = ref(false)
-const selectedPvz   = ref(null)
+// ── ПВЗ СДЭК + Карта ──────────────────────────────────────────────────────────
+const pvzCityQuery = ref('')
+const pvzList      = ref([])
+const pvzLoading   = ref(false)
+const selectedPvz  = ref(null)
+const mapRef       = ref(null)
 let pvzDebounce = null
+let mapInstance = null
+let mapMarkers  = []
 
-const onPvzCityInput = () => {
-  selectedPvz.value = null
+const _markerHtml = (selected) => selected
+  ? `<div style="width:32px;height:32px;border-radius:50%;background:#F5C000;border:3px solid #1E2235;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,.4);cursor:pointer"><div style="width:11px;height:11px;background:#1E2235;border-radius:50%"></div></div>`
+  : `<div style="width:26px;height:26px;border-radius:50%;background:#fff;border:3px solid #6B7280;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.2);cursor:pointer"><div style="width:9px;height:9px;background:#6B7280;border-radius:50%"></div></div>`
+
+const _icon = (selected) => L.divIcon({ html: _markerHtml(selected), className: '', iconSize: [32, 32], iconAnchor: [16, 16] })
+
+const selectPvz = (pvz) => {
+  selectedPvz.value       = pvz
+  form.client_pvz_code    = pvz.code
+  form.client_pvz_address = pvz.address
+  form.client_pvz_city    = pvzCityQuery.value
+  mapMarkers.forEach(({ marker, p }) => marker.setIcon(_icon(p.code === pvz.code)))
+  if (mapInstance) mapInstance.closePopup()
+}
+
+const clearPvz = () => {
+  selectedPvz.value       = null
   form.client_pvz_code    = ''
   form.client_pvz_address = ''
   form.client_pvz_city    = ''
+  mapMarkers.forEach(({ marker }) => marker.setIcon(_icon(false)))
+}
+
+const onPvzCityInput = () => {
+  clearPvz()
   pvzList.value = []
+  if (mapInstance) { mapInstance.remove(); mapInstance = null; mapMarkers = [] }
   if (pvzCityQuery.value.length < 2) return
   clearTimeout(pvzDebounce)
   pvzDebounce = setTimeout(async () => {
@@ -95,16 +122,28 @@ const onPvzCityInput = () => {
       pvzList.value = data.data || []
     } catch { pvzList.value = [] }
     finally { pvzLoading.value = false }
-  }, 600)
+  }, 700)
 }
 
-const selectPvz = (pvz) => {
-  selectedPvz.value     = pvz
-  form.client_pvz_code    = pvz.code
-  form.client_pvz_address = pvz.address
-  form.client_pvz_city    = pvzCityQuery.value
-  pvzList.value = []
-}
+watch(pvzList, async (list) => {
+  await nextTick()
+  if (!list.length || !mapRef.value) return
+  const pts = list.filter(p => p.lat && p.lng)
+  if (!pts.length) return
+  if (mapInstance) { mapInstance.remove(); mapInstance = null; mapMarkers = [] }
+  mapInstance = L.map(mapRef.value, { scrollWheelZoom: false, zoomControl: true })
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://openstreetmap.org">OSM</a>', maxZoom: 19
+  }).addTo(mapInstance)
+  const bounds = []
+  pts.forEach(p => {
+    const marker = L.marker([p.lat, p.lng], { icon: _icon(false) }).addTo(mapInstance)
+    marker.on('click', () => selectPvz(p))
+    mapMarkers.push({ marker, p })
+    bounds.push([p.lat, p.lng])
+  })
+  mapInstance.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 })
+})
 
 const PROBLEM_TYPES = ['Некомплект', 'Брак', 'Нужна другая деталь']
 
@@ -144,8 +183,6 @@ const validate = () => {
   if (phoneDigits.length < 11)      errors.customer_phone = 'Введите полный номер'
   if (!form.problem_type)           errors.problem_type = 'Выберите тип проблемы'
   if (!form.items_to_send.trim())   errors.items_to_send = 'Укажите, что нужно отправить'
-  if (!form.address_city.trim() && !form.address_street.trim())
-                                    errors.address = 'Укажите хотя бы город и улицу'
   if (uploadedFiles.value.filter(f => f.url).length === 0)
                                     errors.photos = 'Прикрепите хотя бы одну фотографию'
   if (!form.client_pvz_code)        errors.pvz = 'Выберите пункт выдачи СДЭК'
@@ -420,7 +457,7 @@ const submit = async () => {
               <p v-if="errors.photos" class="text-xs mt-1" style="color:#EF4444;">{{ errors.photos }}</p>
             </div>
 
-            <!-- ПВЗ СДЭК -->
+            <!-- ПВЗ СДЭК — карта -->
             <div>
               <div class="flex items-center gap-2 mb-4">
                 <span class="text-xs font-bold uppercase tracking-widest" style="color:#F5C000;">{{ categories.length ? '06' : '05' }}</span>
@@ -428,7 +465,7 @@ const submit = async () => {
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
 
-              <p class="text-xs mb-3" style="color:#9CA3AF;">Введите ваш город — мы покажем ближайшие пункты СДЭК</p>
+              <p class="text-xs mb-3" style="color:#9CA3AF;">Введите город — на карте появятся пункты СДЭК, нажмите на нужный</p>
 
               <!-- Ввод города -->
               <input v-model="pvzCityQuery" @input="onPvzCityInput" type="text"
@@ -444,36 +481,38 @@ const submit = async () => {
                 Ищем пункты выдачи...
               </div>
 
-              <!-- Карточки ПВЗ -->
-              <div v-if="pvzList.length" class="mt-3 space-y-2">
-                <button v-for="pvz in pvzList.slice(0, 5)" :key="pvz.code" type="button"
-                  @click="selectPvz(pvz)"
-                  class="w-full text-left px-4 py-3 rounded-2xl border-2 transition-all"
-                  :style="selectedPvz?.code === pvz.code
-                    ? 'border-color:#F5C000; background:#FFF8D6;'
-                    : 'border-color:#E5E7EB; background:#fff;'">
-                  <div class="flex items-start justify-between gap-2">
-                    <div class="min-w-0">
-                      <div class="text-sm font-bold truncate" style="color:#1E2235;">{{ pvz.name }}</div>
-                      <div class="text-xs mt-0.5 leading-relaxed" style="color:#6B7280;">{{ pvz.address }}</div>
-                      <div v-if="pvz.work_time" class="text-xs mt-0.5" style="color:#9CA3AF;">{{ pvz.work_time }}</div>
-                    </div>
-                    <div v-if="selectedPvz?.code === pvz.code"
-                      class="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center mt-0.5"
-                      style="background:#F5C000;">
-                      <svg class="w-3 h-3" fill="none" viewBox="0 0 12 12">
-                        <path d="M2 6l3 3 5-5" stroke="#1E2235" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                      </svg>
-                    </div>
-                  </div>
-                </button>
-              </div>
+              <!-- Карта -->
+              <div v-show="pvzList.length" ref="mapRef"
+                class="mt-3 rounded-2xl overflow-hidden"
+                style="height:320px; border:1.5px solid #E5E7EB;"></div>
 
-              <!-- Не нашли? Подсказка -->
-              <p v-if="pvzList.length === 0 && pvzCityQuery.length >= 2 && !pvzLoading"
+              <!-- Подсказка -->
+              <p v-if="pvzList.length && !selectedPvz"
+                class="text-xs mt-2 text-center" style="color:#9CA3AF;">
+                Нажмите на маркер, чтобы выбрать пункт выдачи
+              </p>
+
+              <!-- Не нашли -->
+              <p v-if="!pvzList.length && pvzCityQuery.length >= 2 && !pvzLoading"
                 class="text-xs mt-2" style="color:#9CA3AF;">
                 Пункты не найдены. Проверьте название города.
               </p>
+
+              <!-- Выбранный ПВЗ -->
+              <div v-if="selectedPvz" class="mt-3 px-4 py-3 rounded-2xl" style="background:#FFF8D6; border:1.5px solid #F5C000;">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="text-sm font-bold" style="color:#1E2235;">{{ selectedPvz.name }}</div>
+                    <div class="text-xs mt-0.5 leading-relaxed" style="color:#6B7280;">{{ selectedPvz.address }}</div>
+                    <div v-if="selectedPvz.work_time" class="text-xs mt-1" style="color:#9CA3AF;">{{ selectedPvz.work_time }}</div>
+                  </div>
+                  <button type="button" @click="clearPvz"
+                    class="flex-shrink-0 text-xs px-3 py-1.5 rounded-xl font-semibold transition-opacity hover:opacity-70"
+                    style="background:#F5C00033; color:#92700A;">
+                    Изменить
+                  </button>
+                </div>
+              </div>
 
               <p v-if="errors.pvz" class="text-xs mt-2" style="color:#EF4444;">{{ errors.pvz }}</p>
             </div>
