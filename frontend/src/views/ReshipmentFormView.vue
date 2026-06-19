@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import IMask from 'imask'
 import { PackageCheck, CheckCircle2, AlertCircle, Loader2, Upload, X, Info, Send } from 'lucide-vue-next'
 
@@ -154,7 +154,12 @@ const validate = () => {
 }
 
 const submit = async () => {
-  if (!validate()) return
+  if (!validate()) {
+    await nextTick()
+    const el = document.querySelector('[style*="EF4444"]')
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    return
+  }
   state.value = 'loading'
 
   const photoFiles = JSON.stringify(uploadedFiles.value.filter(f => f.url).map(f => f.url))
@@ -360,7 +365,7 @@ const submit = async () => {
             <div>
               <div class="flex items-center gap-2 mb-4">
                 <span class="text-xs font-bold uppercase tracking-widest" style="color:#F5C000;">{{ categories.length ? '04' : '03' }}</span>
-                <span class="text-sm font-bold" style="color:#1E2235;">Что нужно отправить</span>
+                <span class="text-sm font-bold" style="color:#1E2235;">Что нужно отправить <span style="color:#EF4444;">*</span></span>
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
               <textarea v-model="form.items_to_send" rows="3"
@@ -423,52 +428,54 @@ const submit = async () => {
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
 
-              <!-- Поиск города -->
+              <p class="text-xs mb-3" style="color:#9CA3AF;">Введите ваш город — мы покажем ближайшие пункты СДЭК</p>
+
+              <!-- Ввод города -->
               <input v-model="pvzCityQuery" @input="onPvzCityInput" type="text"
-                placeholder="Введите ваш город..."
-                class="form-input w-full px-4 py-3 rounded-2xl border text-sm outline-none transition-colors mb-2"
-                :style="errors.pvz && !pvzCityQuery ? 'border-color:#FCA5A5; background:#FEF2F2;' : 'border-color:#E5E7EB;'" />
+                placeholder="Например: Москва, Екатеринбург..."
+                class="form-input w-full px-4 py-3 rounded-2xl border text-sm outline-none transition-colors"
+                :style="errors.pvz ? 'border-color:#FCA5A5; background:#FEF2F2;' : 'border-color:#E5E7EB;'" />
 
               <!-- Загрузка -->
-              <div v-if="pvzLoading" class="flex items-center gap-2 px-4 py-3 text-sm" style="color:#9CA3AF;">
-                <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+              <div v-if="pvzLoading" class="flex items-center gap-2 mt-3 text-xs" style="color:#9CA3AF;">
+                <svg class="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
                   <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="60" stroke-dashoffset="20"/>
                 </svg>
                 Ищем пункты выдачи...
               </div>
 
-              <!-- Список ПВЗ -->
-              <div v-if="pvzList.length && !selectedPvz"
-                class="rounded-2xl overflow-hidden"
-                style="border:1px solid #E5E7EB; max-height:260px; overflow-y:auto;">
-                <button v-for="pvz in pvzList" :key="pvz.code" type="button"
+              <!-- Карточки ПВЗ -->
+              <div v-if="pvzList.length" class="mt-3 space-y-2">
+                <button v-for="pvz in pvzList.slice(0, 5)" :key="pvz.code" type="button"
                   @click="selectPvz(pvz)"
-                  class="w-full text-left px-4 py-3 border-b last:border-0 transition-colors"
-                  style="border-color:#F3F4F6;"
-                  @mouseenter="$event.currentTarget.style.background='#FFF8D6'"
-                  @mouseleave="$event.currentTarget.style.background=''">
-                  <div class="text-sm font-semibold" style="color:#1E2235;">{{ pvz.name }}</div>
-                  <div class="text-xs mt-0.5" style="color:#6B7280;">{{ pvz.address }}</div>
-                  <div v-if="pvz.work_time" class="text-xs mt-0.5" style="color:#9CA3AF;">{{ pvz.work_time }}</div>
+                  class="w-full text-left px-4 py-3 rounded-2xl border-2 transition-all"
+                  :style="selectedPvz?.code === pvz.code
+                    ? 'border-color:#F5C000; background:#FFF8D6;'
+                    : 'border-color:#E5E7EB; background:#fff;'">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="text-sm font-bold truncate" style="color:#1E2235;">{{ pvz.name }}</div>
+                      <div class="text-xs mt-0.5 leading-relaxed" style="color:#6B7280;">{{ pvz.address }}</div>
+                      <div v-if="pvz.work_time" class="text-xs mt-0.5" style="color:#9CA3AF;">{{ pvz.work_time }}</div>
+                    </div>
+                    <div v-if="selectedPvz?.code === pvz.code"
+                      class="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center mt-0.5"
+                      style="background:#F5C000;">
+                      <svg class="w-3 h-3" fill="none" viewBox="0 0 12 12">
+                        <path d="M2 6l3 3 5-5" stroke="#1E2235" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </div>
+                  </div>
                 </button>
               </div>
 
-              <!-- Выбранный ПВЗ -->
-              <div v-if="selectedPvz" class="mt-1 px-4 py-3 rounded-2xl" style="background:#FFF8D6; border:1.5px solid #F5C000;">
-                <div class="flex items-start justify-between gap-2">
-                  <div>
-                    <div class="text-sm font-bold" style="color:#1E2235;">{{ selectedPvz.name }}</div>
-                    <div class="text-xs mt-0.5" style="color:#6B7280;">{{ selectedPvz.address }}</div>
-                    <div v-if="selectedPvz.work_time" class="text-xs mt-0.5" style="color:#9CA3AF;">{{ selectedPvz.work_time }}</div>
-                  </div>
-                  <button type="button" @click="selectedPvz = null; form.client_pvz_code = ''; pvzList = []"
-                    class="flex-shrink-0 text-xs px-2 py-1 rounded-xl" style="color:#92700A; background:#F5C00022;">
-                    Изменить
-                  </button>
-                </div>
-              </div>
+              <!-- Не нашли? Подсказка -->
+              <p v-if="pvzList.length === 0 && pvzCityQuery.length >= 2 && !pvzLoading"
+                class="text-xs mt-2" style="color:#9CA3AF;">
+                Пункты не найдены. Проверьте название города.
+              </p>
 
-              <p v-if="errors.pvz" class="text-xs mt-1" style="color:#EF4444;">{{ errors.pvz }}</p>
+              <p v-if="errors.pvz" class="text-xs mt-2" style="color:#EF4444;">{{ errors.pvz }}</p>
             </div>
 
             <!-- Согласие -->

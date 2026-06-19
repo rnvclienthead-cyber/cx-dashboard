@@ -886,9 +886,9 @@ def warehouse_packlist(db: Session = Depends(get_db)):
     """Скачать список к отправке в формате Excel."""
     rows = db.execute(text("""
         SELECT id, customer_name, customer_phone,
-               address_city, client_pvz_code, client_pvz_address,
+               address_city, client_pvz_code, client_pvz_address, shipping_address,
                items_to_send, cdek_uuid, cdek_cost,
-               matched_srid, moderator_comment, processed_at
+               moderator_comment, processed_at
         FROM reshipment_requests
         WHERE status = 'approved'
         ORDER BY processed_at ASC
@@ -912,8 +912,8 @@ def warehouse_packlist(db: Session = Depends(get_db)):
 
     headers = [
         ("№", 5), ("Заявка", 8), ("Клиент", 22), ("Телефон", 14),
-        ("Город", 16), ("ПВЗ СДЭК", 12), ("Адрес ПВЗ", 35),
-        ("Что отправить", 40), ("SRID", 14), ("Стоимость", 11),
+        ("Город", 16), ("ПВЗ СДЭК", 12), ("Адрес ПВЗ", 40),
+        ("Что отправить", 40), ("Стоимость", 11),
         ("UUID СДЭК", 38), ("Одобрено", 16),
     ]
     for col, (title, width) in enumerate(headers, 1):
@@ -931,6 +931,7 @@ def warehouse_packlist(db: Session = Depends(get_db)):
         fill = alt_fill if i % 2 == 0 else None
         dt = row["processed_at"]
         dt_str = dt.strftime("%d.%m %H:%M") if dt else ""
+        pvz_addr = row["client_pvz_address"] or row["shipping_address"] or ""
         vals = [
             i,
             row["id"],
@@ -938,9 +939,8 @@ def warehouse_packlist(db: Session = Depends(get_db)):
             row["customer_phone"] or "",
             row["address_city"] or "",
             row["client_pvz_code"] or "",
-            row["client_pvz_address"] or "",
+            pvz_addr,
             row["items_to_send"] or "",
-            row["matched_srid"] or "",
             float(row["cdek_cost"]) if row["cdek_cost"] else "",
             row["cdek_uuid"] or "",
             dt_str,
@@ -992,6 +992,18 @@ def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get
     from reportlab.lib.units import mm
     from reportlab.graphics.barcode import code128
     from reportlab.lib import colors
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    _DEJAVU      = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    _DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVu",     _DEJAVU))
+        pdfmetrics.registerFont(TTFont("DejaVu-Bold", _DEJAVU_BOLD))
+        _F      = "DejaVu"
+        _F_BOLD = "DejaVu-Bold"
+    except Exception:
+        _F = _F_BOLD = "Helvetica"
 
     W = 58 * mm
     H = 40 * mm
@@ -1023,7 +1035,7 @@ def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get
             c.setFont("Helvetica-Bold", 8)
             c.drawCentredString(W / 2, 28 * mm, barcode_val)
 
-        c.setFont("Helvetica", 5.5)
+        c.setFont(_F, 5.5)
         c.setFillColor(colors.HexColor("#555555"))
         c.drawCentredString(W / 2, 20 * mm, barcode_val)
 
@@ -1032,18 +1044,18 @@ def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get
         c.line(2 * mm, 19 * mm, W - 2 * mm, 19 * mm)
 
         c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 7.5)
+        c.setFont(_F_BOLD, 7.5)
         c.drawString(2 * mm, 15.5 * mm, f"#{req_id}  {city}")
         if pvz:
-            c.setFont("Helvetica", 6.5)
+            c.setFont(_F, 6.5)
             c.drawString(2 * mm, 11.5 * mm, f"ПВЗ: {pvz}")
-        c.setFont("Helvetica", 6.5)
+        c.setFont(_F, 6.5)
         c.drawString(2 * mm, 8 * mm, name)
-        c.setFont("Helvetica", 6)
+        c.setFont(_F, 6)
         c.setFillColor(colors.HexColor("#444444"))
         c.drawString(2 * mm, 4.5 * mm, items[:50])
         if cdek_no:
-            c.setFont("Helvetica-Bold", 5.5)
+            c.setFont(_F_BOLD, 5.5)
             c.setFillColor(colors.HexColor("#2563EB"))
             c.drawString(2 * mm, 1.5 * mm, f"СДЭК: {cdek_no}")
 

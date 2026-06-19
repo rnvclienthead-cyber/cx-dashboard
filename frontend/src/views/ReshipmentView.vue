@@ -618,7 +618,7 @@ onMounted(() => {
             <MapPin class="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
             <div>
               <p class="font-medium">{{ selected.client_pvz_city }}</p>
-              <p class="text-xs text-slate-500 mt-0.5">{{ selected.client_pvz_address }}</p>
+              <p class="text-xs text-slate-500 mt-0.5">{{ selected.client_pvz_address || selected.shipping_address || '—' }}</p>
               <p class="text-xs text-slate-400 mt-0.5 font-mono">Код: {{ selected.client_pvz_code }}</p>
             </div>
           </div>
