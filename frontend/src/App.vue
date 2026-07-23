@@ -1,10 +1,12 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { apiFetch } from './api'
 import {
   Database, Bot, ClipboardCheck, BrainCircuit, ScrollText, MessageSquare,
   LineChart, AlertTriangle, Star, ShieldAlert, BadgeDollarSign, LayoutGrid,
-  ChevronLeft, ChevronRight, Menu, PackageCheck, LogOut, KeyRound, X, Eye, EyeOff
+  ChevronLeft, ChevronRight, Menu, PackageCheck, LogOut, KeyRound, X, Eye, EyeOff,
+  BookOpen, HelpCircle, BarChart3, Gauge, MessagesSquare, PackageX
 } from 'lucide-vue-next'
 import { usePlatformStore } from './stores/platform'
 import { usePermissionsStore } from './stores/permissions'
@@ -17,11 +19,6 @@ const isMobileOpen = ref(false)
 
 // Доступные площадки (из прав текущего пользователя)
 const availablePlatforms = computed(() => permissionsStore.allowedMarketplaces)
-
-onMounted(() => {
-  const saved = localStorage.getItem('sidebar_collapsed')
-  if (saved !== null) isCollapsed.value = saved === 'true'
-})
 
 watch(isCollapsed, (val) => {
   localStorage.setItem('sidebar_collapsed', String(val))
@@ -36,6 +33,53 @@ watch(() => permissionsStore.loaded, (loaded) => {
 
 const toggleCollapse = () => { isCollapsed.value = !isCollapsed.value }
 const closeMobile = () => { isMobileOpen.value = false }
+
+// ── Трекинг активности ────────────────────────────────────────────────────────
+const route = useRoute()
+let activityTimer = null
+
+function pingActivity () {
+  if (!permissionsStore.loaded) return
+  apiFetch('/api/v1/cx-control/activity/ping', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: route.path }),
+  }).catch(() => {})
+}
+
+const newReshipmentCount = ref(0)
+let reshipmentTimer = null
+
+async function fetchReshipmentBadge () {
+  if (!permissionsStore.can('reshipment')) return
+  try {
+    const res = await apiFetch('/api/v1/reshipment/stats')
+    const data = await res.json()
+    const newStatus = (data?.data ?? []).find((s) => s.status === 'new')
+    newReshipmentCount.value = parseInt(newStatus?.cnt ?? 0, 10)
+  } catch { /* silent */ }
+}
+
+watch(() => permissionsStore.loaded, (loaded) => {
+  if (loaded && permissionsStore.can('reshipment')) {
+    fetchReshipmentBadge()
+    reshipmentTimer = setInterval(fetchReshipmentBadge, 60000)
+  }
+}, { immediate: true })
+
+onMounted(() => {
+  const saved = localStorage.getItem('sidebar_collapsed')
+  if (saved !== null) isCollapsed.value = saved === 'true'
+  pingActivity()
+  activityTimer = setInterval(pingActivity, 60000)
+})
+
+onUnmounted(() => {
+  clearInterval(activityTimer)
+  if (reshipmentTimer) clearInterval(reshipmentTimer)
+})
+
+watch(() => route.path, pingActivity)
 
 const currentUser = localStorage.getItem('username') || ''
 
@@ -373,10 +417,89 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           <span v-if="!isCollapsed">Финансовые потери</span>
         </RouterLink>
 
+        <RouterLink
+          v-if="permissionsStore.can('pnl')"
+          to="/pnl"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-indigo-50 text-indigo-700 font-semibold"
+          :title="isCollapsed ? 'P&L по артикулу' : ''"
+        >
+          <BarChart3 class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">P&amp;L по артикулу</span>
+        </RouterLink>
+
+        <RouterLink
+          v-if="permissionsStore.isAdmin"
+          to="/cx-control"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-emerald-50 text-emerald-700 font-semibold"
+          :title="isCollapsed ? 'Контроль отдела' : ''"
+        >
+          <Gauge class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">Контроль отдела</span>
+        </RouterLink>
+
         <div v-if="!isCollapsed && permissionsStore.can('reshipment')" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
           Функциональный блок
         </div>
         <div v-else-if="isCollapsed && permissionsStore.can('reshipment')" class="border-t border-slate-100 my-2"></div>
+
+        <template v-if="permissionsStore.can('cx_responses')">
+          <RouterLink
+            to="/reviews"
+            :class="[
+              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+            ]"
+            active-class="bg-emerald-50 text-emerald-700 font-semibold"
+            :title="isCollapsed ? 'Отзывы' : ''"
+          >
+            <Star class="w-4 h-4 flex-shrink-0" />
+            <span v-if="!isCollapsed">Отзывы</span>
+          </RouterLink>
+          <RouterLink
+            to="/questions"
+            :class="[
+              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+            ]"
+            active-class="bg-emerald-50 text-emerald-700 font-semibold"
+            :title="isCollapsed ? 'Вопросы' : ''"
+          >
+            <HelpCircle class="w-4 h-4 flex-shrink-0" />
+            <span v-if="!isCollapsed">Вопросы</span>
+          </RouterLink>
+          <RouterLink
+            to="/chats"
+            :class="[
+              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+            ]"
+            active-class="bg-emerald-50 text-emerald-700 font-semibold"
+            :title="isCollapsed ? 'Чаты' : ''"
+          >
+            <MessagesSquare class="w-4 h-4 flex-shrink-0" />
+            <span v-if="!isCollapsed">Чаты</span>
+          </RouterLink>
+          <RouterLink
+            to="/returns"
+            :class="[
+              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+            ]"
+            active-class="bg-emerald-50 text-emerald-700 font-semibold"
+            :title="isCollapsed ? 'Возвраты' : ''"
+          >
+            <PackageX class="w-4 h-4 flex-shrink-0" />
+            <span v-if="!isCollapsed">Возвраты</span>
+          </RouterLink>
+        </template>
 
         <RouterLink
           v-if="permissionsStore.can('reshipment')"
@@ -388,8 +511,34 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           active-class="bg-emerald-50 text-emerald-700 font-semibold"
           :title="isCollapsed ? 'Отправка деталей' : ''"
         >
-          <PackageCheck class="w-4 h-4 flex-shrink-0" />
-          <span v-if="!isCollapsed">Отправка деталей</span>
+          <span class="relative flex-shrink-0">
+            <PackageCheck class="w-4 h-4" />
+            <span
+              v-if="isCollapsed && newReshipmentCount > 0"
+              class="absolute -top-1.5 -right-1.5 flex items-center justify-center rounded-full bg-red-500 text-white font-bold leading-none"
+              style="min-width:14px;height:14px;font-size:9px;padding:0 2px"
+            >{{ newReshipmentCount }}</span>
+          </span>
+          <span v-if="!isCollapsed" class="flex-1">Отправка деталей</span>
+          <span
+            v-if="!isCollapsed && newReshipmentCount > 0"
+            class="flex items-center justify-center rounded-full bg-red-500 text-white font-bold leading-none"
+            style="min-width:18px;height:18px;font-size:10px;padding:0 4px"
+          >{{ newReshipmentCount }}</span>
+        </RouterLink>
+
+        <RouterLink
+          v-if="permissionsStore.can('faq')"
+          to="/faq"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-emerald-50 text-emerald-700 font-semibold"
+          :title="isCollapsed ? 'База знаний FAQ' : ''"
+        >
+          <HelpCircle class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">База знаний FAQ</span>
         </RouterLink>
 
         <div v-if="!isCollapsed && (permissionsStore.can('admin_panel') || permissionsStore.can('logs'))" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
@@ -423,6 +572,20 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
         >
           <ScrollText class="w-4 h-4 flex-shrink-0" />
           <span v-if="!isCollapsed">Журнал событий</span>
+        </RouterLink>
+
+        <RouterLink
+          v-if="permissionsStore.isAdmin"
+          to="/docs"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-indigo-50 text-indigo-700 font-semibold"
+          :title="isCollapsed ? 'Документация системы' : ''"
+        >
+          <BookOpen class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">Документация системы</span>
         </RouterLink>
 
       </nav>

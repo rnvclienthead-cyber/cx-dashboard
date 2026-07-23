@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from contextlib import asynccontextmanager
 from .database import get_db, engine
-from .routers import claims, ai, system, production, ppm, ratings, auth, finances, voc, dashboard, ym, reshipment, roles
-from . import wb_chat
+from .routers import claims, ai, system, production, ppm, ratings, auth, finances, voc, dashboard, ym, reshipment, roles, returns, events, cx_control, faq, cx_responses, kb, reshipment_skus, chat_playbook, chat_triage, chat_bot as chat_bot_router
+from . import chat_bot
+from . import wb_chat, wb_mini_sync, cx_alert, wb_chat_sync, ozon_chat_sync, ozon_photo_sync
 
 
 @asynccontextmanager
@@ -46,21 +47,259 @@ async def lifespan(app: FastAPI):
                 ADD COLUMN IF NOT EXISTS wb_nm_id       BIGINT,
                 ADD COLUMN IF NOT EXISTS wb_client_id   VARCHAR(100)
         """))
+        # Сравнение СДЭК/Яндекс при подаче заявки: ближайший ПВЗ + цена по каждой ТК.
+        # client_pvz_code/address/city + cdek_cost — уже существующие поля СДЭК (как раньше).
+        # Ниже — параллельные поля под кандидата Яндекса. Перевозчик не выбирается
+        # автоматически — КС сам сравнивает оба варианта на этапе одобрения.
+        conn.execute(text("""
+            ALTER TABLE reshipment_requests
+                ADD COLUMN IF NOT EXISTS yandex_pvz_code    VARCHAR(50),
+                ADD COLUMN IF NOT EXISTS yandex_pvz_address TEXT,
+                ADD COLUMN IF NOT EXISTS yandex_pvz_name    VARCHAR(255),
+                ADD COLUMN IF NOT EXISTS yandex_cost        NUMERIC(10,2),
+                ADD COLUMN IF NOT EXISTS yandex_sharing_url TEXT
+        """))
+        conn.execute(text("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_chat_id VARCHAR(100)
+        """))
+        # WB чаты с покупателями: состояние для мониторинга очереди ответов
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS wb_chats (
+                chat_id       TEXT PRIMARY KEY,
+                client_name   TEXT,
+                nm_id         BIGINT,
+                good_name     TEXT,
+                last_message  TEXT,
+                last_sender   TEXT,
+                last_ts       BIGINT,
+                needs_answer  BOOLEAN DEFAULT FALSE,
+                is_closing    BOOLEAN DEFAULT FALSE,
+                waiting_since TIMESTAMP,
+                reply_sign    TEXT,
+                created_at    TIMESTAMP DEFAULT now(),
+                updated_at    TIMESTAMP DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            ALTER TABLE wb_chats ADD COLUMN IF NOT EXISTS is_closing BOOLEAN DEFAULT FALSE
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_wb_chats_needs ON wb_chats (needs_answer) WHERE needs_answer = true
+        """))
+        # Полная лента переписки WB (копится из потока событий)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS wb_chat_messages (
+                id          BIGSERIAL PRIMARY KEY,
+                chat_id     TEXT        NOT NULL,
+                sender      VARCHAR(20),
+                text        TEXT,
+                attachments JSONB,
+                add_ts      BIGINT,
+                created_at  TIMESTAMP   DEFAULT now(),
+                UNIQUE (chat_id, add_ts, sender)
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_wb_chat_messages_chat "
+            "ON wb_chat_messages (chat_id, add_ts)"
+        ))
+        # SLA-настройки: сид для чатов (24 часа по умолчанию)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_sla_settings (
+                queue_id   VARCHAR(50) PRIMARY KEY,
+                sla_min    INTEGER NOT NULL DEFAULT 1440,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO cx_sla_settings (queue_id, sla_min) VALUES ('wb_chat', 1440)
+            ON CONFLICT (queue_id) DO NOTHING
+        """))
+        # Получать ли системные алерты (утренний дайджест + падения) в Telegram
+        conn.execute(text("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_alerts BOOLEAN DEFAULT false
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_activity (
+                user_id       INTEGER PRIMARY KEY,
+                username      VARCHAR(255) NOT NULL,
+                last_seen     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_path     VARCHAR(500),
+                session_start TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """))
+        # Ozon отзывы покупателей
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ozon_reviews (
+                id          SERIAL PRIMARY KEY,
+                review_id   TEXT UNIQUE NOT NULL,
+                sku         BIGINT,
+                supplier_article TEXT,
+                product_name TEXT,
+                rating      INTEGER,
+                review_text TEXT,
+                pros        TEXT,
+                cons        TEXT,
+                answered_at TIMESTAMP,
+                answer_text TEXT,
+                created_at  TIMESTAMP,
+                synced_at   TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        # Ozon чаты с покупателями
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ozon_chats (
+                id              SERIAL PRIMARY KEY,
+                chat_id         TEXT UNIQUE NOT NULL,
+                chat_status     TEXT,
+                last_message    TEXT,
+                last_sender     TEXT,
+                needs_answer    BOOLEAN DEFAULT FALSE,
+                waiting_since   TIMESTAMP,
+                context_sku     BIGINT,
+                context_article TEXT,
+                order_number    TEXT,
+                updated_at      TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ozon_chats_needs
+            ON ozon_chats (needs_answer) WHERE needs_answer = true
+        """))
+        # ЯМ отзывы: поля для хранения ответа менеджера
+        conn.execute(text("""
+            ALTER TABLE ym_feedbacks
+                ADD COLUMN IF NOT EXISTS answer_text TEXT,
+                ADD COLUMN IF NOT EXISTS answered_at TIMESTAMP
+        """))
+        # Лог ответов КС: кто, когда, что ответил через систему
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_response_log (
+                id          SERIAL PRIMARY KEY,
+                item_type   VARCHAR(20) NOT NULL,
+                item_id     TEXT NOT NULL,
+                mp          VARCHAR(10) NOT NULL DEFAULT 'wb',
+                answered_by VARCHAR(255),
+                answer_text TEXT,
+                sent_at     TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_cx_response_log_item
+            ON cx_response_log (item_type, item_id)
+        """))
+        # Шаблоны ответов КС: ручные + авто-ответы
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_response_templates (
+                id                    SERIAL PRIMARY KEY,
+                title                 VARCHAR(200) NOT NULL,
+                body                  TEXT NOT NULL,
+                mp                    VARCHAR(10)  DEFAULT 'all',
+                item_type             VARCHAR(20)  DEFAULT 'all',
+                tone                  VARCHAR(20)  DEFAULT 'all',
+                auto_reply            BOOLEAN      DEFAULT FALSE,
+                min_rating            INTEGER,
+                max_rating            INTEGER,
+                require_no_text       BOOLEAN      DEFAULT FALSE,
+                stop_words            TEXT         DEFAULT '',
+                ignore_questions      BOOLEAN      DEFAULT FALSE,
+                requires_confirmation BOOLEAN      DEFAULT FALSE,
+                created_by            VARCHAR(255),
+                created_at            TIMESTAMP    DEFAULT NOW(),
+                updated_at            TIMESTAMP    DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("ALTER TABLE cx_response_templates ADD COLUMN IF NOT EXISTS stop_words TEXT DEFAULT ''"))
+        conn.execute(text("ALTER TABLE cx_response_templates ADD COLUMN IF NOT EXISTS ignore_questions BOOLEAN DEFAULT FALSE"))
+        conn.execute(text("ALTER TABLE cx_response_templates ADD COLUMN IF NOT EXISTS requires_confirmation BOOLEAN DEFAULT FALSE"))
+        # Очередь черновиков на модерацию (авто-ответы с requires_confirmation=true)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_pending_moderation (
+                id             SERIAL PRIMARY KEY,
+                item_type      VARCHAR(20)  NOT NULL,
+                item_id        TEXT         NOT NULL,
+                mp             VARCHAR(10)  NOT NULL,
+                draft_text     TEXT         NOT NULL,
+                template_id    INTEGER,
+                template_title VARCHAR(200),
+                created_at     TIMESTAMP    DEFAULT NOW(),
+                UNIQUE (item_type, item_id, mp)
+            )
+        """))
+        # Вручную закрытые обращения (без отправки ответа)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_dismissed_items (
+                id           SERIAL PRIMARY KEY,
+                item_type    VARCHAR(20)  NOT NULL,
+                item_id      TEXT         NOT NULL,
+                mp           VARCHAR(10)  NOT NULL,
+                dismissed_by VARCHAR(255),
+                note         TEXT,
+                dismissed_at TIMESTAMP    DEFAULT NOW(),
+                UNIQUE (item_type, item_id, mp)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS wb_product_photos (
+                nm_id      BIGINT PRIMARY KEY,
+                photo_url  TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT now()
+            )
+        """))
         conn.commit()
 
-    # Инициализируем курсор WB событий (пропускаем старые)
-    wb_chat.init_event_cursor()
+    # Таблицы базы знаний ответов («Конструктор Vidovito»)
+    kb.init_kb_tables(engine)
+
+    # Список SKU, по которым разрешена доотправка деталей
+    reshipment_skus.init_sku_table(engine)
+
+    # Плейбук автоответов в чатах: темы, варианты текстов, режимы
+    chat_playbook.init_playbook_tables(engine)
+    # Движок бота: состояние диалога + журнал (shadow)
+    chat_bot.init_bot_tables(engine)
+
+    # Инициализируем курсор WB событий, захватываем незалинкованные токены из истории
+    wb_chat.init_event_cursor(get_db)
 
     # Запускаем WB чат воркер
     wb_task = asyncio.create_task(wb_chat.start_worker(get_db))
+    # Запускаем мини-воркер (отзывы + возвраты каждые 5 мин)
+    mini_task = asyncio.create_task(wb_mini_sync.start_mini_sync_worker(get_db))
+    # Воркер дозаполнения cdek_number для заявок без номера
+    cdek_task = asyncio.create_task(_cdek_number_filler(get_db))
+    # Воркер обновления статусов в пути
+    cdek_updater_task = asyncio.create_task(_cdek_status_updater(get_db))
+    # Воркер обновления статусов Яндекс NDD (нет вебхука — только опрос)
+    yandex_updater_task = asyncio.create_task(_yandex_status_updater(get_db))
+    # Воркер синхронизации чатов WB (мониторинг очереди ответов)
+    chat_sync_task = asyncio.create_task(wb_chat_sync.start_chat_sync_worker(get_db))
+    # Воркер чатов Ozon (интервал 15 мин — щадящий режим)
+    ozon_chat_task = asyncio.create_task(ozon_chat_sync.start_ozon_chat_sync_worker(get_db))
+    # Воркер фото товаров WB (Content API, раз в 24ч)
+    from .routers.cx_responses import start_photo_sync_worker
+    photo_task = asyncio.create_task(start_photo_sync_worker(get_db))
+    # Воркер фото товаров OZON (раз в 24ч, fallback через supplier_article)
+    ozon_photo_task = asyncio.create_task(ozon_photo_sync.start_ozon_photo_sync_worker(get_db))
+    # Бот автоответов в чатах (по умолчанию shadow — клиенту не шлёт)
+    chat_bot_task = asyncio.create_task(chat_bot.start_chat_bot_worker(get_db))
 
     yield
 
     wb_task.cancel()
-    try:
-        await wb_task
-    except asyncio.CancelledError:
-        pass
+    mini_task.cancel()
+    cdek_task.cancel()
+    cdek_updater_task.cancel()
+    yandex_updater_task.cancel()
+    chat_sync_task.cancel()
+    ozon_chat_task.cancel()
+    ozon_photo_task.cancel()
+    chat_bot_task.cancel()
+    for t in (wb_task, mini_task, cdek_task, cdek_updater_task, yandex_updater_task, chat_sync_task, ozon_chat_task, ozon_photo_task, chat_bot_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 # Инициализируем приложение
@@ -95,7 +334,292 @@ app.include_router(ym.router)
 app.include_router(roles.router)
 app.include_router(reshipment.public_router)
 app.include_router(reshipment.router)
-app.mount("/uploads", StaticFiles(directory="/root/cx-dashboard/uploads"), name="uploads")
+app.include_router(returns.router)
+app.include_router(events.router)
+app.include_router(cx_control.public_router)
+app.include_router(cx_control.router)
+app.include_router(faq.router)
+app.include_router(cx_responses.public_router)
+app.include_router(cx_responses.router)
+app.include_router(kb.router)
+app.include_router(reshipment_skus.router)
+app.include_router(chat_playbook.router)
+app.include_router(chat_triage.router)
+app.include_router(chat_bot_router.router)
+app.mount("/uploads", StaticFiles(directory=os.getenv("CX_UPLOAD_BASE_DIR", "/root/cx-dashboard/uploads")), name="uploads")
+
+async def _cdek_number_filler(get_db_func):
+    """Каждые 10 минут дозаполняет cdek_number и проверяет статус CDEK для актуализации."""
+    import logging, secrets as _sec
+    logger = logging.getLogger("cdek_filler")
+
+    # Статусы CDEK, при которых посылка считается "отправлена" клиенту
+    SHIPPED_CODES = {"ACCEPTED_AT_PICK_UP_POINT", "READY_FOR_PICKUP",
+                     "RECEIVED_AT_DESTINATION_WAREHOUSE", "DELIVERED"}
+
+    while True:
+        await asyncio.sleep(600)
+        try:
+            from .cdek import get_order_by_uuid
+            db = next(get_db_func())
+
+            # Заявки без cdek_number но с uuid
+            rows = db.execute(text("""
+                SELECT id, cdek_uuid FROM reshipment_requests
+                WHERE cdek_uuid IS NOT NULL AND cdek_uuid != ''
+                  AND (cdek_number IS NULL OR cdek_number = '')
+                  AND status NOT IN ('rejected', 'returned')
+            """)).mappings().fetchall()
+
+            for row in rows:
+                await asyncio.sleep(1.5)  # СДЭК банит как бот при частых запросах подряд
+                try:
+                    info = await asyncio.to_thread(get_order_by_uuid, row["cdek_uuid"])
+                    num = info.get("cdek_number", "")
+                    cost = info.get("actual_cost")
+                    status_code = info.get("status_code", "")
+                    if not num:
+                        continue
+
+                    # Если CDEK уже в статусе "отправлено" — обновляем статус заявки сразу
+                    if status_code in SHIPPED_CODES:
+                        updated = db.execute(text("""
+                            UPDATE reshipment_requests
+                            SET cdek_number = :num,
+                                cdek_cost = COALESCE(:cost, cdek_cost),
+                                status = 'shipped',
+                                shipped_at = COALESCE(shipped_at, NOW()),
+                                confirmation_token = COALESCE(confirmation_token, :token)
+                            WHERE id = :id AND status IN ('approved', 'packed')
+                            RETURNING id, salebot_client_id
+                        """), {"num": num, "cost": cost, "id": row["id"],
+                               "token": _sec.token_hex(32)}).mappings().first()
+                        db.commit()
+                        if updated and updated.get("salebot_client_id"):
+                            try:
+                                from .salebot import notify_shipped, is_enabled
+                                if is_enabled():
+                                    notify_shipped(updated["salebot_client_id"], row["id"],
+                                                   track_number=num, delivery_method="cdek")
+                            except Exception as ex:
+                                logger.warning("cdek_filler: salebot error #%s: %s", row["id"], ex)
+                        logger.info("cdek_filler: заявка #%s → shipped (%s)", row["id"], status_code)
+                    else:
+                        db.execute(text("""
+                            UPDATE reshipment_requests
+                            SET cdek_number = :num,
+                                cdek_cost = COALESCE(:cost, cdek_cost)
+                            WHERE id = :id
+                        """), {"num": num, "cost": cost, "id": row["id"]})
+                        db.commit()
+                        logger.info("cdek_filler: заявка #%s → cdek_number=%s", row["id"], num)
+                except Exception as e:
+                    logger.warning("cdek_filler: ошибка для #%s: %s", row["id"], e)
+
+            db.close()
+        except Exception as e:
+            logging.getLogger("cdek_filler").error("cdek_filler loop error: %s", e)
+
+
+async def _cdek_status_updater(get_db_func):
+    """Каждые 10 минут опрашивает CDEK и обновляет статусы заказов в пути."""
+    import logging, secrets as _sec
+    logger = logging.getLogger("cdek_updater")
+
+    # CDEK statuses → наши статусы (statuses[0] = самый свежий)
+    CDEK_MAP = {
+        # Отправлен: CDEK принял посылку на склад отправителя
+        "RECEIVED_AT_SHIPMENT_WAREHOUSE":              ("shipped",          ["approved", "packed"]),
+        # В пути: посылка в сети CDEK
+        "READY_FOR_SHIPMENT_IN_SENDER_CITY":           ("in_transit",       ["approved", "packed", "shipped"]),
+        "TAKEN_BY_TRANSPORTER_FROM_SENDER_CITY":       ("in_transit",       ["approved", "packed", "shipped"]),
+        "SENT_TO_TRANSIT_CITY":                        ("in_transit",       ["approved", "packed", "shipped"]),
+        "ACCEPTED_AT_TRANSIT_WAREHOUSE":               ("in_transit",       ["approved", "packed", "shipped"]),
+        "READY_FOR_SHIPMENT_IN_TRANSIT_CITY":          ("in_transit",       ["approved", "packed", "shipped"]),
+        "TAKEN_BY_TRANSPORTER_FROM_TRANSIT_CITY":      ("in_transit",       ["approved", "packed", "shipped"]),
+        "SENT_TO_RECIPIENT_CITY":                      ("in_transit",       ["approved", "packed", "shipped"]),
+        "ACCEPTED_IN_TRANSIT_CITY":                    ("in_transit",       ["approved", "packed", "shipped"]),
+        "ACCEPTED_IN_RECIPIENT_CITY":                  ("in_transit",       ["approved", "packed", "shipped"]),
+        # Готов к выдаче: посылка на ПВЗ получателя
+        "ACCEPTED_AT_PICK_UP_POINT":                   ("ready_for_pickup", ["approved", "packed", "shipped", "in_transit"]),
+        "READY_FOR_PICKUP":                            ("ready_for_pickup", ["approved", "packed", "shipped", "in_transit"]),
+        # Получен / Вернулся
+        "DELIVERED":                                   ("delivered",        ["shipped", "in_transit", "ready_for_pickup"]),
+        "NOT_DELIVERED":                               ("returned",         ["shipped", "in_transit", "ready_for_pickup"]),
+    }
+    STATUS_ORDER = ["shipped", "in_transit", "ready_for_pickup", "delivered", "returned"]
+
+    while True:
+        await asyncio.sleep(600)
+        try:
+            from .cdek import get_order_by_uuid
+            from .salebot import (notify_shipped, notify_in_transit, notify_ready_for_pickup,
+                                  notify_delivered, is_enabled)
+            db = next(get_db_func())
+            rows = db.execute(text("""
+                SELECT id, cdek_uuid, cdek_number, status, salebot_client_id, wb_reply_sign
+                FROM reshipment_requests
+                WHERE cdek_uuid IS NOT NULL AND cdek_uuid != ''
+                  AND cdek_number IS NOT NULL AND cdek_number != ''
+                  AND status IN ('packed', 'shipped', 'in_transit', 'ready_for_pickup')
+            """)).mappings().fetchall()
+
+            for row in rows:
+                await asyncio.sleep(1.5)  # СДЭК банит как бот при частых запросах подряд
+                try:
+                    info = await asyncio.to_thread(get_order_by_uuid, row["cdek_uuid"])
+                    cdek_code = info.get("status_code", "")
+                    mapping = CDEK_MAP.get(cdek_code)
+                    if not mapping:
+                        continue
+                    new_status, from_statuses = mapping
+                    if new_status == row["status"]:
+                        continue
+                    # Только вперёд по цепочке
+                    curr_idx = STATUS_ORDER.index(row["status"]) if row["status"] in STATUS_ORDER else -1
+                    new_idx = STATUS_ORDER.index(new_status) if new_status in STATUS_ORDER else -1
+                    if new_idx <= curr_idx:
+                        continue
+
+                    updated = db.execute(text("""
+                        UPDATE reshipment_requests
+                        SET status = :ns,
+                            shipped_at  = CASE WHEN :ns = 'shipped'    THEN COALESCE(shipped_at, NOW())   ELSE shipped_at  END,
+                            confirmed_at = CASE WHEN :ns IN ('delivered','returned') THEN COALESCE(confirmed_at, NOW()) ELSE confirmed_at END,
+                            confirmation_token = COALESCE(confirmation_token, :tok)
+                        WHERE id = :id AND status = ANY(:from_list)
+                        RETURNING id, salebot_client_id, wb_reply_sign, cdek_number
+                    """), {"ns": new_status, "id": row["id"],
+                           "tok": _sec.token_hex(32), "from_list": from_statuses}).mappings().first()
+                    db.commit()
+
+                    if updated:
+                        num = updated.get("cdek_number") or row.get("cdek_number") or ""
+                        sid = updated.get("salebot_client_id")
+                        wb_sign = updated.get("wb_reply_sign") or row.get("wb_reply_sign")
+
+                        salebot_sent = False
+                        if sid and is_enabled():
+                            try:
+                                if new_status == "shipped":
+                                    salebot_sent = notify_shipped(sid, row["id"], track_number=num, delivery_method="cdek")
+                                elif new_status == "in_transit":
+                                    salebot_sent = notify_in_transit(sid, row["id"], track_number=num)
+                                elif new_status == "ready_for_pickup":
+                                    salebot_sent = notify_ready_for_pickup(sid, row["id"], track_number=num)
+                                elif new_status == "delivered":
+                                    salebot_sent = notify_delivered(sid, row["id"])
+                            except Exception as ex:
+                                logger.warning("cdek_updater: salebot error #%s: %s", row["id"], ex)
+
+                        if not salebot_sent and wb_sign:
+                            try:
+                                from . import wb_chat as _wbc
+                                if new_status == "shipped":
+                                    _wbc.send_message(wb_sign, f"📦 Ваша посылка отправлена!\nТрек-номер СДЭК: {num}")
+                                elif new_status == "in_transit":
+                                    _wbc.send_message(wb_sign, f"🚚 Ваша посылка в пути!\nТрек-номер СДЭК: {num}\nСкоро прибудет в ваш город.")
+                                elif new_status == "ready_for_pickup":
+                                    _wbc.send_message(wb_sign, f"📬 Ваша посылка готова к выдаче!\nТрек-номер СДЭК: {num}\nЗаберите её в пункте выдачи СДЭК.")
+                                elif new_status == "delivered":
+                                    _wbc.send_message(wb_sign, "✅ Посылка получена! Надеемся, деталь подошла.")
+                            except Exception as ex:
+                                logger.warning("cdek_updater: wb_chat error #%s: %s", row["id"], ex)
+
+                    logger.info("cdek_updater: #%s %s → %s (%s)", row["id"], row["status"], new_status, cdek_code)
+                except Exception as e:
+                    logger.warning("cdek_updater: ошибка #%s: %s", row["id"], e)
+
+            db.close()
+        except Exception as e:
+            logging.getLogger("cdek_updater").error("cdek_updater loop error: %s", e)
+
+
+async def _yandex_status_updater(get_db_func):
+    """Каждые 10 минут опрашивает Яндекс NDD и обновляет статусы заказов в пути.
+    У Яндекса нет вебхука в этой интеграции — только периодический опрос."""
+    import logging, secrets as _sec
+    logger = logging.getLogger("yandex_updater")
+
+    STATUS_ORDER = ["shipped", "in_transit", "ready_for_pickup", "delivered", "returned"]
+
+    while True:
+        await asyncio.sleep(600)
+        try:
+            from . import yandex_ndd
+            from .salebot import (notify_in_transit, notify_ready_for_pickup,
+                                  notify_delivered, is_enabled)
+            db = next(get_db_func())
+            rows = db.execute(text("""
+                SELECT id, track_number, status, salebot_client_id, wb_reply_sign
+                FROM reshipment_requests
+                WHERE delivery_method = 'yandex'
+                  AND track_number IS NOT NULL AND track_number != ''
+                  AND status IN ('shipped', 'in_transit', 'ready_for_pickup')
+            """)).mappings().fetchall()
+
+            for row in rows:
+                await asyncio.sleep(1)
+                try:
+                    info = await asyncio.to_thread(yandex_ndd.get_order_status, row["track_number"])
+                    raw_status = info.get("status", "")
+                    new_status = yandex_ndd.STATUS_MAP.get(raw_status)
+                    if not new_status or new_status == row["status"]:
+                        continue
+                    # Только вперёд по цепочке
+                    curr_idx = STATUS_ORDER.index(row["status"]) if row["status"] in STATUS_ORDER else -1
+                    new_idx  = STATUS_ORDER.index(new_status) if new_status in STATUS_ORDER else -1
+                    if new_idx <= curr_idx:
+                        continue
+
+                    updated = db.execute(text("""
+                        UPDATE reshipment_requests
+                        SET status = :ns,
+                            confirmed_at = CASE WHEN :ns IN ('delivered','returned') THEN COALESCE(confirmed_at, NOW()) ELSE confirmed_at END,
+                            confirmation_token = COALESCE(confirmation_token, :tok)
+                        WHERE id = :id AND status = :curr
+                        RETURNING id, salebot_client_id, wb_reply_sign
+                    """), {"ns": new_status, "id": row["id"], "curr": row["status"],
+                           "tok": _sec.token_hex(32)}).mappings().first()
+                    db.commit()
+
+                    if updated:
+                        num = row["track_number"]
+                        sid = updated.get("salebot_client_id")
+                        wb_sign = updated.get("wb_reply_sign") or row.get("wb_reply_sign")
+
+                        salebot_sent = False
+                        if sid and is_enabled():
+                            try:
+                                if new_status == "in_transit":
+                                    salebot_sent = notify_in_transit(sid, row["id"], track_number=num, delivery_method="yandex")
+                                elif new_status == "ready_for_pickup":
+                                    salebot_sent = notify_ready_for_pickup(sid, row["id"], track_number=num, delivery_method="yandex")
+                                elif new_status == "delivered":
+                                    salebot_sent = notify_delivered(sid, row["id"])
+                            except Exception as ex:
+                                logger.warning("yandex_updater: salebot error #%s: %s", row["id"], ex)
+
+                        if not salebot_sent and wb_sign:
+                            try:
+                                from . import wb_chat as _wbc
+                                if new_status == "in_transit":
+                                    _wbc.send_message(wb_sign, f"🚚 Ваша посылка в пути!\nСлужба доставки: Яндекс Доставка\nТрек-номер: {num}\nСкоро прибудет в ваш город.")
+                                elif new_status == "ready_for_pickup":
+                                    _wbc.send_message(wb_sign, f"📬 Ваша посылка готова к выдаче!\nСлужба доставки: Яндекс Доставка\nТрек-номер: {num}\nЗаберите её в пункте выдачи Яндекс Доставка.")
+                                elif new_status == "delivered":
+                                    _wbc.send_message(wb_sign, "✅ Посылка получена! Надеемся, деталь подошла.")
+                            except Exception as ex:
+                                logger.warning("yandex_updater: wb_chat error #%s: %s", row["id"], ex)
+
+                    logger.info("yandex_updater: #%s %s → %s (%s)", row["id"], row["status"], new_status, raw_status)
+                except Exception as e:
+                    logger.warning("yandex_updater: ошибка #%s: %s", row["id"], e)
+
+            db.close()
+        except Exception as e:
+            logging.getLogger("yandex_updater").error("yandex_updater loop error: %s", e)
+
 
 # --- ТЕСТОВЫЕ МАРШРУТЫ ---
 

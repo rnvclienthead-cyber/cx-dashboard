@@ -13,12 +13,24 @@ import LoginView from '../views/LoginView.vue'
 import AdminView from '../views/AdminView.vue'
 import FinancialLossView from '../views/FinancialLossView.vue'
 import VocView from '../views/VocView.vue'
+import CxControlView from '../views/CxControlView.vue'
 import ExecutiveDashboardView from '../views/ExecutiveDashboardView.vue'
 import RegistryView from '../views/RegistryView.vue'
 import ReshipmentView from '../views/ReshipmentView.vue'
 import ReshipmentFormView from '../views/ReshipmentFormView.vue'
 import ReshipmentConfirmView from '../views/ReshipmentConfirmView.vue'
 import ResetPasswordView from '../views/ResetPasswordView.vue'
+import DocsView from '../views/DocsView.vue'
+import FAQView from '../views/FAQView.vue'
+import ReturnScanView from '../views/ReturnScanView.vue'
+import ReturnCardView from '../views/ReturnCardView.vue'
+import ReturnBatchView from '../views/ReturnBatchView.vue'
+import PnLView from '../views/PnLView.vue'
+import CxResponsesView from '../views/CxResponsesView.vue'
+import ReviewsView from '../views/ReviewsView.vue'
+import QuestionsView from '../views/QuestionsView.vue'
+import ChatsView from '../views/ChatsView.vue'
+import ReturnsView from '../views/ReturnsView.vue'
 
 // Порядок совпадает с порядком в сайдбаре — первый доступный модуль станет стартовой страницей
 export const MODULE_ROUTES = [
@@ -32,15 +44,28 @@ export const MODULE_ROUTES = [
   { module: 'production',  path: '/production' },
   { module: 'ppm',         path: '/ppm' },
   { module: 'voc',         path: '/voc' },
+  { module: 'cx_control',  path: '/cx-control' },
   { module: 'ratings',     path: '/ratings' },
-  { module: 'reshipment',  path: '/reshipment' },
   { module: 'finances',    path: '/finances' },
+  { module: 'reshipment',  path: '/reshipment' },
+  { module: 'pnl',         path: '/pnl' },
+  { module: 'faq',         path: '/faq' },
+  { module: 'cx_responses', path: '/reviews' },
+  { module: 'cx_responses', path: '/questions' },
+  { module: 'cx_responses', path: '/chats' },
+  { module: 'cx_responses', path: '/returns' },
+  { module: 'cx_responses', path: '/cx-responses' },
 ]
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    { path: '/',                         name: 'dashboard',         component: ExecutiveDashboardView, meta: { requiresAuth: true } },
+    {
+      path: '/',
+      name: 'dashboard',
+      component: window.location.hostname.includes('vidovito.com') ? ReshipmentFormView : ExecutiveDashboardView,
+      meta: window.location.hostname.includes('vidovito.com') ? { public: true } : { requiresAuth: true },
+    },
     { path: '/sync',                     name: 'sync',              component: SynchronizerView,       meta: { requiresAuth: true } },
     { path: '/ai-tagging',               name: 'tagging',           component: AITaggingView,          meta: { requiresAuth: true } },
     { path: '/moderation',               name: 'moderation',        component: ModerationView,         meta: { requiresAuth: true } },
@@ -53,11 +78,23 @@ const router = createRouter({
     { path: '/admin',                    name: 'admin',             component: AdminView,              meta: { requiresAuth: true } },
     { path: '/finances',                 name: 'finances',          component: FinancialLossView,      meta: { requiresAuth: true } },
     { path: '/voc',                      name: 'voc',               component: VocView,                meta: { requiresAuth: true } },
+    { path: '/cx-control',               name: 'cx-control',         component: CxControlView,          meta: { requiresAuth: true } },
     { path: '/registry',                 name: 'registry',          component: RegistryView,           meta: { requiresAuth: true } },
     { path: '/reshipment',               name: 'reshipment',        component: ReshipmentView,         meta: { requiresAuth: true } },
     { path: '/reshipment/form',          name: 'reshipment-form',   component: ReshipmentFormView,     meta: { public: true } },
     { path: '/reshipment/confirm/:token',name: 'reshipment-confirm',component: ReshipmentConfirmView,  meta: { public: true } },
     { path: '/reset-password',           name: 'reset-password',    component: ResetPasswordView,      meta: { public: true } },
+    { path: '/docs',                      name: 'docs',              component: DocsView,               meta: { requiresAuth: true } },
+    { path: '/pnl',                       name: 'pnl',               component: PnLView,                meta: { requiresAuth: true } },
+    { path: '/faq',                       name: 'faq',               component: FAQView,                meta: { requiresAuth: true } },
+    { path: '/cx-responses',             name: 'cx-responses',      component: CxResponsesView,        meta: { requiresAuth: true } },
+    { path: '/reviews',                  name: 'reviews',           component: ReviewsView,            meta: { requiresAuth: true } },
+    { path: '/questions',                name: 'questions',         component: QuestionsView,          meta: { requiresAuth: true } },
+    { path: '/chats',                    name: 'chats',             component: ChatsView,              meta: { requiresAuth: true } },
+    { path: '/returns',                  name: 'returns',           component: ReturnsView,            meta: { requiresAuth: true } },
+    { path: '/return/scan',              name: 'return-scan',       component: ReturnScanView,         meta: { public: true } },
+    { path: '/return/batch/:incomeId',   name: 'return-batch',      component: ReturnBatchView,        meta: { public: true } },
+    { path: '/return/:srid',             name: 'return-card',       component: ReturnCardView,         meta: { public: true } },
   ]
 })
 
@@ -75,7 +112,16 @@ router.beforeEach(async (to, from, next) => {
     await permStore.load()
   }
 
-  if (to.meta.requiresAuth) return next()
+  if (to.meta.requiresAuth) {
+    // Проверяем, есть ли у пользователя доступ к запрошенному модулю
+    const moduleRoute = MODULE_ROUTES.find(r => r.path === to.path)
+    if (moduleRoute && !permStore.can(moduleRoute.module)) {
+      // Ищем первый доступный модуль для редиректа
+      const first = MODULE_ROUTES.find(r => permStore.can(r.module))
+      if (first) return next(first.path)
+    }
+    return next()
+  }
   next()
 })
 
