@@ -453,7 +453,18 @@ def sync_feedbacks():
         if page_token:
             body["pageToken"] = page_token
 
-        data  = _post(f"/v2/businesses/{YM_BUSINESS_ID}/goods-feedback", body)
+        # ЯМ периодически отдаёт 400/5xx по своим причинам — ретраим до 3 раз
+        for _attempt in range(3):
+            try:
+                data = _post(f"/v2/businesses/{YM_BUSINESS_ID}/goods-feedback", body)
+                break
+            except RateLimitError:
+                raise
+            except Exception as _e:
+                if _attempt == 2:
+                    raise
+                log.warning(f"Временная ошибка отзывов ЯМ (попытка {_attempt+1}/3): {_e}, повтор через {10*(_attempt+1)}с")
+                time.sleep(10 * (_attempt + 1))
         items = data.get("result", {}).get("feedbacks", [])
         if not items:
             break
@@ -645,17 +656,47 @@ def sync_prices():
 def generate_finance_reports():
     yesterday = date.today() - timedelta(days=1)
     month_ago = yesterday   - timedelta(days=30)
+    prev_month_date = date.today().replace(day=1) - timedelta(days=1)
+    report_year  = prev_month_date.year
+    report_month = prev_month_date.month
 
-    for rtype, endpoint in [
-        ("realization", "/v2/reports/goods-realization/generate"),
-        ("services",    "/v2/reports/united-marketplace-services/generate"),
-    ]:
+    report_configs = [
+        ("realization", "/v2/reports/goods-realization/generate", {
+            "campaignId": int(YM_CAMPAIGN_ID),
+            "year":       report_year,
+            "month":      report_month,
+        }),
+        ("services", "/v2/reports/united-marketplace-services/generate", {
+            "businessId": int(YM_BUSINESS_ID),
+            "dateFrom":   month_ago.isoformat(),
+            "dateTo":     yesterday.isoformat(),
+        }),
+    ]
+
+    for rtype, endpoint, body in report_configs:
+        with engine.connect() as conn:
+            if rtype == "realization":
+                # Месячный отчёт — пропускаем, если уже есть pending или downloaded за этот месяц
+                already = conn.execute(
+                    text("""SELECT 1 FROM ym_finance_reports
+                            WHERE report_type=:rt
+                            AND status IN ('pending', 'downloaded')
+                            AND EXTRACT(month FROM period_from) = :month
+                            AND EXTRACT(year  FROM period_from) = :year
+                            LIMIT 1"""),
+                    {"rt": rtype, "month": report_month, "year": report_year}
+                ).fetchone()
+            else:
+                already = conn.execute(
+                    text("SELECT 1 FROM ym_finance_reports WHERE report_type=:rt AND status='pending' LIMIT 1"),
+                    {"rt": rtype}
+                ).fetchone()
+        if already:
+            log.info(f"Отчёт {rtype} уже в очереди или скачан — пропускаем генерацию.")
+            continue
+
         try:
-            resp = _post(endpoint, {
-                "campaignId": int(YM_CAMPAIGN_ID),
-                "dateFrom":   month_ago.isoformat(),
-                "dateTo":     yesterday.isoformat(),
-            })
+            resp = _post(endpoint, body)
             report_id = resp.get("result", {}).get("reportId")
             if report_id:
                 with engine.begin() as conn:
@@ -716,12 +757,20 @@ def _parse_report(report_type, url):
     try:
         r  = requests.get(url, headers=_hdr(), timeout=120)
         r.raise_for_status()
-        ct = r.headers.get("content-type", "")
-        if "zip" in ct or url.endswith(".zip"):
-            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                content = z.read(z.namelist()[0]).decode("utf-8-sig")
+        raw = r.content
+
+        # ЯМ отдаёт отчёт united-marketplace-services в формате XLSX (это zip, начинается
+        # с сигнатуры 'PK'), хотя content-type = application/octet-stream. Старый код
+        # декодировал его как текстовый TSV и падал («'utf-8' codec can't decode byte 0x8a
+        # in position 10»). Поэтому определяем формат по сигнатуре, а не по content-type.
+        if raw[:2] == b"PK":
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                names = z.namelist()
+                if "[Content_Types].xml" in names:              # настоящий XLSX
+                    return _parse_finance_xlsx(report_type, raw)
+                content = z.read(names[0]).decode("utf-8-sig")   # zip с TSV внутри
         else:
-            content = r.content.decode("utf-8-sig")
+            content = raw.decode("utf-8-sig")                    # обычный TSV
 
         reader = csv.DictReader(io.StringIO(content), delimiter="\t")
         revenue = commissions = 0.0
@@ -739,6 +788,49 @@ def _parse_report(report_type, url):
     except Exception as e:
         log.warning(f"Парсинг отчёта {report_type} упал: {e}")
         return None, None
+
+
+def _parse_finance_xlsx(report_type, raw):
+    """Парсит XLSX-отчёт ЯМ «О стоимости услуг маркетплейса».
+    Лист «Сводка» у этого аккаунта приходит пустым (нули) — реальные начисления лежат
+    на детальных листах по каждому виду услуги (Доставка, Приём платежа, Хранение…),
+    в колонке «Стоимость услуги, ₽». Суммируем эту колонку по всем листам.
+    Возвращает (revenue, commissions); у services выручки нет → revenue=None,
+    суммарную стоимость услуг кладём в commissions.
+    ВАЖНО: грузим openpyxl БЕЗ read_only — в read_only-режиме этот файл читается
+    некорректно и колонки не находятся."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+    COST_HEADER = "Стоимость услуги, ₽"
+
+    total = 0.0
+    found_header = False
+    for name in wb.sheetnames:
+        if name == "Сводка":
+            continue
+        ws = wb[name]
+        col = None
+        for row in ws.iter_rows(values_only=True):
+            if col is None:
+                # ищем строку заголовков с колонкой «Стоимость услуги, ₽»
+                for idx, c in enumerate(row):
+                    if isinstance(c, str) and c.strip() == COST_HEADER:
+                        col = idx
+                        found_header = True
+                        break
+                continue
+            if col < len(row) and isinstance(row[col], (int, float)):
+                total += row[col]
+
+    if not found_header:
+        log.warning(f"XLSX-отчёт {report_type}: колонка '{COST_HEADER}' не найдена ни на "
+                    f"одном листе (листы={wb.sheetnames})")
+        return None, None
+
+    commissions = round(total, 2)
+    revenue = None if report_type == "services" else commissions
+    log.info(f"XLSX-отчёт {report_type}: суммарная стоимость услуг = {commissions} ₽")
+    return revenue, commissions
 
 
 
@@ -1266,6 +1358,7 @@ if __name__ == "__main__":
         run(sync_prices)
         run(generate_finance_reports)
         run(sync_supplies)
+    elif task == "ratings":
         run(sync_business_rating_report)
     elif task == "reports":
         run(poll_finance_reports)
@@ -1275,5 +1368,5 @@ if __name__ == "__main__":
         from_date = sys.argv[2] if len(sys.argv) > 2 else "2025-01-01"
         sync_orders_backfill(from_date)
     else:
-        log.error(f"Неизвестная задача: '{task}'. Используй: hourly | daily | reports | backfill | orders-backfill [YYYY-MM-DD]")
+        log.error(f"Неизвестная задача: '{task}'. Используй: hourly | daily | ratings | reports | backfill | orders-backfill [YYYY-MM-DD]")
         sys.exit(1)

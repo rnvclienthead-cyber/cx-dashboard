@@ -310,10 +310,7 @@ const starColor = (val) => {
 }
 
 // ─── ИНИЦИАЛИЗАЦИЯ ────────────────────────────────────────────────────────────
-onMounted(() => {
-  fetchQueue()
-  fetchFbQueue()
-})
+onMounted(() => { fetchQueue(); fetchFbQueue() })
 
 watch(() => platformStore.platform, () => {
   fetchQueue()

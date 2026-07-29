@@ -299,6 +299,88 @@ def sync_orders(days_back=7):
     _log_db("ozon_sync_orders", "success", f"{total} строк")
 
 
+# ── 3. Синхронизация отзывов Ozon ────────────────────────────────────────────
+
+def sync_reviews():
+    """Забирает отзывы через v2/review/list (курсорная пагинация) и сохраняет в ozon_reviews.
+    Требует подписку Ozon «Управление отзывами» или Premium Pro.
+    """
+    log.info("Синхронизация отзывов Ozon (v2)...")
+    total   = 0
+    last_id = None
+    limit   = 100
+
+    while True:
+        body = {
+            "limit":    limit,
+            "sort_dir": "DESC",
+            "filters":  {},
+        }
+        if last_id:
+            body["last_id"] = last_id
+
+        try:
+            data = _post("/v2/review/list", body)
+        except Exception as e:
+            log.error(f"Ошибка запроса отзывов Ozon: {e}")
+            _log_db("ozon_sync_reviews", "error", str(e))
+            return
+
+        # v2: поля прямо в корне ответа (не внутри result)
+        reviews = data.get("reviews") or []
+        if not reviews:
+            break
+
+        with engine.begin() as conn:
+            for rev in reviews:
+                rev_id  = str(rev.get("uuid") or rev.get("review_id") or rev.get("id") or "")
+                if not rev_id:
+                    continue
+                sku     = rev.get("sku") or rev.get("item_id")
+                rating  = rev.get("rating") or rev.get("score")
+                created = rev.get("created_at") or rev.get("date")
+
+                comment_block = rev.get("comment") or {}
+                if isinstance(comment_block, dict):
+                    pros = comment_block.get("positive") or comment_block.get("pros") or ""
+                    cons = comment_block.get("negative") or comment_block.get("cons") or ""
+                    text_body = comment_block.get("overall") or comment_block.get("text") or ""
+                else:
+                    pros = rev.get("pros") or ""
+                    cons = rev.get("cons") or ""
+                    text_body = str(comment_block) or rev.get("text") or ""
+
+                conn.execute(text("""
+                    INSERT INTO ozon_reviews
+                        (review_id, sku, rating, review_text, pros, cons, created_at)
+                    VALUES (:rid, :sku, :rating, :body, :pros, :cons, :created)
+                    ON CONFLICT (review_id) DO UPDATE SET
+                        rating      = EXCLUDED.rating,
+                        review_text = COALESCE(EXCLUDED.review_text, ozon_reviews.review_text),
+                        synced_at   = NOW()
+                """), {
+                    "rid":     rev_id,
+                    "sku":     sku,
+                    "rating":  rating,
+                    "body":    text_body[:2000] if text_body else None,
+                    "pros":    pros[:500]  if pros else None,
+                    "cons":    cons[:500]  if cons else None,
+                    "created": created,
+                })
+                total += 1
+
+        # v2: курсорная пагинация через has_next + last_id
+        if not data.get("has_next"):
+            break
+        last_id = data.get("last_id")
+        if not last_id:
+            break
+        time.sleep(0.5)
+
+    log.info(f"Отзывы Ozon: {total} строк")
+    _log_db("ozon_sync_reviews", "success", f"{total} отзывов")
+
+
 # ── Точка входа ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     task = sys.argv[1] if len(sys.argv) > 1 else "hourly"
@@ -316,6 +398,8 @@ if __name__ == "__main__":
 
     if task == "hourly":
         run(sync_returns)
+        # sync_reviews отключён: Ozon Review API требует подписку «Управление отзывами»
+        # run(sync_reviews)
     elif task == "daily":
         run(sync_orders, days_back=7)
     elif task == "backfill":

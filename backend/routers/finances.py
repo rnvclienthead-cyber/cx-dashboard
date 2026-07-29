@@ -46,7 +46,7 @@ def get_financial_loss_data(
 
         retail_price_map = {r['sku']: float(r['avg_price']) for r in retail_price_rows if r['avg_price']}
 
-        # 3. Возвраты — JOIN через wb_logistics.srid вместо wb_claims.income_id (исправлено)
+        # 3. Возвраты — JOIN через wb_logistics.srid + финотчёт для логистических потерь
         claims_rows = db.execute(text("""
             SELECT
                 c.srid,
@@ -56,9 +56,10 @@ def get_financial_loss_data(
                 c.created_dt,
                 COALESCE(inv.invoice_num, 'Не указан') AS invoice,
                 COALESCE(pc.class_abc, 'C') AS abc_group,
-                COALESCE(pc.class_xyz, '-') AS xyz_group
+                COALESCE(pc.class_xyz, '-') AS xyz_group,
+                COALESCE(rd.delivery_rub, 0)          AS wb_delivery_rub,
+                COALESCE(rd.rebill_logistic_cost, 0)  AS wb_rebill_logistic
             FROM wb_claims c
-            -- Исправленный JOIN через wb_logistics.srid (income_id в wb_claims не заполнен с июня)
             LEFT JOIN wb_logistics l ON l.srid = c.srid
             LEFT JOIN (
                 SELECT DISTINCT ON (supply_id, supplier_article)
@@ -69,6 +70,14 @@ def get_financial_loss_data(
                AND TRIM(c.supplier_article) = TRIM(inv.supplier_article)
             LEFT JOIN product_classification pc
                 ON TRIM(c.supplier_article) = TRIM(pc.article)
+            LEFT JOIN (
+                SELECT LOWER(srid) AS srid,
+                       COALESCE(SUM(delivery_rub), 0)          AS delivery_rub,
+                       COALESCE(SUM(rebill_logistic_cost), 0)  AS rebill_logistic_cost
+                FROM wb_report_detail
+                WHERE doc_type_name = '' AND rebill_logistic_cost > 0
+                GROUP BY LOWER(srid)
+            ) rd ON rd.srid = LOWER(c.srid)
             WHERE c.supplier_article IS NOT NULL
               AND TRIM(c.supplier_article) NOT IN ('', 'Без артикула')
         """)).mappings().all()
@@ -108,6 +117,8 @@ def get_financial_loss_data(
             else:
                 status_mapped = 'Неизвестно'
 
+            wb_delivery_rub    = float(r['wb_delivery_rub']    or 0)
+            wb_rebill_logistic = float(r['wb_rebill_logistic'] or 0)
             result_data.append({
                 "srid": r['srid'],
                 "sku": sku,
@@ -119,9 +130,12 @@ def get_financial_loss_data(
                 "cost": cost,
                 "cost_type": ctype,
                 "latest_cost": latest_cost,
-                # Данные для расчёта недополученного дохода/прибыли
                 "retail_price": retail_price,
                 "has_retail_price": retail_price > 0,
+                # Логистические потери из финотчёта WB
+                "wb_delivery_rub":    wb_delivery_rub,
+                "wb_rebill_logistic": wb_rebill_logistic,
+                "wb_logistic_loss":   wb_delivery_rub + wb_rebill_logistic,
             })
 
         if platform == "wb":
@@ -199,4 +213,110 @@ def get_financial_loss_data(
 
     except Exception as e:
         print(f"Ошибка в финансовом модуле: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pnl-by-article")
+def get_pnl_by_article(
+    date_from: str = Query(default=None, description="YYYY-MM-DD"),
+    date_to:   str = Query(default=None, description="YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+):
+    """P&L по артикулу: выручка, комиссия, логистика, хранение, штрафы, себестоимость, прибыль."""
+    try:
+        # --- себестоимость (последняя известная по артикулу) ---
+        cogs_rows = db.execute(text(
+            "SELECT DISTINCT ON (TRIM(supplier_article)) TRIM(supplier_article) AS sku, cost_value "
+            "FROM wb_cogs WHERE cost_value > 0 ORDER BY TRIM(supplier_article), id DESC"
+        )).mappings().all()
+        cogs_map = {r['sku']: float(r['cost_value']) for r in cogs_rows}
+
+        date_filter = ""
+        params = {}
+        if date_from:
+            date_filter += " AND rr_dt >= :date_from"
+            params["date_from"] = date_from
+        if date_to:
+            date_filter += " AND rr_dt <= :date_to"
+            params["date_to"] = date_to
+
+        # --- агрегат из финотчёта WB ---
+        agg_rows = db.execute(text(f"""
+            SELECT
+                sa_name                                            AS sku,
+                COUNT(*) FILTER (WHERE doc_type_name = 'Продажа') AS sales_count,
+                COUNT(*) FILTER (WHERE doc_type_name = 'Возврат') AS returns_count,
+                COALESCE(SUM(retail_amount) FILTER (WHERE doc_type_name = 'Продажа'), 0)         AS total_revenue,
+                COALESCE(SUM(ppvz_for_pay)  FILTER (WHERE doc_type_name = 'Продажа'), 0)         AS total_payout,
+                COALESCE(SUM(ppvz_sales_commission) FILTER (WHERE doc_type_name = 'Продажа'), 0) AS total_commission,
+                COALESCE(SUM(delivery_rub),          0)                                           AS total_delivery,
+                COALESCE(SUM(storage_fee),           0)                                           AS total_storage,
+                COALESCE(SUM(penalty),               0)                                           AS total_penalty,
+                COALESCE(SUM(deduction),             0)                                           AS total_deduction,
+                COALESCE(SUM(acquiring_fee)         FILTER (WHERE doc_type_name = 'Продажа'), 0) AS total_acquiring,
+                COALESCE(SUM(rebill_logistic_cost),  0)                                           AS total_rebill,
+                COALESCE(AVG(commission_percent)    FILTER (WHERE doc_type_name = 'Продажа'), 0) AS avg_commission_pct,
+                COALESCE(AVG(retail_price)          FILTER (WHERE doc_type_name = 'Продажа'), 0) AS avg_retail_price,
+                COALESCE(AVG(ppvz_for_pay)          FILTER (WHERE doc_type_name = 'Продажа'), 0) AS avg_payout_per_sale
+            FROM wb_report_detail
+            WHERE sa_name IS NOT NULL AND sa_name != ''
+            {date_filter}
+            GROUP BY sa_name
+            ORDER BY total_revenue DESC
+        """), params).mappings().all()
+
+        result = []
+        for r in agg_rows:
+            sku = r['sku']
+            cog = cogs_map.get(sku, 0.0)
+            sales_count   = int(r['sales_count']   or 0)
+            returns_count = int(r['returns_count']  or 0)
+            total_revenue = float(r['total_revenue'] or 0)
+            total_payout  = float(r['total_payout']  or 0)
+            total_commission = float(r['total_commission'] or 0)
+            total_delivery   = float(r['total_delivery']   or 0)
+            total_storage    = float(r['total_storage']    or 0)
+            total_penalty    = float(r['total_penalty']    or 0)
+            total_deduction  = float(r['total_deduction']  or 0)
+            total_acquiring  = float(r['total_acquiring']  or 0)
+            total_rebill     = float(r['total_rebill']     or 0)
+            avg_retail_price = float(r['avg_retail_price'] or 0)
+            avg_payout       = float(r['avg_payout_per_sale'] or 0)
+            avg_commission   = float(r['avg_commission_pct']  or 0)
+
+            total_cogs = cog * sales_count if cog > 0 else 0.0
+            total_costs = (abs(total_commission) + total_delivery + total_storage +
+                           abs(total_penalty) + abs(total_deduction) + total_acquiring + total_rebill)
+            gross_profit = total_payout - total_cogs
+            net_profit   = total_payout - total_cogs - total_storage - abs(total_penalty) - abs(total_deduction) - total_rebill
+
+            result.append({
+                "sku":               sku,
+                "sales_count":       sales_count,
+                "returns_count":     returns_count,
+                "return_rate":       round(returns_count / sales_count * 100, 1) if sales_count else 0,
+                "total_revenue":     round(total_revenue,     2),
+                "total_payout":      round(total_payout,      2),
+                "total_commission":  round(total_commission,  2),
+                "total_delivery":    round(total_delivery,    2),
+                "total_storage":     round(total_storage,     2),
+                "total_penalty":     round(total_penalty,     2),
+                "total_deduction":   round(total_deduction,   2),
+                "total_acquiring":   round(total_acquiring,   2),
+                "total_rebill":      round(total_rebill,      2),
+                "total_costs":       round(total_costs,       2),
+                "cog_per_unit":      round(cog,               2),
+                "total_cogs":        round(total_cogs,        2),
+                "gross_profit":      round(gross_profit,      2),
+                "net_profit":        round(net_profit,        2),
+                "avg_retail_price":  round(avg_retail_price,  2),
+                "avg_payout":        round(avg_payout,        2),
+                "avg_commission_pct":round(avg_commission,    2),
+                "has_cog":           cog > 0,
+            })
+
+        return {"status": "success", "data": result, "total": len(result)}
+
+    except Exception as e:
+        print(f"Ошибка P&L: {e}")
         raise HTTPException(status_code=500, detail=str(e))

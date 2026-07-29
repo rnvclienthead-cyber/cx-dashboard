@@ -189,96 +189,528 @@ def sync_answered_feedbacks_for_active_requests(db) -> int:
     return total
 
 
+def _map_claim_status(raw_st: str, st_ex: str = "", wb_comment: str = "") -> str:
+    # Актуальные коды returns-api: 0=на рассмотрении, 1=отказ, 2=одобрено.
+    # Старый код "3" оставляем как отказ на случай устаревших ответов.
+    # status_ex: 1=отказ, 2/5/10=варианты одобрения (см. живые ответы API).
+    status_map = {
+        "0": "На рассмотрении",
+        "1": "Отказ",
+        "2": "Одобрено",
+        "3": "Отказ",
+    }
+    raw = str(raw_st or "").strip()
+    if raw in ("1", "1.0", "3"):
+        return "Отказ"
+    if raw in ("2", "2.0"):
+        return "Одобрено"
+
+    el = f"{st_ex or ''} {wb_comment or ''}".lower()
+    ex = str(st_ex or "").strip()
+
+    # Числовой status_ex / текст важнее «залипшего» «На рассмотрении» / кода 0.
+    if ex in ("1", "1.0") or "отклон" in el or "отказ" in el:
+        return "Отказ"
+    if ex in ("2", "2.0", "5", "10") or "одобрен" in el or "придут деньги" in el:
+        return "Одобрено"
+
+    if raw in ("Одобрено", "Отказ", "Закрыта"):
+        return raw
+    if status_map.get(raw) == "На рассмотрении" or raw in ("На рассмотрении", "Открыта", ""):
+        return "На рассмотрении"
+    return status_map.get(raw, "На рассмотрении")
+
+
+def _status_ex_label(raw_ex, wb_comment: str = "") -> str:
+    """Читаемая расшифровка: числовой status_ex + комментарий WB."""
+    ex = str(raw_ex if raw_ex is not None else "").strip()
+    comment = (wb_comment or "").strip()
+    # Если пришёл только код — оставляем код; комментарий важнее для UI
+    if comment:
+        if ex and ex not in comment and not ex.isdigit():
+            return f"{ex} | {comment}"[:500]
+        return comment[:500]
+    return ex[:500]
+
+
+def _upsert_claim_row(db, item: dict, *, is_archive: bool) -> bool:
+    srid = str(item.get("srid", "")).strip()
+    if not srid:
+        return False
+    wb_comment = str(item.get("wb_comment") or item.get("wbComment") or "")
+    st_ex_raw = item.get("status_description") or item.get("status_ex") or ""
+    st_ex = _status_ex_label(st_ex_raw, wb_comment)
+    status = _map_claim_status(item.get("status", ""), str(st_ex_raw), wb_comment)
+    nm_id = str(item.get("nm_id") or item.get("nmId") or "").strip() or None
+    article = str(item.get("supplier_article") or item.get("supplierArticle") or item.get("saName") or "")
+    photos = " ".join(u for u in (_photo_url(p) for p in (item.get("photos") or [])) if u) or None
+    income = str(item.get("income_id") or item.get("incomeId") or "0")
+    claim_id = str(item.get("id") or item.get("claim_id") or "")
+    try:
+        db.execute(text("""
+            INSERT INTO wb_claims
+                (srid, claim_id, created_dt, supplier_article, nm_id, user_comment,
+                 status, status_ex, claim_type, income_id, is_archive, last_sync, photos,
+                 order_date, claim_date)
+            VALUES
+                (:srid, :claim_id, :created_dt, :article, :nm_id, :comment,
+                 :status, :status_ex, :claim_type, :income_id, :is_archive, NOW(), :photos,
+                 :order_date, :claim_date)
+            ON CONFLICT (srid) DO UPDATE SET
+                claim_id     = COALESCE(NULLIF(EXCLUDED.claim_id, ''), wb_claims.claim_id),
+                status       = EXCLUDED.status,
+                status_ex    = CASE
+                                 WHEN EXCLUDED.status_ex IS NOT NULL AND EXCLUDED.status_ex <> ''
+                                 THEN EXCLUDED.status_ex
+                                 ELSE wb_claims.status_ex
+                               END,
+                user_comment = COALESCE(EXCLUDED.user_comment, wb_claims.user_comment),
+                photos       = CASE WHEN EXCLUDED.photos IS NOT NULL
+                                    THEN EXCLUDED.photos ELSE wb_claims.photos END,
+                nm_id        = COALESCE(EXCLUDED.nm_id, wb_claims.nm_id),
+                income_id    = COALESCE(EXCLUDED.income_id, wb_claims.income_id),
+                is_archive   = EXCLUDED.is_archive,
+                last_sync    = NOW()
+        """), {
+            "srid":       srid,
+            "claim_id":   claim_id,
+            "created_dt": item.get("dt") or item.get("createdDate"),
+            "article":    article,
+            "nm_id":      nm_id,
+            "comment":    item.get("user_comment") or item.get("userComment") or "",
+            "status":     status,
+            "status_ex":  st_ex,
+            "claim_type": str(item.get("claim_type") or item.get("claimType") or ""),
+            "income_id":  income,
+            "is_archive": is_archive,
+            "photos":     photos,
+            "order_date": item.get("order_dt") or item.get("orderDate"),
+            "claim_date": item.get("dt") or item.get("claimDate"),
+        })
+        return True
+    except Exception as e:
+        print(f"[MiniSync] claim insert error: {e}")
+        return False
+
+
+def _fetch_claims_page(
+    *,
+    is_archive: bool,
+    limit: int = 200,
+    offset: int = 0,
+    claim_id=None,
+    nm_id=None,
+) -> list:
+    params: dict = {
+        "limit": limit,
+        "offset": offset,
+        "is_archive": "true" if is_archive else "false",
+    }
+    if claim_id:
+        params["id"] = claim_id
+    if nm_id:
+        params["nm_id"] = int(nm_id) if str(nm_id).isdigit() else nm_id
+    r = _req.get(
+        f"{RETURNS_BASE}/api/v1/claims",
+        params=params,
+        headers=_h(), timeout=30,
+    )
+    if r.status_code == 429:
+        import time as _time
+        _time.sleep(25)
+        r = _req.get(
+            f"{RETURNS_BASE}/api/v1/claims",
+            params=params,
+            headers=_h(), timeout=30,
+        )
+    r.raise_for_status()
+    return (r.json() or {}).get("claims") or []
+
+
+def _find_claim_in_api(*, claim_id: str = "", srid: str = "", nm_id: str = "") -> tuple[dict | None, bool]:
+    """
+    Ищет заявку в Returns API. id-фильтр часто пустой для старых заявок —
+    тогда берём по nm_id и матчим claim_id/srid.
+    Returns: (item, is_archive) или (None, False).
+    """
+    cid = str(claim_id or "").strip()
+    rid = str(srid or "").strip()
+    nm = str(nm_id or "").strip()
+
+    def _match(items: list) -> dict | None:
+        for it in items:
+            iid = str(it.get("id") or it.get("claim_id") or "").strip()
+            isrid = str(it.get("srid") or "").strip()
+            if cid and iid == cid:
+                return it
+            if rid and isrid == rid:
+                return it
+        return None
+
+    # 1) Прямой id (active + archive)
+    if cid:
+        for is_arch in (True, False):
+            try:
+                items = _fetch_claims_page(is_archive=is_arch, limit=1, offset=0, claim_id=cid)
+            except Exception:
+                items = []
+            hit = _match(items)
+            if hit:
+                return hit, is_arch
+
+    # 2) По nm_id — надёжнее для заявок в окне ~14 дней
+    if nm:
+        for is_arch in (True, False):
+            try:
+                items = _fetch_claims_page(is_archive=is_arch, limit=50, offset=0, nm_id=nm)
+            except Exception:
+                items = []
+            hit = _match(items)
+            if hit:
+                return hit, is_arch
+            # Если искали по id/srid и не нашли — не берём «чужую» заявку того же nm
+            if not cid and not rid and items:
+                return items[0], is_arch
+
+    return None, False
+
+
+def _chat_claim_rid_sql() -> str:
+    """rid возврата для чата: order_rid или goodCard.rid из сообщений."""
+    return """
+        COALESCE(
+          NULLIF(c.order_rid, ''),
+          (SELECT m.attachments->'goodCard'->>'rid'
+           FROM wb_chat_messages m
+           WHERE m.chat_id = c.chat_id
+             AND coalesce(m.attachments->'goodCard'->>'rid','') <> ''
+           ORDER BY m.add_ts ASC NULLS LAST LIMIT 1)
+        )
+    """
+
+
+def _normalize_local_claim_statuses(db) -> int:
+    """Чинит залипшие строки по уже известному status_ex / числовому status."""
+    fixes = [
+        ("""
+            UPDATE wb_claims SET status = 'Отказ', last_sync = NOW()
+            WHERE status IN ('На рассмотрении', '0', '0.0', 'Открыта', '1', '1.0', '3')
+              AND (
+                trim(coalesce(status_ex, '')) IN ('1', '1.0', '3')
+                OR lower(coalesce(status_ex, '')) LIKE '%%отказ%%'
+                OR lower(coalesce(status_ex, '')) LIKE '%%отклон%%'
+              )
+        """, "ex→Отказ"),
+        ("""
+            UPDATE wb_claims SET status = 'Одобрено', last_sync = NOW()
+            WHERE status IN ('На рассмотрении', '0', '0.0', 'Открыта', '2', '2.0')
+              AND (
+                trim(coalesce(status_ex, '')) IN ('2', '2.0', '5', '10')
+                OR lower(coalesce(status_ex, '')) LIKE '%%одобрен%%'
+                OR lower(coalesce(status_ex, '')) LIKE '%%придут деньги%%'
+              )
+        """, "ex→Одобрено"),
+        ("""
+            UPDATE wb_claims SET status = 'Отказ', last_sync = NOW()
+            WHERE status IN ('1', '1.0', '3')
+        """, "code→Отказ"),
+        ("""
+            UPDATE wb_claims SET status = 'Одобрено', last_sync = NOW()
+            WHERE status IN ('2', '2.0')
+        """, "code→Одобрено"),
+        ("""
+            UPDATE wb_claims SET status = 'На рассмотрении', last_sync = NOW()
+            WHERE status IN ('0', '0.0', 'Открыта')
+        """, "code→рассмотрении"),
+    ]
+    total = 0
+    for sql, _label in fixes:
+        res = db.execute(text(sql))
+        total += res.rowcount or 0
+    return total
+
+
+def refresh_stale_claim_statuses(db, *, limit: int = 40) -> int:
+    """
+    Точечно обновляет «открытые» заявки по claim_id / nm_id (active + archive).
+    Приоритет: привязанные к чатам «ждёт ответа», затем остальные.
+    Лимит умеренный: Returns API легко отдаёт 429.
+    """
+    fixed = _normalize_local_claim_statuses(db)
+    if fixed:
+        db.commit()
+        print(f"[MiniSync] claim statuses normalized locally: {fixed}")
+
+    rid_expr = _chat_claim_rid_sql()
+    rows = db.execute(text(f"""
+        WITH waiting_rids AS (
+          SELECT DISTINCT {rid_expr} AS rid
+          FROM wb_chats c
+          LEFT JOIN cx_dismissed_items d
+            ON d.item_id = c.chat_id AND d.mp = 'wb' AND d.item_type = 'chat'
+          WHERE d.item_id IS NULL
+            AND COALESCE(c.is_closing, false) = false
+            AND c.needs_answer = true
+        ),
+        pending AS (
+          SELECT srid, claim_id, nm_id, coalesce(claim_date, created_dt) AS dt,
+                 CASE WHEN EXISTS (SELECT 1 FROM waiting_rids w WHERE w.rid = srid)
+                      THEN 0 ELSE 1 END AS prio
+          FROM wb_claims
+          WHERE status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+            AND (
+              coalesce(nullif(trim(claim_id), ''), '') <> ''
+              OR coalesce(nullif(trim(nm_id), ''), '') <> ''
+            )
+            -- Старше окна WB (~14д) API уже не отдаёт — не жжём лимит
+            AND coalesce(claim_date, created_dt, last_sync) > NOW() - INTERVAL '20 days'
+        )
+        SELECT srid, claim_id, nm_id FROM pending
+        ORDER BY prio ASC, dt DESC NULLS LAST
+        LIMIT :lim
+    """), {"lim": limit}).fetchall()
+    if not rows:
+        return 0
+
+    import time as _time
+    updated = 0
+    for srid, claim_id, nm_id in rows:
+        cid = str(claim_id or "").strip()
+        try:
+            item, is_arch = _find_claim_in_api(claim_id=cid, srid=srid, nm_id=nm_id)
+        except Exception as e:
+            print(f"[MiniSync] claim id={cid} fetch error: {e}")
+            if "429" in str(e):
+                db.commit()
+                print(f"[MiniSync] stale claims refreshed: {updated}/{len(rows)} (stopped on 429)")
+                return updated
+            continue
+        if item:
+            if _upsert_claim_row(db, item, is_archive=is_arch):
+                updated += 1
+        else:
+            # Ушла из окна API: в архиве, но не «на рассмотрении»
+            db.execute(text("""
+                UPDATE wb_claims
+                SET is_archive = true,
+                    status = CASE
+                      WHEN status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+                      THEN 'Закрыта'
+                      ELSE status
+                    END,
+                    status_ex = CASE
+                      WHEN status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+                           AND coalesce(nullif(trim(status_ex), ''), '') = ''
+                      THEN 'Статус не получен из WB API (заявка вне окна выдачи)'
+                      ELSE status_ex
+                    END,
+                    last_sync = NOW()
+                WHERE srid = :srid
+            """), {"srid": srid})
+        _time.sleep(0.35)
+    if updated or rows:
+        db.commit()
+        print(f"[MiniSync] stale claims refreshed: {updated}/{len(rows)}")
+    return updated
+
+
+def archive_waiting_chats_with_approved_claims(db) -> int:
+    """
+    Чаты «ждёт ответа» с возвратом в статусе «Одобрено» → в архив
+    (cx_dismissed_items) и needs_answer=false.
+    """
+    rid_expr = _chat_claim_rid_sql()
+    targets = db.execute(text(f"""
+        WITH waiting AS (
+          SELECT c.chat_id, {rid_expr} AS rid
+          FROM wb_chats c
+          LEFT JOIN cx_dismissed_items d
+            ON d.item_id = c.chat_id AND d.mp = 'wb' AND d.item_type = 'chat'
+          WHERE d.item_id IS NULL
+            AND COALESCE(c.is_closing, false) = false
+            AND c.needs_answer = true
+            AND c.last_sender = 'client'
+        )
+        SELECT w.chat_id, w.rid
+        FROM waiting w
+        JOIN wb_claims cl ON cl.srid = w.rid
+        WHERE w.rid IS NOT NULL AND w.rid <> '' AND cl.status = 'Одобрено'
+    """)).mappings().fetchall()
+    if not targets:
+        return 0
+
+    note = "Авто: возврат Одобрено"
+    user = "auto_approved_return"
+    closed = 0
+    for t in targets:
+        db.execute(text("""
+            INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+            VALUES ('chat', :cid, 'wb', :u, :n)
+            ON CONFLICT (item_type, item_id, mp) DO NOTHING
+        """), {"cid": t["chat_id"], "u": user, "n": note})
+        db.execute(text("""
+            UPDATE wb_chats SET needs_answer = false, updated_at = now()
+            WHERE chat_id = :cid
+        """), {"cid": t["chat_id"]})
+        closed += 1
+    db.commit()
+    print(f"[MiniSync] archived waiting chats (approved claim): {closed}")
+    return closed
+
+
+# Ротация глубокого архива между циклами (offset страниц × 200).
+_archive_page_cursor = 0
+
+
 def sync_recent_claims(db) -> int:
-    """Забирает последние 200 активных возвратов и обновляет wb_claims."""
+    """
+    Обновляет wb_claims из WB Returns API.
+    Активные + несколько страниц архива (с ротацией глубже) + точечный
+    рефреш «На рассмотрении» для чатов. Иначе статус «Отказ/Одобрено»
+    не доезжает: заявка уходит из active, у нас остаётся «На рассмотрении».
+    """
+    global _archive_page_cursor
     key = _key()
     if not key:
         return 0
 
-    status_map = {"1": "На рассмотрении", "2": "Одобрено", "3": "Отказ"}
-
+    count = 0
+    active_claims: list = []
+    archive_claims: list = []
     try:
-        r = _req.get(
-            f"{RETURNS_BASE}/api/v1/claims",
-            params={"limit": 200, "offset": 0, "is_archive": "false"},
-            headers=_h(), timeout=30,
-        )
-        r.raise_for_status()
-        claims = r.json().get("claims") or []
+        for off in (0, 200):
+            batch = _fetch_claims_page(is_archive=False, limit=200, offset=off)
+            active_claims.extend(batch)
+            if len(batch) < 200:
+                break
+
+        # Всегда свежий хвост + 2 страницы глубже по курсору (до ~offset 4000).
+        deep_base = (_archive_page_cursor % 20) * 200  # 0..3800
+        _archive_page_cursor += 1
+        archive_offsets = [0, 200, deep_base, deep_base + 200]
+        # Уникальные, сохраняя порядок
+        seen_off = set()
+        ordered_offs = []
+        for off in archive_offsets:
+            if off not in seen_off:
+                seen_off.add(off)
+                ordered_offs.append(off)
+
+        for off in ordered_offs:
+            batch = _fetch_claims_page(is_archive=True, limit=200, offset=off)
+            archive_claims.extend(batch)
+            if len(batch) < 200 and off > 0:
+                # Курсор ушёл за конец архива — сброс
+                if off >= deep_base:
+                    _archive_page_cursor = 0
     except Exception as e:
         print(f"[MiniSync] claims API error: {e}")
         return 0
 
-    count = 0
-    for item in claims:
+    # Дедуп по srid (глубокие страницы могут пересечься со свежими)
+    by_srid: dict = {}
+    for item in active_claims:
         srid = str(item.get("srid", "")).strip()
-        if not srid:
-            continue
-        raw_st  = str(item.get("status", "")).strip()
-        st_ex   = str(item.get("status_description") or item.get("status_ex") or "")
-        status  = status_map.get(raw_st, raw_st)
-        if status in ("", "None", "Архивная", "Активная"):
-            el = st_ex.lower()
-            if "одобрено" in el or "возврат" in el: status = "Одобрено"
-            elif "отклон" in el or "отказ" in el:   status = "Отказ"
-            else:                                     status = "На рассмотрении"
+        if srid:
+            by_srid[srid] = (item, False)
+    for item in archive_claims:
+        srid = str(item.get("srid", "")).strip()
+        if srid:
+            by_srid[srid] = (item, True)
 
-        nm_id   = str(item.get("nm_id") or item.get("nmId") or "").strip() or None
-        article = str(item.get("supplier_article") or item.get("supplierArticle") or item.get("saName") or "")
-        photos  = " ".join(u for u in (_photo_url(p) for p in (item.get("photos") or [])) if u) or None
-        income  = str(item.get("income_id") or item.get("incomeId") or "0")
-
-        try:
-            db.execute(text("""
-                INSERT INTO wb_claims
-                    (srid, claim_id, created_dt, supplier_article, nm_id, user_comment,
-                     status, claim_type, income_id, is_archive, last_sync, photos,
-                     order_date, claim_date)
-                VALUES
-                    (:srid, :claim_id, :created_dt, :article, :nm_id, :comment,
-                     :status, :claim_type, :income_id, false, NOW(), :photos,
-                     :order_date, :claim_date)
-                ON CONFLICT (srid) DO UPDATE SET
-                    status       = EXCLUDED.status,
-                    user_comment = COALESCE(EXCLUDED.user_comment, wb_claims.user_comment),
-                    photos       = CASE WHEN EXCLUDED.photos IS NOT NULL
-                                        THEN EXCLUDED.photos ELSE wb_claims.photos END,
-                    nm_id        = COALESCE(EXCLUDED.nm_id, wb_claims.nm_id),
-                    income_id    = COALESCE(EXCLUDED.income_id, wb_claims.income_id),
-                    last_sync    = NOW()
-            """), {
-                "srid":       srid,
-                "claim_id":   str(item.get("id") or item.get("claim_id") or ""),
-                "created_dt": item.get("dt") or item.get("createdDate"),
-                "article":    article,
-                "nm_id":      nm_id,
-                "comment":    item.get("user_comment") or item.get("userComment") or "",
-                "status":     status,
-                "claim_type": str(item.get("claim_type") or item.get("claimType") or ""),
-                "income_id":  income,
-                "photos":     photos,
-                "order_date": item.get("order_dt") or item.get("orderDate"),
-                "claim_date": item.get("dt") or item.get("claimDate"),
-            })
+    for item, is_arch in by_srid.values():
+        if _upsert_claim_row(db, item, is_archive=is_arch):
             count += 1
-        except Exception as e:
-            print(f"[MiniSync] claim insert error: {e}")
 
     if count:
         db.commit()
-        print(f"[MiniSync] claims synced: {count}")
+        print(
+            f"[MiniSync] claims synced: {count} "
+            f"(active={len(active_claims)} archive_raw={len(archive_claims)} "
+            f"unique={len(by_srid)} deep_off={deep_base})"
+        )
+
+    archive_by_srid = {
+        str(i.get("srid", "")).strip(): i for i in archive_claims if i.get("srid")
+    }
+    active_srids = [str(i.get("srid", "")).strip() for i in active_claims if i.get("srid")]
+    if active_srids:
+        from sqlalchemy import bindparam
+        missing = db.execute(
+            text("""
+                SELECT srid FROM wb_claims
+                WHERE is_archive = false
+                  AND srid NOT IN :srids
+            """).bindparams(bindparam("srids", expanding=True)),
+            {"srids": active_srids},
+        ).fetchall()
+        for (srid,) in missing:
+            item = archive_by_srid.get(srid)
+            if item:
+                _upsert_claim_row(db, item, is_archive=True)
+            else:
+                # Ушла из active, но нет в просканированных страницах архива —
+                # не оставляем «На рассмотрении» (это и есть залипание в чатах).
+                row = db.execute(text(
+                    "SELECT claim_id, nm_id FROM wb_claims WHERE srid = :srid"
+                ), {"srid": srid}).mappings().first()
+                hit = None
+                is_arch = True
+                if row:
+                    hit, is_arch = _find_claim_in_api(
+                        claim_id=row.get("claim_id") or "",
+                        srid=srid,
+                        nm_id=row.get("nm_id") or "",
+                    )
+                if hit:
+                    _upsert_claim_row(db, hit, is_archive=is_arch)
+                else:
+                    db.execute(text("""
+                        UPDATE wb_claims
+                        SET is_archive = true,
+                            status = CASE
+                              WHEN status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+                              THEN 'Закрыта'
+                              ELSE status
+                            END,
+                            status_ex = CASE
+                              WHEN status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+                                   AND coalesce(nullif(trim(status_ex), ''), '') = ''
+                              THEN 'Статус не получен из WB API (заявка вне окна выдачи)'
+                              ELSE status_ex
+                            END,
+                            last_sync = NOW()
+                        WHERE srid = :srid AND is_archive = false
+                    """), {"srid": srid})
+        db.commit()
+        if missing:
+            print(f"[MiniSync] claims left active list: {len(missing)}")
+
+    try:
+        refresh_stale_claim_statuses(db)
+    except Exception as e:
+        print(f"[MiniSync] refresh_stale_claim_statuses: {e}")
+
+    try:
+        archive_waiting_chats_with_approved_claims(db)
+    except Exception as e:
+        print(f"[MiniSync] archive_waiting_chats_with_approved_claims: {e}")
+
     return count
 
 
 def scan_unlinked_tokens(db) -> int:
-    """Сканирует список WB-чатов и линкует незалинкованные токены по lastMessage и nm_id."""
+    """Сканирует список WB-чатов и линкует незалинкованные токены по lastMessage, истории и nm_id."""
     key = _key()
     if not key:
         return 0
 
     from sqlalchemy import text
     import re
-    TOKEN_PAT = re.compile(r"box\.vidovito\.com\?t=([\w\-]+)")
+    TOKEN_PAT = re.compile(
+        r"box\.vidovito\.com(?:/reshipment/form)?\?t=([\w\-]+)",
+        re.IGNORECASE,
+    )
 
     try:
         # Все незалинкованные токены (форма заполнена, но chatID ещё нет)
@@ -286,11 +718,50 @@ def scan_unlinked_tokens(db) -> int:
             SELECT t.token, r.id as req_id, r.wb_nm_id
             FROM reshipment_chat_tokens t
             LEFT JOIN reshipment_requests r ON r.chat_token = t.token
-            WHERE t.chat_id IS NULL
+            WHERE t.chat_id IS NULL OR t.chat_id = ''
         """)).mappings().fetchall()
         if not rows:
             return 0
         unlinked = {r["token"]: r for r in rows}
+
+        # 0) Ищем токены прямо в сохранённой истории сообщений (надёжнее lastMessage)
+        for tok in list(unlinked.keys()):
+            hit = db.execute(text("""
+                SELECT chat_id FROM wb_chat_messages
+                WHERE text ILIKE :pat
+                ORDER BY add_ts DESC LIMIT 1
+            """), {"pat": f"%t={tok}%"}).mappings().first()
+            if not hit:
+                continue
+            chat_id = str(hit["chat_id"])
+            try:
+                db.execute(text(
+                    "UPDATE reshipment_chat_tokens SET chat_id=:cid WHERE token=:token AND (chat_id IS NULL OR chat_id='')"
+                ), {"cid": chat_id, "token": tok})
+                req_id = unlinked[tok].get("req_id")
+                if req_id:
+                    chat_row = db.execute(text(
+                        "SELECT nm_id, order_rid, reply_sign FROM wb_chats WHERE chat_id=:cid"
+                    ), {"cid": chat_id}).mappings().first()
+                    nm = (chat_row or {}).get("nm_id")
+                    rid = (chat_row or {}).get("order_rid")
+                    sign = (chat_row or {}).get("reply_sign")
+                    db.execute(text("""
+                        UPDATE reshipment_requests SET
+                            wb_chat_id = :cid,
+                            wb_nm_id = COALESCE(wb_nm_id, :nm),
+                            wb_reply_sign = COALESCE(wb_reply_sign, :sign),
+                            matched_srid = COALESCE(matched_srid, :rid)
+                        WHERE id = :id AND (wb_chat_id IS NULL OR wb_chat_id = '')
+                    """), {"cid": chat_id, "nm": nm, "sign": sign, "rid": rid, "id": req_id})
+                db.commit()
+                print(f"[MiniSync] Token linked via messages: {tok} → chat {chat_id}")
+                del unlinked[tok]
+            except Exception as e:
+                print(f"[MiniSync] token link via messages error: {e}")
+
+        if not unlinked:
+            return len(rows) - len(unlinked)
 
         # Список WB чатов
         resp = _req.get(
@@ -303,7 +774,7 @@ def scan_unlinked_tokens(db) -> int:
         print(f"[MiniSync] scan_tokens error: {e}")
         return 0
 
-    linked = 0
+    linked = len(rows) - len(unlinked)
     for chat in chats:
         chat_id = str(chat.get("chatID", ""))
         if not chat_id:
@@ -330,12 +801,12 @@ def scan_unlinked_tokens(db) -> int:
         try:
             nm_from_chat = str((chat.get("goodCard") or {}).get("nmID") or "")
             db.execute(text(
-                "UPDATE reshipment_chat_tokens SET chat_id=:cid WHERE token=:token AND chat_id IS NULL"
+                "UPDATE reshipment_chat_tokens SET chat_id=:cid WHERE token=:token AND (chat_id IS NULL OR chat_id='')"
             ), {"cid": chat_id, "token": token_found})
             req_id = unlinked[token_found].get("req_id")
             if req_id:
                 db.execute(text(
-                    "UPDATE reshipment_requests SET wb_chat_id=:cid, wb_nm_id=COALESCE(wb_nm_id, :nm) WHERE id=:id AND wb_chat_id IS NULL"
+                    "UPDATE reshipment_requests SET wb_chat_id=:cid, wb_nm_id=COALESCE(wb_nm_id, :nm) WHERE id=:id AND (wb_chat_id IS NULL OR wb_chat_id='')"
                 ), {"cid": chat_id, "nm": int(nm_from_chat) if nm_from_chat else None, "id": req_id})
             db.commit()
             linked += 1
@@ -387,6 +858,7 @@ def sync_reshipment_review_snapshots(db) -> int:
                             AND o.supplier_article = f.supplier_article)
                     )
                     WHERE o.srid = :srid
+                    ORDER BY f.created_date ASC
                     LIMIT 1
                 """), {"srid": row["matched_srid"]}).mappings().first()
 
@@ -413,6 +885,7 @@ def sync_reshipment_review_snapshots(db) -> int:
                     )
                     WHERE o.srid = :srid
                       AND f.created_date > :delivered_at - INTERVAL '3 hours'
+                    ORDER BY f.created_date DESC
                     LIMIT 1
                 """), {"srid": row["matched_srid"], "delivered_at": row["delivered_at"]}).mappings().first()
 
@@ -694,6 +1167,7 @@ def send_review_requests(db) -> int:
                     )
                     WHERE o.srid = r.matched_srid
                       AND f.created_date < COALESCE(r.confirmed_at, r.updated_at) - INTERVAL '3 hours'
+                    ORDER BY f.created_date ASC
                     LIMIT 1) AS had_review_before,
                    (SELECT 1 FROM wb_feedback_snapshots s
                     WHERE s.request_id = r.id
@@ -754,6 +1228,7 @@ def send_review_requests(db) -> int:
                             AND o.supplier_article = f.supplier_article)
                     )
                     WHERE o.srid = :srid
+                    ORDER BY f.created_date ASC
                     LIMIT 1
                 """), {"srid": row.get("matched_srid")}).mappings().first()
                 if fb:
@@ -843,6 +1318,52 @@ def send_rejection_promo(db) -> int:
     return sent
 
 
+def sync_yandex_statuses(db) -> int:
+    """Только sharing_url для Яндекс NDD.
+    Статусы и уведомления клиенту — в _yandex_status_updater (main.py).
+    Иначе мини-синк меняет статус раньше опросника, и письмо клиенту теряется."""
+    try:
+        rows = db.execute(text("""
+            SELECT id, track_number, yandex_sharing_url
+            FROM reshipment_requests
+            WHERE delivery_method = 'yandex'
+              AND track_number IS NOT NULL AND track_number != ''
+              AND (yandex_sharing_url IS NULL OR yandex_sharing_url = '')
+              AND status NOT IN ('delivered', 'returned', 'rejected')
+        """)).mappings().fetchall()
+    except Exception as e:
+        print(f"[MiniSync] sync_yandex: fetch error: {e}")
+        return 0
+
+    if not rows:
+        return 0
+
+    try:
+        from .yandex_ndd import get_order_status
+    except Exception as e:
+        print(f"[MiniSync] sync_yandex: import error: {e}")
+        return 0
+
+    updated = 0
+    for row in rows:
+        try:
+            info = get_order_status(row["track_number"])
+            sharing_url = info.get("sharing_url") or ""
+            if not sharing_url:
+                continue
+            db.execute(text("""
+                UPDATE reshipment_requests SET yandex_sharing_url = :url
+                WHERE id = :id AND (yandex_sharing_url IS NULL OR yandex_sharing_url = '')
+            """), {"url": sharing_url, "id": row["id"]})
+            db.commit()
+            updated += 1
+            print(f"[MiniSync] Yandex sharing_url req#{row['id']}")
+        except Exception as e:
+            print(f"[MiniSync] sync_yandex req#{row['id']}: {e}")
+
+    return updated
+
+
 async def start_mini_sync_worker(get_db) -> None:
     """Фоновая задача FastAPI: синхронизация отзывов и возвратов каждые 5 минут."""
     import datetime as _dt
@@ -852,31 +1373,37 @@ async def start_mini_sync_worker(get_db) -> None:
         await asyncio.sleep(300)
         if not _key():
             continue
+        new_feedbacks = 0
         try:
+            # Каждый sync_* делает блокирующие HTTP-запросы к API WB (таймауты до 30с).
+            # Выполняем их в отдельном потоке через asyncio.to_thread, иначе они
+            # замораживают event loop uvicorn и весь сайт перестаёт отвечать на эти секунды.
             with db_session() as db:
-                sync_recent_feedbacks(db)
+                new_feedbacks = await asyncio.to_thread(sync_recent_feedbacks, db) or 0
                 await asyncio.sleep(2)
-                sync_answered_feedbacks_for_active_requests(db)
+                await asyncio.to_thread(sync_answered_feedbacks_for_active_requests, db)
                 await asyncio.sleep(2)
-                sync_recent_claims(db)
+                await asyncio.to_thread(sync_recent_claims, db)
                 await asyncio.sleep(2)
-                scan_unlinked_tokens(db)
+                await asyncio.to_thread(scan_unlinked_tokens, db)
                 await asyncio.sleep(2)
-                sync_reshipment_review_snapshots(db)
+                await asyncio.to_thread(sync_reshipment_review_snapshots, db)
                 await asyncio.sleep(2)
-                send_pickup_reminders(db)
+                await asyncio.to_thread(send_pickup_reminders, db)
                 await asyncio.sleep(2)
-                send_review_requests(db)
+                await asyncio.to_thread(send_review_requests, db)
                 await asyncio.sleep(2)
-                send_rejection_promo(db)
+                await asyncio.to_thread(send_rejection_promo, db)
+                await asyncio.sleep(2)
+                await asyncio.to_thread(sync_yandex_statuses, db)
 
                 # Ежедневно: ре-синк отвеченных + архивирование старых
                 today = _dt.date.today()
                 if _last_daily != today:
                     await asyncio.sleep(5)
-                    sync_all_answered_wb(db)
+                    await asyncio.to_thread(sync_all_answered_wb, db)
                     await asyncio.sleep(3)
-                    archive_old_active_feedbacks(db)
+                    await asyncio.to_thread(archive_old_active_feedbacks, db)
                     _last_daily = today
 
             # Уведомляем фронтенд об обновлении данных
@@ -884,5 +1411,14 @@ async def start_mini_sync_worker(get_db) -> None:
             await broadcaster.broadcast("moderation")
             await broadcaster.broadcast("dashboard")
             await broadcaster.broadcast("sync")
+            await broadcaster.broadcast("chats")
+
+            # Centrifugo: реалтайм-сигнал разделу отзывов о новых отзывах
+            if new_feedbacks > 0:
+                try:
+                    from backend import centrifugo
+                    await asyncio.to_thread(centrifugo.publish, "reviews", {"type": "reviews_updated", "count": new_feedbacks})
+                except Exception as _e:
+                    print(f"[MiniSync] centrifugo publish failed: {_e}")
         except Exception as e:
             print(f"[MiniSync] cycle error: {e}")

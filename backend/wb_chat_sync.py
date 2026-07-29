@@ -20,6 +20,7 @@ import asyncio
 import logging
 import requests
 from sqlalchemy import text
+from . import centrifugo
 
 logger = logging.getLogger("wb_chat_sync")
 
@@ -55,7 +56,7 @@ def _is_closing(text_body: str) -> bool:
     return bool(_CLOSING_RE.search(s))
 
 WB_CHAT_BASE  = "https://buyer-chat-api.wildberries.ru"
-SYNC_INTERVAL = 300          # инкрементальная синхронизация раз в 5 минут
+SYNC_INTERVAL = 5            # было 60; для бота с меню 1–5 нужна быстрая реакция
 BACKFILL_DAYS = 60           # глубина первичного бэкфилла
 REQ_DELAY     = 0.8          # пауза между запросами (rate-limit)
 MAX_PAGES     = 400          # предохранитель на один проход
@@ -98,7 +99,55 @@ def _ensure_cursor_row(conn):
         )
     """))
     conn.execute(text("INSERT INTO wb_chat_sync_state (id, last_ts) VALUES (1, 0) ON CONFLICT (id) DO NOTHING"))
+    # Полная лента переписки (накапливается из событий; WB историю не отдаёт)
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS wb_chat_messages (
+            id          BIGSERIAL PRIMARY KEY,
+            chat_id     TEXT        NOT NULL,
+            sender      VARCHAR(20),
+            text        TEXT,
+            attachments JSONB,
+            add_ts      BIGINT,
+            created_at  TIMESTAMP   DEFAULT now(),
+            UNIQUE (chat_id, add_ts, sender)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_wb_chat_messages_chat "
+        "ON wb_chat_messages (chat_id, add_ts)"
+    ))
     conn.commit()
+
+
+def _store_message(conn, chat_id: str, sender: str, text_body: str, attachments, add_ts: int):
+    """Сохранить сообщение в ленту переписки (идемпотентно).
+
+    WB и наша отправка часто дают один текст с разным add_ts (±сек) —
+    UNIQUE(chat_id, add_ts, sender) их не склеивает. Поэтому сначала
+    ищем тот же текст у того же отправителя в окне 3 минуты.
+    """
+    import json as _json
+    ts = int(add_ts or 0)
+    body = text_body or ""
+    # Пустые служебные — не дедупим по тексту (могут идти пачкой)
+    if body.strip():
+        exists = conn.execute(text("""
+            SELECT id FROM wb_chat_messages
+            WHERE chat_id = :cid AND sender = :snd AND text = :txt
+              AND add_ts BETWEEN :t0 AND :t1
+            LIMIT 1
+        """), {
+            "cid": chat_id, "snd": sender, "txt": body,
+            "t0": ts - 180_000, "t1": ts + 180_000,
+        }).first()
+        if exists:
+            return
+    att = _json.dumps(attachments, ensure_ascii=False) if attachments else None
+    conn.execute(text("""
+        INSERT INTO wb_chat_messages (chat_id, sender, text, attachments, add_ts)
+        VALUES (:cid, :snd, :txt, CAST(:att AS JSONB), :ts)
+        ON CONFLICT (chat_id, add_ts, sender) DO NOTHING
+    """), {"cid": chat_id, "snd": sender, "txt": body, "att": att, "ts": ts})
 
 
 def _get_cursor(conn) -> int:
@@ -123,20 +172,25 @@ def _upsert_event(conn, e: dict):
     ts     = int(e.get("addTimestamp") or 0)
     msg    = e.get("message") or {}
     body   = (msg.get("text") or "")[:1000]
-    good   = ((msg.get("attachments") or {}).get("goodCard")) or {}
+    attachments = msg.get("attachments") or {}
+    good   = attachments.get("goodCard") or {}
     nm_id  = good.get("nmID")
     gname  = good.get("name")
     cname  = e.get("clientName")
+    reply_sign = (e.get("replySign") or "").strip()
+
+    # Сохраняем сообщение в полную ленту переписки (все стороны)
+    _store_message(conn, cid, sender, msg.get("text") or "", attachments, ts)
 
     if sender == "client":
         closing = _is_closing(body)
         conn.execute(text("""
             INSERT INTO wb_chats
                 (chat_id, client_name, nm_id, good_name, last_message, last_sender,
-                 last_ts, needs_answer, is_closing, waiting_since, updated_at)
+                 last_ts, needs_answer, is_closing, waiting_since, reply_sign, updated_at)
             VALUES
                 (:cid, :cn, :nm, :gn, :msg, 'client',
-                 :ts, true, :closing, to_timestamp(:ts/1000.0), now())
+                 :ts, true, :closing, to_timestamp(:ts/1000.0), NULLIF(:rs,''), now())
             ON CONFLICT (chat_id) DO UPDATE SET
                 client_name  = COALESCE(EXCLUDED.client_name, wb_chats.client_name),
                 nm_id        = COALESCE(EXCLUDED.nm_id,        wb_chats.nm_id),
@@ -146,6 +200,7 @@ def _upsert_event(conn, e: dict):
                 last_ts      = EXCLUDED.last_ts,
                 needs_answer = true,
                 is_closing   = :closing,
+                reply_sign   = COALESCE(NULLIF(EXCLUDED.reply_sign,''), wb_chats.reply_sign),
                 -- если чат уже ждал ответа — сохраняем самый ранний момент ожидания
                 waiting_since = CASE
                     WHEN wb_chats.needs_answer AND wb_chats.waiting_since IS NOT NULL
@@ -153,15 +208,15 @@ def _upsert_event(conn, e: dict):
                     ELSE EXCLUDED.waiting_since END,
                 updated_at   = now()
         """), {"cid": cid, "cn": cname, "nm": nm_id, "gn": gname, "msg": body,
-               "ts": ts, "closing": closing})
+               "ts": ts, "closing": closing, "rs": reply_sign})
     elif sender == "seller":
         conn.execute(text("""
             INSERT INTO wb_chats
                 (chat_id, client_name, nm_id, good_name, last_message, last_sender,
-                 last_ts, needs_answer, is_closing, waiting_since, updated_at)
+                 last_ts, needs_answer, is_closing, waiting_since, reply_sign, updated_at)
             VALUES
                 (:cid, :cn, :nm, :gn, :msg, 'seller',
-                 :ts, false, false, NULL, now())
+                 :ts, false, false, NULL, NULLIF(:rs,''), now())
             ON CONFLICT (chat_id) DO UPDATE SET
                 client_name  = COALESCE(EXCLUDED.client_name, wb_chats.client_name),
                 nm_id        = COALESCE(EXCLUDED.nm_id,        wb_chats.nm_id),
@@ -172,8 +227,9 @@ def _upsert_event(conn, e: dict):
                 needs_answer = false,
                 is_closing   = false,
                 waiting_since = NULL,
+                reply_sign   = COALESCE(NULLIF(EXCLUDED.reply_sign,''), wb_chats.reply_sign),
                 updated_at   = now()
-        """), {"cid": cid, "cn": cname, "nm": nm_id, "gn": gname, "msg": body, "ts": ts})
+        """), {"cid": cid, "cn": cname, "nm": nm_id, "gn": gname, "msg": body, "ts": ts, "rs": reply_sign})
     # sender == 'wb' (системные) — не меняют статус ответа
 
 
@@ -204,13 +260,30 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
             if not events:
                 break
 
+            updated_ids = []
             for e in events:
                 _upsert_event(conn, e)
+                cid = e.get("chatID") or e.get("chat_id") or ""
+                if cid:
+                    updated_ids.append(cid)
                 processed += 1
                 ets = int(e.get("addTimestamp") or 0)
                 if ets > last_ts:
                     last_ts = ets
             conn.commit()
+
+            # Публикуем обновлённые чаты в Centrifugo
+            if updated_ids:
+                rows = conn.execute(text("""
+                    SELECT chat_id, client_name, nm_id, good_name,
+                           last_message, last_sender, last_ts, needs_answer
+                    FROM wb_chats WHERE chat_id = ANY(:ids)
+                """), {"ids": list(set(updated_ids))}).mappings().all()
+                for row in rows:
+                    centrifugo.publish("chats", {
+                        "type": "chat_updated",
+                        "chat": dict(row),
+                    })
 
             nxt = res.get("next")
             if not nxt or int(nxt) <= cursor:
@@ -246,7 +319,7 @@ async def start_chat_sync_worker(get_db_func) -> None:
             if cursor == 0:
                 backfill_from = int((time.time() - BACKFILL_DAYS * 86400) * 1000)
                 logger.info("[WBChatSync] backfill from %d days", BACKFILL_DAYS)
-                sync_events(db, since_ts=backfill_from)
+                await asyncio.to_thread(sync_events, db, backfill_from)
         finally:
             db.close()
     except Exception as e:
@@ -258,7 +331,8 @@ async def start_chat_sync_worker(get_db_func) -> None:
         try:
             db = next(get_db_func())
             try:
-                sync_events(db)
+                # Блокирующий синк (HTTP к API WB) — в отдельном потоке
+                await asyncio.to_thread(sync_events, db)
             finally:
                 db.close()
         except Exception as e:

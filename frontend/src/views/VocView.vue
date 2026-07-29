@@ -162,12 +162,11 @@ onMounted(loadData)
 </script>
 
 <template>
-  <div class="p-6 w-full mx-auto pb-24 bg-slate-50 min-h-screen font-sans max-w-[1600px] text-slate-800">
-
+  <div class="p-4 md:p-6 w-full mx-auto pb-24 bg-slate-50 min-h-screen font-sans max-w-[1600px] text-slate-800">
     <!-- ── Заголовок ── -->
-    <div class="flex items-center justify-between mb-6 border-b border-slate-200 pb-5">
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 border-b border-slate-200 pb-5">
       <div class="flex items-center gap-4">
-        <div class="p-3 bg-violet-600 text-white rounded-xl shadow-lg shadow-violet-200/50">
+        <div class="p-3 bg-violet-600 text-white rounded-xl shadow-lg shadow-violet-200/50 flex-shrink-0">
           <MessageSquare class="w-6 h-6" />
         </div>
         <div>
@@ -177,7 +176,7 @@ onMounted(loadData)
       </div>
 
       <!-- Период + режим -->
-      <div class="flex items-center gap-3">
+      <div class="flex flex-wrap items-center gap-3">
         <div class="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
           <button v-for="d in [7,14,30,90]" :key="d"
             @click="days = d"

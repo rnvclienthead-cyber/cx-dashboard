@@ -3,7 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { apiFetch } from '../api'
 import {
   ShieldAlert, Users, MailPlus, Trash2, Check, UserCog,
-  Plus, Settings2, X, Save, Globe, ChevronDown, ChevronRight, KeyRound
+  Plus, Settings2, X, Save, Globe, ChevronDown, ChevronRight, KeyRound, Send
 } from 'lucide-vue-next'
 
 // ── Пользователи и инвайты ────────────────────────────────────────────────────
@@ -25,8 +25,8 @@ const showNewRole  = ref(false)
 const saving       = ref(false)
 
 // Маркетплейсы: читаемые названия
-const mpLabel = { all: 'Все', wb: 'WB', ym: 'ЯМ' }
-const mpColor = { all: 'bg-slate-100 text-slate-600', wb: 'bg-purple-100 text-purple-700', ym: 'bg-yellow-100 text-yellow-700' }
+const mpLabel = { all: 'Все', wb: 'WB', ym: 'ЯМ', ozon: 'OZON' }
+const mpColor = { all: 'bg-slate-100 text-slate-600', wb: 'bg-purple-100 text-purple-700', ym: 'bg-yellow-100 text-yellow-700', ozon: 'bg-blue-100 text-blue-700' }
 
 // ── Инвайты: список ролей из БД ───────────────────────────────────────────────
 const roleOptions = computed(() =>
@@ -62,6 +62,33 @@ const changeUserRole = async (userId, newRole) => {
   try {
     await apiFetch(`/api/auth/users/${userId}/role`, { method: 'PUT', body: JSON.stringify({ role: newRole }) })
   } catch { alert('Ошибка при изменении роли') }
+}
+
+// ── Telegram: привязка чата + флаг системных алертов ──────────────────────────
+const savingTg = ref(null)
+const savedTg  = ref(null)
+
+const _putTg = (user) => apiFetch(`/api/auth/users/${user.id}/tg`, {
+  method: 'PUT',
+  body: JSON.stringify({ tg_chat_id: user.tg_chat_id || '', tg_alerts: !!user.tg_alerts })
+})
+
+// Тихое сохранение при клике на тумблер (без смены иконки кнопки)
+const toggleUserTgAlerts = async (user) => {
+  user.tg_alerts = !user.tg_alerts
+  try { await _putTg(user) }
+  catch { user.tg_alerts = !user.tg_alerts; alert('Ошибка сохранения') }
+}
+
+// Сохранение через кнопку (chat_id + текущий флаг) — показывает галочку
+const saveUserTg = async (user) => {
+  savingTg.value = user.id
+  try {
+    await _putTg(user)
+    savedTg.value = user.id
+    setTimeout(() => { if (savedTg.value === user.id) savedTg.value = null }, 2000)
+  } catch { alert('Ошибка сохранения Telegram') }
+  finally { savingTg.value = null }
 }
 
 const createInvite = async () => {
@@ -137,31 +164,35 @@ const createRole = async () => {
 }
 
 // ── Сброс пароля пользователя (admin) ────────────────────────────────────────
-const resetTarget = ref(null)   // { id, email }
-const resetNewPw  = ref('')
-const resetError  = ref('')
-const resetOk     = ref(false)
+const resetTarget  = ref(null)   // { id, email }
+const resetError   = ref('')
+const resetOk      = ref(false)
+const resetLoading = ref(false)
 
 const openReset = (user) => {
-  resetTarget.value = user
-  resetNewPw.value  = ''
-  resetError.value  = ''
-  resetOk.value     = false
+  resetTarget.value  = user
+  resetError.value   = ''
+  resetOk.value      = false
+  resetLoading.value = false
 }
 
 const submitReset = async () => {
-  resetError.value = ''
-  if (resetNewPw.value.length < 6) { resetError.value = 'Минимум 6 символов'; return }
+  resetError.value   = ''
+  resetLoading.value = true
   try {
-    const res = await apiFetch('/api/auth/admin/reset-password', {
+    const res = await apiFetch('/api/auth/admin/reset-to-activation', {
       method: 'POST',
-      body: JSON.stringify({ user_id: resetTarget.value.id, new_password: resetNewPw.value })
+      body: JSON.stringify({ user_id: resetTarget.value.id })
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.detail || 'Ошибка')
     resetOk.value = true
-    setTimeout(() => { resetTarget.value = null }, 1500)
-  } catch (e) { resetError.value = e.message }
+    setTimeout(() => { resetTarget.value = null; loadData() }, 1800)
+  } catch (e) {
+    resetError.value = e.message
+  } finally {
+    resetLoading.value = false
+  }
 }
 
 const deleteRole = async (roleName) => {
@@ -261,6 +292,7 @@ onMounted(loadData)
                   <th class="pb-3 font-bold">ID</th>
                   <th class="pb-3 font-bold">Email</th>
                   <th class="pb-3 font-bold">Роль</th>
+                  <th class="pb-3 font-bold">Telegram-алерты</th>
                   <th class="pb-3 font-bold text-right">Пароль</th>
                 </tr>
               </thead>
@@ -274,6 +306,27 @@ onMounted(loadData)
                       <option v-for="r in roleOptions" :key="r.id" :value="r.id">{{ r.name }}</option>
                     </select>
                   </td>
+                  <td class="py-3">
+                    <div class="flex items-center gap-2">
+                      <input v-model="user.tg_chat_id" type="text" placeholder="chat_id" inputmode="numeric"
+                        class="w-28 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-700 focus:outline-none focus:border-sky-400" />
+                      <!-- Тумблер: получать алерты -->
+                      <button type="button" @click="toggleUserTgAlerts(user)"
+                        :title="user.tg_alerts ? 'Получает системные алерты' : 'Алерты выключены'"
+                        :class="['relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
+                                 user.tg_alerts ? 'bg-emerald-500' : 'bg-slate-300']">
+                        <span :class="['pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform transition duration-200 ease-in-out',
+                                       user.tg_alerts ? 'translate-x-4' : 'translate-x-0']"></span>
+                      </button>
+                      <Check v-if="user.tg_alerts" class="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                      <button @click="saveUserTg(user)" :disabled="savingTg === user.id"
+                        :class="['p-1.5 rounded-lg transition-colors', savedTg === user.id ? 'text-emerald-600 bg-emerald-50' : 'text-sky-500 hover:bg-sky-50']"
+                        :title="savedTg === user.id ? 'Сохранено' : 'Сохранить'">
+                        <Check v-if="savedTg === user.id" class="w-4 h-4" />
+                        <Send v-else class="w-4 h-4" />
+                      </button>
+                    </div>
+                  </td>
                   <td class="py-3 text-right">
                     <button @click="openReset(user)" title="Сбросить пароль"
                       class="p-2 rounded-lg text-amber-500 hover:bg-amber-50 hover:text-amber-600 transition-colors">
@@ -284,23 +337,32 @@ onMounted(loadData)
               </tbody>
             </table>
 
-            <!-- Модал сброса пароля -->
+            <!-- Модал сброса пароля → активация -->
             <div v-if="resetTarget" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
               <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm">
                 <div class="flex items-center justify-between mb-4">
                   <h3 class="font-black text-slate-800">Сброс пароля</h3>
                   <button @click="resetTarget = null" class="p-1 rounded-lg hover:bg-slate-100 text-slate-400"><X class="w-4 h-4" /></button>
                 </div>
-                <p class="text-sm text-slate-500 mb-4">Новый пароль для <span class="font-bold text-slate-700">{{ resetTarget.email }}</span></p>
-                <div v-if="resetOk" class="p-3 bg-green-50 text-green-700 text-sm font-bold rounded-xl text-center">Пароль сброшен!</div>
+
+                <div v-if="resetOk" class="p-4 bg-green-50 text-green-700 text-sm font-bold rounded-xl text-center">
+                  ✓ Аккаунт сброшен — сотрудник может войти через активацию
+                </div>
                 <template v-else>
+                  <p class="text-sm text-slate-600 mb-1">Аккаунт будет деактивирован:</p>
+                  <p class="font-bold text-slate-800 mb-4">{{ resetTarget.email }}</p>
+                  <p class="text-sm text-slate-500 mb-5">Сотрудник увидит ошибку при попытке войти и сможет самостоятельно задать новый пароль через кнопку <span class="font-semibold text-slate-700">«Активировать»</span> на странице входа.</p>
                   <div v-if="resetError" class="mb-3 p-3 bg-red-50 text-red-600 text-sm font-bold rounded-xl">{{ resetError }}</div>
-                  <input v-model="resetNewPw" type="text" placeholder="Новый пароль"
-                    class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-amber-400 mb-3" />
-                  <button @click="submitReset"
-                    class="w-full bg-amber-500 hover:bg-amber-600 text-white font-black py-3 rounded-xl transition-colors">
-                    Сохранить новый пароль
-                  </button>
+                  <div class="flex gap-2">
+                    <button @click="resetTarget = null"
+                      class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 rounded-xl transition-colors">
+                      Отмена
+                    </button>
+                    <button @click="submitReset" :disabled="resetLoading"
+                      class="flex-1 bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white font-black py-3 rounded-xl transition-colors">
+                      {{ resetLoading ? 'Сброс...' : 'Сбросить' }}
+                    </button>
+                  </div>
                 </template>
               </div>
             </div>
@@ -406,7 +468,7 @@ onMounted(loadData)
                       type="button" @click="setMarketplace(mod.key, mp)"
                       :class="['px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors',
                         editingRole.permsMap[mod.key] === mp
-                          ? (mp === 'all' ? 'bg-slate-700 text-white' : mp === 'wb' ? 'bg-purple-600 text-white' : 'bg-yellow-500 text-white')
+                          ? (mp === 'all' ? 'bg-slate-700 text-white' : mp === 'wb' ? 'bg-purple-600 text-white' : mp === 'ym' ? 'bg-yellow-500 text-white' : 'bg-blue-600 text-white')
                           : 'bg-slate-100 text-slate-500 hover:bg-slate-200']">
                       {{ mpLabel[mp] }}
                     </button>

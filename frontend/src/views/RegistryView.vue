@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { Download, X, Ban, Search, SlidersHorizontal, ChevronDown, Plus } from 'lucide-vue-next'
 import { apiFetch } from '../api'
+import JSZip from 'jszip'
 
 // ── Данные ────────────────────────────────────────────────────────────────────
 const logs = ref([])
@@ -81,6 +82,20 @@ const formatRuDate = (d) => {
   return s
 }
 
+const toMsk = (dt) => {
+  if (!dt) return ''
+  const s = String(dt).trim()
+  // Бэкенд возвращает UTC уже отформатированным: "09.07.2026 13:05"
+  const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/)
+  if (m) {
+    const d = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:00Z`)
+    if (!isNaN(d)) return d.toLocaleString('ru-RU', {
+      timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+    })
+  }
+  return s
+}
+
 // ── п.5: Отчетный месяц — нормализация хранимого значения ────────────────────
 // Приводим к виду "Месяц ГГГГ", нормализуем старые значения
 const normalizeMonth = (v) => {
@@ -94,7 +109,7 @@ const normalizeMonth = (v) => {
 }
 
 // ── Ресайз колонок ────────────────────────────────────────────────────────────
-const COL_WIDTHS_KEY = 'registry_col_widths_v2'
+const COL_WIDTHS_KEY = 'registry_col_widths_v4'
 const colWidths = ref(JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) || '{}'))
 let _resizeState = null
 const startResize = (e, colIdx) => {
@@ -191,6 +206,11 @@ const openAddManualForm = () => {
 onMounted(() => { fetchAll(); fetchMetadata() })
 
 // ── Фильтр ────────────────────────────────────────────────────────────────────
+const availableSuppliers = computed(() => {
+  const s = new Set(logs.value.map(l => l.supplier).filter(Boolean))
+  return Array.from(s).sort()
+})
+
 const filtered = computed(() => {
   let data = logs.value
   const q = search.value.toLowerCase()
@@ -199,7 +219,7 @@ const filtered = computed(() => {
       .some(v => String(v || '').toLowerCase().includes(q))
   )
   if (filters.value.sku) data = data.filter(r => String(r.sku || '').toLowerCase().includes(filters.value.sku.toLowerCase()))
-  if (filters.value.supplier) data = data.filter(r => String(r.supplier || '').toLowerCase().includes(filters.value.supplier.toLowerCase()))
+  if (filters.value.supplier) data = data.filter(r => r.supplier === filters.value.supplier)
   if (filters.value.claim_status) data = data.filter(r => r.claim_status === filters.value.claim_status)
   if (filters.value.send_status) data = data.filter(r => r.send_status === filters.value.send_status)
   if (filters.value.factory_type) data = data.filter(r => r.factory_type === filters.value.factory_type)
@@ -208,6 +228,14 @@ const filtered = computed(() => {
 })
 const activeFiltersCount = computed(() => Object.values(filters.value).filter(v => v).length)
 const resetFilters = () => { Object.keys(filters.value).forEach(k => { filters.value[k] = '' }) }
+
+// ── Раскрытие "Ответ завода" ──────────────────────────────────────────────────
+const expandedReplies = ref(new Set())
+const toggleReply = (id) => {
+  const s = new Set(expandedReplies.value)
+  if (s.has(id)) s.delete(id); else s.add(id)
+  expandedReplies.value = s
+}
 
 // ── Lock-логика ───────────────────────────────────────────────────────────────
 const isRowLocked = (log) => log.send_status === 'Отправлен'
@@ -262,6 +290,70 @@ const handleSendStatusChange = async (log) => {
   await saveField(log, 'send_status', 'send_date')
 }
 
+// ── Массовое скачивание ───────────────────────────────────────────────────────
+const selectedIds = ref(new Set())
+const isDownloadingBulk = ref(false)
+
+const toggleSelection = (id) => {
+  const s = new Set(selectedIds.value)
+  if (s.has(id)) s.delete(id); else s.add(id)
+  selectedIds.value = s
+}
+const toggleSelectAll = () => {
+  const downloadable = filtered.value.filter(l => l.pdf_payload)
+  if (selectedIds.value.size === downloadable.length && downloadable.length > 0) {
+    selectedIds.value = new Set()
+  } else {
+    selectedIds.value = new Set(downloadable.map(l => l.id))
+  }
+}
+const isAllSelected = computed(() => {
+  const downloadable = filtered.value.filter(l => l.pdf_payload)
+  return downloadable.length > 0 && selectedIds.value.size === downloadable.length
+})
+
+const actFilename = (log) => {
+  const date = (log.ra_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '.')
+  const sku = String(log.sku || '').replace(/[/\\:*?"<>|]/g, '-')
+  return `PA № ${log.act_number} - ${sku} ${date}.pdf`
+}
+
+const fetchActBlob = async (log) => {
+  const payload = typeof log.pdf_payload === 'string' ? JSON.parse(log.pdf_payload) : log.pdf_payload
+  payload.is_redownload = true
+  payload.existing_act_number = log.act_number
+  const res = await apiFetch('/api/v1/analytics/export-claim', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  })
+  return res.blob()
+}
+
+const downloadSelected = async () => {
+  const toDownload = filtered.value.filter(l => selectedIds.value.has(l.id) && l.pdf_payload)
+  if (!toDownload.length) return
+  isDownloadingBulk.value = true
+  try {
+    const zip = new JSZip()
+    for (const log of toDownload) {
+      try {
+        const blob = await fetchActBlob(log)
+        zip.file(actFilename(log), blob)
+      } catch { /* пропускаем если не удалось */ }
+    }
+    const zipBlob = await zip.generateAsync({ type: 'blob' })
+    const factories = [...new Set(toDownload.map(l => l.supplier).filter(Boolean))]
+    const zipName = `${factories.join(', ') || 'Акты'} ${new Date().toISOString().slice(0, 10).replace(/-/g, '.')}.zip`
+    const url = URL.createObjectURL(zipBlob)
+    const link = document.createElement('a')
+    link.href = url; link.download = zipName
+    document.body.appendChild(link); link.click(); document.body.removeChild(link)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } finally {
+    isDownloadingBulk.value = false
+    selectedIds.value = new Set()
+  }
+}
+
 // ── Действия ──────────────────────────────────────────────────────────────────
 const cancelLog = async (id) => {
   if (!confirm('Аннулировать акт?')) return
@@ -281,11 +373,12 @@ const unlockLog = async (id) => {
 const redownload = async (log) => {
   if (!log.pdf_payload) return alert('Данные акта не сохранились.')
   try {
-    const payload = typeof log.pdf_payload === 'string' ? JSON.parse(log.pdf_payload) : log.pdf_payload
-    payload.is_redownload = true; payload.existing_act_number = log.act_number
-    const res = await apiFetch('/api/v1/analytics/export-claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-    const blob = await res.blob(); const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob); link.download = `${log.act_number}_${log.sku}.pdf`; link.click()
+    const blob = await fetchActBlob(log)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url; link.download = actFilename(log)
+    document.body.appendChild(link); link.click(); document.body.removeChild(link)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch { alert('Не удалось скачать.') }
 }
 
@@ -377,7 +470,7 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
             </div>
             <div class="space-y-2.5">
               <div><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">Артикул</label><input v-model="filters.sku" class="w-full p-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-blue-400" placeholder="Поиск по артикулу..." /></div>
-              <div><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">Завод</label><input v-model="filters.supplier" class="w-full p-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-blue-400" placeholder="Название завода..." /></div>
+              <div><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">Завод</label><select v-model="filters.supplier" class="w-full p-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-blue-400 bg-white"><option value="">Все</option><option v-for="s in availableSuppliers" :key="s">{{ s }}</option></select></div>
               <div><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">Группа ABC</label><select v-model="filters.abc_group" class="w-full p-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-blue-400 bg-white"><option value="">Все</option><option>A</option><option>B</option><option>C</option></select></div>
               <div><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">Статус претензии</label><select v-model="filters.claim_status" class="w-full p-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-blue-400 bg-white"><option value="">Все</option><option v-for="o in CLAIM_STATUS_OPTIONS" :key="o">{{ o }}</option></select></div>
               <div><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">Статус отправки</label><select v-model="filters.send_status" class="w-full p-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-blue-400 bg-white"><option value="">Все</option><option v-for="o in SEND_STATUS_OPTIONS" :key="o">{{ o }}</option></select></div>
@@ -386,6 +479,11 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
             <div class="mt-3 pt-3 border-t border-slate-100 text-center text-[10px] text-slate-400">Показано: {{ filtered.length }} из {{ logs.length }}</div>
           </div>
         </div>
+        <button v-if="activeTab==='acts' && selectedIds.size > 0" @click="downloadSelected" :disabled="isDownloadingBulk"
+                class="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white hover:bg-blue-700 border border-blue-600 rounded-xl font-bold text-xs transition-colors disabled:opacity-60">
+          <Download class="w-3.5 h-3.5" />
+          {{ isDownloadingBulk ? 'Скачивание...' : `PDF (${selectedIds.size})` }}
+        </button>
         <button v-if="activeTab==='acts'" @click="exportCsv" class="flex items-center gap-1.5 px-3 py-1.5 bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 rounded-xl font-bold text-xs transition-colors">
           <Download class="w-3.5 h-3.5" /> CSV
         </button>
@@ -451,14 +549,17 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
         <thead class="bg-slate-100 border-b-2 border-slate-300" style="position:sticky;top:0;z-index:20">
           <tr class="text-slate-500 uppercase font-black text-[9px] tracking-wider">
 
-            <!-- Вспомогательный компонент resize-handle используется как slot внутри th -->
+            <!-- col checkbox -->
+            <th class="p-2.5 text-center select-none" style="width:36px;min-width:36px;position:sticky;left:0;background:#f1f5f9;z-index:30">
+              <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" class="rounded accent-blue-600 cursor-pointer" />
+            </th>
             <!-- col 0: № РА -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(0,90)" style="position:sticky;left:0;background:#f1f5f9;z-index:30">
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(0,90)" style="position:sticky;left:36px;background:#f1f5f9;z-index:30">
               № РА
               <div class="resize-handle" @mousedown.stop="startResize($event,0)"><div class="resize-bar"></div></div>
             </th>
             <!-- col 1: Артикул -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(1,130)" style="position:sticky;left:90px;background:#f1f5f9;z-index:30">
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(1,130)" style="position:sticky;left:126px;background:#f1f5f9;z-index:30">
               Артикул
               <div class="resize-handle" @mousedown.stop="startResize($event,1)"><div class="resize-bar"></div></div>
             </th>
@@ -472,28 +573,28 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
             <th class="p-2.5 text-center relative select-none overflow-hidden" :style="getColStyle(5,55)">Кол-во<div class="resize-handle" @mousedown.stop="startResize($event,5)"><div class="resize-bar"></div></div></th>
             <!-- col 6 -->
             <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(6,150)">Описание отклонения<div class="resize-handle" @mousedown.stop="startResize($event,6)"><div class="resize-bar"></div></div></th>
-            <!-- col 7 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(7,120)">Комментарии<div class="resize-handle" @mousedown.stop="startResize($event,7)"><div class="resize-bar"></div></div></th>
-            <!-- col 8: Отч. месяц -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(8,110)">Отч. месяц<div class="resize-handle" @mousedown.stop="startResize($event,8)"><div class="resize-bar"></div></div></th>
+            <!-- col 7: Отч. месяц -->
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(7,110)">Отч. месяц<div class="resize-handle" @mousedown.stop="startResize($event,7)"><div class="resize-bar"></div></div></th>
+            <!-- col 8 -->
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(8,90)">Инициатор<div class="resize-handle" @mousedown.stop="startResize($event,8)"><div class="resize-bar"></div></div></th>
             <!-- col 9 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(9,90)">Инициатор<div class="resize-handle" @mousedown.stop="startResize($event,9)"><div class="resize-bar"></div></div></th>
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(9,130)">Инвойсы<div class="resize-handle" @mousedown.stop="startResize($event,9)"><div class="resize-bar"></div></div></th>
             <!-- col 10 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(10,130)">Инвойсы<div class="resize-handle" @mousedown.stop="startResize($event,10)"><div class="resize-bar"></div></div></th>
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(10,200)">Контр. параметры<div class="resize-handle" @mousedown.stop="startResize($event,10)"><div class="resize-bar"></div></div></th>
             <!-- col 11 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(11,200)">Контр. параметры<div class="resize-handle" @mousedown.stop="startResize($event,11)"><div class="resize-bar"></div></div></th>
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(11,200)">Отклонение<div class="resize-handle" @mousedown.stop="startResize($event,11)"><div class="resize-bar"></div></div></th>
             <!-- col 12 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(12,200)">Отклонение<div class="resize-handle" @mousedown.stop="startResize($event,12)"><div class="resize-bar"></div></div></th>
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(12,100)">Повторяемость<div class="resize-handle" @mousedown.stop="startResize($event,12)"><div class="resize-bar"></div></div></th>
             <!-- col 13 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(13,100)">Повторяемость<div class="resize-handle" @mousedown.stop="startResize($event,13)"><div class="resize-bar"></div></div></th>
-            <!-- col 14 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(14,100)">Кто отправил<div class="resize-handle" @mousedown.stop="startResize($event,14)"><div class="resize-bar"></div></div></th>
-            <!-- col 15: Статус отправки (первым) -->
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(13,100)">Кто отправил<div class="resize-handle" @mousedown.stop="startResize($event,13)"><div class="resize-bar"></div></div></th>
+            <!-- col 14: Чат -->
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(14,130)">Чат<div class="resize-handle" @mousedown.stop="startResize($event,14)"><div class="resize-bar"></div></div></th>
+            <!-- col 15: Статус отправки -->
             <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(15,115)">Статус отправки<div class="resize-handle" @mousedown.stop="startResize($event,15)"><div class="resize-bar"></div></div></th>
             <!-- col 16: Дата отправки -->
             <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(16,100)">Дата отправки<div class="resize-handle" @mousedown.stop="startResize($event,16)"><div class="resize-bar"></div></div></th>
             <!-- col 17 -->
-            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(17,180)">Ответ завода<div class="resize-handle" @mousedown.stop="startResize($event,17)"><div class="resize-bar"></div></div></th>
+            <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(17,500)">Ответ завода<div class="resize-handle" @mousedown.stop="startResize($event,17)"><div class="resize-bar"></div></div></th>
             <!-- col 18 -->
             <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(18,100)">Дата ответа<div class="resize-handle" @mousedown.stop="startResize($event,18)"><div class="resize-bar"></div></div></th>
             <!-- col 19 -->
@@ -509,17 +610,22 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
             <tr :class="['group transition-colors', isRowDone(log) ? 'bg-amber-100 hover:bg-amber-200/60' : isRowPartialDone(log) ? 'row-stripe' : isRowLocked(log) ? 'bg-green-50 hover:bg-green-100/60' : 'bg-white hover:bg-blue-50/30']"
                 :style="isRowPartialDone(log) && !isRowDone(log) ? { backgroundPosition: `${(logIndex * 37) % 95}px 0` } : {}">
 
+              <!-- checkbox -->
+              <td class="p-2 text-center overflow-hidden" :class="rowBgClass(log)" style="position:sticky;left:0;z-index:10;width:36px">
+                <input v-if="log.pdf_payload" type="checkbox" :checked="selectedIds.has(log.id)" @change="toggleSelection(log.id)" class="rounded accent-blue-600 cursor-pointer" />
+              </td>
+
               <!-- 0: № РА -->
-              <td class="p-2 overflow-hidden" :class="rowBgClass(log)" style="position:sticky;left:0;z-index:10">
+              <td class="p-2 overflow-hidden" :class="rowBgClass(log)" style="position:sticky;left:36px;z-index:10">
                 <div class="flex items-center gap-1 cursor-pointer" @click="expandedId = expandedId===log.id ? null : log.id">
                   <ChevronDown :class="['w-3 h-3 text-slate-400 flex-shrink-0 transition-transform', expandedId===log.id ? 'rotate-180 text-blue-600' : '']" />
                   <span class="font-black text-blue-700 text-xs hover:text-blue-900 leading-tight">{{ log.act_number }}</span>
                 </div>
-                <div class="text-[9px] text-slate-400 ml-4">{{ log.created_at }}</div>
+                <div class="text-[9px] text-slate-400 ml-4">{{ toMsk(log.created_at) }}</div>
               </td>
 
               <!-- 1: Артикул -->
-              <td class="p-2 font-bold text-slate-800 overflow-hidden truncate" :class="rowBgClass(log)" style="position:sticky;left:90px;z-index:10">{{ log.sku }}</td>
+              <td class="p-2 font-bold text-slate-800 overflow-hidden truncate" :class="rowBgClass(log)" style="position:sticky;left:126px;z-index:10">{{ log.sku }}</td>
 
               <!-- 2: Наименование -->
               <td class="p-2 overflow-hidden">
@@ -545,19 +651,13 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
                 <textarea v-else v-model="log.deviation_desc" @blur="saveField(log,'deviation_desc')" rows="2" :class="inp + ' resize-none focus:bg-white'" placeholder="—"></textarea>
               </td>
 
-              <!-- 7: Комментарии -->
-              <td class="p-2 overflow-hidden">
-                <span v-if="isRowLocked(log)" :class="inpLocked + ' text-[11px] line-clamp-2 block'">{{ log.comments || '—' }}</span>
-                <textarea v-else v-model="log.comments" @blur="saveField(log,'comments')" rows="2" :class="inp + ' resize-none focus:bg-white'" placeholder="—"></textarea>
-              </td>
-
-              <!-- 8: Отч. месяц — текстовый input "Июнь 2026" -->
+              <!-- 7: Отч. месяц — текстовый input "Июнь 2026" -->
               <td class="p-2 overflow-hidden">
                 <span v-if="isRowLocked(log)" :class="inpLocked">{{ log.report_month || '—' }}</span>
                 <input v-else v-model="log.report_month" @blur="saveField(log,'report_month')" :class="inp" placeholder="Июнь 2026" />
               </td>
 
-              <!-- 9: Инициатор -->
+              <!-- 8: Инициатор -->
               <td class="p-2 overflow-hidden">
                 <span v-if="isRowLocked(log)" :class="inpLocked">{{ log.initiator || '—' }}</span>
                 <select v-else v-model="log.initiator" @change="saveField(log,'initiator')" :class="inp">
@@ -565,13 +665,13 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
                 </select>
               </td>
 
-              <!-- 10: Инвойсы -->
+              <!-- 9: Инвойсы -->
               <td class="p-2 overflow-hidden">
                 <span v-if="isRowLocked(log)" :class="inpLocked + ' whitespace-pre-wrap text-[11px]'">{{ (log.invoice_ref || '—').replace(/,\s*/g, '\n') }}</span>
                 <input v-else v-model="log.invoice_ref" @blur="saveField(log,'invoice_ref')" :class="inp" placeholder="—" />
               </td>
 
-              <!-- 11: Контр. параметры -->
+              <!-- 10: Контр. параметры -->
               <td class="p-2 relative overflow-hidden" @click.stop>
                 <div v-if="isRowLocked(log)" class="text-slate-600 text-[11px] leading-tight">
                   <span v-if="!parseMulti(log.controlled_params).length" class="text-slate-400">—</span>
@@ -591,7 +691,7 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
                 </div>
               </td>
 
-              <!-- 12: Отклонение -->
+              <!-- 11: Отклонение -->
               <td class="p-2 relative overflow-hidden" @click.stop>
                 <div v-if="isRowLocked(log)" class="text-slate-600 text-[11px] leading-tight">
                   <span v-if="!parseMulti(log.deviation).length" class="text-slate-400">—</span>
@@ -611,7 +711,7 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
                 </div>
               </td>
 
-              <!-- 13: Повторяемость -->
+              <!-- 12: Повторяемость -->
               <td class="p-2 overflow-hidden">
                 <span v-if="isRowLocked(log)" :class="inpLocked">{{ log.repeatability || '—' }}</span>
                 <select v-else v-model="log.repeatability" @change="saveField(log,'repeatability')" :class="inp">
@@ -619,10 +719,16 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
                 </select>
               </td>
 
-              <!-- 14: Кто отправил -->
+              <!-- 13: Кто отправил -->
               <td class="p-2 overflow-hidden">
                 <span v-if="isRowLocked(log)" :class="inpLocked">{{ log.who_sent || '—' }}</span>
                 <input v-else v-model="log.who_sent" @blur="saveField(log,'who_sent')" :class="inp" placeholder="—" />
+              </td>
+
+              <!-- 14: Чат -->
+              <td class="p-2 overflow-hidden">
+                <span v-if="isRowLocked(log)" :class="inpLocked">{{ log.chat_name || '—' }}</span>
+                <input v-else v-model="log.chat_name" @blur="saveField(log,'chat_name')" :class="inp" placeholder="—" />
               </td>
 
               <!-- 15: Статус отправки -->
@@ -641,8 +747,19 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
 
               <!-- 17: Ответ завода -->
               <td class="p-2 overflow-hidden">
-                <span v-if="isRowFullyLocked(log)" :class="inpLocked + ' text-[11px] line-clamp-3 block'">{{ log.factory_reply || '—' }}</span>
-                <textarea v-else v-model="log.factory_reply" @blur="saveField(log,'factory_reply')" rows="2" :class="inp + ' resize-none focus:bg-white'" placeholder="Ответ завода..."></textarea>
+                <template v-if="isRowFullyLocked(log)">
+                  <span :class="inpLocked + ' text-[11px] whitespace-pre-wrap block'">
+                    {{ expandedReplies.has(log.id) ? log.factory_reply : (log.factory_reply || '—').slice(0, 100) + ((log.factory_reply || '').length > 100 && !expandedReplies.has(log.id) ? '…' : '') }}
+                  </span>
+                </template>
+                <textarea v-else v-model="log.factory_reply" @blur="saveField(log,'factory_reply')"
+                  :rows="expandedReplies.has(log.id) ? Math.max(3, Math.ceil((log.factory_reply || '').length / 55)) : 2"
+                  :class="inp + ' resize-none focus:bg-white w-full'" placeholder="Ответ завода..."></textarea>
+                <button v-if="(log.factory_reply || '').length > 100"
+                  @click.stop="toggleReply(log.id)"
+                  class="mt-0.5 text-[10px] font-bold text-blue-500 hover:text-blue-700 leading-none">
+                  {{ expandedReplies.has(log.id) ? '↑ Свернуть' : '↓ Показать ещё' }}
+                </button>
               </td>
 
               <!-- 18: Дата ответа -->
@@ -690,7 +807,7 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
 
             <!-- ── Раскрытая строка ──────────────────────────────────────────── -->
             <tr v-if="expandedId===log.id" class="bg-indigo-50/40 border-b border-indigo-100">
-              <td colspan="22" class="px-5 py-4">
+              <td colspan="23" class="px-5 py-4">
                 <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3 text-xs">
 
                   <!-- Статус акта (п.1: перенесён из основной строки) -->
@@ -742,13 +859,20 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
                   <!-- Прочие поля -->
                   <div v-for="[field, label, type] in [
                     ['batch_num','№ партии','text'],['production_date','Дата производства','date'],
-                    ['sale_date','Дата продажи','date'],['chat_name','Название чата','text'],
+                    ['sale_date','Дата продажи','date'],
                     ['abc_group','Группа ABC','text'],['factory_type','Завод/не завод','text']
                   ]" :key="field">
                     <div class="text-[9px] font-black text-slate-400 uppercase mb-1">{{ label }}</div>
                     <span v-if="isRowLocked(log)" class="text-slate-700 text-xs font-medium">{{ type === 'date' ? formatRuDate(log[field]) : (log[field] || '—') }}</span>
                     <input v-else :type="type" v-model="log[field]" @blur="saveField(log, field)"
                            class="p-1 border border-slate-200 rounded-lg bg-white outline-none focus:ring-1 focus:ring-blue-400 text-xs max-w-[160px] w-full" placeholder="—" />
+                  </div>
+
+                  <div class="col-span-2">
+                    <div class="text-[9px] font-black text-slate-400 uppercase mb-1">Комментарии</div>
+                    <span v-if="isRowLocked(log)" class="text-slate-700 text-xs">{{ log.comments || '—' }}</span>
+                    <textarea v-else v-model="log.comments" @blur="saveField(log,'comments')" rows="2"
+                              class="w-full p-1 border border-slate-200 rounded-lg bg-white outline-none focus:ring-1 focus:ring-blue-400 text-xs resize-none" placeholder="—"></textarea>
                   </div>
 
                   <div class="col-span-2">
@@ -763,7 +887,7 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
           </template>
 
           <tr v-if="filtered.length===0">
-            <td colspan="22" class="text-center py-16 text-slate-400 font-bold">Нет записей</td>
+            <td colspan="23" class="text-center py-16 text-slate-400 font-bold">Нет записей</td>
           </tr>
         </tbody>
       </table>

@@ -49,6 +49,7 @@ class ClaimExportRequest(BaseModel):
     initiator: Optional[str] = 'Wildberries'
     factory_type: Optional[str] = 'завод'
     who_sent: Optional[str] = None
+    chat_name: Optional[str] = None
 
 class ReplyRequest(BaseModel):
     reply: str
@@ -395,7 +396,22 @@ def compute_abc_xyz(df_monthly: pd.DataFrame,
 def load_hybrid_data(db: Session, platform: str = 'wb') -> pd.DataFrame:
     if platform == 'ym':
         return _load_ym_claims(db)
-    query = text('SELECT * FROM view_wb_claims_enriched')
+    # Обычные отказы не считаем браком.
+    # Исключение: отказ из‑за доотправки детали — брак остаётся, просто закрыт
+    # внутренним инструментом (метка в status_ex или связь с reshipment_requests).
+    query = text("""
+        SELECT v.*
+        FROM view_wb_claims_enriched v
+        WHERE v.status IS DISTINCT FROM 'Отказ'
+           OR COALESCE(v.status_ex, '') ILIKE '%доотправк%'
+           OR EXISTS (
+                SELECT 1
+                FROM reshipment_requests r
+                WHERE r.matched_srid IS NOT NULL
+                  AND TRIM(r.matched_srid) <> ''
+                  AND LOWER(TRIM(r.matched_srid)) = LOWER(TRIM(v.srid))
+           )
+    """)
     try:
         with db.bind.connect() as conn:
             df = pd.read_sql(query, conn)
@@ -447,7 +463,8 @@ def _load_ym_claims(db: Session) -> pd.DataFrame:
                 LEFT JOIN wb_factories f
                     ON trim(lower(f.invoice_num)) = trim(lower(inv.invoice_num))
                    AND trim(lower(f.supplier_article)) = trim(lower(r.supplier_article))
-                WHERE r.return_type = 'RETURN' OR r.return_type IS NULL
+                WHERE (r.return_type = 'RETURN' OR r.return_type IS NULL)
+                  AND r.status NOT IN ('NOT_RETURNED', 'FAILED')
                 ORDER BY r.created_at DESC
             """), conn)
         if df.empty: return df
@@ -762,6 +779,18 @@ def get_ppm_dataset(
         df_total['abc_group'] = df_total['abc_group'].fillna('C')
         df_total['xyz_class'] = df_total['xyz_class'].fillna('Z')
 
+        # is_new из wb_assortment
+        try:
+            with db.bind.connect() as conn:
+                df_new = pd.read_sql(text("SELECT supplier_article AS article, is_new FROM wb_assortment WHERE is_new = true"), conn)
+            if not df_new.empty:
+                df_total = pd.merge(df_total, df_new[['article','is_new']], on='article', how='left')
+                df_total['is_new'] = df_total['is_new'].fillna(False)
+            else:
+                df_total['is_new'] = False
+        except:
+            df_total['is_new'] = False
+
         months_ru = {1:'Янв', 2:'Фев', 3:'Мар', 4:'Апр', 5:'Май', 6:'Июн', 7:'Июл', 8:'Авг', 9:'Сен', 10:'Окт', 11:'Ноя', 12:'Дек'}
         df_total['month_str'] = df_total['month_dt'].dt.month.map(months_ru) + " " + df_total['month_dt'].dt.year.astype(str)
         df_total['month_dt'] = df_total['month_dt'].dt.strftime('%Y-%m-%d')
@@ -830,12 +859,12 @@ def export_claim_pdf(payload: ClaimExportRequest = Body(...), db: Session = Depe
                       (act_number, sku, supplier, defects_count, period_str, pdf_payload,
                        report_month, abc_group, product_name, invoice_ref, deviation,
                        deviation_desc, deviation_cause, claim_status, initiator, factory_type,
-                       who_sent, qty, ra_date, send_status)
+                       who_sent, qty, ra_date, send_status, chat_name)
                     VALUES
                       ('TEMP-' || gen_random_uuid(), :sku, :sup, :def, :per, CAST(:pay AS jsonb),
                        :report_month, :abc_group, :product_name, :invoice_ref, :deviation,
                        :deviation_desc, :deviation_cause, :claim_status, :initiator, :factory_type,
-                       :who_sent, :qty, CURRENT_DATE, 'Не отправлен')
+                       :who_sent, :qty, CURRENT_DATE, 'Не отправлен', :chat_name)
                     RETURNING id
                 """), {
                     "sku": payload.sku, "sup": payload.supplier, "def": payload.defects,
@@ -852,6 +881,7 @@ def export_claim_pdf(payload: ClaimExportRequest = Body(...), db: Session = Depe
                     "factory_type": payload.factory_type or 'завод',
                     "who_sent": payload.who_sent,
                     "qty": payload.defects,
+                    "chat_name": payload.chat_name,
                 })
                 nid = res.scalar()
                 next_num = conn.execute(text("""
@@ -896,7 +926,7 @@ def export_claim_pdf(payload: ClaimExportRequest = Body(...), db: Session = Depe
         <div class="photo-page-block">
             <div class="section-title">
                 <span><span class="pin">&#9650;</span> {c.get("ru","")}</span>
-                <span><span class="pin">&#9650;</span> {c.get("cn","")} <span class="count-badge">{len(urls)} шт / 件</span></span>
+                <span><span class="pin">&#9650;</span> {c.get("cn","")}</span>
             </div>
             <div class="photo-grid">
                 {grid_cells}

@@ -104,12 +104,18 @@ def get_wb_ratings_summary(
                 COALESCE(r."feedbackCount_current", 0) AS new_today,
                 t.stars_5, t.stars_4, t.stars_3, t.stars_2, t.stars_1,
                 t.refreshed_at::text    AS snapshot_date,
-                COALESCE(a.is_new, FALSE) AS is_new
+                COALESCE(a.is_new, FALSE) AS is_new,
+                f.nm_id
             FROM wb_ratings_totals t
             LEFT JOIN wb_ratings_raw r
                 ON r.sys_article = t.supplier_article
                 AND r.sys_date = (SELECT MAX(sys_date) FROM wb_ratings_raw)
             LEFT JOIN wb_assortment a ON a.supplier_article = t.supplier_article
+            LEFT JOIN LATERAL (
+                SELECT nm_id FROM wb_feedbacks
+                WHERE supplier_article = t.supplier_article AND nm_id IS NOT NULL
+                LIMIT 1
+            ) f ON TRUE
             ORDER BY t.review_count DESC NULLS LAST
         """)).fetchall()
         return [
@@ -123,6 +129,7 @@ def get_wb_ratings_summary(
                 "stars_1": r.stars_1 or 0,
                 "snapshot_date": str(r.snapshot_date or ""),
                 "is_new": bool(r.is_new),
+                "nm_id": str(r.nm_id) if r.nm_id else None,
             }
             for r in rows
         ]

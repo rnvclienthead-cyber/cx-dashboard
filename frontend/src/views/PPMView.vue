@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { AlertTriangle, TrendingUp, TableProperties, Calendar, Search, Download, ChevronLeft, ChevronRight, ChevronDown, X, FileText, CheckCircle2, History, Ban } from 'lucide-vue-next'
+import { AlertTriangle, TrendingUp, TableProperties, Calendar, Search, Download, ChevronLeft, ChevronRight, ChevronDown, X, FileText, CheckCircle2, Check, History, Ban } from 'lucide-vue-next'
 import Plotly from 'plotly.js-dist-min'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
@@ -12,6 +12,7 @@ const claimsDetail = ref([])
 const ordersByFactory = ref([])
 const loading = ref(true)
 const trendChart = ref(null)
+const defectTypeChart = ref(null)
 
 const categoryPhotosState = ref({})
 const excludedPhotos = ref(new Set())
@@ -28,6 +29,56 @@ const showLogsModal = ref(false)
 const claimLogs = ref([])
 const isLogsLoading = ref(false)
 const activeLogTab = ref('acts')
+
+// Журнал: фильтр по заводу
+const logFactoryFilter = ref('Все')
+const logFactories = computed(() => {
+  const factories = new Set(claimLogs.value.map(l => l.supplier).filter(Boolean))
+  return ['Все', ...Array.from(factories).sort()]
+})
+const filteredClaimLogs = computed(() => {
+  if (logFactoryFilter.value === 'Все') return claimLogs.value
+  return claimLogs.value.filter(l => l.supplier === logFactoryFilter.value)
+})
+
+// Журнал: массовое скачивание
+const selectedLogIds = ref(new Set())
+const isDownloadingBulk = ref(false)
+const toggleLogSelection = (id) => {
+  const s = new Set(selectedLogIds.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  selectedLogIds.value = s
+}
+const toggleSelectAll = () => {
+  if (selectedLogIds.value.size === filteredClaimLogs.value.length && filteredClaimLogs.value.length > 0) {
+    selectedLogIds.value = new Set()
+  } else {
+    selectedLogIds.value = new Set(filteredClaimLogs.value.map(l => l.id))
+  }
+}
+const downloadSelectedActs = async () => {
+  const ids = [...selectedLogIds.value]
+  if (!ids.length) return
+  isDownloadingBulk.value = true
+  try {
+    for (const id of ids) {
+      const log = claimLogs.value.find(l => l.id === id)
+      if (log?.pdf_payload) {
+        await redownloadLog(log)
+        await new Promise(r => setTimeout(r, 700))
+      }
+    }
+  } finally { isDownloadingBulk.value = false }
+}
+
+// Уведомление об успешном создании акта
+const actCreatedMsg = ref('')
+let _actCreatedTimer = null
+const showActCreated = (msg) => {
+  actCreatedMsg.value = msg
+  if (_actCreatedTimer) clearTimeout(_actCreatedTimer)
+  _actCreatedTimer = setTimeout(() => { actCreatedMsg.value = '' }, 5000)
+}
 const manualClaims = ref([])
 const isManualLoading = ref(false)
 const newManualClaim = ref({ send_date: '', send_text: '', invoice_ref: '', factory_name: '', container_num: '', manual_status: '', who_sent: '' })
@@ -98,7 +149,7 @@ const CONTROLLED_PARAMS_OPTIONS = ['Внешний вид','Размеры / г�
 const DEVIATION_OPTIONS = ['Не хватает комплектующих','Повреждения деталей','Качество материалов','Хлипкость конструкции','Несоответствие размеров','Прочие производственные дефекты']
 
 // Ресайз колонок с сохранением в localStorage
-const COL_WIDTHS_KEY = 'ppm_acts_col_widths_v2'
+const COL_WIDTHS_KEY = 'ppm_acts_col_widths_v3'
 const colWidths = ref(JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) || '{}'))
 let _resizeState = null
 
@@ -183,6 +234,7 @@ const handleSendStatusChange = async (log) => {
 }
 
 const selectedGroupFilter = ref(null)
+const isNovinkiFilter = ref(false)
 const selectedFactory = ref('Уточняется')
 
 const togglePhotoSelection = (url) => {
@@ -203,6 +255,33 @@ const calendarYear = ref(todayObj.getFullYear())
 const calendarMonth = ref(todayObj.getMonth())
 const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 
+const activePeriodLabel = ref('current_month')
+const _cy = todayObj.getFullYear()
+const MONTHS_PRESETS = [
+  { label: 'Янв', start: `${_cy}-01-01`, end: `${_cy}-01-31` },
+  { label: 'Фев', start: `${_cy}-02-01`, end: `${_cy}-02-28` },
+  { label: 'Мар', start: `${_cy}-03-01`, end: `${_cy}-03-31` },
+  { label: 'Апр', start: `${_cy}-04-01`, end: `${_cy}-04-30` },
+  { label: 'Май', start: `${_cy}-05-01`, end: `${_cy}-05-31` },
+  { label: 'Июн', start: `${_cy}-06-01`, end: `${_cy}-06-30` },
+  { label: 'Июл', start: `${_cy}-07-01`, end: `${_cy}-07-31` },
+  { label: 'Авг', start: `${_cy}-08-01`, end: `${_cy}-08-31` },
+  { label: 'Сен', start: `${_cy}-09-01`, end: `${_cy}-09-30` },
+  { label: 'Окт', start: `${_cy}-10-01`, end: `${_cy}-10-31` },
+  { label: 'Ноя', start: `${_cy}-11-01`, end: `${_cy}-11-30` },
+  { label: 'Дек', start: `${_cy}-12-01`, end: `${_cy}-12-31` },
+]
+const selectSpecificMonth = (preset) => {
+  startDate.value = preset.start; endDate.value = preset.end
+  activePeriodLabel.value = preset.label; showCalendarPopover.value = false
+}
+const setCurrentMonth = () => {
+  const now = new Date()
+  const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d2 = String(now.getDate()).padStart(2,'0')
+  startDate.value = `${y}-${m}-01`; endDate.value = `${y}-${m}-${d2}`
+  activePeriodLabel.value = 'current_month'; calendarYear.value = y; calendarMonth.value = now.getMonth()
+  showCalendarPopover.value = false
+}
 const changeCalendarMonth = (offset) => {
   calendarMonth.value += offset
   if (calendarMonth.value < 0) { calendarMonth.value = 11; calendarYear.value-- }
@@ -217,15 +296,51 @@ const setPreviousMonth = () => {
   const lastDay = new Date(year, d.getMonth() + 1, 0).getDate()
   startDate.value = `${year}-${month}-01`
   endDate.value = `${year}-${month}-${lastDay}`
-  calendarYear.value = year
-  calendarMonth.value = d.getMonth()
+  calendarYear.value = year; calendarMonth.value = d.getMonth()
+  activePeriodLabel.value = 'prev_month'
   showCalendarPopover.value = false
 }
 
-const selectedSku = ref('Все')
+const selectedSkus = ref(new Set())  // пусто = все артикулы
 const skuSearch = ref('')
 const showSkuDropdown = ref(false)
 const clickedSku = ref(null)
+
+const hasSkuFilter = computed(() => selectedSkus.value.size > 0)
+const skuMatchesFilter = (sku) => {
+  if (!hasSkuFilter.value) return true
+  return selectedSkus.value.has(String(sku).trim())
+}
+const selectedSkuLabel = computed(() => {
+  const n = selectedSkus.value.size
+  if (n === 0) return 'Найти и выбрать артикулы...'
+  if (n === 1) return [...selectedSkus.value][0]
+  return `Выбрано: ${n} артикулов`
+})
+const toggleSku = (sku) => {
+  const s = new Set(selectedSkus.value)
+  if (s.has(sku)) s.delete(sku)
+  else s.add(sku)
+  selectedSkus.value = s
+  clickedSku.value = null
+}
+const selectAllFoundSkus = () => {
+  const s = new Set(selectedSkus.value)
+  filteredSkuList.value.forEach(sku => s.add(sku))
+  selectedSkus.value = s
+  clickedSku.value = null
+}
+const deselectFoundSkus = () => {
+  const s = new Set(selectedSkus.value)
+  filteredSkuList.value.forEach(sku => s.delete(sku))
+  selectedSkus.value = s
+  clickedSku.value = null
+}
+const clearSkuFilter = () => {
+  selectedSkus.value = new Set()
+  clickedSku.value = null
+  skuSearch.value = ''
+}
 
 const claimForm = ref({
   factory: 'Уточняется', invoices: '', period: '',
@@ -240,6 +355,16 @@ const photoCommentMap = ref({})
 const openCriticalPopup = (g, event) => {
   event.stopPropagation()
   criticalPopup.value = { isOpen: true, group: g }
+}
+
+const FACTORY_CHAT_MAP = {
+  'Wuyi-Jiayi':       'RNV нов.обув武义衣帽架 鞋架',
+  'Pujiang-Haohong':  'RNV сушилки мал.',
+  'Wuyi-Meitianle':   'RNVведра浙江武义美添乐-义乌开馨',
+  'Bazhou-Caichen':   'RNV订货群 вешалки',
+  'Bazhou-Youran':    'ОбувницыЭтажерки',
+  'Bazhou-Yimingyang':'RNV鑫天弘 корзинка',
+  'Bazhou-Liumin':    'RNVстолики刘敏家居',
 }
 
 const CLAIM_CATEGORIES_LOGIC = {
@@ -501,6 +626,13 @@ const effFactory = (c) => {
   return activeFactoryBySku.value[sku] || 'Уточняется'
 }
 
+// Набор SKU, помеченных как новинки (из rawDataset)
+const novinkiSkus = computed(() => {
+  const s = new Set()
+  rawDataset.value.forEach(d => { if (d['is_new']) s.add(String(d['article'] || '').trim()) })
+  return s
+})
+
 const baseTableData = computed(() => {
   if (!rawDataset.value.length) return []
   const startYMD = startDate.value
@@ -512,7 +644,9 @@ const baseTableData = computed(() => {
   rawDataset.value.filter(d => {
     if (!d['month_dt']) return false
     const rowDate = d['month_dt'].substring(0, 10)
-    return rowDate >= startYMD.substring(0, 7) + "-01" && rowDate <= endYMD
+    if (rowDate < startYMD.substring(0, 7) + "-01" || rowDate > endYMD) return false
+    if (isNovinkiFilter.value && !d['is_new']) return false
+    return true
   }).forEach(d => {
     const sku = String(d['article'] || 'Без артикула').trim()
     // abc/xyz из бэкенда — начальные значения, будут заменены period-aware расчётом ниже
@@ -577,7 +711,8 @@ const baseTableData = computed(() => {
   
   claimsDetail.value.forEach(c => {
     const sku = String(c['supplier_article'] || '').trim()
-    if (!sku || (selectedSku.value !== 'Все' && sku !== selectedSku.value)) return
+    if (!sku || !skuMatchesFilter(sku)) return
+    if (isNovinkiFilter.value && !novinkiSkus.value.has(sku)) return
 
     let isDefect = false
     for (let i=1; i<=13; i++) {
@@ -613,7 +748,7 @@ const baseTableData = computed(() => {
   
   Object.keys(skuOrders).forEach(sku => {
     const hasDefects = Object.keys(map).some(k => k.startsWith(`${sku}___`))
-    if (!hasDefects && skuOrders[sku].orders > 0 && (selectedSku.value === 'Все' || selectedSku.value === sku)) {
+    if (!hasDefects && skuOrders[sku].orders > 0 && skuMatchesFilter(sku)) {
       const knownFactoryClaim = claimsDetail.value.find(c => String(c['supplier_article'] || '').trim() === sku && c['factory_name'] && c['factory_name'] !== 'Уточняется')
       // Если претензий нет — берём завод из orders-by-factory (там уже работает fallback на wb_assortment)
       const assignedFactory = knownFactoryClaim
@@ -656,21 +791,21 @@ const groupMetrics = computed(() => {
   baseTableData.value.forEach(row => {
     const sku = row['Артикул']
     if (!skuAgg[sku]) {
-        skuAgg[sku] = { group: row['ABC_Группа'], orders: row['Заказы'], defects: 0, isBad: false, ppm: 0 }
+        skuAgg[sku] = { group: row['ABC_Группа'], orders: row['Заказы'], defects: 0, rows: [] }
         result[row['ABC_Группа']].total++
         result[row['ABC_Группа']].orders += row['Заказы']
     }
     skuAgg[sku].defects += row['Брак']
-    if (row.ppm > 10000) skuAgg[sku].isBad = true
-    if (row.ppm > skuAgg[sku].ppm) skuAgg[sku].ppm = row.ppm
+    skuAgg[sku].rows.push({ factory: row['Завод'], ppm: row.ppm })
   })
 
   const curBad = { A: new Set(), B: new Set(), C: new Set() }
   Object.entries(skuAgg).forEach(([sku, s]) => {
       result[s.group].defects += s.defects
-      if (s.isBad) {
+      const critRows = s.rows.filter(r => r.ppm > 10000)
+      if (critRows.length > 0) {
         result[s.group].bad++
-        result[s.group].badSkus.push({ sku, ppm: s.ppm })
+        critRows.forEach(r => result[s.group].badSkus.push({ sku, factory: r.factory, ppm: r.ppm }))
         curBad[s.group].add(String(sku).trim())
       }
   })
@@ -686,6 +821,8 @@ const groupMetrics = computed(() => {
     const m = (d['month_dt'] || '').slice(0, 7)
     if (!m || m < startYM || m > endYM) return
     const sku = String(d['article'] || '').trim()
+    if (!sku) return  // пропускаем строки без артикула (outer-merge артефакты)
+    if (isNovinkiFilter.value && !d['is_new']) return
     const g   = periodSkuAbc.value[sku] || 'C'
     const src = d['source'] || 'System'
     if (!gMonthSrc[g][m]) gMonthSrc[g][m] = {}
@@ -721,7 +858,10 @@ const groupMetrics = computed(() => {
     const prevBadSet = { A: new Set(), B: new Set(), C: new Set() }
     Object.entries(prevMap).forEach(([sku, skuRow]) => {
       const ppm = skuRow.orders > 0 ? Math.floor((skuRow.defects / skuRow.orders) * 1000000) : 0
-      const g = skuRow.group
+      // Используем period-aware ABC (тот же расчёт что в текущем периоде),
+      // иначе сравнение некорректно: артикул мог быть в другой группе по
+      // скользящему 12-месячному ABC бэкенда.
+      const g = periodSkuAbc.value[String(sku).trim()] || skuRow.group || 'C'
       if (ppm > 10000 && result[g]) { result[g].prevBad++; prevBadSet[g].add(String(sku).trim()) }
     })
 
@@ -735,14 +875,40 @@ const groupMetrics = computed(() => {
   return result
 })
 
+const filterCritical = ref(false)
+const filterFactory = ref('Все')
+
+const availableFactories = computed(() => {
+  const factories = new Set(baseTableData.value.map(r => r['Завод']).filter(Boolean))
+  return ['Все', ...Array.from(factories).sort()]
+})
+
 const processedTableData = computed(() => {
   let data = baseTableData.value
   if (selectedGroupFilter.value) { data = data.filter(r => r['ABC_Группа'] === selectedGroupFilter.value) }
+  if (filterCritical.value) { data = data.filter(r => r.ppm > 10000) }
+  if (filterFactory.value !== 'Все') { data = data.filter(r => r['Завод'] === filterFactory.value) }
   return data.sort((a, b) => a['ABC_Группа'].localeCompare(b['ABC_Группа']) || b.ppm - a.ppm)
 })
 
-const skuOptions = computed(() => ['Все', ...Array.from(new Set(rawDataset.value.map(d => d['article'])))].sort())
-const filteredSkuList = computed(() => skuOptions.value.filter(s => String(s).toLowerCase().includes(skuSearch.value.toLowerCase())))
+const skuOptions = computed(() => {
+  const set = new Set()
+  rawDataset.value.forEach(d => {
+    const a = d['article']
+    if (a !== undefined && a !== null && String(a).trim()) set.add(String(a).trim())
+  })
+  return Array.from(set).sort((a, b) => a.localeCompare(b, 'ru', { numeric: true }))
+})
+const filteredSkuList = computed(() => {
+  const q = skuSearch.value.toLowerCase().trim()
+  if (!q) return skuOptions.value
+  return skuOptions.value.filter(s => String(s).toLowerCase().includes(q))
+})
+const allFoundSelected = computed(() => {
+  const list = filteredSkuList.value
+  if (!list.length) return false
+  return list.every(sku => selectedSkus.value.has(sku))
+})
 
 // Маппинг SKU → период-ABC (из baseTableData, тот же пересчёт что в карточках)
 const periodSkuAbc = computed(() => {
@@ -754,15 +920,19 @@ const periodSkuAbc = computed(() => {
 const buildChart = () => {
   if (!trendChart.value) return
   try {
-    const targetSku = clickedSku.value || (selectedSku.value !== 'Все' ? selectedSku.value : null)
+    const singleSelected = selectedSkus.value.size === 1 ? [...selectedSkus.value][0] : null
+    const targetSku = clickedSku.value || singleSelected
     const endYMD = endDate.value.substring(0, 7)
     
     const chartSource = rawDataset.value.filter(d => {
         const dMonth = d['month_dt'] ? String(d['month_dt']).substring(0, 7) : ''
-        if (dMonth > endYMD) return false 
+        if (dMonth > endYMD) return false
+        if (isNovinkiFilter.value && !d['is_new']) return false
 
-        if (targetSku) return String(d['article']).trim().toLowerCase() === String(targetSku).trim().toLowerCase()
-        if (selectedGroupFilter.value) return (periodSkuAbc.value[String(d['article']).trim()] || 'C') === selectedGroupFilter.value
+        const article = String(d['article'] || '').trim()
+        if (targetSku) return article.toLowerCase() === String(targetSku).trim().toLowerCase()
+        if (hasSkuFilter.value) return selectedSkus.value.has(article)
+        if (selectedGroupFilter.value) return (periodSkuAbc.value[article] || 'C') === selectedGroupFilter.value
         return true
     })
 
@@ -855,6 +1025,7 @@ const buildChart = () => {
 
     let chartTitle = 'Совокупная динамика качества'
     if (targetSku) chartTitle = `Динамика качества: ${targetSku}`
+    else if (selectedSkus.value.size > 1) chartTitle = `Динамика качества: ${selectedSkus.value.size} артикулов`
     else if (selectedGroupFilter.value) chartTitle = `Динамика качества: Группа ${selectedGroupFilter.value}`
 
     const shapes = [
@@ -919,7 +1090,7 @@ const buildChart = () => {
   } catch (err) { console.error(err) }
 }
 
-watch([startDate, endDate, selectedSku, clickedSku, selectedGroupFilter, skuActDates], () => { nextTick(() => buildChart()) })
+watch([startDate, endDate, selectedSkus, clickedSku, selectedGroupFilter, isNovinkiFilter, skuActDates], () => { nextTick(() => buildChart()) })
 
 // Загружаем акты по SKU для маркеров на основном графике
 watch(clickedSku, async (newSku) => {
@@ -961,6 +1132,20 @@ const currentSkuClaims = computed(() => {
     }
     
     return claimDateStr && claimDateStr >= startYMD && claimDateStr <= endYMD
+  })
+})
+
+// Претензии по SKU+заводу за ВСЮ историю (без привязки к выбранному периоду) —
+// нужно для помесячного графика типов дефектов, чтобы видеть динамику, а не один месяц.
+const allTimeSkuClaims = computed(() => {
+  if (!clickedSku.value) return []
+  const targetSku = String(clickedSku.value).trim().toLowerCase()
+  const targetFactory = String(selectedFactory.value).trim().toLowerCase()
+
+  return claimsDetail.value.filter(c => {
+    const sku = String(c['supplier_article'] || '').trim().toLowerCase()
+    const factory = String(effFactory(c)).trim().toLowerCase()
+    return sku === targetSku && factory === targetFactory
   })
 })
 
@@ -1020,6 +1205,97 @@ const activeDefectCategories = computed(() => {
   } catch (err) { return [] }
 })
 
+// Помесячная разбивка типов дефектов для выбранного SKU (та же логика распределения
+// претензии по группе, что и в activeDefectCategories — каждая претензия попадает
+// ровно в одну категорию, приоритет отдаём CLAIM_CATEGORIES_LOGIC, остальное — "Прочие").
+const monthlyDefectTypeData = computed(() => {
+  try {
+    if (!clickedSku.value) return { months: [], series: [] }
+    const validVals = ['1','1.0','+','true','да', 't']
+    const groupKeys = Object.keys(CLAIM_CATEGORIES_LOGIC)
+    const monthSet = new Set()
+    // month -> catKey -> count
+    const grid = {}
+    const ensureMonth = (m) => { if (!grid[m]) grid[m] = {}; monthSet.add(m) }
+
+    allTimeSkuClaims.value.forEach(c => {
+      let claimDateStr = ''
+      if (c['created_dt']) claimDateStr = String(c['created_dt']).substring(0, 10)
+      else if (c['claim_date']) claimDateStr = String(c['claim_date']).substring(0, 10)
+      if (!claimDateStr) return
+      const month = claimDateStr.substring(0, 7)
+
+      let matchedKey = null
+      for (const groupKey of groupKeys) {
+        const config = CLAIM_CATEGORIES_LOGIC[groupKey]
+        const hasMatch = config.ids.some(id => {
+          const val = c[`cat_${id}`]
+          return val === true || validVals.includes(String(val || '').trim().toLowerCase())
+        })
+        if (hasMatch) { matchedKey = groupKey; break }
+      }
+      if (!matchedKey) {
+        let hasAnyValidTag = false
+        for (let i = 1; i <= 11; i++) {
+          const val = c[`cat_${i}`]
+          if (val === true || validVals.includes(String(val || '').trim().toLowerCase())) { hasAnyValidTag = true; break }
+        }
+        if (hasAnyValidTag) matchedKey = 'others'
+      }
+      if (!matchedKey) return
+
+      ensureMonth(month)
+      grid[month][matchedKey] = (grid[month][matchedKey] || 0) + 1
+    })
+
+    const months = [...monthSet].sort()
+    const allKeys = [...groupKeys, 'others']
+    const nameMap = { ...Object.fromEntries(groupKeys.map(k => [k, CLAIM_CATEGORIES_LOGIC[k].ru])), others: 'Прочие производственные дефекты' }
+    const series = allKeys
+      .map(key => ({ key, name: nameMap[key], counts: months.map(m => grid[m]?.[key] || 0) }))
+      .filter(s => s.counts.some(v => v > 0))
+
+    return { months, series }
+  } catch (err) { return { months: [], series: [] } }
+})
+
+const buildDefectTypeChart = () => {
+  try {
+  if (!defectTypeChart.value) return
+  const { months, series } = monthlyDefectTypeData.value
+  if (!months.length || !series.length) { Plotly.purge(defectTypeChart.value); return }
+
+  const monthLabel = (m) => {
+    const [y, mo] = m.split('-')
+    return `${MONTHS_PRESETS[parseInt(mo, 10) - 1]?.label || m} ${y}`
+  }
+  const xLabels = months.map(monthLabel)
+  // Цвет закреплён за конкретным типом дефекта (ключом), а не за позицией в массиве —
+  // чтобы, например, "Повреждения деталей" были одного и того же цвета на любом SKU/графике.
+  const colorByKey = { Shortage: '#f97316', Damage: '#ef4444', Flimsy: '#a855f7', others: '#64748b' }
+
+  const traces = series.map(s => ({
+    x: xLabels, y: s.counts, name: s.name, type: 'bar',
+    marker: { color: colorByKey[s.key] || '#64748b' },
+    hovertemplate: '%{data.name}: <b>%{y}</b> шт<extra></extra>'
+  }))
+
+  const layout = {
+    barmode: 'group',
+    bargap: 0.25,
+    bargroupgap: 0.08,
+    height: 320,
+    margin: { t: 20, r: 20, b: 40, l: 40 },
+    legend: { orientation: 'h', y: -0.2, x: 0.5, xanchor: 'center' },
+    xaxis: { type: 'category', showgrid: false },
+    yaxis: { title: 'Кол-во претензий', showgrid: true, gridcolor: '#f1f5f9' },
+  }
+  Plotly.newPlot(defectTypeChart.value, traces, layout, { responsive: true, displayModeBar: false })
+  } catch (err) { console.error('buildDefectTypeChart error:', err) }
+}
+
+watch([clickedSku, selectedFactory, allTimeSkuClaims], () => { nextTick(() => buildDefectTypeChart()) })
+
 const refreshCategoryPhotos = (catKey) => {
   const state = categoryPhotosState.value[catKey]
   if (!state || state.all.length <= state.visible.length) return
@@ -1060,7 +1336,7 @@ const parsePhotos = (str) => {
 
 // Следим и за SKU и за заводом: при смене завода (тот же SKU, другой завод) нужно
 // перестроить categoryPhotosState, иначе фото остаются от предыдущего завода.
-watch([clickedSku, selectedFactory], async ([newSku]) => {
+watch([clickedSku, selectedFactory], async ([newSku, newFactory]) => {
   if (!newSku) return
   excludedPhotos.value.clear()
   
@@ -1119,9 +1395,21 @@ watch([clickedSku, selectedFactory], async ([newSku]) => {
   const newPhotoCommentMap = {}
   const categoriesList = [{ key: 'Shortage', ids: [1, 2] }, { key: 'Damage', ids: [4, 5] }, { key: 'Flimsy', ids: [7, 9] }, { key: 'others', ids: [] }]
 
+  // Фото строго по выбранному заводу (без ограничения по датам — чтобы включить всю историю дефектов).
+  // snapSku/snapFactory захвачены из аргументов watch, чтобы избежать гонки при быстрых кликах.
+  const snapSku = String(newSku || '').trim().toLowerCase()
+  const snapFactory = String(newFactory || '').trim().toLowerCase()
+  const claimsForPhotos = claimsDetail.value.filter(c => {
+    const sku = String(c['supplier_article'] || '').trim().toLowerCase()
+    const fac = String(effFactory(c)).trim().toLowerCase()
+    if (sku !== snapSku || fac !== snapFactory) return false
+    const d = String(c['created_dt'] || c['claim_date'] || '').substring(0, 10)
+    return d >= startDate.value && d <= endDate.value
+  })
+
   categoriesList.forEach(cat => {
     let matched = []
-    currentSkuClaims.value.forEach(c => {
+    claimsForPhotos.forEach(c => {
       const srid = String(c.srid || c.SRID || c.id)
       if (assignedSrids.has(srid)) return
       if (cat.key === 'others') {
@@ -1272,54 +1560,42 @@ const generatePDFClaim = async (isTest = false) => {
       initiator: 'Wildberries',
       factory_type: 'завод',
       who_sent: whoSent,
+      chat_name: FACTORY_CHAT_MAP[claimForm.value.factory] || '',
     }
     const response = await apiFetch('/api/v1/analytics/export-claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
     if (!response.ok) throw new Error()
     const blob = await response.blob()
 
-    // 1. Пытаемся взять чистый номер из кастомного заголовка (если он настроен на бэке)
-    // или используем исправленное безопасное регулярное выражение
-    let actNumber = isTest ? 'TEST' : '';
-    
-    // Сначала смотрим прямой кастомный заголовок (самый надежный способ без парсинга)
-    const customActHeader = response.headers.get('X-Act-Number') || response.headers.get('x-act-number');
-    
+    // Извлекаем номер акта из заголовков
+    let actNumber = isTest ? 'TEST' : ''
+    const customActHeader = response.headers.get('X-Act-Number') || response.headers.get('x-act-number')
     if (customActHeader) {
-      actNumber = customActHeader.trim();
+      actNumber = customActHeader.trim()
     } else if (!isTest) {
-      // Фолбэк: парсим Content-Disposition безопасным методом (без жадного .+)
-      const disposition = response.headers.get('Content-Disposition') || response.headers.get('content-disposition');
+      const disposition = response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
       if (disposition) {
-        // [^; \t]+ и [^"]+ строго отсекают кавычки и параметры заголовка Nginx/FastAPI
-        const match = disposition.match(/filename\*=UTF-8''([^; \t]+)/i) || disposition.match(/filename="([^"]+)"/i);
-        if (match && match[1]) {
-          actNumber = decodeURIComponent(match[1]).trim().replace(/\.pdf$/i, '');
-        }
+        const match = disposition.match(/filename\*=UTF-8''([^; \t]+)/i) || disposition.match(/filename="([^"]+)"/i)
+        if (match && match[1]) actNumber = decodeURIComponent(match[1]).trim().replace(/\.pdf$/i, '')
       }
     }
-    
-    if (!actNumber && !isTest) actNumber = 'б-н';
+    if (!actNumber && !isTest) actNumber = 'б-н'
+    if (/^\d+$/.test(actNumber)) actNumber = actNumber.padStart(3, '0')
 
-    // Добавляем нули до 3 знаков (например, "92" -> "092")
-    if (/^\d+$/.test(actNumber)) {
-      actNumber = actNumber.padStart(3, '0');
+    const now = new Date()
+    const dateStr = `${now.getFullYear()}.${String(now.getMonth()+1).padStart(2,'0')}.${String(now.getDate()).padStart(2,'0')}`
+
+    if (isTest) {
+      // Тестовый акт — скачиваем сразу как раньше
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `РА № ${actNumber} - ${clickedSku.value} ${dateStr}.pdf`
+      link.click()
+    } else {
+      // Боевой акт — в журнал, без скачивания
+      URL.revokeObjectURL(URL.createObjectURL(blob))
+      showActCreated(`✅ Акт № ${actNumber} сформирован и добавлен в журнал`)
+      await fetchLogs()
     }
-
-    // 2. Получаем текущую дату создания в формате YYYY.MM.DD
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const dateStr = `${year}.${month}.${day}`;
-
-    // 3. Скачиваем файл по единому шаблону
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    
-    // Результат: "РА № 092 - 2-СБ-Grey 2026.05.12.pdf"
-    link.download = `РА № ${actNumber} - ${clickedSku.value} ${dateStr}.pdf`; 
-    
-    link.click();
   } catch (err) { alert("Не удалось сгенерировать рекламационный акт.") } finally { isGenerating.value = false }
 }
 
@@ -1427,6 +1703,7 @@ onMounted(() => {
   document.addEventListener('click', () => {
     openParamsDropdownId.value = null
     openDeviationDropdownId.value = null
+    showSkuDropdown.value = false
   })
 })
 </script>
@@ -1456,14 +1733,28 @@ onMounted(() => {
           Отчет по заводу
         </button>
 
+        <label :class="['flex items-center gap-2 px-4 py-3 rounded-2xl border cursor-pointer font-bold text-sm shadow-sm transition-all', isNovinkiFilter ? 'bg-emerald-50 border-emerald-400 text-emerald-700' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300']">
+          <input type="checkbox" v-model="isNovinkiFilter" class="hidden" />
+          <div class="w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0" :class="isNovinkiFilter ? 'bg-emerald-500 border-emerald-500' : 'border-slate-300'">
+            <Check v-if="isNovinkiFilter" class="w-3 h-3 text-white" />
+          </div>
+          Только Новинки
+        </label>
+
         <div class="relative">
           <div class="flex items-center bg-white border border-slate-200 rounded-2xl px-5 py-3 cursor-pointer hover:border-blue-500 transition-colors shadow-sm" @click="showCalendarPopover = !showCalendarPopover">
             <Calendar class="w-4 h-4 text-blue-500 mr-3" />
-            <span class="text-sm font-bold text-slate-700">{{ formatDateDisplay(startDate) }} — {{ formatDateDisplay(endDate) }}</span>
+            <span class="text-sm font-bold text-slate-700">{{ activePeriodLabel === 'current_month' ? 'Текущий месяц' : activePeriodLabel === 'prev_month' ? 'Прошлый месяц' : activePeriodLabel || (formatDateDisplay(startDate) + ' — ' + formatDateDisplay(endDate)) }}</span>
           </div>
           <div v-if="showCalendarPopover" class="absolute right-0 mt-3 bg-white border border-slate-100 rounded-3xl shadow-2xl z-[150] p-5 w-80 animate-in zoom-in-95 duration-200">
-            <div class="mb-4 border-b border-slate-100 pb-3">
-              <button @click="setPreviousMonth" class="w-full text-center text-xs font-black bg-blue-50 hover:bg-blue-100 text-blue-700 py-2.5 rounded-xl transition-all shadow-sm tracking-wide uppercase border border-blue-100/50">Прошлый месяц</button>
+            <div class="mb-4 border-b border-slate-100 pb-3 space-y-2">
+              <div class="grid grid-cols-2 gap-1.5">
+                <button @click="setCurrentMonth" :class="activePeriodLabel === 'current_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Текущий месяц</button>
+                <button @click="setPreviousMonth" :class="activePeriodLabel === 'prev_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Прошлый месяц</button>
+              </div>
+              <div class="grid grid-cols-4 gap-1">
+                <button v-for="m in MONTHS_PRESETS" :key="m.label" @click="selectSpecificMonth(m)" :class="activePeriodLabel === m.label ? 'bg-slate-800 text-white' : 'hover:bg-slate-100 text-slate-600'" class="text-center text-[11px] font-bold py-1.5 rounded-lg transition-all">{{ m.label }}</button>
+              </div>
             </div>
             <div class="flex justify-between items-center mb-4">
               <button @click="changeCalendarMonth(-1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-500 transition-colors"><ChevronLeft class="w-4 h-4"/></button>
@@ -1494,7 +1785,17 @@ onMounted(() => {
               <button @click="activeLogTab = 'manual'" :class="['px-4 py-1.5 text-sm font-bold rounded-lg transition-all', activeLogTab === 'manual' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700']">Ручные отправления</button>
             </div>
           </div>
-          <div class="flex items-center gap-3">
+          <div class="flex items-center gap-2 flex-wrap justify-end">
+            <select v-if="activeLogTab === 'acts'" v-model="logFactoryFilter"
+                    class="px-3 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white text-slate-700 focus:outline-none focus:border-blue-400 transition-colors max-w-[180px]">
+              <option v-for="f in logFactories" :key="f" :value="f">{{ f === 'Все' ? 'Все заводы' : f }}</option>
+            </select>
+            <button v-if="selectedLogIds.size > 0" @click="downloadSelectedActs" :disabled="isDownloadingBulk"
+                    :class="['flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm border transition-colors shadow-sm',
+                             isDownloadingBulk ? 'opacity-60 cursor-wait bg-blue-50 text-blue-500 border-blue-200' : 'bg-blue-600 text-white hover:bg-blue-700 border-blue-600']">
+              <Download class="w-4 h-4" />
+              {{ isDownloadingBulk ? 'Скачивание...' : `Скачать выбранные (${selectedLogIds.size})` }}
+            </button>
             <button @click="exportToExcel" class="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 rounded-xl transition-colors font-bold text-sm shadow-sm">
               <Download class="w-4 h-4" /> В Excel
             </button>
@@ -1509,7 +1810,12 @@ onMounted(() => {
             <table class="w-full text-left border-collapse text-xs" style="min-width:2100px;table-layout:fixed">
               <thead class="sticky top-0 z-10">
                 <tr class="bg-slate-50 text-slate-400 border-b border-slate-200 uppercase font-black text-[9px] tracking-wider">
-                  <th class="p-2.5 sticky left-0 bg-slate-50 z-20 relative select-none overflow-hidden" :style="getColStyle(0,120)">№ РА<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,0)"></div></th>
+                  <th class="p-2.5 w-8 sticky left-0 bg-slate-50 z-20 text-center">
+                    <input type="checkbox"
+                           :checked="filteredClaimLogs.length > 0 && selectedLogIds.size === filteredClaimLogs.length"
+                           @change="toggleSelectAll" class="rounded accent-blue-600 cursor-pointer" />
+                  </th>
+                  <th class="p-2.5 sticky left-8 bg-slate-50 z-20 relative select-none overflow-hidden" :style="getColStyle(0,120)">№ РА<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,0)"></div></th>
                   <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(1,90)">Дата РА<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,1)"></div></th>
                   <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(2,110)">Артикул<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,2)"></div></th>
                   <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(3,130)">Наименование<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,3)"></div></th>
@@ -1523,23 +1829,28 @@ onMounted(() => {
                   <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(11,150)">Отклонение<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,11)"></div></th>
                   <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(12,90)">Повторяемость<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,12)"></div></th>
                   <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(13,100)">Кто отправил<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,13)"></div></th>
-                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(14,115)">Статус отправки<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,14)"></div></th>
-                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(15,95)">Дата отправки<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,15)"></div></th>
-                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(16,200)">Ответ завода<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,16)"></div></th>
-                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(17,95)">Дата ответа<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,17)"></div></th>
-                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(18,130)">Инвойс испр.<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,18)"></div></th>
-                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(19,110)">Прим. дата улучш.<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,19)"></div></th>
-                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(20,120)">Комментарии<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,20)"></div></th>
+                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(14,130)">Чат<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,14)"></div></th>
+                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(15,115)">Статус отправки<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,15)"></div></th>
+                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(16,95)">Дата отправки<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,16)"></div></th>
+                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(17,200)">Ответ завода<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,17)"></div></th>
+                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(18,95)">Дата ответа<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,18)"></div></th>
+                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(19,130)">Инвойс испр.<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,19)"></div></th>
+                  <th class="p-2.5 relative select-none overflow-hidden" :style="getColStyle(20,110)">Прим. дата улучш.<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,20)"></div></th>
                   <th class="p-2.5 text-center relative select-none overflow-hidden" :style="getColStyle(21,68)">Статус<div class="absolute inset-y-0 right-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors" @mousedown.stop="startResize($event,21)"></div></th>
                   <th class="p-2.5 text-center sticky right-0 bg-slate-50 z-20 select-none" :style="getColStyle(22,115)">Действия</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100 text-slate-700">
-                <template v-for="(log, logIndex) in claimLogs" :key="log.id">
+                <template v-for="(log, logIndex) in filteredClaimLogs" :key="log.id">
                   <tr :class="['transition-colors', expandedLogId === log.id ? 'ring-inset ring-1 ring-blue-300' : '', isRowDone(log) ? 'bg-amber-100 hover:bg-amber-200/60' : isRowPartialDone(log) ? 'row-stripe' : isRowLocked(log) ? 'bg-green-50 hover:bg-green-100/60' : 'hover:bg-slate-50/80']"
                        :style="isRowPartialDone(log) && !isRowDone(log) ? { backgroundPosition: `${(logIndex * 37) % 95}px 0` } : {}">
+                    <!-- checkbox -->
+                    <td class="p-2 w-8 sticky left-0 z-10 text-center" :class="rowBgClass(log) || 'bg-white'">
+                      <input type="checkbox" :checked="selectedLogIds.has(log.id)" @change="toggleLogSelection(log.id)"
+                             class="rounded accent-blue-600 cursor-pointer" />
+                    </td>
                     <!-- 0: № РА + стрелка раскрытия -->
-                    <td class="p-2 sticky left-0 z-10 overflow-hidden" :class="rowBgClass(log) || 'bg-white'">
+                    <td class="p-2 sticky left-8 z-10 overflow-hidden" :class="rowBgClass(log) || 'bg-white'">
                       <div class="flex items-center gap-1">
                         <button @click="expandedLogId = expandedLogId === log.id ? null : log.id" class="text-slate-400 hover:text-blue-600 flex-shrink-0 transition-colors">
                           <ChevronDown :class="['w-3.5 h-3.5 transition-transform', expandedLogId === log.id ? 'rotate-180 text-blue-600' : '']" />
@@ -1624,43 +1935,48 @@ onMounted(() => {
                       <input v-model="log.who_sent" @blur="saveLogField(log,'who_sent')" :disabled="isRowLocked(log)"
                         :class="['w-full text-xs p-1 border rounded outline-none', isRowLocked(log) ? 'border-transparent bg-transparent cursor-default' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent']" placeholder="—" />
                     </td>
-                    <!-- 14: Статус отправки -->
+                    <!-- 14: Чат -->
+                    <td class="p-2 overflow-hidden">
+                      <div class="flex items-center gap-1">
+                        <input v-model="log.chat_name" @blur="saveLogField(log,'chat_name')" :disabled="isRowLocked(log)"
+                          :class="['flex-1 min-w-0 text-xs p-1 border rounded outline-none', isRowLocked(log) ? 'border-transparent bg-transparent cursor-default' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent']" placeholder="—" />
+                        <button v-if="!isRowLocked(log) && FACTORY_CHAT_MAP[log.supplier] && log.chat_name !== FACTORY_CHAT_MAP[log.supplier]"
+                                @click="log.chat_name = FACTORY_CHAT_MAP[log.supplier]; saveLogField(log,'chat_name')"
+                                class="flex-shrink-0 text-[9px] bg-blue-50 text-blue-600 border border-blue-100 rounded px-1 py-0.5 hover:bg-blue-100 font-black leading-none" title="Подставить чат по заводу">↗</button>
+                      </div>
+                    </td>
+                    <!-- 15: Статус отправки -->
                     <td class="p-2 overflow-hidden">
                       <select v-model="log.send_status" @change="handleSendStatusChange(log)"
                         :class="['w-full text-xs p-1 border rounded outline-none font-semibold', isRowLocked(log) ? 'border-green-200 bg-green-100 text-green-800 cursor-default' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent']">
                         <option value="">—</option><option>Не отправлен</option><option>Отправлен</option><option>Доставлен</option><option>Прочитан</option>
                       </select>
                     </td>
-                    <!-- 15: Дата отправки (авто при Отправлен) -->
+                    <!-- 16: Дата отправки (авто при Отправлен) -->
                     <td class="p-2 overflow-hidden">
                       <div v-if="isRowLocked(log)" class="text-xs text-slate-600 font-medium px-1">{{ log.send_date || '—' }}</div>
                       <input v-else type="date" v-model="log.send_date" @blur="saveLogField(log,'send_date')"
                         class="w-full text-xs p-1 border border-transparent hover:border-slate-200 rounded focus:border-blue-400 bg-transparent outline-none" />
                     </td>
-                    <!-- 16: Ответ завода (редактируемо пока не полная блокировка) -->
+                    <!-- 17: Ответ завода (редактируемо пока не полная блокировка) -->
                     <td class="p-2 overflow-hidden">
                       <textarea v-model="log.factory_reply" @blur="saveLogField(log,'factory_reply')" :disabled="isRowFullyLocked(log)" rows="2" placeholder="Ответ завода..."
                         :class="['w-full text-xs p-1 border rounded outline-none resize-none', isRowFullyLocked(log) ? 'border-transparent bg-transparent cursor-default' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent focus:bg-white']"></textarea>
                     </td>
-                    <!-- 17: Дата ответа (редактируемо пока не полная блокировка) -->
+                    <!-- 18: Дата ответа (редактируемо пока не полная блокировка) -->
                     <td class="p-2 overflow-hidden">
                       <input type="date" v-model="log.factory_reply_date" @blur="saveLogField(log,'factory_reply_date')" :disabled="isRowFullyLocked(log)"
                         :class="['w-full text-xs p-1 border rounded outline-none', isRowFullyLocked(log) ? 'border-transparent bg-transparent cursor-default text-slate-600' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent']" />
                     </td>
-                    <!-- 18: Примерный инвойс (редактируемо пока не полная блокировка) -->
+                    <!-- 19: Примерный инвойс (редактируемо пока не полная блокировка) -->
                     <td class="p-2 overflow-hidden">
                       <input v-model="log.correction_invoice" @blur="saveLogField(log,'correction_invoice')" :disabled="isRowFullyLocked(log)" placeholder="Номер инвойса..."
                         :class="['w-full text-xs p-1 border rounded outline-none', isRowFullyLocked(log) ? 'border-transparent bg-transparent cursor-default text-slate-600' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent']" />
                     </td>
-                    <!-- 19: Примерная дата улучшения (последнее поле — заполнение закрывает строку) -->
+                    <!-- 20: Примерная дата улучшения (последнее поле — заполнение закрывает строку) -->
                     <td class="p-2 overflow-hidden">
                       <input type="date" v-model="log.estimated_improvement_date" @blur="saveLogField(log,'estimated_improvement_date')" :disabled="isRowFullyLocked(log)"
                         :class="['w-full text-xs p-1 border rounded outline-none', isRowFullyLocked(log) ? 'border-transparent bg-transparent cursor-default text-slate-600 font-bold' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent']" />
-                    </td>
-                    <!-- 20: Комментарии -->
-                    <td class="p-2 overflow-hidden">
-                      <textarea v-model="log.comments" @blur="saveLogField(log,'comments')" :disabled="isRowLocked(log)" rows="2" placeholder="Комментарии..."
-                        :class="['w-full text-xs p-1 border rounded outline-none resize-none', isRowLocked(log) ? 'border-transparent bg-transparent cursor-default' : 'border-transparent hover:border-slate-200 focus:border-blue-400 bg-transparent focus:bg-white']"></textarea>
                     </td>
                     <!-- 21: Статус акта -->
                     <td class="p-2 text-center">
@@ -1688,7 +2004,7 @@ onMounted(() => {
                   </tr>
                   <!-- Раскрытая строка с дополнительными полями -->
                   <tr v-if="expandedLogId === log.id" class="bg-blue-50/30 border-b border-blue-100">
-                    <td colspan="23" class="px-4 py-3">
+                    <td colspan="24" class="px-4 py-3">
                       <div class="grid grid-cols-3 md:grid-cols-6 gap-2 text-xs">
                         <!-- Статус претензии (перенесён сюда) -->
                         <div>
@@ -1738,9 +2054,9 @@ onMounted(() => {
                             </div>
                           </div>
                         </div>
-                        <div>
-                          <div class="text-[9px] font-black text-slate-400 uppercase mb-1">Название чата</div>
-                          <input v-model="log.chat_name" @blur="saveLogField(log,'chat_name')" :disabled="isRowLocked(log)" class="p-1 border border-slate-200 rounded-lg bg-white outline-none focus:ring-1 focus:ring-blue-400 max-w-[160px] w-full" placeholder="—" />
+                        <div class="md:col-span-2">
+                          <div class="text-[9px] font-black text-slate-400 uppercase mb-1">Комментарии</div>
+                          <textarea v-model="log.comments" @blur="saveLogField(log,'comments')" :disabled="isRowLocked(log)" rows="2" class="w-full p-1 border border-slate-200 rounded-lg bg-white outline-none focus:ring-1 focus:ring-blue-400 resize-none" placeholder="—"></textarea>
                         </div>
                         <div class="md:col-span-2">
                           <div class="text-[9px] font-black text-slate-400 uppercase mb-1">Общее описание отклонения</div>
@@ -1877,16 +2193,47 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="relative mb-8">
+    <div class="relative mb-8" @click.stop>
       <div class="flex items-center bg-white border border-slate-200 rounded-2xl px-5 py-4 cursor-pointer shadow-sm hover:shadow-md transition-shadow" @click="showSkuDropdown = !showSkuDropdown">
-        <Search class="w-5 h-5 text-slate-400 mr-4" />
-        <span class="text-sm font-bold text-slate-700 flex-1">{{ selectedSku === 'Все' ? 'Найти и выбрать артикул...' : selectedSku }}</span>
-        <X v-if="selectedSku !== 'Все'" class="w-5 h-5 text-slate-300 hover:text-red-500 transition-colors" @click.stop="selectedSku = 'Все'; clickedSku = null" />
+        <Search class="w-5 h-5 text-slate-400 mr-4 shrink-0" />
+        <span class="text-sm font-bold text-slate-700 flex-1 truncate">{{ selectedSkuLabel }}</span>
+        <X v-if="hasSkuFilter" class="w-5 h-5 text-slate-300 hover:text-red-500 transition-colors shrink-0" @click.stop="clearSkuFilter()" />
+        <ChevronDown class="w-4 h-4 text-slate-400 ml-2 shrink-0" :class="showSkuDropdown ? 'rotate-180' : ''" />
+      </div>
+      <div v-if="hasSkuFilter && selectedSkus.size > 1" class="flex flex-wrap gap-1.5 mt-2">
+        <span v-for="sku in [...selectedSkus].sort((a,b) => a.localeCompare(b,'ru',{numeric:true}))" :key="sku"
+              class="inline-flex items-center gap-1 text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-100 rounded-lg px-2 py-1">
+          {{ sku }}
+          <X class="w-3 h-3 cursor-pointer hover:text-red-500" @click="toggleSku(sku)" />
+        </span>
       </div>
       <div v-if="showSkuDropdown" class="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-100 rounded-2xl shadow-xl z-[100] p-3 overflow-hidden">
-        <input type="text" v-model="skuSearch" class="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" placeholder="Поиск по артикулу..." @click.stop />
+        <input type="text" v-model="skuSearch" class="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" placeholder="Например: 2 — найдёт все артикулы с «2»..." autofocus />
+        <div class="flex items-center justify-between gap-2 mb-2 px-1">
+          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">
+            {{ filteredSkuList.length }} найдено<span v-if="hasSkuFilter"> · выбрано {{ selectedSkus.size }}</span>
+          </span>
+          <div class="flex items-center gap-2">
+            <button type="button" v-if="filteredSkuList.length"
+                    @click="allFoundSelected ? deselectFoundSkus() : selectAllFoundSkus()"
+                    class="text-[11px] font-black uppercase tracking-wide px-2.5 py-1 rounded-lg transition-colors"
+                    :class="allFoundSelected ? 'bg-slate-100 text-slate-500 hover:bg-red-50 hover:text-red-600' : 'bg-blue-50 text-blue-700 hover:bg-blue-100'">
+              {{ allFoundSelected ? 'Снять найденные' : 'Выбрать все найденные' }}
+            </button>
+            <button type="button" v-if="hasSkuFilter" @click="clearSkuFilter()" class="text-[11px] font-black uppercase tracking-wide text-slate-400 hover:text-red-500 px-2 py-1">Сбросить</button>
+          </div>
+        </div>
         <div class="max-h-60 overflow-y-auto custom-scroll pr-1">
-          <div v-for="sku in filteredSkuList" :key="sku" @click="selectedSku = sku; clickedSku = (sku === 'Все' ? null : sku); showSkuDropdown = false" class="p-3 text-sm font-bold hover:bg-blue-50 rounded-xl cursor-pointer transition-colors text-slate-700">{{ sku }}</div>
+          <div v-if="!filteredSkuList.length" class="p-4 text-sm text-slate-400 text-center">Ничего не найдено</div>
+          <div v-for="sku in filteredSkuList" :key="sku" @click="toggleSku(sku)"
+               class="flex items-center gap-3 p-3 text-sm font-bold hover:bg-blue-50 rounded-xl cursor-pointer transition-colors text-slate-700"
+               :class="selectedSkus.has(sku) ? 'bg-blue-50/70' : ''">
+            <span class="w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors"
+                  :class="selectedSkus.has(sku) ? 'bg-blue-600 border-blue-600 text-white' : 'border-slate-300 bg-white'">
+              <Check v-if="selectedSkus.has(sku)" class="w-3.5 h-3.5" />
+            </span>
+            <span class="truncate">{{ sku }}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1928,11 +2275,23 @@ onMounted(() => {
       </div>
 
       <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
-        <div class="p-5 border-b border-slate-100 bg-slate-50/50 flex items-center gap-3">
-          <TableProperties class="w-5 h-5 text-blue-600"/>
-          <h2 class="text-sm font-black text-slate-800 tracking-wide">
-            Спецификация по артикулам <span v-if="selectedGroupFilter" class="text-blue-500 ml-2">(Фильтр: Группа {{ selectedGroupFilter }})</span>
+        <div class="p-5 border-b border-slate-100 bg-slate-50/50 flex items-center gap-3 flex-wrap">
+          <TableProperties class="w-5 h-5 text-blue-600 flex-shrink-0"/>
+          <h2 class="text-sm font-black text-slate-800 tracking-wide flex-1 min-w-0">
+            Спецификация по артикулам
+            <span v-if="selectedGroupFilter" class="text-blue-500 ml-2">(Фильтр: Группа {{ selectedGroupFilter }})</span>
+            <span v-if="isNovinkiFilter" class="text-emerald-600 ml-2">(Только новинки)</span>
           </h2>
+          <button @click="filterCritical = !filterCritical"
+                  :class="['flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all flex-shrink-0',
+                           filterCritical ? 'bg-red-100 border-red-300 text-red-700' : 'bg-white border-slate-200 text-slate-500 hover:border-red-300 hover:text-red-600']">
+            <span class="w-2 h-2 rounded-full bg-red-500 flex-shrink-0"></span>
+            Только критические (&gt;1%)
+          </button>
+          <select v-model="filterFactory"
+                  class="px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-200 bg-white text-slate-700 focus:outline-none focus:border-blue-400 transition-colors flex-shrink-0 max-w-[200px]">
+            <option v-for="f in availableFactories" :key="f" :value="f">{{ f === 'Все' ? 'Все заводы' : f }}</option>
+          </select>
         </div>
         <div class="overflow-y-auto max-h-[500px] custom-scroll">
           <table class="w-full text-left border-collapse table-fixed text-sm">
@@ -1956,7 +2315,7 @@ onMounted(() => {
                 <td :class="['p-4 font-bold border-r border-slate-100 truncate shadow-xs sticky left-0 transition-colors', clickedSku === row['Артикул'] && selectedFactory === row['Завод'] ? 'bg-blue-600 text-white' : 'bg-white text-slate-900 group-hover:bg-slate-50']">
                     {{ row['Артикул'] }}
                     <span v-if="getFactoryCount(row['Артикул']) > 1" class="ml-2 text-[9px] bg-slate-100 border border-slate-200 text-slate-400 px-1.5 py-0.5 rounded uppercase font-black">Разделен</span>
-                    <div class="text-[10px] text-slate-400 font-normal mt-0.5 tracking-wide">Фабрика: <span class="text-blue-600 font-bold">{{ row['Завод'] }}</span></div>
+                    <div class="text-[10px] font-normal mt-0.5 tracking-wide" :class="clickedSku === row['Артикул'] && selectedFactory === row['Завод'] ? 'text-blue-200' : 'text-slate-400'">Фабрика: <span class="font-bold" :class="clickedSku === row['Артикул'] && selectedFactory === row['Завод'] ? 'text-white' : 'text-blue-600'">{{ row['Завод'] }}</span></div>
                 </td>
                 <td class="p-4 text-center" :class="[clickedSku === row['Артикул'] && selectedFactory === row['Завод'] ? 'text-blue-200' : 'text-slate-500']">{{ row['ABC_Группа'] }}</td>
                 <td class="p-4 text-center" :class="[clickedSku === row['Артикул'] && selectedFactory === row['Завод'] ? 'text-blue-300' : 'text-slate-400']">{{ row['Класс XYZ'] }}</td>
@@ -1980,9 +2339,14 @@ onMounted(() => {
           </div>
           <button @click="clickedSku = null" class="text-slate-400 hover:text-slate-700 p-2 rounded-xl hover:bg-slate-100 transition-colors"><X class="w-6 h-6"/></button>
         </div>
-        
+
+        <div v-if="monthlyDefectTypeData.months.length > 0" class="border border-slate-100 rounded-2xl p-6 bg-white shadow-sm">
+          <h4 class="text-sm font-black text-slate-700 uppercase tracking-wide mb-4">Динамика типов дефектов по месяцам</h4>
+          <div ref="defectTypeChart" class="w-full"></div>
+        </div>
+
         <div v-if="activeDefectCategories.length === 0" class="text-sm text-slate-400 font-bold py-12 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">Дефекты не обнаружены в выбранном периоде</div>
-        
+
         <div v-else class="flex flex-col gap-10">
           <div v-for="cat in activeDefectCategories" :key="cat.key" class="flex flex-col border border-slate-100 rounded-2xl p-6 bg-white shadow-sm">
             
@@ -2012,7 +2376,10 @@ onMounted(() => {
             
             <div v-if="categoryPhotosState[cat.key]?.all.length > categoryPhotosState[cat.key]?.visible.length" class="mb-4 flex justify-end">
                 <button @click="refreshCategoryPhotos(cat.key)" class="text-xs bg-slate-100 hover:bg-blue-50 text-slate-600 hover:text-blue-600 border border-slate-200 hover:border-blue-200 px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 shadow-xs">
-                    🔄 Заменить невыбранные фото (Всего в пуле: {{ categoryPhotosState[cat.key]?.all.length }} шт)
+                    🔄 Заменить невыбранные фото
+                    <span class="bg-blue-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full leading-none">
+                      +{{ categoryPhotosState[cat.key]?.all.length - categoryPhotosState[cat.key]?.visible.length }}
+                    </span>
                 </button>
             </div>
 
@@ -2050,18 +2417,23 @@ onMounted(() => {
               <p class="text-blue-100 font-medium text-sm leading-relaxed">Фото коробок и штрих-кодов уже убраны автоматически. Снимите выделение с оставшихся нежелательных фотографий — они не попадут в акт.</p>
             </div>
 
-            <div class="w-full md:w-auto flex flex-col sm:flex-row gap-3">
-              <button @click="generatePDFClaim(true)" :disabled="isGenerating"
-                      :class="['w-full md:w-auto px-6 py-4 bg-blue-500/20 border border-white/40 text-white rounded-2xl text-sm font-black transition-all flex items-center justify-center gap-2',
-                               isGenerating ? 'opacity-70 cursor-wait' : 'hover:bg-blue-500/40 active:scale-95']">
-                🧪 Тестовый акт
-              </button>
-              <button @click="generatePDFClaim(false)" :disabled="isGenerating"
-                      :class="['w-full md:w-auto px-8 py-4 bg-white text-blue-700 rounded-2xl text-sm font-black transition-all flex items-center justify-center gap-3 shadow-xl',
-                               isGenerating ? 'opacity-70 cursor-wait' : 'hover:scale-105 active:scale-95']">
-                <Download v-if="!isGenerating" class="w-5 h-5" />
-                {{ isGenerating ? '⏳ Формирование акта...' : 'Скачать акт (PDF)' }}
-              </button>
+            <div class="w-full md:w-auto flex flex-col gap-3">
+              <div v-if="actCreatedMsg" class="px-5 py-3 bg-green-500/20 border border-green-300/50 text-green-100 rounded-2xl text-sm font-bold text-center animate-in slide-in-from-bottom-2 duration-300">
+                {{ actCreatedMsg }}
+              </div>
+              <div class="flex flex-col sm:flex-row gap-3">
+                <button @click="generatePDFClaim(true)" :disabled="isGenerating"
+                        :class="['w-full md:w-auto px-6 py-4 bg-blue-500/20 border border-white/40 text-white rounded-2xl text-sm font-black transition-all flex items-center justify-center gap-2',
+                                 isGenerating ? 'opacity-70 cursor-wait' : 'hover:bg-blue-500/40 active:scale-95']">
+                  🧪 Тестовый акт
+                </button>
+                <button @click="generatePDFClaim(false)" :disabled="isGenerating"
+                        :class="['w-full md:w-auto px-8 py-4 bg-white text-blue-700 rounded-2xl text-sm font-black transition-all flex items-center justify-center gap-3 shadow-xl',
+                                 isGenerating ? 'opacity-70 cursor-wait' : 'hover:scale-105 active:scale-95']">
+                  <CheckCircle2 v-if="!isGenerating" class="w-5 h-5" />
+                  {{ isGenerating ? '⏳ Формирование...' : 'Сформировать акт' }}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -2221,9 +2593,12 @@ onMounted(() => {
           <div v-if="groupMetrics[criticalPopup.group].badSkus.length > 0">
             <div class="text-xs font-black text-slate-500 uppercase tracking-widest mb-3">Критические сейчас</div>
             <div class="space-y-2">
-              <div v-for="item in groupMetrics[criticalPopup.group].badSkus" :key="item.sku"
+              <div v-for="(item, idx) in groupMetrics[criticalPopup.group].badSkus" :key="item.sku + '___' + item.factory + idx"
                    class="flex items-center justify-between bg-red-50 border border-red-100 rounded-2xl px-5 py-3">
-                <span class="font-bold text-slate-800 text-sm">{{ item.sku }}</span>
+                <div>
+                  <div class="font-bold text-slate-800 text-sm">{{ item.sku }}</div>
+                  <div class="text-xs text-blue-600 font-semibold mt-0.5">{{ item.factory }}</div>
+                </div>
                 <span class="text-sm font-black text-red-600 bg-red-100 px-3 py-1 rounded-lg">{{ item.ppm.toLocaleString() }} PPM</span>
               </div>
             </div>

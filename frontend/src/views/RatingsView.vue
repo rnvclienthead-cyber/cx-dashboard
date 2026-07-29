@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import Plotly from 'plotly.js-dist-min'
 import { Calendar, Search, Star, Package, X, TrendingUp, TrendingDown, ChevronLeft, ChevronRight, Check, ChevronsUpDown, ChevronUp, ChevronDown as ChevronDownIcon, Upload } from 'lucide-vue-next'
 import { apiFetch } from '../api'
@@ -23,6 +23,33 @@ const calendarYear  = ref(todayObj.getFullYear())
 const calendarMonth = ref(todayObj.getMonth())
 const monthNames = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
 
+const activePeriodLabel = ref('')
+const _cy = todayObj.getFullYear()
+const MONTHS_PRESETS = [
+  { label: 'Янв', start: `${_cy}-01-01`, end: `${_cy}-01-31` },
+  { label: 'Фев', start: `${_cy}-02-01`, end: `${_cy}-02-28` },
+  { label: 'Мар', start: `${_cy}-03-01`, end: `${_cy}-03-31` },
+  { label: 'Апр', start: `${_cy}-04-01`, end: `${_cy}-04-30` },
+  { label: 'Май', start: `${_cy}-05-01`, end: `${_cy}-05-31` },
+  { label: 'Июн', start: `${_cy}-06-01`, end: `${_cy}-06-30` },
+  { label: 'Июл', start: `${_cy}-07-01`, end: `${_cy}-07-31` },
+  { label: 'Авг', start: `${_cy}-08-01`, end: `${_cy}-08-31` },
+  { label: 'Сен', start: `${_cy}-09-01`, end: `${_cy}-09-30` },
+  { label: 'Окт', start: `${_cy}-10-01`, end: `${_cy}-10-31` },
+  { label: 'Ноя', start: `${_cy}-11-01`, end: `${_cy}-11-30` },
+  { label: 'Дек', start: `${_cy}-12-01`, end: `${_cy}-12-31` },
+]
+const selectSpecificMonth = (preset) => {
+  startDate.value = preset.start; endDate.value = preset.end
+  activePeriodLabel.value = preset.label; showCalendarPopover.value = false
+}
+const setCurrentMonth = () => {
+  const now = new Date()
+  const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d2 = String(now.getDate()).padStart(2,'0')
+  startDate.value = `${y}-${m}-01`; endDate.value = `${y}-${m}-${d2}`
+  activePeriodLabel.value = 'current_month'; calendarYear.value = y; calendarMonth.value = now.getMonth()
+  showCalendarPopover.value = false
+}
 const setPreviousMonth = () => {
   const d = new Date(); d.setMonth(d.getMonth() - 1)
   const year = d.getFullYear()
@@ -31,6 +58,7 @@ const setPreviousMonth = () => {
   startDate.value = `${year}-${month}-01`
   endDate.value   = `${year}-${month}-${String(lastDay).padStart(2,'0')}`
   calendarYear.value = year; calendarMonth.value = d.getMonth()
+  activePeriodLabel.value = 'prev_month'
   showCalendarPopover.value = false
 }
 
@@ -139,11 +167,41 @@ const aggregateByGroup = (data) => {
   }))
 }
 
-const axisHeaderRef     = ref(null)
 const categoryChartRefs = {}
 const summaryChartRefs  = {}
 const structureRef = ref(null)
 const expandedCategories = ref(new Set())
+
+// ─── Шапка дат матрицы: позиции читаются из реальной геометрии Plotly ─────────
+const matrixWrapRef = ref(null)          // контейнер всей матрицы (для ResizeObserver)
+const headerDateLabels = ref([])         // [{ label, leftPct }] — абсолютное позиционирование
+
+// Берём ПЕРВЫЙ реально отрендеренный чарт и читаем точные пиксельные координаты
+// колонок прямо из Plotly (_fullLayout._size). Затем переводим в % ширины —
+// шапка лежит в том же контейнере, поэтому % совпадают идеально на любой платформе.
+const syncHeaderDates = () => {
+  let chartEl = null
+  for (const [catName] of categoryGroups.value) {
+    const el = expandedCategories.value.has(catName)
+      ? categoryChartRefs[catName]
+      : summaryChartRefs[catName]
+    if (el && el._fullLayout && el._fullLayout._size && el.offsetWidth) { chartEl = el; break }
+  }
+  const agg  = aggregateByGroup(fullyFilteredData.value)
+  const keys = [...new Set(agg.map(r => r.date))].sort()
+  if (!chartEl || !keys.length) { headerDateLabels.value = []; return }
+
+  const size = chartEl._fullLayout._size   // { l, r, t, b, w, h } в пикселях
+  const w    = chartEl.offsetWidth
+  const n    = keys.length
+  const cell = size.w / n
+  headerDateLabels.value = keys.map((k, i) => ({
+    label:   heatmapLabel(k),
+    leftPct: ((size.l + (i + 0.5) * cell) / w) * 100
+  }))
+}
+
+let matrixResizeObserver = null
 
 // ─── Загрузка данных ─────────────────────────────────────────────────────────
 const fetchRatings = async () => {
@@ -206,6 +264,21 @@ const formatDateDisplay = (dateStr) => {
   if (!dateStr) return '...'
   const p = dateStr.split('-')
   return p.length === 3 ? `${p[2]}.${p[1]}.${p[0]}` : dateStr
+}
+
+// Короткий формат для осей матрицы: dd.MM для дней, MM.YY для месяцев, Wnn для недель
+const heatmapLabel = (key) => {
+  if (groupBy.value === 'month') {
+    const [y, m] = key.split('-')
+    return `${m}.${y.slice(2)}`
+  }
+  if (groupBy.value === 'week') {
+    const [, wStr] = key.split('-W')
+    return `W${wStr}`
+  }
+  // day
+  const p = key.split('-')
+  return p.length === 3 ? `${p[2]}.${p[1]}` : key
 }
 
 // ─── Артикулы ────────────────────────────────────────────────────────────────
@@ -423,7 +496,7 @@ const renderSummaryChart = (catName) => {
   const allAgg    = aggregateByGroup(fullyFilteredData.value)
   const groupKeys = [...new Set(allAgg.map(r => r.date))].sort()
   if (!groupKeys.length) return
-  const xLabels   = groupKeys.map(k => groupKeyLabel(k))
+  const xLabels   = groupKeys.map(k => heatmapLabel(k))
 
   // Категорийные данные только для вычисления среднего
   const catAgg = aggregateByGroup(fullyFilteredData.value.filter(r => catSkus.includes(r.supplier_article)))
@@ -475,35 +548,6 @@ const renderSummaryChart = (catName) => {
   }, { responsive: true, displayModeBar: false })
 }
 
-// ─── Единая шапка дат (sticky) для всей матрицы ──────────────────────────────
-const renderAxisHeader = () => {
-  const el = axisHeaderRef.value
-  if (!el) return
-
-  const agg       = aggregateByGroup(fullyFilteredData.value)
-  const groupKeys = [...new Set(agg.map(r => r.date))].sort()
-  if (!groupKeys.length) { Plotly.purge(el); return }
-  const xLabels = groupKeys.map(k => groupKeyLabel(k))
-
-  Plotly.newPlot(el, [{
-    x: xLabels, y: Array(xLabels.length).fill(0),
-    type: 'scatter', mode: 'markers', opacity: 0,
-    showlegend: false, hoverinfo: 'none'
-  }], {
-    margin: { l: 200, r: 20, t: 2, b: 30 },
-    height: 40,
-    xaxis: {
-      showticklabels: true, tickangle: 0,
-      showgrid: false, ticks: '', showline: false, zeroline: false,
-      tickfont: { size: 9, weight: 'bold', color: '#475569' },
-      automargin: false
-    },
-    yaxis: { visible: false, range: [-1, 1], fixedrange: true },
-    paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor:  'rgba(0,0,0,0)'
-  }, { responsive: true, displayModeBar: false })
-}
-
 // ─── Построение одной тепловой карты для набора SKU ──────────────────────────
 const renderCategoryChart = (catName) => {
   const el = categoryChartRefs[catName]
@@ -516,7 +560,7 @@ const renderCategoryChart = (catName) => {
   // Глобальные groupKeys для выравнивания по общей оси дат
   const allAgg    = aggregateByGroup(fullyFilteredData.value)
   const groupKeys = [...new Set(allAgg.map(r => r.date))].sort()
-  const xLabels   = groupKeys.map(k => groupKeyLabel(k))
+  const xLabels   = groupKeys.map(k => heatmapLabel(k))
 
   const agg = aggregateByGroup(fullyFilteredData.value.filter(r => catSkus.includes(r.supplier_article)))
 
@@ -587,7 +631,9 @@ const renderCategoryChart = (catName) => {
     height: Math.max(80, catSkus.length * cellH + 20),
     xaxis: { showticklabels: false, showgrid: false, ticks: '', showline: false, zeroline: false },
     yaxis: { showgrid: false, tickfont: { size: 11, weight: 'bold' }, ticks: '' }
-  }, { responsive: true, displayModeBar: false })
+  }, { responsive: true, displayModeBar: false, doubleClick: false })
+
+  attachYAxisDblClick(el, catSkus)
 
   el.on('plotly_click', ev => {
     if (ev.points?.length > 0) {
@@ -603,7 +649,6 @@ const renderCharts = () => {
     if (structureRef.value) Plotly.purge(structureRef.value)
     return
   }
-  renderAxisHeader()
   // Раскрытые категории: перерисовываем при смене дат/режима/группировки
   expandedCategories.value.forEach(cat => {
     const el = categoryChartRefs[cat]
@@ -613,6 +658,9 @@ const renderCharts = () => {
   categoryGroups.value.forEach(([catName]) => {
     if (!expandedCategories.value.has(catName)) renderSummaryChart(catName)
   })
+
+  // Шапка дат: после рендера геометрия Plotly уже доступна
+  nextTick(() => requestAnimationFrame(syncHeaderDates))
 
   const groupLabel    = groupBy.value === 'day' ? 'день' : groupBy.value === 'week' ? 'неделю' : 'месяц'
   const structureData = [...finalDeltaAnalysis.value].sort((a, b) => b.totalReviews - a.totalReviews)
@@ -671,15 +719,64 @@ watch([selectedSkus, isNovinkiFilter, activeCard], () => {
   nextTick(() => setTimeout(() => renderCharts(), 0))
 })
 
+
 onMounted(async () => {
   await fetchRatings()
   fetchSummaries()
   nextTick(() => renderCharts())
+
+  // Любое изменение ширины матрицы → пересчёт позиций шапки дат
+  if (matrixWrapRef.value && 'ResizeObserver' in window) {
+    matrixResizeObserver = new ResizeObserver(() => requestAnimationFrame(syncHeaderDates))
+    matrixResizeObserver.observe(matrixWrapRef.value)
+  }
+  window.addEventListener('resize', syncHeaderDates)
+})
+
+onUnmounted(() => {
+  matrixResizeObserver?.disconnect()
+  window.removeEventListener('resize', syncHeaderDates)
 })
 
 // ─── Вспомогательные ─────────────────────────────────────────────────────────
 const starsDisplay = (r) => '★'.repeat(Math.round(r)) + '☆'.repeat(Math.max(0, 5 - Math.round(r)))
 const ratingColor  = (r) => r >= 4.5 ? 'text-green-600' : r >= 4.0 ? 'text-lime-600' : r >= 3.5 ? 'text-yellow-600' : 'text-red-600'
+
+// ─── Ссылки на карточки товаров ──────────────────────────────────────────────
+const nmIdMap = computed(() => {
+  const map = {}
+  wbSummary.value.forEach(r => { if (r.nm_id) map[r.supplier_article] = r.nm_id })
+  return map
+})
+
+const getProductUrl = (sku) => {
+  const nmId = nmIdMap.value[sku]
+  if (nmId) return `https://www.wildberries.ru/catalog/${nmId}/detail.aspx`
+  // YM или WB без nm_id — поиск по артикулу
+  return `https://market.yandex.ru/search?text=${encodeURIComponent(sku)}`
+}
+
+const attachYAxisDblClick = (el, catSkus) => {
+  if (!el || !catSkus?.length) return
+  // Снимаем старый обработчик если уже был
+  if (el._yadblclick) el.removeEventListener('dblclick', el._yadblclick)
+  el._yadblclick = (e) => {
+    const layout = el._fullLayout
+    if (!layout?._size) return
+    const { l, t, h } = layout._size
+    const rect = el.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    // Клик должен быть в левом поле (зона подписей оси Y)
+    if (x < 0 || x > l) return
+    if (y < t || y > t + h) return
+    // Plotly рисует heatmap снизу вверх: catSkus[0] внизу, catSkus[last] вверху
+    const cellIdx = Math.floor((y - t) / (h / catSkus.length))
+    const sku = catSkus[catSkus.length - 1 - cellIdx]
+    if (sku) window.open(getProductUrl(sku), '_blank', 'noopener')
+  }
+  el.addEventListener('dblclick', el._yadblclick)
+}
 </script>
 
 <template>
@@ -706,11 +803,17 @@ const ratingColor  = (r) => r >= 4.5 ? 'text-green-600' : r >= 4.0 ? 'text-lime-
         <div class="relative">
           <div class="flex items-center bg-white border border-slate-200 rounded-2xl px-5 py-3 cursor-pointer hover:border-blue-500 transition-colors shadow-sm" @click.stop="showCalendarPopover = !showCalendarPopover">
             <Calendar class="w-4 h-4 text-blue-500 mr-3" />
-            <span class="text-sm font-bold text-slate-700">{{ formatDateDisplay(startDate) }} — {{ formatDateDisplay(endDate) }}</span>
+            <span class="text-sm font-bold text-slate-700">{{ activePeriodLabel === 'current_month' ? 'Текущий месяц' : activePeriodLabel === 'prev_month' ? 'Прошлый месяц' : activePeriodLabel || (formatDateDisplay(startDate) + ' — ' + formatDateDisplay(endDate)) }}</span>
           </div>
           <div v-if="showCalendarPopover" class="absolute right-0 mt-3 bg-white border border-slate-100 rounded-3xl shadow-2xl z-[150] p-5 w-80" @click.stop>
-            <div class="mb-4 border-b border-slate-100 pb-3">
-              <button @click.stop="setPreviousMonth" class="w-full text-center text-xs font-black bg-blue-50 hover:bg-blue-100 text-blue-700 py-2.5 rounded-xl transition-all tracking-wide uppercase">Прошлый месяц</button>
+            <div class="mb-4 border-b border-slate-100 pb-3 space-y-2">
+              <div class="grid grid-cols-2 gap-1.5">
+                <button @click.stop="setCurrentMonth" :class="activePeriodLabel === 'current_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Текущий месяц</button>
+                <button @click.stop="setPreviousMonth" :class="activePeriodLabel === 'prev_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Прошлый месяц</button>
+              </div>
+              <div class="grid grid-cols-4 gap-1">
+                <button v-for="m in MONTHS_PRESETS" :key="m.label" @click.stop="selectSpecificMonth(m)" :class="activePeriodLabel === m.label ? 'bg-slate-800 text-white' : 'hover:bg-slate-100 text-slate-600'" class="text-center text-[11px] font-bold py-1.5 rounded-lg transition-all">{{ m.label }}</button>
+              </div>
             </div>
             <div class="flex justify-between items-center mb-4">
               <button @click="changeCalendarMonth(-1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-500"><ChevronLeft class="w-4 h-4"/></button>
@@ -812,8 +915,20 @@ const ratingColor  = (r) => r >= 4.5 ? 'text-green-600' : r >= 4.0 ? 'text-lime-
           </div>
         </div>
 
-        <!-- ── Единая шапка дат (sticky при скролле) ── -->
-        <div ref="axisHeaderRef" class="sticky top-0 z-20 bg-white border-b border-slate-100 shadow-sm"></div>
+        <!-- ── Обёртка матрицы: ширина = ширине чартов, отслеживается ResizeObserver ── -->
+        <div ref="matrixWrapRef" class="relative">
+
+        <!-- ── Шапка дат (sticky): метки позиционируются по реальной геометрии Plotly ── -->
+        <div v-if="headerDateLabels.length"
+             class="sticky top-0 z-20 bg-white border-b border-slate-100 shadow-sm"
+             style="height:30px;">
+          <span v-for="d in headerDateLabels" :key="d.label"
+                class="absolute whitespace-nowrap"
+                :style="{ left: d.leftPct + '%', top: '8px', transform: 'translateX(-50%)',
+                          fontSize: '10px', fontWeight: '700', color: '#475569' }">
+            {{ d.label }}
+          </span>
+        </div>
 
         <div v-for="([catName, catSkus], idx) in categoryGroups" :key="catName"
              :class="['border-slate-100', idx < categoryGroups.length - 1 ? 'border-b' : '']">
@@ -846,6 +961,7 @@ const ratingColor  = (r) => r >= 4.5 ? 'text-green-600' : r >= 4.0 ? 'text-lime-
           </div>
 
         </div>
+        </div><!-- /matrixWrapRef -->
       </div>
 
       <!-- ── Динамика отзывов ── -->
@@ -913,7 +1029,13 @@ const ratingColor  = (r) => r >= 4.5 ? 'text-green-600' : r >= 4.0 ? 'text-lime-
             </thead>
             <tbody class="divide-y divide-slate-50">
               <tr v-for="row in sortedWbSummary" :key="row.supplier_article" class="hover:bg-slate-50 transition-colors">
-                <td class="px-5 py-3 font-bold text-slate-800">{{ row.supplier_article }}</td>
+                <td class="px-5 py-3 font-bold text-slate-800">
+                  <a v-if="row.nm_id"
+                     :href="`https://www.wildberries.ru/catalog/${row.nm_id}/detail.aspx`"
+                     target="_blank" rel="noopener"
+                     class="text-blue-600 hover:text-blue-800 hover:underline">{{ row.supplier_article }}</a>
+                  <span v-else>{{ row.supplier_article }}</span>
+                </td>
                 <td class="px-4 py-3 text-center">
                   <div class="flex flex-col items-center gap-0.5">
                     <span :class="['text-lg font-black', ratingColor(row.average_rating)]">{{ row.average_rating.toFixed(2) }}</span>
@@ -999,7 +1121,11 @@ const ratingColor  = (r) => r >= 4.5 ? 'text-green-600' : r >= 4.0 ? 'text-lime-
             </thead>
             <tbody class="divide-y divide-slate-50">
               <tr v-for="row in sortedYmSummary" :key="row.supplier_article" class="hover:bg-slate-50 transition-colors">
-                <td class="px-5 py-3 font-bold text-slate-800">{{ row.supplier_article }}</td>
+                <td class="px-5 py-3 font-bold text-slate-800">
+                  <a :href="`https://market.yandex.ru/search?text=${encodeURIComponent(row.supplier_article)}`"
+                     target="_blank" rel="noopener"
+                     class="text-blue-600 hover:text-blue-800 hover:underline">{{ row.supplier_article }}</a>
+                </td>
                 <td class="px-5 py-3 text-xs text-slate-400 max-w-[160px] truncate" :title="row.product_name">{{ row.product_name || '—' }}</td>
                 <td class="px-4 py-3 text-center">
                   <div class="flex flex-col items-center gap-0.5">

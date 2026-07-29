@@ -30,8 +30,8 @@ logger = logging.getLogger("cx_alert")
 TG_BOT_TOKEN = os.getenv("TG_ALERT_BOT_TOKEN", "")
 TG_CHAT_ID   = os.getenv("TG_ALERT_CHAT_ID", "")
 
-# Antipam: alert po klyuchu ne chashche raz v N chasov
-COOLDOWN_HOURS = 6
+# Антиспам: один алерт одного типа не чаще раза в сутки
+COOLDOWN_HOURS = 24
 
 
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://lingering-recipe-b1b3.mursalimov.workers.dev")

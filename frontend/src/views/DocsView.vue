@@ -4,7 +4,8 @@ import { useRoute } from 'vue-router'
 import {
   BookOpen, Server, Layers, GitFork, Rocket, Plug,
   Download, ChevronRight, Database, Globe, Cpu, Box,
-  Users, Shield, Clock, AlertTriangle, CheckCircle2, RefreshCw
+  Users, Shield, Clock, AlertTriangle, CheckCircle2, RefreshCw,
+  MessagesSquare
 } from 'lucide-vue-next'
 import { SYNC_CATALOG } from '../syncCatalog'
 
@@ -36,6 +37,7 @@ const sections = [
   { id: 'modules',       label: 'Модули',              icon: 'Layers' },
   { id: 'syncs',         label: 'Синхронизаторы',      icon: 'RefreshCw' },
   { id: 'processes',     label: 'Процессы и RACI',     icon: 'GitFork' },
+  { id: 'cx-auto',       label: 'Автоответы клиентам', icon: 'MessagesSquare' },
   { id: 'deploy',        label: 'Деплой',              icon: 'Rocket' },
   { id: 'integrations',  label: 'Интеграции',          icon: 'Plug' },
 ]
@@ -135,6 +137,7 @@ function downloadSection() {
           <Rocket     v-if="s.icon==='Rocket'"    class="w-4 h-4 flex-shrink-0" />
           <Plug       v-if="s.icon==='Plug'"      class="w-4 h-4 flex-shrink-0" />
           <RefreshCw  v-if="s.icon==='RefreshCw'" class="w-4 h-4 flex-shrink-0" />
+          <MessagesSquare v-if="s.icon==='MessagesSquare'" class="w-4 h-4 flex-shrink-0" />
           {{ s.label }}
         </button>
       </nav>
@@ -162,6 +165,8 @@ function downloadSection() {
               <GitFork    v-if="s.icon==='GitFork'"   class="w-4 h-4 flex-shrink-0" />
               <Rocket     v-if="s.icon==='Rocket'"    class="w-4 h-4 flex-shrink-0" />
               <Plug       v-if="s.icon==='Plug'"      class="w-4 h-4 flex-shrink-0" />
+              <RefreshCw  v-if="s.icon==='RefreshCw'" class="w-4 h-4 flex-shrink-0" />
+              <MessagesSquare v-if="s.icon==='MessagesSquare'" class="w-4 h-4 flex-shrink-0" />
               {{ s.label }}
             </button>
           </div>
@@ -228,7 +233,7 @@ function downloadSection() {
                 <div>
                   <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Воркеры (cron) + постоянные процессы (asyncio)</p>
                   <div class="grid grid-cols-4 gap-2">
-                    <div v-for="w in [{l:'worker.py',s:'WB синхронизация'},{l:'ym_worker.py',s:'ЯМ синхронизация'},{l:'ozon_worker.py',s:'OZON синхронизация'},{l:'wb_chat.py',s:'WB чат — мониторинг #от'}]" :key="w.l"
+                    <div v-for="w in [{l:'worker.py',s:'WB синхронизация'},{l:'ym_worker.py',s:'ЯМ синхронизация'},{l:'ozon_worker.py',s:'OZON синхронизация'},{l:'+ чат-синки, мини-синк, фото, монитор',s:'фоновые asyncio-процессы'}]" :key="w.l"
                          class="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-center">
                       <p class="text-xs font-bold text-amber-800 font-mono">{{ w.l }}</p>
                       <p class="text-[11px] text-amber-600 mt-0.5">{{ w.s }}</p>
@@ -252,7 +257,7 @@ function downloadSection() {
                       <Database class="w-5 h-5 text-blue-600" />
                       <p class="text-sm font-black text-blue-800">PostgreSQL · cx_dashboard</p>
                     </div>
-                    <p class="text-xs text-blue-500 mt-1">127.0.0.1:5432 · ~20 таблиц</p>
+                    <p class="text-xs text-blue-500 mt-1">127.0.0.1:5432 · ~30 таблиц (WB, ЯМ, OZON, чаты, ответы КС, система)</p>
                   </div>
                 </div>
 
@@ -372,6 +377,12 @@ function downloadSection() {
                     {w:'ozon_worker.py hourly',s:'каждые 2 ч',d:'OZON: возвраты, статусы'},
                     {w:'ozon_worker.py daily',s:'03:00',d:'OZON: заказы (30-дн. окно)'},
                     {w:'wb_chat.py',s:'постоянно (asyncio)',d:'Мониторинг WB-чата, триггер #от'},
+                    {w:'wb_chat_sync.py',s:'постоянно (asyncio)',d:'Синхронизация всех WB-чатов для «Контроля отдела» (SLA)'},
+                    {w:'wb_mini_sync.py',s:'каждые 5 мин (asyncio)',d:'Быстрое обновление свежих отзывов и возвратов WB'},
+                    {w:'ozon_chat_sync.py',s:'каждые 15 мин (asyncio)',d:'Синхронизация чатов OZON с покупателями'},
+                    {w:'ozon_photo_sync.py',s:'раз в 7 дней (asyncio)',d:'Кэш фото товаров из OZON API v3'},
+                    {w:'system_monitor.py digest',s:'08:30 МСК (cron)',d:'Утренний дайджест сбоев в Telegram'},
+                    {w:'system_monitor.py health',s:'каждые 5 мин (cron)',d:'Контроль доступности сайта/БД/воркеров + алерты в Telegram'},
                   ]" :key="r.w" class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-5 py-3 font-mono text-xs text-amber-700 bg-amber-50/30 font-semibold">{{ r.w }}</td>
                     <td class="px-5 py-3 text-slate-600 text-xs">{{ r.s }}</td>
@@ -416,36 +427,72 @@ function downloadSection() {
           <!-- ══════════════════════════════════════════════════════════════ -->
           <template v-else-if="activeSection==='modules'">
 
-            <div class="grid grid-cols-3 gap-3 mb-8">
-              <div v-for="m in [
-                {n:'Главный дашборд',p:'/',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
-                {n:'Статус автоматизации',p:'/sync',c:'bg-blue-50 border-blue-200 text-blue-700'},
-                {n:'ИИ Тегирование',p:'/ai-tagging',c:'bg-blue-50 border-blue-200 text-blue-700'},
-                {n:'Модерация тегов',p:'/moderation',c:'bg-blue-50 border-blue-200 text-blue-700'},
-                {n:'Обучение ИИ',p:'/ai-training',c:'bg-blue-50 border-blue-200 text-blue-700'},
-                {n:'Карта проблем',p:'/production',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
-                {n:'PPM и Акты',p:'/ppm',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
-                {n:'Голос покупателя',p:'/voc',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
-                {n:'Рейтинг товаров',p:'/ratings',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
-                {n:'Финансовые потери',p:'/finances',c:'bg-rose-50 border-rose-200 text-rose-700'},
-                {n:'Доотправки',p:'/reshipment',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
-                {n:'Реестр актов',p:'/registry',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
-                {n:'Панель управления',p:'/admin',c:'bg-red-50 border-red-200 text-red-700'},
-                {n:'Документация',p:'/docs',c:'bg-indigo-50 border-indigo-200 text-indigo-700'},
-              ]" :key="m.n"
-                 :class="['border rounded-xl px-4 py-3', m.c]">
-                <p class="font-bold text-sm">{{ m.n }}</p>
-                <p class="font-mono text-xs opacity-70 mt-0.5">{{ m.p }}</p>
+            <p class="text-sm text-slate-600 mb-6 leading-relaxed">
+              Меню слева разбито на 4 блока. Каждый пользователь видит только те разделы, на которые
+              у его роли есть право (настраивается в <strong>Панели управления</strong>). Наверху меню —
+              Главный дашборд и переключатель площадки <strong>WB / Яндекс Маркет / OZON</strong>.
+            </p>
+
+            <div class="space-y-5 mb-8">
+              <div v-for="blk in [
+                {title:'📊 Наверху',      hint:'открывается сразу после входа', items:[
+                  {n:'Главный дашборд',p:'/',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
+                ]},
+                {title:'🔧 Технический блок', hint:'настройка ИИ и данных', items:[
+                  {n:'Статус автоматизации',p:'/sync',c:'bg-blue-50 border-blue-200 text-blue-700'},
+                  {n:'ИИ Тегирование',p:'/ai-tagging',c:'bg-blue-50 border-blue-200 text-blue-700'},
+                  {n:'Модерация тегов',p:'/moderation',c:'bg-blue-50 border-blue-200 text-blue-700'},
+                  {n:'Обучение ИИ',p:'/ai-training',c:'bg-blue-50 border-blue-200 text-blue-700'},
+                ]},
+                {title:'📊 Операционный блок', hint:'аналитика и деньги', items:[
+                  {n:'Карта проблем',p:'/production',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
+                  {n:'PPM и Акты',p:'/ppm',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
+                  {n:'Отзывы и аналитика (VoC)',p:'/voc',c:'bg-amber-50 border-amber-200 text-amber-700'},
+                  {n:'Рейтинг товаров',p:'/ratings',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
+                  {n:'Финансовые потери',p:'/finances',c:'bg-rose-50 border-rose-200 text-rose-700'},
+                  {n:'P&L по артикулу',p:'/pnl',c:'bg-rose-50 border-rose-200 text-rose-700'},
+                  {n:'Контроль отдела',p:'/cx-control',c:'bg-violet-50 border-violet-200 text-violet-700'},
+                ]},
+                {title:'💬 Функциональный блок', hint:'ежедневная работа с клиентами', items:[
+                  {n:'Отзывы',p:'/reviews',c:'bg-sky-50 border-sky-200 text-sky-700'},
+                  {n:'Вопросы',p:'/questions',c:'bg-sky-50 border-sky-200 text-sky-700'},
+                  {n:'Чаты',p:'/chats',c:'bg-sky-50 border-sky-200 text-sky-700'},
+                  {n:'Возвраты',p:'/returns',c:'bg-sky-50 border-sky-200 text-sky-700'},
+                  {n:'Отправка деталей',p:'/reshipment',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
+                  {n:'База знаний FAQ',p:'/faq',c:'bg-emerald-50 border-emerald-200 text-emerald-700'},
+                ]},
+                {title:'⚙️ Административный блок', hint:'только для администратора', items:[
+                  {n:'Панель управления',p:'/admin',c:'bg-red-50 border-red-200 text-red-700'},
+                  {n:'Журнал событий',p:'/logs',c:'bg-slate-50 border-slate-200 text-slate-700'},
+                  {n:'Документация системы',p:'/docs',c:'bg-indigo-50 border-indigo-200 text-indigo-700'},
+                ]},
+              ]" :key="blk.title">
+                <div class="flex items-baseline gap-2 mb-2">
+                  <p class="text-sm font-black text-slate-700">{{ blk.title }}</p>
+                  <p class="text-xs text-slate-400">— {{ blk.hint }}</p>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                  <div v-for="m in blk.items" :key="m.n" :class="['border rounded-xl px-4 py-3', m.c]">
+                    <p class="font-bold text-sm">{{ m.n }}</p>
+                    <p class="font-mono text-xs opacity-70 mt-0.5">{{ m.p }}</p>
+                  </div>
+                </div>
               </div>
             </div>
+
+            <p class="text-xs text-slate-400 mb-8">
+              Реестр претензионных актов теперь открывается вкладкой внутри раздела <strong>PPM и Акты</strong>
+              (отдельного пункта меню «Реестр» больше нет). Отзывы, Вопросы, Чаты и Возвраты — это раздел
+              «Обращения клиентов» с общим правом <span class="font-mono">cx_responses</span>.
+            </p>
 
             <!-- Подробно каждый модуль -->
             <div class="space-y-6">
 
               <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div class="px-6 py-4 bg-emerald-50 border-b border-emerald-100">
-                  <h3 class="font-black text-emerald-900">1. Главный дашборд</h3>
-                  <p class="text-xs text-emerald-600 mt-0.5">Исполнительный обзор ключевых метрик</p>
+                  <h3 class="font-black text-emerald-900">Главный дашборд (/)</h3>
+                  <p class="text-xs text-emerald-600 mt-0.5">Исполнительный обзор ключевых метрик · ⚠️ аналитика OZON в разработке</p>
                 </div>
                 <div class="p-6">
                   <table class="w-full text-sm mb-0">
@@ -473,7 +520,7 @@ function downloadSection() {
 
               <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div class="px-6 py-4 bg-blue-50 border-b border-blue-100">
-                  <h3 class="font-black text-blue-900">3–4. ИИ Тегирование + Модерация</h3>
+                  <h3 class="font-black text-blue-900">ИИ Тегирование + Модерация + Обучение ИИ</h3>
                   <p class="text-xs text-blue-600 mt-0.5">Автоматическая разметка → ручная проверка</p>
                 </div>
                 <div class="p-6 space-y-4">
@@ -503,8 +550,8 @@ function downloadSection() {
 
               <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div class="px-6 py-4 bg-emerald-50 border-b border-emerald-100">
-                  <h3 class="font-black text-emerald-900">8. PPM и Акты</h3>
-                  <p class="text-xs text-emerald-600 mt-0.5">Расчёт дефектности и генерация претензионных актов PDF</p>
+                  <h3 class="font-black text-emerald-900">PPM и Акты (/ppm)</h3>
+                  <p class="text-xs text-emerald-600 mt-0.5">Расчёт дефектности, генерация актов PDF + Единый реестр претензий (вкладки)</p>
                 </div>
                 <div class="p-6">
                   <div class="bg-slate-50 rounded-xl px-5 py-4 mb-4 inline-flex items-center gap-4">
@@ -525,7 +572,7 @@ function downloadSection() {
 
               <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div class="px-6 py-4 bg-rose-50 border-b border-rose-100">
-                  <h3 class="font-black text-rose-900">10. Финансовые потери</h3>
+                  <h3 class="font-black text-rose-900">Финансовые потери — COQ (/finances)</h3>
                   <p class="text-xs text-rose-600 mt-0.5">Детальный учёт потерь от возвратов с разбивкой по SKU, каналам и периодам</p>
                 </div>
                 <div class="p-6">
@@ -545,7 +592,7 @@ function downloadSection() {
 
               <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div class="px-6 py-4 bg-amber-50 border-b border-amber-100">
-                  <h3 class="font-black text-amber-900">7. Голос покупателя (VoC)</h3>
+                  <h3 class="font-black text-amber-900">Отзывы и аналитика — VoC (/voc)</h3>
                   <p class="text-xs text-amber-600 mt-0.5">Анализ отзывов и вопросов с тегами ИИ и трендами</p>
                 </div>
                 <div class="p-6">
@@ -565,7 +612,7 @@ function downloadSection() {
 
               <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div class="px-6 py-4 bg-emerald-50 border-b border-emerald-100">
-                  <h3 class="font-black text-emerald-900">9. Рейтинг товаров</h3>
+                  <h3 class="font-black text-emerald-900">Рейтинг товаров (/ratings)</h3>
                   <p class="text-xs text-emerald-600 mt-0.5">Средние оценки и число отзывов в разрезе SKU</p>
                 </div>
                 <div class="p-6">
@@ -580,6 +627,119 @@ function downloadSection() {
                       <p class="text-xs text-slate-600 mt-1">{{ g.d }}</p>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <!-- Контроль отдела -->
+              <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 bg-violet-50 border-b border-violet-100">
+                  <h3 class="font-black text-violet-900">Контроль отдела (/cx-control)</h3>
+                  <p class="text-xs text-violet-600 mt-0.5">Только для администратора. Мониторинг работы менеджеров КС в реальном времени</p>
+                </div>
+                <div class="p-6 space-y-4">
+                  <div class="flex flex-wrap gap-2">
+                    <div class="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5 text-xs"><span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span> <span class="text-emerald-700 font-semibold">Зелёный</span> — в норме</div>
+                    <div class="flex items-center gap-1.5 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 text-xs"><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span> <span class="text-amber-700 font-semibold">Жёлтый</span> — 75% лимита</div>
+                    <div class="flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5 text-xs"><span class="w-2.5 h-2.5 rounded-full bg-red-400"></span> <span class="text-red-700 font-semibold">Красный</span> — SLA превышен</div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div v-for="g in [
+                      {t:'Очереди под SLA',d:'Сколько обращений ждут ответа по каждому менеджеру и каналу'},
+                      {t:'Каналы: план vs факт',d:'Нагрузка по чатам, отзывам, вопросам, возвратам'},
+                      {t:'Воронка доотправок',d:'Конверсия заявок по этапам'},
+                      {t:'Дисциплина ИИ-разметки',d:'Насколько аккуратно размечаются данные WB'},
+                    ]" :key="g.t" class="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3">
+                      <span class="font-black text-violet-700 text-sm">{{ g.t }}:</span>
+                      <p class="text-xs text-slate-600 mt-1">{{ g.d }}</p>
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-500"><strong>Источники очередей:</strong> <span class="font-mono">wb_chats</span> (ждут ответа), <span class="font-mono">ozon_chats</span>, непросмотренные отзывы и вопросы. Лимиты SLA — в <span class="font-mono">cx_sla_settings</span>, алерты можно слать менеджерам в Telegram.</p>
+                </div>
+              </div>
+
+              <!-- P&L по артикулу -->
+              <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 bg-rose-50 border-b border-rose-100">
+                  <h3 class="font-black text-rose-900">P&L по артикулу (/pnl)</h3>
+                  <p class="text-xs text-rose-600 mt-0.5">Реальный финансовый результат по каждому SKU из еженедельного финотчёта WB</p>
+                </div>
+                <div class="p-6">
+                  <div class="grid grid-cols-3 gap-3">
+                    <div v-for="g in [
+                      {t:'К выплате WB',d:'Сколько WB выплатил по артикулу за период'},
+                      {t:'Себестоимость',d:'Из wb_cogs (Google Sheets)'},
+                      {t:'Валовая прибыль',d:'К выплате WB − Себестоимость'},
+                    ]" :key="g.t" class="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3">
+                      <span class="font-black text-rose-700 text-sm">{{ g.t }}:</span>
+                      <p class="text-xs text-slate-600 mt-1">{{ g.d }}</p>
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-500 mt-3">Если у товара нет себестоимости, строка помечается значком ⚠ — сигнал заполнить COG в Google Sheets.</p>
+                </div>
+              </div>
+
+              <!-- Обращения клиентов -->
+              <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 bg-sky-50 border-b border-sky-100">
+                  <h3 class="font-black text-sky-900">Обращения клиентов: Отзывы · Вопросы · Чаты · Возвраты</h3>
+                  <p class="text-xs text-sky-600 mt-0.5">Рабочий стол менеджера КС — общее право <span class="font-mono">cx_responses</span></p>
+                </div>
+                <div class="p-6 space-y-4">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div v-for="g in [
+                      {t:'Отзывы (/reviews)',d:'Таблица всех отзывов WB/ЯМ/OZON как в MPStats: фильтры, чекбоксы, миниатюры фото'},
+                      {t:'Вопросы (/questions)',d:'Вопросы покупателей WB и ЯМ с ответом вручную/шаблон/ИИ'},
+                      {t:'Чаты (/chats)',d:'Переписка WB и OZON в одном окне + контекст клиента по rid'},
+                      {t:'Возвраты (/returns)',d:'Возвраты со всех площадок для реакции менеджера'},
+                    ]" :key="g.t" class="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3">
+                      <span class="font-black text-sky-700 text-sm">{{ g.t }}</span>
+                      <p class="text-xs text-slate-600 mt-1">{{ g.d }}</p>
+                    </div>
+                  </div>
+                  <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-4">
+                    <p class="font-bold text-indigo-800 text-sm mb-1">Три способа ответить</p>
+                    <p class="text-xs text-indigo-700">1) <strong>вручную</strong> · 2) <strong>из шаблона</strong> (Конструктор) · 3) <strong>ИИ</strong> (опирается на те же шаблоны). Можно отметить чекбоксами несколько обращений и отправить ответы массово.</p>
+                  </div>
+                  <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                    <p class="font-bold text-slate-700 text-sm mb-1">Конструктор ответов (вкладка «Шаблоны ответов»)</p>
+                    <p class="text-xs text-slate-600">Детерминированная сборка без ИИ: <strong>Приветствие + Эмпатия + Решение + Энергия + Прощание</strong>. Блоки подбираются по артикулу (группе товара), ключевым словам-триггерам и оценке (позитив 4–5★ / проблема 1–3★). Эти же шаблоны ИИ использует как «знания» при генерации.</p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- FAQ -->
+              <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 bg-emerald-50 border-b border-emerald-100">
+                  <h3 class="font-black text-emerald-900">База знаний FAQ (/faq)</h3>
+                  <p class="text-xs text-emerald-600 mt-0.5">Справочник готовых ответов для менеджеров — доступен всем ролям</p>
+                </div>
+                <div class="p-6">
+                  <p class="text-sm text-slate-600">16 ответов по 7 категориям (доставка, размеры, качество, оплата, возврат, комплектация, описание товара), составленных на основе анализа <strong>10 000+ вопросов</strong> покупателей WB. Ответы можно искать и привязывать к карточке товара.</p>
+                </div>
+              </div>
+
+              <!-- Отправка деталей — обзор -->
+              <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 bg-emerald-50 border-b border-emerald-100">
+                  <h3 class="font-black text-emerald-900">Отправка деталей / Доотправки (/reshipment)</h3>
+                  <p class="text-xs text-emerald-600 mt-0.5">Полный цикл доотправки детали клиенту — от заявки до выдачи в ПВЗ</p>
+                </div>
+                <div class="p-6 space-y-4">
+                  <div class="grid grid-cols-3 gap-3">
+                    <div class="bg-blue-50 border border-blue-100 rounded-xl p-4">
+                      <p class="font-bold text-blue-800 text-sm mb-1">Клиент</p>
+                      <p class="text-xs text-blue-700">По персональной ссылке (box.vidovito.com?t=…) заполняет форму: ФИО, телефон, адрес/ПВЗ, категорию, описание, до 5 фото брака.</p>
+                    </div>
+                    <div class="bg-amber-50 border border-amber-100 rounded-xl p-4">
+                      <p class="font-bold text-amber-800 text-sm mb-1">Менеджер</p>
+                      <p class="text-xs text-amber-700">Модерирует заявку, сравнивает стоимость СДЭК/Яндекс, смотрит «Экономику отправки» (3 варианта из финотчёта WB), одобряет или отклоняет (с промокодом-компенсацией).</p>
+                    </div>
+                    <div class="bg-emerald-50 border border-emerald-100 rounded-xl p-4">
+                      <p class="font-bold text-emerald-800 text-sm mb-1">Склад</p>
+                      <p class="text-xs text-emerald-700">Очередь склада, паклист, печать этикеток, подтверждение сборки (в т.ч. массовое), отправка СДЭК/Яндекс с трек-номером.</p>
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-500"><strong>Триггер запуска:</strong> менеджер пишет <span class="font-mono bg-slate-100 px-1.5 py-0.5 rounded">#от</span> в WB-чате → создаётся заявка → клиенту уходит ссылка. Статус СДЭК обновляется автоматически через вебхук.</p>
                 </div>
               </div>
 
@@ -1023,6 +1183,127 @@ function downloadSection() {
           <!-- ══════════════════════════════════════════════════════════════ -->
           <!-- РАЗДЕЛ 4: ДЕПЛОЙ -->
           <!-- ══════════════════════════════════════════════════════════════ -->
+          <template v-else-if="activeSection==='cx-auto'">
+
+            <p class="text-slate-600 mb-6 leading-relaxed">
+              Как система отвечает покупателям без участия менеджера. Карта построена на разборе
+              реальной переписки: <strong>2 342</strong> ответа менеджера, <strong>2 235</strong> сообщений
+              покупателей, <strong>681</strong> пара «вопрос — ответ» за период с 25 сентября 2025 года.
+            </p>
+
+            <!-- Три слоя -->
+            <h3 class="text-lg font-black text-slate-900 mb-3">Как это устроено</h3>
+            <p class="text-sm text-slate-500 mb-4">
+              Искусственный интеллект <strong>понимает</strong>, но не сочиняет: весь текст, который уходит
+              покупателю, берётся из базы знаний. Это делает ответы предсказуемыми и дешёвыми.
+            </p>
+            <div class="grid sm:grid-cols-3 gap-3 mb-8">
+              <div v-for="l in [
+                {n:'Слой 1', t:'Диспетчер',    d:'Читает сообщение и историю чата, знает товар и есть ли по нему возврат. Определяет тему и насколько уверен. Текст не пишет.'},
+                {n:'Слой 2', t:'База знаний',  d:'По теме и стадии диалога выдаёт готовый ответ и действие — выслать форму, дать инструкцию, напомнить про трек.'},
+                {n:'Слой 3', t:'Светофор',     d:'Решает судьбу ответа: отправить самому, показать менеджеру черновик или сразу передать человеку.'},
+              ]" :key="l.n" class="bg-white rounded-2xl border border-slate-200 p-4">
+                <p class="text-[11px] font-bold text-indigo-600 uppercase tracking-wide mb-1">{{ l.n }}</p>
+                <p class="font-black text-slate-900 mb-1">{{ l.t }}</p>
+                <p class="text-xs text-slate-500 leading-relaxed">{{ l.d }}</p>
+              </div>
+            </div>
+
+            <!-- Карта тем -->
+            <h3 class="text-lg font-black text-slate-900 mb-3">Тринадцать тем, которые закрывают чаты</h3>
+            <p class="text-sm text-slate-500 mb-4">
+              Цифра справа — сколько раз тема встретилась в реальной переписке. Темы могут пересекаться.
+            </p>
+            <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-8 divide-y divide-slate-100">
+              <div v-for="i in [
+                {t:'Не хватает детали',       s:'«Не хватило одной трубки вертикальной 17 см»',        a:'Сочувствие, предложение выслать деталь, затем ссылка на форму заявки. Только по разрешённым товарам.', n:228, z:'auto'},
+                {t:'Отказ от доотправки',     s:'«Не актуально», «Не надо, хочу вернуть»',             a:'Бот останавливается и передаёт обращение менеджеру. Возврат оформляет менеджер сам.', n:null, z:'human'},
+                {t:'Согласие на доотправку',  s:'«Да», «Отправляйте»',                                 a:'Сразу ссылка на форму с персональным токеном.',                        n:75,  z:'auto'},
+                {t:'Благодарность, закрытие', s:'«Спасибо», «Хорошо»',                                 a:'Тёплое прощание, при решённой проблеме — просьба обновить отзыв.',     n:113, z:'auto'},
+                {t:'Как собрать',             s:'«Трубки А не подходят к центральным креплениям»',      a:'Инструкция по товару. Часто это не брак, а неверная сборка.',          n:63,  z:'auto'},
+                {t:'Невозвратный товар',      s:'«Заказала две, вторая лишняя, можно вернуть?»',        a:'Объяснение, что возвратность определяет маркетплейс.',                 n:61,  z:'auto'},
+                {t:'Где мой заказ',           s:'«Когда придёт товар?»',                                a:'Доставку везёт сам маркетплейс — объясняем, куда обратиться.',         n:29,  z:'auto'},
+                {t:'Что с моей заявкой',      s:'«Как долго ждать?»',                                   a:'Актуальный статус доотправки из системы, с треком если есть.',         n:14,  z:'auto'},
+                {t:'Ссылка не открывается',   s:'«При переходе открывается главная страница ВБ»',       a:'Подсказка скопировать адрес в браузер, повторная отправка ссылки.',    n:12,  z:'auto'},
+                {t:'Товар не работает',       s:'«Наполнила бак водой, но тряпка не увлажняется»',      a:'Пошаговая подсказка по эксплуатации.',                                 n:7,   z:'auto'},
+                {t:'Хочу вернуть товар',      s:'«Не актуально, хочу сделать возврат»',                 a:'Инструкция по возврату, попытка предложить доотправку взамен.',        n:305, z:'draft'},
+                {t:'Брак и повреждение',      s:'«На одной из нижних трубок вмятина»',                  a:'Разбор: чинится доотправкой или нужен возврат по браку.',              n:162, z:'draft'},
+                {t:'Всё остальное',           s:'Нестандартная формулировка, бот не уверен',            a:'Молча уходит менеджеру с пометкой, почему бот не взялся.',             n:null,z:'human'},
+              ]" :key="i.t" class="px-4 py-3 flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-4"
+                :class="i.z==='auto' ? 'border-l-4 border-l-emerald-400' : i.z==='draft' ? 'border-l-4 border-l-amber-400' : 'border-l-4 border-l-rose-400'">
+                <div class="sm:w-56 sm:flex-shrink-0">
+                  <p class="text-sm font-bold text-slate-800">{{ i.t }}</p>
+                  <p class="text-[11px] text-slate-400 italic mt-0.5">{{ i.s }}</p>
+                </div>
+                <p class="flex-1 text-xs text-slate-600 leading-relaxed">{{ i.a }}</p>
+                <div class="flex items-center gap-2 sm:flex-col sm:items-end sm:gap-1 flex-shrink-0">
+                  <span class="text-[11px] text-slate-400 tabular-nums">{{ i.n ?? '—' }}</span>
+                  <span :class="['text-[10px] font-bold px-2 py-0.5 rounded',
+                    i.z==='auto' ? 'bg-emerald-100 text-emerald-700' : i.z==='draft' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700']">
+                    {{ i.z==='auto' ? 'Авто' : i.z==='draft' ? 'Черновик' : 'Человек' }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Красная зона -->
+            <h3 class="text-lg font-black text-slate-900 mb-3">Красная зона: сюда бот не заходит никогда</h3>
+            <div class="bg-rose-50 border border-rose-200 rounded-2xl p-5 mb-8">
+              <p class="text-sm text-rose-900 mb-3">
+                Даже при полной уверенности ответ уходит менеджеру.
+              </p>
+              <ul class="space-y-2">
+                <li v-for="r in [
+                  ['Деньги и компенсация','возврат средств, скидка, «верните деньги», требование доплаты'],
+                  ['Юридическое давление','суд, юрист, Роспотребнадзор, жалоба в маркетплейс'],
+                  ['Отказ по заявке','«вы отклонили мой возврат» — клиент уже получил отказ и злится'],
+                  ['Повторное обращение','клиент пишет третий раз по той же проблеме'],
+                  ['Здоровье и безопасность','травма, порезался, ребёнок, опасность конструкции'],
+                  ['Оскорбления и угрозы','переходит на личности, угрожает отзывом или оглаской'],
+                ]" :key="r[0]" class="flex gap-2 text-sm">
+                  <AlertTriangle class="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                  <span><strong class="text-slate-800">{{ r[0] }}</strong> <span class="text-slate-500">— {{ r[1] }}</span></span>
+                </li>
+              </ul>
+            </div>
+
+            <!-- Стадии -->
+            <h3 class="text-lg font-black text-slate-900 mb-3">Стадии диалога</h3>
+            <p class="text-sm text-slate-500 mb-4">
+              Один и тот же вопрос требует разного ответа в зависимости от того, где находится клиент.
+              «Где посылка» на первом обращении и после отправки трека — это два разных ответа.
+            </p>
+            <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-8 divide-y divide-slate-100">
+              <div v-for="st in [
+                ['новое',        'Клиент написал впервые. Определяем тему, отвечаем по карте.'],
+                ['ждём клиента', 'Предложили выслать деталь, ждём «да» или «нет». Через двое суток — мягкое напоминание.'],
+                ['форма ушла',   'Ссылка отправлена, заявка не заполнена. Помогаем с формой, напоминаем один раз.'],
+                ['в работе',     'Заявка одобрена, посылка собирается. На вопросы отвечаем фактическим статусом.'],
+                ['в пути',       'Есть трек. Автоматически шлём трек и напоминание про срок хранения.'],
+                ['доставлено',   'Клиент забрал. Спрашиваем, всё ли хорошо, и просим обновить отзыв.'],
+                ['закрыт',       'Проблема решена или клиент ушёл. Больше не пишем.'],
+              ]" :key="st[0]" class="px-4 py-3 flex flex-col sm:flex-row sm:gap-4">
+                <span class="text-xs font-mono font-bold text-indigo-600 sm:w-32 sm:flex-shrink-0">{{ st[0] }}</span>
+                <span class="text-sm text-slate-600">{{ st[1] }}</span>
+              </div>
+            </div>
+
+            <!-- Правила -->
+            <h3 class="text-lg font-black text-slate-900 mb-3">Правила, утверждённые владельцем</h3>
+            <div class="grid sm:grid-cols-2 gap-3">
+              <div v-for="p in [
+                {t:'Доотправка деталей', d:'Форму отправляем всегда, когда клиент заинтересован и соглашается. Если отказывается — бот возврат не оформляет и ничего не обещает: обращение передаётся менеджеру, дальше он всё делает сам.'},
+                {t:'Список товаров',     d:'Доотправка предлагается только по разрешённым SKU. Список редактируется в разделе «Отправка деталей» → кнопка «Товары». На старте это вешалки 2-СБ (Black, Green, Grey, White).'},
+                {t:'Подпись',            d:'В чатах бот всегда подписывается Александром — так проще понять, кто отвечал клиенту. В отзывах остаются Ольга и Софья.'},
+                {t:'Режим работы',       d:'Круглосуточно, без ночной паузы. Ответ ночью приходит сразу.'},
+              ]" :key="p.t" class="bg-white rounded-2xl border border-slate-200 p-4">
+                <p class="font-black text-slate-900 mb-1 text-sm">{{ p.t }}</p>
+                <p class="text-xs text-slate-500 leading-relaxed">{{ p.d }}</p>
+              </div>
+            </div>
+
+          </template>
+
           <template v-else-if="activeSection==='deploy'">
 
             <div class="bg-red-50 border border-red-200 rounded-2xl p-5 mb-8">
@@ -1189,7 +1470,7 @@ function downloadSection() {
                     <Database class="w-6 h-6 text-blue-600" />
                     <div>
                       <p class="font-black text-blue-900 text-base">PostgreSQL · cx_dashboard</p>
-                      <p class="text-xs text-blue-500 mt-0.5">wb_claims, wb_feedbacks, wb_orders, wb_logistics, wb_invoices, wb_cogs, ym_*, ozon_*, users, reshipment_requests, ...</p>
+                      <p class="text-xs text-blue-500 mt-0.5">wb_claims, wb_feedbacks, wb_orders, wb_logistics, wb_invoices, wb_cogs, wb_chats, ym_*, ozon_returns, ozon_reviews, ozon_chats, cx_response_*, cx_sla_settings, users, reshipment_requests, ...</p>
                     </div>
                   </div>
                 </div>
@@ -1204,12 +1485,13 @@ function downloadSection() {
                 <div class="flex justify-center text-slate-300 text-sm">▼</div>
 
                 <!-- Выходные сервисы -->
-                <div class="grid grid-cols-4 gap-2">
+                <div class="grid grid-cols-5 gap-2">
                   <div v-for="out in [
                     {n:'Vue.js Frontend',c:'bg-indigo-50 border-indigo-200 text-indigo-800',d:'cxvo.ru'},
-                    {n:'СДЭК API',c:'bg-slate-50 border-slate-200 text-slate-700',d:'создание отправлений'},
+                    {n:'СДЭК / Яндекс',c:'bg-slate-50 border-slate-200 text-slate-700',d:'создание отправлений'},
                     {n:'Яндекс S3',c:'bg-slate-50 border-slate-200 text-slate-700',d:'хранение фото'},
                     {n:'SaleBot',c:'bg-slate-50 border-slate-200 text-slate-700',d:'уведомления команде'},
+                    {n:'Telegram',c:'bg-slate-50 border-slate-200 text-slate-700',d:'алерты и дайджест сбоев'},
                   ]" :key="out.n" :class="['border rounded-xl p-3 text-center', out.c]">
                     <p class="font-bold text-xs">{{ out.n }}</p>
                     <p class="text-[10px] opacity-70 mt-1">{{ out.d }}</p>
@@ -1265,8 +1547,21 @@ function downloadSection() {
                   rows:[
                     {d:'Возвраты FBO',t:'ozon_returns',f:'каждые 2 ч'},
                     {d:'Заказы FBS (30-дн. окно)',t:'ozon_orders',f:'ежедневно'},
+                    {d:'Отзывы',t:'ozon_reviews',f:'каждые 2 ч'},
+                    {d:'Чаты с покупателями',t:'ozon_chats',f:'каждые 15 мин (asyncio)'},
+                    {d:'Фото товаров (API v3)',t:'wb_product_photos',f:'раз в 7 дней'},
                   ],
-                  notes:['Только FBO (склад OZON), FBS не поддерживается', 'Нет фото и комментариев к возвратам — API не отдаёт', 'Пагинация через last_id (cursor-based)', 'Ручной backfill: python3 ozon_worker.py backfill']
+                  notes:['Только FBO (склад OZON), FBS не поддерживается', 'Нет фото и комментариев к возвратам — API не отдаёт', 'Пагинация через last_id (cursor-based)', '⚠️ Отзывы заперты платной подпиской (вопросы/чаты/возвраты — бесплатно)', 'Ручной backfill: python3 ozon_worker.py backfill']
+                },
+                {
+                  title:'WB Mini-Sync (быстрое обновление)',
+                  color:'bg-purple-50 border-purple-200',hc:'bg-purple-50',
+                  key:'wb_mini_sync.py (asyncio, внутри бэкенда)',
+                  rows:[
+                    {d:'Свежие отзывы WB',t:'wb_feedbacks',f:'каждые 5 мин'},
+                    {d:'Новые возвраты WB',t:'wb_claims',f:'каждые 5 мин'},
+                  ],
+                  notes:['Лёгкий опрос за последние ~15 мин — чтобы «Обращения клиентов» показывали данные почти в реальном времени', 'Основной worker.py по-прежнему ходит раз в 2 ч за полной синхронизацией']
                 },
                 {
                   title:'СДЭК API v2',

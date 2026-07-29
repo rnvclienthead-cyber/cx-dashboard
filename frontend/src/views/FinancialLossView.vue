@@ -1,9 +1,13 @@
 <script setup>
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { DollarSign, TrendingDown, Package, AlertCircle, Calendar, ChevronLeft, ChevronRight, Search, X, Grid, BarChart3, ChevronDown } from 'lucide-vue-next'
+import { TrendingDown, Package, AlertCircle, Calendar, ChevronLeft, ChevronRight, Search, X, Grid, BarChart3, ChevronDown } from 'lucide-vue-next'
 import Plotly from 'plotly.js-dist-min'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+
+const RubleIcon = {
+  template: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4h6a4 4 0 0 1 0 8H7V4z"/><line x1="7" y1="4" x2="7" y2="20"/><line x1="5" y1="16" x2="14" y2="16"/></svg>`
+}
 
 const platformStore = usePlatformStore()
 
@@ -52,9 +56,36 @@ const loadFinances = async () => {
 }
 
 // --- ЛОГИКА КАЛЕНДАРЯ ---
+const activePeriodLabel = ref('current_month')
+const _cy = todayObj.getFullYear()
+const MONTHS_PRESETS = [
+  { label: 'Янв', start: `${_cy}-01-01`, end: `${_cy}-01-31` },
+  { label: 'Фев', start: `${_cy}-02-01`, end: `${_cy}-02-28` },
+  { label: 'Мар', start: `${_cy}-03-01`, end: `${_cy}-03-31` },
+  { label: 'Апр', start: `${_cy}-04-01`, end: `${_cy}-04-30` },
+  { label: 'Май', start: `${_cy}-05-01`, end: `${_cy}-05-31` },
+  { label: 'Июн', start: `${_cy}-06-01`, end: `${_cy}-06-30` },
+  { label: 'Июл', start: `${_cy}-07-01`, end: `${_cy}-07-31` },
+  { label: 'Авг', start: `${_cy}-08-01`, end: `${_cy}-08-31` },
+  { label: 'Сен', start: `${_cy}-09-01`, end: `${_cy}-09-30` },
+  { label: 'Окт', start: `${_cy}-10-01`, end: `${_cy}-10-31` },
+  { label: 'Ноя', start: `${_cy}-11-01`, end: `${_cy}-11-30` },
+  { label: 'Дек', start: `${_cy}-12-01`, end: `${_cy}-12-31` },
+]
+const selectSpecificMonth = (preset) => {
+  startDate.value = preset.start; endDate.value = preset.end
+  activePeriodLabel.value = preset.label; showCalendarPopover.value = false
+}
+const setCurrentMonth = () => {
+  const now = new Date()
+  const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d2 = String(now.getDate()).padStart(2,'0')
+  startDate.value = `${y}-${m}-01`; endDate.value = `${y}-${m}-${d2}`
+  activePeriodLabel.value = 'current_month'; calendarYear.value = y; calendarMonth.value = now.getMonth()
+  showCalendarPopover.value = false
+}
 const changeCalendarMonth = (offset) => {
   calendarMonth.value += offset
-  if (calendarMonth.value < 0) { calendarMonth.value = 11; calendarYear.value-- } 
+  if (calendarMonth.value < 0) { calendarMonth.value = 11; calendarYear.value-- }
   else if (calendarMonth.value > 11) { calendarMonth.value = 0; calendarYear.value++ }
 }
 
@@ -66,8 +97,8 @@ const setPreviousMonth = () => {
   const lastDay = new Date(year, d.getMonth() + 1, 0).getDate()
   startDate.value = `${year}-${month}-01`
   endDate.value = `${year}-${month}-${lastDay}`
-  calendarYear.value = year
-  calendarMonth.value = d.getMonth()
+  calendarYear.value = year; calendarMonth.value = d.getMonth()
+  activePeriodLabel.value = 'prev_month'
   showCalendarPopover.value = false
 }
 
@@ -131,7 +162,7 @@ const filteredSkuList = computed(() => skuOptions.value.filter(s => String(s).to
 const totalLoss = computed(() => {
   return skuFilteredData.value
     .filter(r => r.status === 'Одобрено' && r.cost_type !== 'none')
-    .reduce((sum, r) => sum + Number(r.cost), 0)
+    .reduce((sum, r) => sum + Number(r.cost) + Number(r.wb_logistic_loss || 0), 0)
 })
 
 const pendingLoss = computed(() => {
@@ -179,11 +210,12 @@ const skuTableData = computed(() => {
 
     if (r.status === 'Одобрено') {
       m.defectsCount++
+      const inv = r.invoice
+      if (!m.invoices[inv]) m.invoices[inv] = { count: 0, sum: 0, lostRevenue: 0, lostProfit: 0 }
+      m.invoices[inv].count++
+
       if (r.cost_type !== 'none') {
-        m.approvedLoss += Number(r.cost)
-        const inv = r.invoice
-        if (!m.invoices[inv]) m.invoices[inv] = { count: 0, sum: 0 }
-        m.invoices[inv].count++
+        m.approvedLoss += Number(r.cost) + Number(r.wb_logistic_loss || 0)
         m.invoices[inv].sum += Number(r.cost)
       }
       if (r.has_retail_price) {
@@ -191,8 +223,11 @@ const skuTableData = computed(() => {
         m.lostRevenue += rp
         m.retailCount++
         m.totalRetailSum += rp
+        m.invoices[inv].lostRevenue += rp
         if (r.cost_type !== 'none') {
-          m.lostProfit += Math.max(0, rp - Number(r.cost || 0))
+          const profit = Math.max(0, rp - Number(r.cost || 0))
+          m.lostProfit += profit
+          m.invoices[inv].lostProfit += profit
         }
       }
     } else if (r.status === 'На рассмотрении' && r.cost_type !== 'none') {
@@ -220,7 +255,17 @@ const skuTableData = computed(() => {
       avgProfit:      (item.retailCount > 0 && item.knownCostCount > 0)
                         ? (item.totalRetailSum / item.retailCount) - (item.totalCostSum / item.knownCostCount)
                         : 0,
-      invoicesList: Object.entries(item.invoices).map(([inv, d]) => ({ invoice: inv, ...d })).sort((a,b) => b.sum - a.sum)
+      invoicesList: Object.entries(item.invoices)
+        .map(([inv, d]) => ({ invoice: inv, ...d }))
+        .filter(d => activeFilter.value === 'revenue' ? d.lostRevenue > 0
+                   : activeFilter.value === 'profit'  ? d.lostProfit > 0
+                   : d.sum > 0)
+        .sort((a, b) => {
+          const key = activeFilter.value === 'revenue' ? 'lostRevenue'
+                    : activeFilter.value === 'profit'  ? 'lostProfit'
+                    : 'sum'
+          return b[key] - a[key]
+        })
     }))
     .sort((a, b) => b[sortKey] - a[sortKey])
 })
@@ -259,7 +304,7 @@ const renderCharts = () => {
       if (!matrixData[a] || !matrixData[a][x]) return
       const val = af === 'revenue' ? Number(r.retail_price || 0)
                 : af === 'profit'  ? Math.max(0, Number(r.retail_price || 0) - Number(r.cost || 0))
-                : Number(r.cost)
+                : Number(r.cost) + Number(r.wb_logistic_loss || 0)
       matrixData[a][x].s += val
       matrixData[a][x].t[r.sku] = (matrixData[a][x].t[r.sku] || 0) + val
   })
@@ -333,7 +378,7 @@ const renderCharts = () => {
       const m = r.created_dt.substring(0, 7)
       const val = af === 'revenue' ? Number(r.retail_price || 0)
                 : af === 'profit'  ? Math.max(0, Number(r.retail_price || 0) - Number(r.cost || 0))
-                : Number(r.cost)
+                : Number(r.cost) + Number(r.wb_logistic_loss || 0)
       monthsMap[m] += val
   })
 
@@ -402,7 +447,7 @@ onMounted(loadFinances)
     <div class="flex flex-col md:flex-row justify-between md:items-end gap-4 mb-8 border-b border-slate-200 pb-5">
       <div class="flex items-center gap-4">
         <div class="p-3 bg-rose-600 text-white rounded-xl shadow-lg shadow-rose-200/50">
-          <DollarSign class="w-6 h-6" />
+          <RubleIcon class="w-6 h-6" />
         </div>
         <div>
           <h1 class="text-xl font-black tracking-tight text-slate-900">Cost of Quality (COQ)</h1>
@@ -428,11 +473,17 @@ onMounted(loadFinances)
         <div class="relative">
           <div class="flex items-center bg-white border border-slate-200 rounded-2xl px-5 py-3 cursor-pointer hover:border-blue-500 transition-colors shadow-sm" @click.stop="showCalendarPopover = !showCalendarPopover">
             <Calendar class="w-4 h-4 text-blue-500 mr-3" />
-            <span class="text-sm font-bold text-slate-700">{{ formatDateDisplay(startDate) }} — {{ formatDateDisplay(endDate) }}</span>
+            <span class="text-sm font-bold text-slate-700">{{ activePeriodLabel === 'current_month' ? 'Текущий месяц' : activePeriodLabel === 'prev_month' ? 'Прошлый месяц' : activePeriodLabel || (formatDateDisplay(startDate) + ' — ' + formatDateDisplay(endDate)) }}</span>
           </div>
           <div v-if="showCalendarPopover" class="absolute right-0 mt-3 bg-white border border-slate-100 rounded-3xl shadow-2xl z-[150] p-5 w-80" @click.stop>
-            <div class="mb-4 border-b border-slate-100 pb-3">
-              <button @click.stop="setPreviousMonth" class="w-full text-center text-xs font-black bg-blue-50 hover:bg-blue-100 text-blue-700 py-2.5 rounded-xl transition-all shadow-sm tracking-wide uppercase border border-blue-100/50">Прошлый месяц</button>
+            <div class="mb-4 border-b border-slate-100 pb-3 space-y-2">
+              <div class="grid grid-cols-2 gap-1.5">
+                <button @click.stop="setCurrentMonth" :class="activePeriodLabel === 'current_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Текущий месяц</button>
+                <button @click.stop="setPreviousMonth" :class="activePeriodLabel === 'prev_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Прошлый месяц</button>
+              </div>
+              <div class="grid grid-cols-4 gap-1">
+                <button v-for="m in MONTHS_PRESETS" :key="m.label" @click.stop="selectSpecificMonth(m)" :class="activePeriodLabel === m.label ? 'bg-slate-800 text-white' : 'hover:bg-slate-100 text-slate-600'" class="text-center text-[11px] font-bold py-1.5 rounded-lg transition-all">{{ m.label }}</button>
+              </div>
             </div>
             <div class="flex justify-between items-center mb-4">
               <button @click="changeCalendarMonth(-1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-500"><ChevronLeft class="w-4 h-4"/></button>
@@ -463,7 +514,7 @@ onMounted(loadFinances)
              :class="['rounded-3xl p-6 shadow-sm relative overflow-hidden border cursor-pointer transition-all select-none',
                       activeFilter === 'revenue' ? 'ring-2 ring-indigo-400 border-indigo-400 bg-indigo-50' : hasRetailPrices ? 'bg-white border-indigo-200 hover:border-indigo-400' : 'bg-slate-50 border-slate-200 opacity-60']">
           <div class="flex items-center gap-2 mb-2">
-            <DollarSign class="w-5 h-5 text-indigo-500" />
+            <RubleIcon class="w-5 h-5 text-indigo-500" />
             <span class="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Недополученный доход</span>
           </div>
           <div v-if="hasRetailPrices" class="text-3xl font-black text-slate-900 tracking-tight">{{ formatMoney(lostRevenue) }}</div>
@@ -600,16 +651,25 @@ onMounted(loadFinances)
                    <td colspan="8" class="p-4 px-12">
                       <div class="bg-white border border-blue-100 rounded-xl p-4 shadow-sm animate-in slide-in-from-top-2">
                          <h4 class="text-xs font-black text-slate-800 mb-3 flex items-center gap-2">
-                            <Package class="w-3 h-3 text-blue-500" /> Детализация убытков по инвойсам:
+                            <Package class="w-3 h-3 text-blue-500" />
+                            Детализация по инвойсам ·
+                            <span :class="activeFilter === 'revenue' ? 'text-indigo-600' : activeFilter === 'profit' ? 'text-purple-600' : 'text-rose-600'">
+                              {{ activeFilter === 'revenue' ? 'Недопол. доход' : activeFilter === 'profit' ? 'Недопол. прибыль' : 'Убытки по с/с' }}
+                            </span>
                          </h4>
-                         <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                         <div v-if="row.invoicesList.length > 0" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3">
                             <div v-for="inv in row.invoicesList" :key="inv.invoice" class="bg-slate-50 border border-slate-100 rounded-lg p-3 text-xs shadow-sm hover:border-blue-200 transition-colors">
                                <div class="font-bold text-slate-700 truncate mb-1"># {{ inv.invoice }}</div>
                                <div class="text-slate-500 flex justify-between items-center">
                                   <span>{{ inv.count }} шт.</span>
-                                  <span class="text-rose-600 font-bold">{{ formatMoney(inv.sum) }}</span>
+                                  <span :class="activeFilter === 'revenue' ? 'text-indigo-600' : activeFilter === 'profit' ? 'text-purple-600' : 'text-rose-600'" class="font-bold">
+                                    {{ formatMoney(activeFilter === 'revenue' ? inv.lostRevenue : activeFilter === 'profit' ? inv.lostProfit : inv.sum) }}
+                                  </span>
                                </div>
                             </div>
+                         </div>
+                         <div v-else class="text-xs text-slate-400 text-center py-3">
+                           {{ activeFilter === 'risk' ? 'Детализация недоступна для статуса «В риске»' : 'Нет данных по инвойсам' }}
                          </div>
                       </div>
                    </td>

@@ -27,6 +27,16 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 MAX_FILE_SIZE_MB = 15
 
+# MIME → расширение (для файлов без расширения, напр. с iPhone)
+MIME_TO_EXT = {
+    "image/jpeg":  ".jpg",
+    "image/jpg":   ".jpg",
+    "image/png":   ".png",
+    "image/webp":  ".webp",
+    "image/heic":  ".heic",
+    "image/heif":  ".heif",
+}
+
 # ── Публичный роутер (без авторизации) ──────────────────────────────────────
 public_router = APIRouter(prefix="/api/v1/reshipment", tags=["Reshipment / Доотправка"])
 
@@ -105,7 +115,13 @@ def get_pvz_list(city: str = Query(..., min_length=2)):
 @public_router.post("/upload-photo")
 async def upload_photo(request: Request, file: UploadFile = File(...)):
     """Загрузка фото от клиента"""
-    ext = Path(file.filename or "").suffix.lower()
+    mime = (file.content_type or "").lower().split(";")[0].strip()
+    ext  = Path(file.filename or "").suffix.lower()
+
+    # Если расширения нет или неизвестно — определяем по MIME (актуально для iPhone)
+    if ext not in ALLOWED_EXTENSIONS:
+        ext = MIME_TO_EXT.get(mime, "")
+
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Допустимые форматы: JPG, PNG, WEBP, HEIC")
 

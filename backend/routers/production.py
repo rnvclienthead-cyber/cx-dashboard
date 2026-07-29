@@ -92,7 +92,8 @@ def get_production_claims(
                 SELECT
                     v.*,
                     v."Номер поставки" AS "Номер поставки_ОРИГИНАЛ",
-                    COALESCE(inv.invoice_num, 'Не указан') AS "Инвойс"
+                    COALESCE(inv.invoice_num, 'Не указан') AS "Инвойс",
+                    COALESCE(a.category_1, 'Прочее') AS "category"
                 FROM view_cx_dashboard v
                 LEFT JOIN (
                     SELECT DISTINCT ON (supply_id, supplier_article)
@@ -101,18 +102,37 @@ def get_production_claims(
                 ) inv
                     ON TRIM(v."Номер поставки") = TRIM(inv.supply_id)
                    AND TRIM(v."Артикул продавца") = TRIM(inv.supplier_article)
+                LEFT JOIN wb_assortment a
+                    ON TRIM(v."Артикул продавца") = TRIM(a.supplier_article)
             """)
             with db.bind.connect() as conn:
                 df = pd.read_sql(query, conn)
 
             if not df.empty:
-                valid = ['одобрено', '2', '2.0', 'да', 'true']
+                excluded = ['отказ', '0', 'нет', 'false']
+                # Отказы из‑за доотправки детали — это всё равно брак для карты проблем
+                with db.bind.connect() as conn:
+                    reship_sriids = {
+                        row[0] for row in conn.execute(text("""
+                            SELECT DISTINCT LOWER(TRIM(matched_srid))
+                            FROM reshipment_requests
+                            WHERE matched_srid IS NOT NULL AND TRIM(matched_srid) <> ''
+                        """)).fetchall()
+                    }
+                status_l = df['Решение по возврату покупателю'].astype(str).str.strip().str.lower()
+                ex_l = (
+                    df['Статус товара'].astype(str).str.lower()
+                    if 'Статус товара' in df.columns
+                    else pd.Series([''] * len(df), index=df.index)
+                )
+                srid_l = df['SRID'].astype(str).str.strip().str.lower() if 'SRID' in df.columns else pd.Series([''] * len(df), index=df.index)
+                is_plain_refusal = status_l.isin(excluded)
+                is_reship_refusal = ex_l.str.contains('доотправк', na=False) | srid_l.isin(reship_sriids)
                 df = df[
-                    df['Решение по возврату покупателю'].astype(str).str.strip().str.lower().isin(valid) |
-                    df['Статус товара'].astype(str).str.strip().str.lower().isin(valid)
+                    (~is_plain_refusal | is_reship_refusal) &
+                    ~df['Артикул продавца'].astype(str).str.strip().str.lower().isin(['nan', 'none', '', 'null', '0'])
                 ]
                 df['Артикул продавца'] = df['Артикул продавца'].astype(str).str.strip()
-                df = df[~df['Артикул продавца'].str.lower().isin(['nan', 'none', '', 'null'])]
                 date_col = next((c for c in df.columns if 'оформления заявки' in str(c).lower()), None)
                 df['claim_date_iso'] = (
                     pd.to_datetime(df[date_col], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
@@ -158,16 +178,18 @@ def get_production_claims(
                     ym_supply_map  = {}
                 ym_rows = conn.execute(text("""
                     SELECT
-                        return_id, order_id, supplier_article,
-                        status, status_ru, created_at, updated_at,
-                        return_comment, photos,
-                        reason_type, subreason_type,
-                        cat_1,  cat_2,  cat_3,  cat_4,  cat_5,
-                        cat_6,  cat_7,  cat_8,  cat_9,  cat_10,
-                        cat_11, cat_12, cat_13
-                    FROM ym_returns
-                    WHERE supplier_article IS NOT NULL
-                      AND supplier_article != ''
+                        r.return_id, r.order_id, r.supplier_article,
+                        r.status, r.status_ru, r.created_at, r.updated_at,
+                        r.return_comment, r.photos,
+                        r.reason_type, r.subreason_type,
+                        r.cat_1,  r.cat_2,  r.cat_3,  r.cat_4,  r.cat_5,
+                        r.cat_6,  r.cat_7,  r.cat_8,  r.cat_9,  r.cat_10,
+                        r.cat_11, r.cat_12, r.cat_13,
+                        COALESCE(a.category_1, 'Прочее') AS category
+                    FROM ym_returns r
+                    LEFT JOIN wb_assortment a ON LOWER(TRIM(r.supplier_article)) = LOWER(TRIM(a.supplier_article))
+                    WHERE r.supplier_article IS NOT NULL
+                      AND r.supplier_article != ''
                 """)).mappings().all()
 
                 # Похожий отзыв по тому же SKU (последний негативный, 1-3★).
@@ -198,6 +220,8 @@ def get_production_claims(
                     r.get("status_ru")
                     or _YM_STATUS_MAP.get(r.get("status") or "", "На рассмотрении")
                 )
+                if status_ru.lower() == "отказ":
+                    continue
                 row = {
                     "Артикул продавца":               r["supplier_article"],
                     "Инвойс":                         ym_invoice_map.get(r["return_id"], "ЯМ"),
@@ -211,6 +235,7 @@ def get_production_claims(
                     # photos уже включены — фронтенд не будет вызывать claim-media
                     "photos":                          r["photos"] or "",
                     "platform":                        "ym",
+                    "category":                        r.get("category") or "Прочее",
                     # Причины Маркета (для 2-й карты и обогащения карточки)
                     "reason_type":                     r.get("reason_type"),
                     "subreason_type":                  r.get("subreason_type"),
@@ -234,14 +259,16 @@ def get_production_claims(
 
                 oz_rows = conn.execute(text("""
                     SELECT
-                        return_id, order_id, order_number, posting_number,
-                        supplier_article, product_name,
-                        return_reason, status_sys, status_ru,
-                        is_opened, return_date,
-                        cat_1,  cat_2,  cat_3,  cat_4,  cat_5,
-                        cat_6,  cat_7,  cat_8,  cat_9,  cat_10,
-                        cat_11, cat_12, cat_13
-                    FROM ozon_returns
+                        r.return_id, r.order_id, r.order_number, r.posting_number,
+                        r.supplier_article, r.product_name,
+                        r.return_reason, r.status_sys, r.status_ru,
+                        r.is_opened, r.return_date,
+                        r.cat_1,  r.cat_2,  r.cat_3,  r.cat_4,  r.cat_5,
+                        r.cat_6,  r.cat_7,  r.cat_8,  r.cat_9,  r.cat_10,
+                        r.cat_11, r.cat_12, r.cat_13,
+                        COALESCE(a.category_1, 'Прочее') AS category
+                    FROM ozon_returns r
+                    LEFT JOIN wb_assortment a ON LOWER(TRIM(r.supplier_article)) = LOWER(TRIM(a.supplier_article))
                     WHERE supplier_article IS NOT NULL
                       AND supplier_article != ''
                       AND status_sys IN (
@@ -277,6 +304,7 @@ def get_production_claims(
                     "Комментарий покупателя":          "",
                     "photos":                          "",
                     "platform":                        "ozon",
+                    "category":                        r.get("category") or "Прочее",
                     "Причина ЯМ":                      r.get("return_reason") or "",
                     "Субпричина ЯМ":                   "",
                     "Название товара":                 r.get("product_name") or "",
@@ -286,7 +314,16 @@ def get_production_claims(
                     row[str(i)] = 1 if val else 0
                 all_rows.append(row)
 
-        res = {"status": "success", "data": all_rows}
+        with db.bind.connect() as conn:
+            asm_rows = conn.execute(text("""
+                SELECT supplier_article, COALESCE(category_1, 'Прочее') AS category_1
+                FROM wb_assortment
+                WHERE matrix_status IN ('В матрице', 'Новинка', 'Ввод в матрицу')
+                ORDER BY supplier_article
+            """)).mappings().all()
+        known_skus = [{"supplier_article": r["supplier_article"], "category": r["category_1"]} for r in asm_rows]
+
+        res = {"status": "success", "data": all_rows, "known_skus": known_skus}
         save_to_cache(cache_key, res)
         return res
     except Exception as e:

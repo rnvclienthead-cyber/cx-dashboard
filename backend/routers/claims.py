@@ -26,8 +26,12 @@ def get_pending_claims(db: Session = Depends(get_db)):
             v."SRID", v."Дата и время оформления заявки на возврат", v."Артикул продавца", 
             v."Комментарий покупателя", v."Решение по возврату покупателю", v."Статус товара",
             v."1", v."2", v."3", v."4", v."5", v."6", v."7", v."8", v."9", v."10", v."11", v."12", v."13",
-            v."Корректировка", v."Номер поставки",
-            COALESCE(inv.invoice_num, 'Не указан') AS "Инвойс"
+            v."Корректировка",
+            COALESCE(NULLIF(TRIM(v."Номер поставки"), ''), '0') AS "Номер поставки",
+            CASE
+                WHEN COALESCE(NULLIF(TRIM(v."Номер поставки"), ''), '0') = '0' THEN 'Не указан'
+                ELSE COALESCE(NULLIF(inv.invoice_num, ''), 'Не указан')
+            END AS "Инвойс"
         FROM view_cx_dashboard v
         LEFT JOIN wb_invoices inv 
             ON TRIM(v."Номер поставки") = inv.supply_id 

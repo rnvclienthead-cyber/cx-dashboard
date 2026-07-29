@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { Activity, Server, HardDrive, Cpu, RefreshCw, ScrollText } from 'lucide-vue-next'
 import { apiFetch } from '../api'
+import { describeSync } from '../syncCatalog'
 
 const sysMetrics = ref(null)
 const logs = ref([])
@@ -18,7 +19,8 @@ const fetchData = async () => {
     if (resMetrics && resMetrics.ok) sysMetrics.value = await resMetrics.json()
     if (resLogs && resLogs.ok) {
       const data = await resLogs.json()
-      logs.value = data.data || [] // Бэкенд отдает { count: X, data: [...] }
+      // Обогащаем каждую запись человеческим названием синка из справочника
+      logs.value = (data.data || []).map(l => ({ ...l, _sync: describeSync(l.action) }))
     }
   } catch (err) {
     console.error("Ошибка загрузки логов:", err)
@@ -95,7 +97,15 @@ onMounted(fetchData)
           <tbody class="divide-y divide-slate-100 text-sm bg-white">
             <tr v-for="(log, idx) in logs" :key="idx" class="hover:bg-slate-50 transition-colors">
               <td class="p-4 text-slate-500 whitespace-nowrap">{{ log.date }}</td>
-              <td class="p-4 font-bold text-slate-700">{{ log.action }}</td>
+              <td class="p-4">
+                <router-link :to="{ path: '/docs', query: { section: 'syncs' } }"
+                  :title="log._sync?.desc || 'Открыть описание синхронизаторов'"
+                  class="font-bold text-slate-700 hover:text-indigo-600 hover:underline decoration-dotted underline-offset-2 inline-flex items-center gap-1.5">
+                  <span v-if="log._sync?.mp" class="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-black tracking-wide">{{ log._sync.mp }}</span>
+                  {{ log._sync?.label || log.action }}
+                </router-link>
+                <div v-if="log._sync?.known" class="text-[10px] text-slate-400 font-mono mt-0.5">{{ log.action }}</div>
+              </td>
               <td class="p-4">
                 <span :class="['px-2.5 py-1 border rounded-md text-xs font-bold tracking-wide', getStatusStyle(log.status)]">
                   {{ log.status }}

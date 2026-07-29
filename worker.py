@@ -138,15 +138,19 @@ def fetch_wb_claims():
                     if not srid: continue
                     
                     raw_status = str(item.get("status", "")).strip()
-                    status_map = {'1': 'На рассмотрении', '2': 'Одобрено', '3': 'Отказ'}
+                    # returns-api: 0=на рассмотрении, 1=отказ, 2=одобрено
+                    status_map = {'0': 'На рассмотрении', '1': 'Отказ', '2': 'Одобрено', '3': 'Отказ'}
                     mapped = status_map.get(raw_status, raw_status)
                     
-                    status_ex = item.get("status_description", "")
-                    if mapped in ['Архивная', 'None', '', 'Активная']:
+                    status_ex = item.get("status_description", "") or item.get("status_ex", "")
+                    if mapped not in ['На рассмотрении', 'Одобрено', 'Отказ']:
                         ex_lower = str(status_ex).lower()
-                        if 'возврат' in ex_lower or 'одобрено' in ex_lower: mapped = 'Одобрено'
-                        elif 'отклон' in ex_lower or 'отказ' in ex_lower: mapped = 'Отказ'
-                        elif 'рассмотр' in ex_lower: mapped = 'На рассмотрении'
+                        wb_c = str(item.get("wb_comment") or "").lower()
+                        blob = f"{ex_lower} {wb_c}"
+                        if 'возврат' in blob or 'одобрено' in blob or 'придут деньги' in blob: mapped = 'Одобрено'
+                        elif 'отклон' in blob or 'отказ' in blob: mapped = 'Отказ'
+                        elif 'рассмотр' in blob: mapped = 'На рассмотрении'
+                        else: mapped = 'На рассмотрении'
                     
                     final_photos = ""
                     if srid in existing_photos_map and existing_photos_map[srid] not in ['nan', 'None']:
@@ -164,7 +168,7 @@ def fetch_wb_claims():
                             compressed_urls = [create_and_upload_thumbnail(u) for u in photo_urls if u]
                             final_photos = " ".join(compressed_urls)
                     
-                    raw_videos = item.get("video") or item.get("videos") or []
+                    raw_videos = item.get("video_paths") or item.get("video") or item.get("videos") or []
                     video_urls = []
                     if isinstance(raw_videos, str): video_urls = [raw_videos]
                     elif isinstance(raw_videos, list): video_urls = [v for v in raw_videos if isinstance(v, str)]
@@ -222,12 +226,18 @@ def sync_claims_to_db(df):
     INSERT INTO wb_claims (srid, claim_id, created_dt, supplier_article, nm_id, user_comment, status, status_ex, claim_type, is_archive, last_sync, photos, video_paths, order_date, claim_date)
     SELECT DISTINCT ON (srid) srid, claim_id, CAST(created_dt AS TIMESTAMP), supplier_article, nm_id, user_comment, status, status_ex, claim_type, CAST(is_archive AS BOOLEAN), CAST(last_sync AS TIMESTAMP), photos, video_paths, CAST(order_date AS TIMESTAMP), CAST(claim_date AS TIMESTAMP)
     FROM temp_wb_claims ORDER BY srid
-    ON CONFLICT (srid) DO UPDATE SET 
+    ON CONFLICT (srid) DO UPDATE SET
         status = EXCLUDED.status, status_ex = EXCLUDED.status_ex, is_archive = EXCLUDED.is_archive, last_sync = EXCLUDED.last_sync,
         photos = CASE WHEN EXCLUDED.photos != '' THEN EXCLUDED.photos ELSE wb_claims.photos END,
         video_paths = CASE WHEN EXCLUDED.video_paths != '' THEN EXCLUDED.video_paths ELSE wb_claims.video_paths END,
         order_date = COALESCE(EXCLUDED.order_date, wb_claims.order_date),
-        claim_date = COALESCE(EXCLUDED.claim_date, wb_claims.claim_date);
+        claim_date = COALESCE(EXCLUDED.claim_date, wb_claims.claim_date),
+        supplier_article = CASE
+            WHEN wb_claims.supplier_article IS NULL OR TRIM(wb_claims.supplier_article) IN ('', 'Без артикула')
+            THEN COALESCE(NULLIF(TRIM(EXCLUDED.supplier_article), ''), wb_claims.supplier_article)
+            ELSE wb_claims.supplier_article
+        END,
+        created_dt = COALESCE(wb_claims.created_dt, EXCLUDED.created_dt);
     """
     try:
         df.to_sql('temp_wb_claims', engine_local, if_exists='replace', index=False)
@@ -251,48 +261,58 @@ def fetch_feedbacks_archive():
     }
     
     upsert_sql = text("""
-        INSERT INTO wb_feedbacks (id, supplier_article, created_date, valuation, text, answer_text, state)
-        VALUES (:id, :sku, :created, :val, :text, :ans, 'archive')
-        ON CONFLICT (id) 
-        DO UPDATE SET 
-            valuation = EXCLUDED.valuation,
-            answer_text = EXCLUDED.answer_text
+        INSERT INTO wb_feedbacks (id, supplier_article, nm_id, created_date, valuation, text, answer_text, photos, state)
+        VALUES (:id, :sku, :nm_id, :created, :val, :text, :ans, :photos, 'archive')
+        ON CONFLICT (id)
+        DO UPDATE SET
+            valuation   = EXCLUDED.valuation,
+            answer_text = EXCLUDED.answer_text,
+            photos      = COALESCE(EXCLUDED.photos, wb_feedbacks.photos),
+            nm_id       = COALESCE(EXCLUDED.nm_id,  wb_feedbacks.nm_id)
     """)
-    
+
     skip = 0
-    take = 5000 
+    take = 5000
     total_saved = 0
-    
+
     try:
         while True:
             url = f"https://feedbacks-api.wildberries.ru/api/v1/feedbacks/archive?isAnswered=true&take={take}&skip={skip}&order=dateDesc"
             resp = requests.get(url, headers=headers)
-            
+
             if resp.status_code == 422:
                 print("🏁 Достигнут предел архива WB (лимит пагинации).")
                 break
             elif resp.status_code != 200:
                 print(f"❌ Ошибка API WB (Отзывы): {resp.status_code} - {resp.text}")
                 break
-                
+
             feedbacks = resp.json().get('data', {}).get('feedbacks', [])
             if not feedbacks:
-                break 
-                
+                break
+
             valid_feedbacks = []
             for fb in feedbacks:
                 fb_text = fb.get('text', '').strip()
                 if not fb_text:
                     continue
-                    
+
                 sku = fb.get('productDetails', {}).get('supplierArticle', 'Без артикула')
+                nm_id_val = safe_str(fb.get('productDetails', {}).get('nmId'))
                 val = fb.get('productValuation', 5)
                 created = fb.get('createdDate', '')
                 ans = fb.get('answer', {}).get('text', '') if fb.get('answer') else ''
-                
+                raw_photos = fb.get('photoLinks') or []
+                photo_urls = []
+                for p in raw_photos:
+                    if isinstance(p, str): photo_urls.append(p)
+                    elif isinstance(p, dict): photo_urls.append(p.get('fullSize') or p.get('url') or '')
+                photos_str = ' '.join(u for u in photo_urls if u) or None
+
                 valid_feedbacks.append({
-                    "id": str(fb.get('id')), "sku": sku, "created": created,
-                    "val": val, "text": fb_text, "ans": ans
+                    "id": str(fb.get('id')), "sku": sku, "nm_id": nm_id_val,
+                    "created": created, "val": val, "text": fb_text, "ans": ans,
+                    "photos": photos_str,
                 })
             
             # 🔥 Запись сразу в ДВЕ базы данных
@@ -324,48 +344,58 @@ def fetch_new_feedbacks():
     }
     
     upsert_sql = text("""
-        INSERT INTO wb_feedbacks (id, supplier_article, created_date, valuation, text, answer_text, state)
-        VALUES (:id, :sku, :created, :val, :text, :ans, 'active')
-        ON CONFLICT (id) 
-        DO UPDATE SET 
-            valuation = EXCLUDED.valuation,
+        INSERT INTO wb_feedbacks (id, supplier_article, nm_id, created_date, valuation, text, answer_text, photos, state)
+        VALUES (:id, :sku, :nm_id, :created, :val, :text, :ans, :photos, 'active')
+        ON CONFLICT (id)
+        DO UPDATE SET
+            valuation   = EXCLUDED.valuation,
             answer_text = EXCLUDED.answer_text,
-            state = EXCLUDED.state
+            state       = EXCLUDED.state,
+            photos      = COALESCE(EXCLUDED.photos, wb_feedbacks.photos),
+            nm_id       = COALESCE(EXCLUDED.nm_id,  wb_feedbacks.nm_id)
     """)
-    
+
     skip = 0
     take = 5000
     total_saved = 0
-    
+
     try:
         while True:
             url = f"https://feedbacks-api.wildberries.ru/api/v1/feedbacks?isAnswered=false&take={take}&skip={skip}&order=dateDesc"
             resp = requests.get(url, headers=headers)
-            
+
             if resp.status_code == 422:
                 break
             elif resp.status_code != 200:
                 print(f"❌ Ошибка API WB (Новые отзывы): {resp.status_code} - {resp.text}")
                 break
-                
+
             feedbacks = resp.json().get('data', {}).get('feedbacks', [])
             if not feedbacks:
-                break 
-                
+                break
+
             valid_feedbacks = []
             for fb in feedbacks:
                 fb_text = fb.get('text', '').strip()
                 if not fb_text:
                     continue
-                    
+
                 sku = fb.get('productDetails', {}).get('supplierArticle', 'Без артикула')
+                nm_id_val = safe_str(fb.get('productDetails', {}).get('nmId'))
                 val = fb.get('productValuation', 5)
                 created = fb.get('createdDate', '')
                 ans = fb.get('answer', {}).get('text', '') if fb.get('answer') else ''
-                
+                raw_photos = fb.get('photoLinks') or []
+                photo_urls = []
+                for p in raw_photos:
+                    if isinstance(p, str): photo_urls.append(p)
+                    elif isinstance(p, dict): photo_urls.append(p.get('fullSize') or p.get('url') or '')
+                photos_str = ' '.join(u for u in photo_urls if u) or None
+
                 valid_feedbacks.append({
-                    "id": str(fb.get('id')), "sku": sku, "created": created,
-                    "val": val, "text": fb_text, "ans": ans
+                    "id": str(fb.get('id')), "sku": sku, "nm_id": nm_id_val,
+                    "created": created, "val": val, "text": fb_text, "ans": ans,
+                    "photos": photos_str,
                 })
             
             # 🔥 Запись сразу в ДВЕ базы данных
@@ -474,6 +504,8 @@ def sync_chunk(df, table, upsert_sql):
             conn.execute(text(upsert_sql)); conn.execute(text(f"DROP TABLE temp_{table};"))
     except Exception as e:
         print(f"❌ Ошибка {table}: {e}")
+        log_to_system(f"Синхронизатор {table}", "ERROR", f"Партия из {len(df)} строк НЕ записана: {e}")
+        raise
 
 def fetch_and_save_logistics(url, doc_type):
     current_from = get_start_date("wb_logistics", doc_type)
@@ -523,14 +555,18 @@ def fetch_and_save_orders(url):
             if response.status_code == 429: time.sleep(65); continue
             res = response.json()
             if not res or not isinstance(res, list): break
+            def _safe_shk_id(v):
+                s = str(v or "").strip()
+                return int(s) if s.isdigit() else None
             chunk = [{"srid": safe_str(i.get("srid")), "dt": i.get("date"), "supplier_article": safe_str(i.get("supplierArticle") or i.get("saName")),
                       "cancel_dt": i.get("cancelDate") if str(i.get("cancelDate")).startswith("20") and i.get("isCancel") else None,
-                      "last_change_date": i.get("lastChangeDate")} for i in res if safe_str(i.get("srid"))]
+                      "last_change_date": i.get("lastChangeDate"),
+                      "shk_id": _safe_shk_id(i.get("sticker"))} for i in res if safe_str(i.get("srid"))]
             df = pd.DataFrame(chunk).drop_duplicates(subset=['srid'], keep='last')
             df['last_sync'] = pd.Timestamp.now()
-            sql = """INSERT INTO wb_orders (srid, dt, supplier_article, cancel_dt, last_change_date, last_sync)
-                     SELECT DISTINCT ON (srid) srid, CAST(dt AS TIMESTAMP), supplier_article, CAST(cancel_dt AS TIMESTAMP), CAST(last_change_date AS TIMESTAMP), CAST(last_sync AS TIMESTAMP) FROM temp_wb_orders ORDER BY srid, last_change_date DESC
-                     ON CONFLICT (srid) DO UPDATE SET cancel_dt=EXCLUDED.cancel_dt, last_change_date=EXCLUDED.last_change_date, last_sync=EXCLUDED.last_sync;"""
+            sql = """INSERT INTO wb_orders (srid, dt, supplier_article, cancel_dt, last_change_date, shk_id, last_sync)
+                     SELECT DISTINCT ON (srid) srid, CAST(dt AS TIMESTAMP), supplier_article, CAST(cancel_dt AS TIMESTAMP), CAST(last_change_date AS TIMESTAMP), NULLIF(shk_id::text,'')::bigint, CAST(last_sync AS TIMESTAMP) FROM temp_wb_orders ORDER BY srid, last_change_date DESC
+                     ON CONFLICT (srid) DO UPDATE SET cancel_dt=EXCLUDED.cancel_dt, last_change_date=EXCLUDED.last_change_date, shk_id=COALESCE(EXCLUDED.shk_id, wb_orders.shk_id), last_sync=EXCLUDED.last_sync;"""
             sync_chunk(df, 'wb_orders', sql)
             total_rows += len(df)
             last_change = res[-1].get("lastChangeDate")
@@ -1054,6 +1090,123 @@ def sync_wb_ratings_totals():
 
 
 # =========================================================================
+# ДЕТАЛЬНЫЙ ФИНАНСОВЫЙ ОТЧЁТ WB (reportDetailByPeriod)
+# Курсорная пагинация через rrd_id — тянем инкрементально
+# =========================================================================
+def sync_wb_report_detail():
+    """Синхронизирует детальный еженедельный отчёт WB (продажи, возвраты, штрафы, хранение).
+    Использует rrd_id как курсор — при каждом запуске докачивает только новые строки."""
+    print("📊 Синк детального финотчёта WB...")
+    log_to_system("Финотчёт WB", "INFO", "Старт синхронизации reportDetailByPeriod")
+
+    # Берём последний сохранённый rrd_id как курсор
+    with engine_local.connect() as conn:
+        row = conn.execute(text("SELECT COALESCE(MAX(rrd_id), 0) FROM wb_report_detail")).fetchone()
+        last_rrd_id = int(row[0])
+
+    # date_from: с апреля 2026; rrd_id курсор не даёт дублей при повторных запусках
+    date_from = "2026-04-01T00:00:00"
+
+    date_to = datetime.now().strftime("%Y-%m-%dT23:59:59")
+    url = "https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod"
+    limit = 1000
+    cursor = last_rrd_id
+    total_saved = 0
+    page = 0
+
+    while True:
+        page += 1
+        params = {"dateFrom": date_from, "dateTo": date_to, "rrdid": cursor, "limit": limit}
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=120)
+            if resp.status_code == 429:
+                print("  ⏳ rate limit, жду 61с")
+                time.sleep(61)
+                continue
+            if resp.status_code != 200:
+                print(f"  ❌ HTTP {resp.status_code}: {resp.text[:200]}")
+                break
+            rows = resp.json()
+        except Exception as e:
+            print(f"  ❌ Ошибка запроса: {e}")
+            break
+
+        if not rows or not isinstance(rows, list):
+            break
+
+        def _f(v):
+            try: return float(v or 0)
+            except: return 0.0
+
+        records = []
+        for r in rows:
+            records.append({
+                "rrd_id":                int(r.get("rrd_id", 0)),
+                "realizationreport_id":  r.get("realizationreport_id"),
+                "date_from":             r.get("date_from"),
+                "date_to":               r.get("date_to"),
+                "rr_dt":                 r.get("rr_dt"),
+                "doc_type_name":         str(r.get("doc_type_name") or ""),
+                "sa_name":               str(r.get("sa_name") or ""),
+                "nm_id":                 r.get("nm_id"),
+                "barcode":               str(r.get("barcode") or ""),
+                "srid":                  str(r.get("srid") or ""),
+                "quantity":              int(r.get("quantity") or 0),
+                "retail_price":          _f(r.get("retail_price")),
+                "retail_amount":         _f(r.get("retail_amount")),
+                "ppvz_for_pay":          _f(r.get("ppvz_for_pay")),
+                "ppvz_sales_commission": _f(r.get("ppvz_sales_commission")),
+                "delivery_rub":          _f(r.get("delivery_rub")),
+                "storage_fee":           _f(r.get("storage_fee")),
+                "penalty":               _f(r.get("penalty")),
+                "deduction":             _f(r.get("deduction")),
+                "acceptance":            _f(r.get("acceptance")),
+                "rebill_logistic_cost":  _f(r.get("rebill_logistic_cost")),
+                "acquiring_fee":         _f(r.get("acquiring_fee")),
+                "supplier_promo":        _f(r.get("supplier_promo")),
+                "additional_payment":    _f(r.get("additional_payment")),
+                "commission_percent":    _f(r.get("commission_percent")),
+            })
+
+        if not records:
+            break
+
+        # Upsert пачкой
+        with engine_local.begin() as conn:
+            for rec in records:
+                conn.execute(text("""
+                    INSERT INTO wb_report_detail (
+                        rrd_id, realizationreport_id, date_from, date_to, rr_dt,
+                        doc_type_name, sa_name, nm_id, barcode, srid, quantity,
+                        retail_price, retail_amount, ppvz_for_pay, ppvz_sales_commission,
+                        delivery_rub, storage_fee, penalty, deduction, acceptance,
+                        rebill_logistic_cost, acquiring_fee, supplier_promo,
+                        additional_payment, commission_percent
+                    ) VALUES (
+                        :rrd_id, :realizationreport_id, :date_from, :date_to, :rr_dt,
+                        :doc_type_name, :sa_name, :nm_id, :barcode, :srid, :quantity,
+                        :retail_price, :retail_amount, :ppvz_for_pay, :ppvz_sales_commission,
+                        :delivery_rub, :storage_fee, :penalty, :deduction, :acceptance,
+                        :rebill_logistic_cost, :acquiring_fee, :supplier_promo,
+                        :additional_payment, :commission_percent
+                    )
+                    ON CONFLICT (rrd_id) DO NOTHING
+                """), rec)
+
+        total_saved += len(records)
+        max_rrd = max(r["rrd_id"] for r in records)
+        print(f"  Страница {page}: {len(records)} строк, курсор {cursor} → {max_rrd}")
+
+        if len(records) < limit:
+            break
+        cursor = max_rrd
+        time.sleep(1)
+
+    log_to_system("Финотчёт WB", "SUCCESS", f"Синхронизировано {total_saved} строк")
+    print(f"✅ Финотчёт WB: {total_saved} строк загружено")
+
+
+# =========================================================================
 # ПОРЯДОК ЗАПУСКА
 # =========================================================================
 if __name__ == "__main__":
@@ -1115,6 +1268,16 @@ if __name__ == "__main__":
         print(f"✅ Ретро-синк завершён. Обработано {total_rows} строк.")
         sys.exit(0)
 
+    if mode == "report_detail":
+        print("📊 СИНК ДЕТАЛЬНОГО ФИНОТЧЁТА WB")
+        log_to_system("Финотчёт WB", "INFO", "Ручной запуск синхронизации reportDetailByPeriod")
+        try:
+            sync_wb_report_detail()
+        except Exception as e:
+            log_to_system("Финотчёт WB", "FAIL", str(e))
+            sys.exit(1)
+        sys.exit(0)
+
     if mode == "ratings":
         # Только рейтинги — запускается в 10:00, когда отчёт WB уже обновлён
         print("⭐ СИНК РЕЙТИНГОВ ВБ (10:00)")
@@ -1142,6 +1305,7 @@ if __name__ == "__main__":
         fetch_questions()
         fetch_and_save_logistics("https://statistics-api.wildberries.ru/api/v1/supplier/sales", "SALE")
         fetch_and_save_orders("https://statistics-api.wildberries.ru/api/v1/supplier/orders")
+        sync_wb_report_detail()
         print("🏁 СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА")
         log_to_system("Единый Воркер", "SUCCESS", "Синхронизация данных по всем API выполнена успешно")
     except Exception as e:

@@ -105,11 +105,7 @@ MODERATION_ROWS = [
      "date_col": "created_date", "id_col": "id", "sku_col": "supplier_article", "text_col": _YM_FB_TEXT},
 ]
 
-GAPS = [
-    {"mp": "ozon", "title_ru": "Отзывы",  "note_ru": "Отзывы Озон не синхронизируются — нужна интеграция Ozon API."},
-    {"mp": "ozon", "title_ru": "Вопросы", "note_ru": "Вопросы Озон не синхронизируются — нужна интеграция Ozon API."},
-    {"mp": "ozon", "title_ru": "Чаты",    "note_ru": "Чаты Озон не синхронизируются — нужна интеграция Ozon API."},
-]
+GAPS = []  # Ozon отзывы и чаты подключены в Фазе 3
 
 MP_LABEL = {"wb": "Wildberries", "ym": "Яндекс Маркет", "ozon": "Озон"}
 
@@ -126,9 +122,11 @@ PLAN = [
     {"id": "wb_returns",   "mp": "wb",   "label": "WB · Возвраты",  "budget_min": 40,
      "table": None,             "date_col": None},
     {"id": "ozon_reviews", "mp": "ozon", "label": "Ozon · Отзывы",  "budget_min": 60,
-     "table": None,             "date_col": None},
+     "table": "ozon_reviews",   "date_col": "created_at"},
     {"id": "ozon_chats",   "mp": "ozon", "label": "Ozon · Чаты",    "budget_min": 30,
-     "table": None,             "date_col": None},
+     "table": "ozon_chats",     "date_col": "waiting_since"},
+    {"id": "ym_chats",     "mp": "ym",   "label": "ЯМ · Чаты",      "budget_min": 30,
+     "table": "ym_chats",       "date_col": "waiting_since"},
     {"id": "ozon_returns", "mp": "ozon", "label": "Ozon · Возвраты", "budget_min": 0,
      "table": "ozon_returns",   "date_col": "return_date"},
     {"id": "ym_reviews",   "mp": "ym",   "label": "ЯМ · Отзывы",   "budget_min": 20,

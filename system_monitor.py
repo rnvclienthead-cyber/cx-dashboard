@@ -71,8 +71,8 @@ engine = create_engine(DB_URL, pool_pre_ping=True)
 # ── Словарь синков (action → читаемое название) ─────────────────────────
 # Зеркало frontend/src/syncCatalog.js; обновлять синхронно.
 _SYNC_LABELS = {
-    "sync_feedbacks":                   "Отзывы покупателей (WB)",
-    "sync_assortment":                  "Ассортимент (WB)",
+    "sync_feedbacks":                   "Отзывы покупателей (ЯМ)",
+    "sync_assortment":                  "Ассортимент (ЯМ)",
     "Синхронизатор Претензий":          "Претензии и возвраты (WB)",
     "Синхронизатор Заказов":            "Заказы (WB)",
     "Синхронизатор Логистики":          "Логистика (WB)",
@@ -196,6 +196,68 @@ def _msk(dt) -> str:
     return (dt.astimezone(timezone(timedelta(hours=3)))).strftime("%d.%m %H:%M")
 
 
+# ── Бизнес-проверки (очереди, рейтинг, разметка) ────────────────────────
+def _fmtage(minutes: int) -> str:
+    if minutes < 60: return f"{minutes} мин"
+    h = minutes // 60
+    if h < 24: return f"{h} ч"
+    return f"{h // 24} дн {h % 24} ч"
+
+def _check_business(conn) -> list:
+    """Проверяет бизнес-условия и возвращает список строк для дайджеста."""
+    issues = []
+    try:
+        QUEUES = [
+            ("WB отзывы (негатив)", "wb_feedbacks", "state='active' AND COALESCE(valuation,0)<=3", 240),
+            ("WB отзывы (позитив)", "wb_feedbacks", "state='active' AND COALESCE(valuation,0)>=4", 1440),
+            ("WB вопросы",          "wb_questions",  "state='active'",          240),
+            ("ЯМ вопросы",          "ym_questions",  "state='UNANSWERED'",       240),
+        ]
+        for qlabel, tbl, cond, sla_min in QUEUES:
+            try:
+                r = conn.execute(text(f"""
+                    SELECT
+                        count(*) FILTER (WHERE now()-created_date > make_interval(mins=>{sla_min})) AS red,
+                        COALESCE(ROUND(EXTRACT(epoch FROM now()-min(created_date))/60)::int, 0) AS oldest_min
+                    FROM {tbl} WHERE {cond}
+                """)).fetchone()
+                red, oldest = int(r[0] or 0), int(r[1] or 0)
+                if red > 5 and oldest > sla_min * 3:
+                    issues.append(f"🔴 <b>{qlabel}</b>: {red} просрочено, старейшее {_fmtage(oldest)}")
+            except Exception:
+                pass
+
+        # Разметка ИИ
+        try:
+            r2 = conn.execute(text("""
+                SELECT count(*) AS total,
+                       count(*) FILTER (WHERE ai_tags IS NOT NULL AND ai_tags ? 'processed') AS tagged
+                FROM wb_feedbacks WHERE created_date > now() - interval '24 hours'
+            """)).fetchone()
+            total_24h, tagged_24h = int(r2[0] or 0), int(r2[1] or 0)
+            if total_24h > 20:
+                pct = round(tagged_24h / total_24h * 100, 1)
+                if pct < 40:
+                    issues.append(f"🟡 <b>ИИ-разметка WB отстаёт</b>: {pct}% ({tagged_24h}/{total_24h} за 24ч)")
+        except Exception:
+            pass
+
+        # Рейтинг WB
+        try:
+            r3 = conn.execute(text("""
+                SELECT round(avg(valuation::numeric), 2) FROM wb_feedbacks
+                WHERE created_date::date = current_date AND valuation IS NOT NULL
+            """)).scalar()
+            if r3 is not None and float(r3) < 4.3:
+                issues.append(f"🟡 <b>Рейтинг WB сегодня: {r3}</b> — ниже 4.3")
+        except Exception:
+            pass
+
+    except Exception as e:
+        print(f"[monitor] _check_business error: {e}")
+    return issues
+
+
 # ── Режим DIGEST: утренний отчёт о сбоях за сутки ────────────────────────
 def run_digest() -> None:
     admin_and_moder = get_recipients()
@@ -217,31 +279,42 @@ def run_digest() -> None:
             GROUP BY action ORDER BY cnt DESC
         """), {"statuses": list(WARN_STATUSES)}).fetchall()
 
-    if not errs and not warns:
+        biz_issues = _check_business(conn)
+
+    all_clear = not errs and not warns and not biz_issues
+    if all_clear:
         send_tg(
             "✅ <b>CX-Dashboard — утренняя сводка</b>\n"
-            "За последние 24 часа сбоев в кронах и тегировании не зафиксировано.\n"
+            "За последние 24 часа сбоев в кронах, тегировании и очередях не зафиксировано.\n"
             "<i>Мониторинг работает.</i>",
             admin_and_moder,
         )
         return
 
-    total = sum(int(r.cnt) for r in errs)
-    lines = [f"⚠️ <b>CX-Dashboard — сбои за сутки</b>",
-             f"Всего ошибок: <b>{total}</b> в {len(errs)} модул(ях)\n"]
-    for r in errs:
-        detail = (r.last_detail or "").strip().replace("\n", " ")
-        if len(detail) > 180:
-            detail = detail[:180] + "…"
-        lines.append(f"🔴 <b>{_label(r.action)}</b> — {r.cnt}× (последний {_msk(r.last_at)} МСК)")
-        if detail:
-            lines.append(f"   <i>{detail}</i>")
+    lines = ["📋 <b>CX-Dashboard — утренняя сводка</b>\n"]
+
+    if errs:
+        total = sum(int(r.cnt) for r in errs)
+        lines.append(f"⚠️ <b>Системные сбои:</b> {total} ошибок в {len(errs)} модул(ях)")
+        for r in errs:
+            detail = (r.last_detail or "").strip().replace("\n", " ")
+            if len(detail) > 180:
+                detail = detail[:180] + "…"
+            lines.append(f"🔴 <b>{_label(r.action)}</b> — {r.cnt}× (последний {_msk(r.last_at)} МСК)")
+            if detail:
+                lines.append(f"   <i>{detail}</i>")
+
     if warns:
         lines.append("\n🟡 <b>Предупреждения:</b>")
         for w in warns:
             lines.append(f"   • {_label(w.action)} — {w.cnt}×")
-    lines.append("\n<i>Журнал: cxvo.ru • таблица system_logs</i>")
 
+    if biz_issues:
+        lines.append("\n📊 <b>Очереди и показатели:</b>")
+        for bi in biz_issues:
+            lines.append(f"   {bi}")
+
+    lines.append("\n<i>cxvo.ru — Системный журнал</i>")
     send_tg("\n".join(lines), admin_and_moder)
 
 

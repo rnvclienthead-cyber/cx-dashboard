@@ -19,14 +19,18 @@ MODULES = [
     {"key": "production",   "label": "Карта проблем"},
     {"key": "ppm",          "label": "PPM и Акты"},
     {"key": "voc",          "label": "Отзывы и аналитика"},
+    {"key": "cx_control",   "label": "Контроль отдела"},
+    {"key": "cx_responses", "label": "Ответы КС"},
     {"key": "ratings",      "label": "Рейтинг товаров"},
     {"key": "finances",     "label": "Финансовые потери"},
+    {"key": "pnl",          "label": "P&L по артикулу"},
     {"key": "reshipment",   "label": "Доотправки"},
+    {"key": "faq",          "label": "База знаний FAQ"},
     {"key": "registry",     "label": "Реестр"},
     {"key": "admin_panel",  "label": "Панель управления"},
 ]
 
-MARKETPLACES = ["all", "wb", "ym"]
+MARKETPLACES = ["all", "wb", "ym", "ozon"]
 
 
 class RoleCreate(BaseModel):

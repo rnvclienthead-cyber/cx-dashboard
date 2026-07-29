@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
@@ -7,9 +8,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from contextlib import asynccontextmanager
 from .database import get_db, engine
-from .routers import claims, ai, system, production, ppm, ratings, auth, finances, voc, dashboard, ym, reshipment, roles, returns, events, cx_control, faq, cx_responses, kb, reshipment_skus, chat_playbook, chat_triage, chat_bot as chat_bot_router
+from .routers import claims, ai, system, production, ppm, ratings, auth, finances, voc, dashboard, ym, reshipment, roles, returns, events, cx_control, faq, cx_responses, kb, reshipment_skus, chat_playbook, chat_triage, chat_bot as chat_bot_router, nonreturnable_cats
 from . import chat_bot
-from . import wb_chat, wb_mini_sync, cx_alert, wb_chat_sync, ozon_chat_sync, ozon_photo_sync
+from . import wb_chat, wb_mini_sync, cx_alert, wb_chat_sync, ozon_chat_sync, ozon_photo_sync, ym_chat_sync
 
 
 @asynccontextmanager
@@ -58,6 +59,16 @@ async def lifespan(app: FastAPI):
                 ADD COLUMN IF NOT EXISTS yandex_pvz_name    VARCHAR(255),
                 ADD COLUMN IF NOT EXISTS yandex_cost        NUMERIC(10,2),
                 ADD COLUMN IF NOT EXISTS yandex_sharing_url TEXT
+        """))
+        # Координаты адреса клиента и подобранных ПВЗ — для расстояния и карты в КС
+        conn.execute(text("""
+            ALTER TABLE reshipment_requests
+                ADD COLUMN IF NOT EXISTS client_lat     DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS client_lon     DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS cdek_pvz_lat   DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS cdek_pvz_lng   DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS yandex_pvz_lat DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS yandex_pvz_lng DOUBLE PRECISION
         """))
         conn.execute(text("""
             ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_chat_id VARCHAR(100)
@@ -162,9 +173,74 @@ async def lifespan(app: FastAPI):
                 updated_at      TIMESTAMP DEFAULT NOW()
             )
         """))
+        conn.execute(text("ALTER TABLE ozon_chats ADD COLUMN IF NOT EXISTS chat_type TEXT"))
+        conn.execute(text("ALTER TABLE ozon_chats ADD COLUMN IF NOT EXISTS unread_count INTEGER DEFAULT 0"))
+        conn.execute(text("ALTER TABLE ozon_chats ADD COLUMN IF NOT EXISTS last_message_id TEXT"))
+        conn.execute(text("ALTER TABLE ozon_chats ADD COLUMN IF NOT EXISTS created_at TIMESTAMP"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ozon_chat_messages (
+                id           SERIAL PRIMARY KEY,
+                message_id   TEXT UNIQUE NOT NULL,
+                chat_id      TEXT NOT NULL,
+                sender_type  TEXT,
+                sender_id    TEXT,
+                text         TEXT,
+                is_image     BOOLEAN DEFAULT FALSE,
+                is_read      BOOLEAN DEFAULT FALSE,
+                attachments  TEXT,
+                created_at   TIMESTAMP
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ozon_chat_messages_chat
+            ON ozon_chat_messages (chat_id, created_at)
+        """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_ozon_chats_needs
             ON ozon_chats (needs_answer) WHERE needs_answer = true
+        """))
+        # Яндекс Маркет чаты
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ym_chats (
+                id                   SERIAL PRIMARY KEY,
+                chat_id              TEXT UNIQUE NOT NULL,
+                status               TEXT,
+                context_type         TEXT,
+                customer_name        TEXT,
+                customer_public_id   TEXT,
+                order_id             TEXT,
+                return_id            TEXT,
+                last_message         TEXT,
+                last_sender          TEXT,
+                needs_answer         BOOLEAN DEFAULT FALSE,
+                waiting_since        TIMESTAMP,
+                created_at           TIMESTAMP,
+                updated_at           TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ym_chat_messages (
+                id           SERIAL PRIMARY KEY,
+                message_id   TEXT UNIQUE NOT NULL,
+                chat_id      TEXT NOT NULL,
+                sender_type  TEXT,
+                text         TEXT,
+                created_at   TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "ALTER TABLE ym_chat_messages ADD COLUMN IF NOT EXISTS attachments TEXT"
+        ))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ym_chats_needs
+            ON ym_chats (needs_answer) WHERE needs_answer = true
+        """))
+        conn.execute(text(
+            "ALTER TABLE ym_chats ADD COLUMN IF NOT EXISTS cabinet_chat_id TEXT"
+        ))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ym_chat_messages_chat
+            ON ym_chat_messages (chat_id, created_at)
         """))
         # ЯМ отзывы: поля для хранения ответа менеджера
         conn.execute(text("""
@@ -253,53 +329,60 @@ async def lifespan(app: FastAPI):
 
     # Список SKU, по которым разрешена доотправка деталей
     reshipment_skus.init_sku_table(engine)
+    nonreturnable_cats.init_nonreturnable_cats(engine)
 
     # Плейбук автоответов в чатах: темы, варианты текстов, режимы
     chat_playbook.init_playbook_tables(engine)
     # Движок бота: состояние диалога + журнал (shadow)
     chat_bot.init_bot_tables(engine)
+    # Антидубль уведомлений клиенту по статусам доотправки
+    from . import reshipment_notify
+    reshipment_notify.init_notify_table(engine)
 
     # Инициализируем курсор WB событий, захватываем незалинкованные токены из истории
     wb_chat.init_event_cursor(get_db)
 
-    # Запускаем WB чат воркер
-    wb_task = asyncio.create_task(wb_chat.start_worker(get_db))
-    # Запускаем мини-воркер (отзывы + возвраты каждые 5 мин)
-    mini_task = asyncio.create_task(wb_mini_sync.start_mini_sync_worker(get_db))
-    # Воркер дозаполнения cdek_number для заявок без номера
-    cdek_task = asyncio.create_task(_cdek_number_filler(get_db))
-    # Воркер обновления статусов в пути
-    cdek_updater_task = asyncio.create_task(_cdek_status_updater(get_db))
-    # Воркер обновления статусов Яндекс NDD (нет вебхука — только опрос)
-    yandex_updater_task = asyncio.create_task(_yandex_status_updater(get_db))
-    # Воркер синхронизации чатов WB (мониторинг очереди ответов)
-    chat_sync_task = asyncio.create_task(wb_chat_sync.start_chat_sync_worker(get_db))
-    # Воркер чатов Ozon (интервал 15 мин — щадящий режим)
-    ozon_chat_task = asyncio.create_task(ozon_chat_sync.start_ozon_chat_sync_worker(get_db))
-    # Воркер фото товаров WB (Content API, раз в 24ч)
-    from .routers.cx_responses import start_photo_sync_worker
-    photo_task = asyncio.create_task(start_photo_sync_worker(get_db))
-    # Воркер фото товаров OZON (раз в 24ч, fallback через supplier_article)
-    ozon_photo_task = asyncio.create_task(ozon_photo_sync.start_ozon_photo_sync_worker(get_db))
-    # Бот автоответов в чатах (по умолчанию shadow — клиенту не шлёт)
-    chat_bot_task = asyncio.create_task(chat_bot.start_chat_bot_worker(get_db))
+    # При --workers 2 каждый процесс поднимает lifespan. Фоновые задачи
+    # (опрос СДЭК/Яндекс, синки) должны крутиться только в одном процессе,
+    # иначе уведомления клиенту уходят дважды.
+    leader_conn = engine.connect()
+    is_leader = bool(leader_conn.execute(text("SELECT pg_try_advisory_lock(87442201)")).scalar())
+    app.state.leader_conn = leader_conn
+    app.state.is_leader = is_leader
+
+    bg_tasks = []
+    if is_leader:
+        from .routers.cx_responses import start_photo_sync_worker
+        logging.getLogger("uvicorn.error").info("cx-backend: leader — starting background workers")
+        bg_tasks = [
+            asyncio.create_task(wb_chat.start_worker(get_db)),
+            asyncio.create_task(wb_mini_sync.start_mini_sync_worker(get_db)),
+            asyncio.create_task(_cdek_number_filler(get_db)),
+            asyncio.create_task(_cdek_status_updater(get_db)),
+            asyncio.create_task(_yandex_status_updater(get_db)),
+            asyncio.create_task(wb_chat_sync.start_chat_sync_worker(get_db)),
+            asyncio.create_task(ozon_chat_sync.start_ozon_chat_sync_worker(get_db)),
+            asyncio.create_task(ym_chat_sync.start_ym_chat_sync_worker(get_db)),
+            asyncio.create_task(start_photo_sync_worker(get_db)),
+            asyncio.create_task(ozon_photo_sync.start_ozon_photo_sync_worker(get_db)),
+            asyncio.create_task(chat_bot.start_chat_bot_worker(get_db)),
+        ]
+    else:
+        logging.getLogger("uvicorn.error").info("cx-backend: follower — background workers skipped")
 
     yield
 
-    wb_task.cancel()
-    mini_task.cancel()
-    cdek_task.cancel()
-    cdek_updater_task.cancel()
-    yandex_updater_task.cancel()
-    chat_sync_task.cancel()
-    ozon_chat_task.cancel()
-    ozon_photo_task.cancel()
-    chat_bot_task.cancel()
-    for t in (wb_task, mini_task, cdek_task, cdek_updater_task, yandex_updater_task, chat_sync_task, ozon_chat_task, ozon_photo_task, chat_bot_task):
+    for t in bg_tasks:
+        t.cancel()
+    for t in bg_tasks:
         try:
             await t
         except asyncio.CancelledError:
             pass
+    try:
+        leader_conn.close()
+    except Exception:
+        pass
 
 
 # Инициализируем приложение
@@ -343,6 +426,7 @@ app.include_router(cx_responses.public_router)
 app.include_router(cx_responses.router)
 app.include_router(kb.router)
 app.include_router(reshipment_skus.router)
+app.include_router(nonreturnable_cats.router)
 app.include_router(chat_playbook.router)
 app.include_router(chat_triage.router)
 app.include_router(chat_bot_router.router)
@@ -395,14 +479,20 @@ async def _cdek_number_filler(get_db_func):
                         """), {"num": num, "cost": cost, "id": row["id"],
                                "token": _sec.token_hex(32)}).mappings().first()
                         db.commit()
-                        if updated and updated.get("salebot_client_id"):
-                            try:
-                                from .salebot import notify_shipped, is_enabled
-                                if is_enabled():
-                                    notify_shipped(updated["salebot_client_id"], row["id"],
-                                                   track_number=num, delivery_method="cdek")
-                            except Exception as ex:
-                                logger.warning("cdek_filler: salebot error #%s: %s", row["id"], ex)
+                        if updated:
+                            from . import reshipment_notify
+                            if reshipment_notify.claim_notify(db, row["id"], "shipped"):
+                                sid = updated.get("salebot_client_id")
+                                if sid:
+                                    try:
+                                        from .salebot import notify_shipped, is_enabled
+                                        if is_enabled():
+                                            notify_shipped(sid, row["id"],
+                                                           track_number=num, delivery_method="cdek")
+                                    except Exception as ex:
+                                        logger.warning("cdek_filler: salebot error #%s: %s", row["id"], ex)
+                            else:
+                                logger.info("cdek_filler: skip notify #%s shipped (already sent)", row["id"])
                         logger.info("cdek_filler: заявка #%s → shipped (%s)", row["id"], status_code)
                     else:
                         db.execute(text("""
@@ -494,37 +584,41 @@ async def _cdek_status_updater(get_db_func):
                     db.commit()
 
                     if updated:
+                        from . import reshipment_notify
                         num = updated.get("cdek_number") or row.get("cdek_number") or ""
                         sid = updated.get("salebot_client_id")
                         wb_sign = updated.get("wb_reply_sign") or row.get("wb_reply_sign")
 
-                        salebot_sent = False
-                        if sid and is_enabled():
-                            try:
-                                if new_status == "shipped":
-                                    salebot_sent = notify_shipped(sid, row["id"], track_number=num, delivery_method="cdek")
-                                elif new_status == "in_transit":
-                                    salebot_sent = notify_in_transit(sid, row["id"], track_number=num)
-                                elif new_status == "ready_for_pickup":
-                                    salebot_sent = notify_ready_for_pickup(sid, row["id"], track_number=num)
-                                elif new_status == "delivered":
-                                    salebot_sent = notify_delivered(sid, row["id"])
-                            except Exception as ex:
-                                logger.warning("cdek_updater: salebot error #%s: %s", row["id"], ex)
+                        if not reshipment_notify.claim_notify(db, row["id"], new_status):
+                            logger.info("cdek_updater: skip notify #%s %s (already sent)", row["id"], new_status)
+                        else:
+                            salebot_sent = False
+                            if sid and is_enabled():
+                                try:
+                                    if new_status == "shipped":
+                                        salebot_sent = notify_shipped(sid, row["id"], track_number=num, delivery_method="cdek")
+                                    elif new_status == "in_transit":
+                                        salebot_sent = notify_in_transit(sid, row["id"], track_number=num)
+                                    elif new_status == "ready_for_pickup":
+                                        salebot_sent = notify_ready_for_pickup(sid, row["id"], track_number=num)
+                                    elif new_status == "delivered":
+                                        salebot_sent = notify_delivered(sid, row["id"])
+                                except Exception as ex:
+                                    logger.warning("cdek_updater: salebot error #%s: %s", row["id"], ex)
 
-                        if not salebot_sent and wb_sign:
-                            try:
-                                from . import wb_chat as _wbc
-                                if new_status == "shipped":
-                                    _wbc.send_message(wb_sign, f"📦 Ваша посылка отправлена!\nТрек-номер СДЭК: {num}")
-                                elif new_status == "in_transit":
-                                    _wbc.send_message(wb_sign, f"🚚 Ваша посылка в пути!\nТрек-номер СДЭК: {num}\nСкоро прибудет в ваш город.")
-                                elif new_status == "ready_for_pickup":
-                                    _wbc.send_message(wb_sign, f"📬 Ваша посылка готова к выдаче!\nТрек-номер СДЭК: {num}\nЗаберите её в пункте выдачи СДЭК.")
-                                elif new_status == "delivered":
-                                    _wbc.send_message(wb_sign, "✅ Посылка получена! Надеемся, деталь подошла.")
-                            except Exception as ex:
-                                logger.warning("cdek_updater: wb_chat error #%s: %s", row["id"], ex)
+                            if not salebot_sent and wb_sign:
+                                try:
+                                    from . import wb_chat as _wbc
+                                    if new_status == "shipped":
+                                        _wbc.send_message(wb_sign, f"📦 Ваша посылка отправлена!\nТрек-номер СДЭК: {num}")
+                                    elif new_status == "in_transit":
+                                        _wbc.send_message(wb_sign, f"🚚 Ваша посылка в пути!\nТрек-номер СДЭК: {num}\nСкоро прибудет в ваш город.")
+                                    elif new_status == "ready_for_pickup":
+                                        _wbc.send_message(wb_sign, f"📬 Ваша посылка готова к выдаче!\nТрек-номер СДЭК: {num}\nЗаберите её в пункте выдачи СДЭК.")
+                                    elif new_status == "delivered":
+                                        _wbc.send_message(wb_sign, "✅ Посылка получена! Надеемся, деталь подошла.")
+                                except Exception as ex:
+                                    logger.warning("cdek_updater: wb_chat error #%s: %s", row["id"], ex)
 
                     logger.info("cdek_updater: #%s %s → %s (%s)", row["id"], row["status"], new_status, cdek_code)
                 except Exception as e:
@@ -548,14 +642,17 @@ async def _yandex_status_updater(get_db_func):
         try:
             from . import yandex_ndd
             from .salebot import (notify_in_transit, notify_ready_for_pickup,
-                                  notify_delivered, is_enabled)
+                                  notify_delivered, is_enabled,
+                                  format_delivery_status_message)
             db = next(get_db_func())
             rows = db.execute(text("""
-                SELECT id, track_number, status, salebot_client_id, wb_reply_sign
+                SELECT id, track_number, status, salebot_client_id, wb_reply_sign,
+                       yandex_sharing_url, yandex_pvz_address, yandex_pvz_name,
+                       client_pvz_address, items_to_send
                 FROM reshipment_requests
                 WHERE delivery_method = 'yandex'
                   AND track_number IS NOT NULL AND track_number != ''
-                  AND status IN ('shipped', 'in_transit', 'ready_for_pickup')
+                  AND status IN ('packed', 'shipped', 'in_transit', 'ready_for_pickup')
             """)).mappings().fetchall()
 
             for row in rows:
@@ -566,51 +663,77 @@ async def _yandex_status_updater(get_db_func):
                     new_status = yandex_ndd.STATUS_MAP.get(raw_status)
                     if not new_status or new_status == row["status"]:
                         continue
-                    # Только вперёд по цепочке
+                    # Только вперёд по цепочке (packed = до shipped)
                     curr_idx = STATUS_ORDER.index(row["status"]) if row["status"] in STATUS_ORDER else -1
                     new_idx  = STATUS_ORDER.index(new_status) if new_status in STATUS_ORDER else -1
                     if new_idx <= curr_idx:
                         continue
 
+                    sharing_url = (info.get("sharing_url") or row.get("yandex_sharing_url") or "").strip()
                     updated = db.execute(text("""
                         UPDATE reshipment_requests
                         SET status = :ns,
+                            shipped_at = CASE
+                              WHEN :ns IN ('shipped','in_transit','ready_for_pickup','delivered')
+                               AND shipped_at IS NULL THEN NOW()
+                              ELSE shipped_at END,
                             confirmed_at = CASE WHEN :ns IN ('delivered','returned') THEN COALESCE(confirmed_at, NOW()) ELSE confirmed_at END,
-                            confirmation_token = COALESCE(confirmation_token, :tok)
+                            confirmation_token = COALESCE(confirmation_token, :tok),
+                            yandex_sharing_url = COALESCE(NULLIF(:sharing_url, ''), yandex_sharing_url)
                         WHERE id = :id AND status = :curr
                         RETURNING id, salebot_client_id, wb_reply_sign
                     """), {"ns": new_status, "id": row["id"], "curr": row["status"],
-                           "tok": _sec.token_hex(32)}).mappings().first()
+                           "tok": _sec.token_hex(32), "sharing_url": sharing_url}).mappings().first()
                     db.commit()
 
                     if updated:
+                        from . import reshipment_notify
                         num = row["track_number"]
                         sid = updated.get("salebot_client_id")
                         wb_sign = updated.get("wb_reply_sign") or row.get("wb_reply_sign")
+                        pvz_addr = (row.get("yandex_pvz_address") or row.get("client_pvz_address") or "").strip()
+                        pvz_name = (row.get("yandex_pvz_name") or "").strip()
+                        items = row.get("items_to_send") or ""
 
-                        salebot_sent = False
-                        if sid and is_enabled():
-                            try:
-                                if new_status == "in_transit":
-                                    salebot_sent = notify_in_transit(sid, row["id"], track_number=num, delivery_method="yandex")
-                                elif new_status == "ready_for_pickup":
-                                    salebot_sent = notify_ready_for_pickup(sid, row["id"], track_number=num, delivery_method="yandex")
-                                elif new_status == "delivered":
-                                    salebot_sent = notify_delivered(sid, row["id"])
-                            except Exception as ex:
-                                logger.warning("yandex_updater: salebot error #%s: %s", row["id"], ex)
+                        if not reshipment_notify.claim_notify(db, row["id"], new_status):
+                            logger.info("yandex_updater: skip notify #%s %s (already sent)", row["id"], new_status)
+                        else:
+                            salebot_sent = False
+                            if sid and is_enabled():
+                                try:
+                                    if new_status == "in_transit":
+                                        salebot_sent = notify_in_transit(
+                                            sid, row["id"], track_number=num, delivery_method="yandex",
+                                            sharing_url=sharing_url, items_to_send=items,
+                                            pvz_address=pvz_addr, pvz_name=pvz_name,
+                                        )
+                                    elif new_status == "ready_for_pickup":
+                                        salebot_sent = notify_ready_for_pickup(
+                                            sid, row["id"], track_number=num, delivery_method="yandex",
+                                            sharing_url=sharing_url, pvz_address=pvz_addr,
+                                            pvz_name=pvz_name, items_to_send=items,
+                                        )
+                                    elif new_status == "delivered":
+                                        salebot_sent = notify_delivered(sid, row["id"])
+                                except Exception as ex:
+                                    logger.warning("yandex_updater: salebot error #%s: %s", row["id"], ex)
 
-                        if not salebot_sent and wb_sign:
-                            try:
-                                from . import wb_chat as _wbc
-                                if new_status == "in_transit":
-                                    _wbc.send_message(wb_sign, f"🚚 Ваша посылка в пути!\nСлужба доставки: Яндекс Доставка\nТрек-номер: {num}\nСкоро прибудет в ваш город.")
-                                elif new_status == "ready_for_pickup":
-                                    _wbc.send_message(wb_sign, f"📬 Ваша посылка готова к выдаче!\nСлужба доставки: Яндекс Доставка\nТрек-номер: {num}\nЗаберите её в пункте выдачи Яндекс Доставка.")
-                                elif new_status == "delivered":
-                                    _wbc.send_message(wb_sign, "✅ Посылка получена! Надеемся, деталь подошла.")
-                            except Exception as ex:
-                                logger.warning("yandex_updater: wb_chat error #%s: %s", row["id"], ex)
+                            if not salebot_sent and wb_sign:
+                                try:
+                                    from . import wb_chat as _wbc
+                                    msg = format_delivery_status_message(
+                                        new_status,
+                                        track_number=num,
+                                        delivery_method="yandex",
+                                        sharing_url=sharing_url,
+                                        pvz_address=pvz_addr,
+                                        pvz_name=pvz_name,
+                                        items_to_send=items,
+                                    )
+                                    if msg:
+                                        _wbc.send_message(wb_sign, msg)
+                                except Exception as ex:
+                                    logger.warning("yandex_updater: wb_chat error #%s: %s", row["id"], ex)
 
                     logger.info("yandex_updater: #%s %s → %s (%s)", row["id"], row["status"], new_status, raw_status)
                 except Exception as e:

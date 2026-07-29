@@ -191,3 +191,58 @@ async def get_sync_status(
         {"id": "assortment", "name": "SKU в ассортименте",    "yesterday": 0,          "total": mat_total},
     ]
     return {"last_sync": last_sync_str, "status": "active", "logs": logs_list, "metrics": metrics}
+
+@router.get("/doc-stats")
+async def get_doc_stats(db: Session = Depends(get_db)):
+    """Живая статистика системы для раздела документации."""
+    from datetime import datetime, timezone
+    def cnt(q):
+        try:
+            return db.execute(text(q)).scalar() or 0
+        except Exception:
+            db.rollback()
+            return 0
+
+    def last_sync(q):
+        try:
+            val = db.execute(text(q)).scalar()
+            if val:
+                return (val + timedelta(hours=3)).strftime('%d.%m.%Y %H:%M')
+            return "Нет данных"
+        except Exception:
+            return "Нет данных"
+
+    now_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime('%d.%m.%Y %H:%M')
+
+    return {
+        "generated_at": now_msk,
+        "wb": {
+            "claims":         cnt("SELECT COUNT(*) FROM wb_returns WHERE status NOT IN ('Cancelled', 'Rejected')"),
+            "feedbacks":      cnt("SELECT COUNT(*) FROM wb_feedbacks"),
+            "orders":         cnt("SELECT COUNT(*) FROM wb_orders"),
+            "last_sync":      last_sync("SELECT MAX(synced_at) FROM wb_returns"),
+        },
+        "ym": {
+            "returns":        cnt("SELECT COUNT(*) FROM ym_returns"),
+            "orders":         cnt("SELECT COUNT(*) FROM ym_orders"),
+            "feedbacks":      cnt("SELECT COUNT(*) FROM ym_feedbacks"),
+            "last_sync":      last_sync("SELECT MAX(synced_at) FROM ym_returns"),
+        },
+        "ozon": {
+            "returns":        cnt("SELECT COUNT(*) FROM ozon_returns WHERE status_sys != 'Cancelled'"),
+            "last_sync":      last_sync("SELECT MAX(synced_at) FROM ozon_returns"),
+        },
+        "ppm": {
+            "acts_total":     cnt("SELECT COUNT(*) FROM cx_claim_logs"),
+            "acts_sent":      cnt("SELECT COUNT(*) FROM cx_claim_logs WHERE send_date IS NOT NULL AND send_status != 'Не отправлен' AND status != 'Аннулирован'"),
+            "got_reply":      cnt("SELECT COUNT(*) FROM cx_claim_logs WHERE factory_reply IS NOT NULL AND factory_reply != '' AND status != 'Аннулирован'"),
+        },
+        "reshipment": {
+            "total":          cnt("SELECT COUNT(*) FROM reshipment_requests"),
+            "delivered":      cnt("SELECT COUNT(*) FROM reshipment_requests WHERE status = 'delivered'"),
+        },
+        "ai": {
+            "tagged_wb":      cnt("SELECT COUNT(*) FROM wb_returns WHERE ai_tag IS NOT NULL"),
+            "tagged_fb":      cnt("SELECT COUNT(*) FROM wb_feedbacks WHERE ai_tag IS NOT NULL"),
+        },
+    }

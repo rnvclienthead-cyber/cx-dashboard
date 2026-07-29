@@ -131,8 +131,31 @@ class InviteCreate(BaseModel):
 def get_all_users(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Доступ запрещен. Только для администраторов.")
-    users = db.execute(text("SELECT id, username, role FROM users ORDER BY id")).fetchall()
-    return [{"id": u.id, "email": u.username, "role": u.role} for u in users]
+    users = db.execute(text(
+        "SELECT id, username, role, tg_chat_id, COALESCE(tg_alerts, false) AS tg_alerts FROM users ORDER BY id"
+    )).fetchall()
+    return [{
+        "id": u.id, "email": u.username, "role": u.role,
+        "tg_chat_id": u.tg_chat_id or "", "tg_alerts": bool(u.tg_alerts),
+    } for u in users]
+
+
+class TgUpdate(BaseModel):
+    tg_chat_id: str = ""
+    tg_alerts: bool = False
+
+# Привязать Telegram-чат к профилю + вкл/выкл системные алерты
+@router.put("/users/{user_id}/tg")
+def update_user_tg(user_id: int, data: TgUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещен")
+    chat = (data.tg_chat_id or "").strip() or None
+    db.execute(
+        text("UPDATE users SET tg_chat_id = :tg, tg_alerts = :al WHERE id = :id"),
+        {"tg": chat, "al": bool(data.tg_alerts), "id": user_id},
+    )
+    db.commit()
+    return {"message": "Telegram-настройки обновлены"}
 
 # 2. Изменить роль пользователя
 @router.put("/users/{user_id}/role")
@@ -229,3 +252,52 @@ def admin_reset_password(
                {"p": hashed, "id": data.user_id})
     db.commit()
     return {"message": "Пароль сброшен."}
+
+
+class ResetToActivationRequest(BaseModel):
+    user_id: int
+
+
+@router.post("/admin/reset-to-activation")
+def admin_reset_to_activation(
+    data: ResetToActivationRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещён.")
+
+    user = db.execute(
+        text("SELECT id, username, role FROM users WHERE id = :id"),
+        {"id": data.user_id}
+    ).fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден.")
+    if user.username == current_user["username"]:
+        raise HTTPException(status_code=400, detail="Нельзя сбросить собственный аккаунт.")
+
+    # Возвращаем email в белый список с текущей ролью
+    db.execute(text("""
+        INSERT INTO allowed_emails (email, role) VALUES (:e, :r)
+        ON CONFLICT (email) DO UPDATE SET role = EXCLUDED.role
+    """), {"e": user.username, "r": user.role})
+
+    # Удаляем пользователя — при следующем входе он пройдёт активацию заново
+    db.execute(text("DELETE FROM users WHERE id = :id"), {"id": data.user_id})
+    db.commit()
+    return {"message": "Аккаунт сброшен. Сотрудник может активироваться заново."}
+
+
+@router.get("/centrifugo-token")
+def get_centrifugo_token(current_user: dict = Depends(get_current_user)):
+    """JWT-токен для подключения к Centrifugo WebSocket."""
+    import os, time
+    secret = os.getenv("CENTRIFUGO_SECRET", "")
+    if not secret:
+        raise HTTPException(status_code=503, detail="Centrifugo not configured")
+    payload = {
+        "sub": str(current_user.get("id", current_user.get("username", "user"))),
+        "exp": int(time.time()) + 86400,
+    }
+    token = jwt.encode(payload, secret, algorithm=ALGORITHM)
+    return {"token": token}

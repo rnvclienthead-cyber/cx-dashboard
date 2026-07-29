@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { LineChart, LayoutGrid, PackageOpen, X, BarChart2, Search, Download, ChevronLeft, ArrowRight, ChevronRight, Image as ImageIcon, Calendar } from 'lucide-vue-next'
+import { LineChart, LayoutGrid, PackageOpen, X, BarChart2, Search, Download, ChevronLeft, ArrowRight, ChevronRight, Image as ImageIcon, Calendar, Filter, MessageSquare } from 'lucide-vue-next'
 import Plotly from 'plotly.js-dist-min'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
@@ -8,6 +8,7 @@ import { usePlatformStore } from '../stores/platform'
 const platformStore = usePlatformStore()
 
 const claims = ref([])
+const knownSkus = ref([])
 const loading = ref(true)
 const plotlyChart = ref(null)
 
@@ -33,28 +34,115 @@ const showCalendarPopover = ref(false)
 const calendarYear = ref(today.getFullYear())
 const calendarMonth = ref(today.getMonth())
 const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+const activePeriodLabel = ref('current_month')
+const _cy = today.getFullYear()
+const MONTHS_PRESETS = [
+  { label: 'Янв', start: `${_cy}-01-01`, end: `${_cy}-01-31` },
+  { label: 'Фев', start: `${_cy}-02-01`, end: `${_cy}-02-28` },
+  { label: 'Мар', start: `${_cy}-03-01`, end: `${_cy}-03-31` },
+  { label: 'Апр', start: `${_cy}-04-01`, end: `${_cy}-04-30` },
+  { label: 'Май', start: `${_cy}-05-01`, end: `${_cy}-05-31` },
+  { label: 'Июн', start: `${_cy}-06-01`, end: `${_cy}-06-30` },
+  { label: 'Июл', start: `${_cy}-07-01`, end: `${_cy}-07-31` },
+  { label: 'Авг', start: `${_cy}-08-01`, end: `${_cy}-08-31` },
+  { label: 'Сен', start: `${_cy}-09-01`, end: `${_cy}-09-30` },
+  { label: 'Окт', start: `${_cy}-10-01`, end: `${_cy}-10-31` },
+  { label: 'Ноя', start: `${_cy}-11-01`, end: `${_cy}-11-30` },
+  { label: 'Дек', start: `${_cy}-12-01`, end: `${_cy}-12-31` },
+]
+const selectSpecificMonth = (preset) => {
+  startDate.value = preset.start; endDate.value = preset.end
+  activePeriodLabel.value = preset.label; showCalendarPopover.value = false
+}
+const setCurrentMonth = () => {
+  const now = new Date()
+  const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d2 = String(now.getDate()).padStart(2,'0')
+  startDate.value = `${y}-${m}-01`; endDate.value = `${y}-${m}-${d2}`
+  activePeriodLabel.value = 'current_month'; calendarYear.value = y; calendarMonth.value = now.getMonth()
+  showCalendarPopover.value = false
+}
 
 // --- КНОПКА "ПРОШЛЫЙ МЕСЯЦ" ---
 const setPreviousMonth = () => {
   const d = new Date()
   d.setMonth(d.getMonth() - 1)
-  
   const year = d.getFullYear()
   const month = String(d.getMonth() + 1).padStart(2, '0')
-  const lastDay = new Date(year, d.getMonth() + 1, 0).getDate() // Узнаем последний день месяца
-
+  const lastDay = new Date(year, d.getMonth() + 1, 0).getDate()
   startDate.value = `${year}-${month}-01`
   endDate.value = `${year}-${month}-${lastDay}`
-  
-  // Синхронизируем отображение календаря
-  calendarYear.value = year
-  calendarMonth.value = d.getMonth()
-  
-  showCalendarPopover.value = false // Закрываем календарь
+  calendarYear.value = year; calendarMonth.value = d.getMonth()
+  activePeriodLabel.value = 'prev_month'
+  showCalendarPopover.value = false
 }
 
 const modalData = ref({ isOpen: false, title: '', claims: [], rawSku: '', catId: '' })
 const lightbox = ref({ isOpen: false, photos: [], index: 0 })
+
+// ── Умный поиск ──────────────────────────────────────────────────────────────
+const smartQuery      = ref('')
+const smartCategory   = ref('Все')
+const smartSkus       = ref([])
+const smartDateFrom   = ref('')
+const smartDateTo     = ref('')
+const smartOnlyVideo  = ref(false)
+const smartPage       = ref(1)
+const SMART_PAGE_SIZE = 20
+const showSmartSkuDropdown = ref(false)
+const smartSkuSearch  = ref('')
+
+const smartCategories = computed(() => {
+  const cats = new Set(claims.value.map(c => c.category || 'Прочее').filter(Boolean))
+  return ['Все', ...Array.from(cats).sort()]
+})
+
+const smartSkuList = computed(() => Array.from(new Set(claims.value.map(c => c['Артикул продавца'] || ''))).filter(Boolean).sort())
+const filteredSmartSkuList = computed(() => smartSkuList.value.filter(s => String(s).toLowerCase().includes(smartSkuSearch.value.toLowerCase())))
+const toggleSmartSku = (sku) => {
+  const idx = smartSkus.value.indexOf(sku)
+  if (idx === -1) smartSkus.value.push(sku)
+  else smartSkus.value.splice(idx, 1)
+}
+
+const smartResults = computed(() => {
+  const q = smartQuery.value.trim().toLowerCase()
+  return claims.value.filter(c => {
+    if (smartCategory.value !== 'Все' && (c.category || 'Прочее') !== smartCategory.value) return false
+    if (smartSkus.value.length > 0 && !smartSkus.value.includes(String(c['Артикул продавца']))) return false
+    if (smartDateFrom.value && c.claim_date_iso && c.claim_date_iso < smartDateFrom.value) return false
+    if (smartDateTo.value && c.claim_date_iso && c.claim_date_iso > smartDateTo.value) return false
+    if (q) {
+      const comment = (c['Комментарий покупателя'] || '').toLowerCase()
+      const похожий = (c['Похожий отзыв'] || '').toLowerCase()
+      if (!comment.includes(q) && !похожий.includes(q)) return false
+    }
+    if (smartOnlyVideo.value && !parseVideos(c.videos || c.db_videos || '').length) return false
+    return true
+  })
+})
+
+const smartResultsPaged = computed(() => smartResults.value.slice(0, smartPage.value * SMART_PAGE_SIZE))
+const hasMoreSmartResults = computed(() => smartResultsPaged.value.length < smartResults.value.length)
+
+watch([smartQuery, smartCategory, smartSkus, smartDateFrom, smartDateTo, smartOnlyVideo], () => { smartPage.value = 1 }, { deep: true })
+
+const openSmartClaim = async (claim) => {
+  modalData.value = {
+    isOpen: true,
+    title: `🔍 ${claim['Артикул продавца']} · ${claim.claim_date_iso || ''}`,
+    claims: [claim],
+    rawSku: claim['Артикул продавца'],
+    catId: ''
+  }
+  if (claim.photos === undefined || claim.photos === null) {
+    try {
+      const res = await apiFetch(`/api/v1/analytics/claim-media/${claim.SRID || claim.srid}`)
+      const media = await res.json()
+      claim.photos = media.photos || ""
+      claim.videos = media.video_paths || ""
+    } catch { claim.photos = ""; claim.videos = "" }
+  }
+}
 
 const CATEGORIES = {
   1: "Некомплект: Фурнитура", 2: "Некомплект: Несущие детали", 3: "Состояние упаковки",
@@ -70,6 +158,7 @@ const fetchData = async () => {
     const res = await apiFetch(`/api/v1/analytics/production-claims?platform=${platformStore.platform}`)
     const json = await res.json()
     claims.value = json.data || []
+    knownSkus.value = json.known_skus || []
   } catch (e) { console.error(e) }
   finally { loading.value = false }
 }
@@ -136,13 +225,19 @@ const filteredClaims = computed(() => {
   })
 })
 
-const skuList = computed(() => ['Все', ...Array.from(new Set(claims.value.map(c => c['Артикул продавца'] || 'Без артикула'))).sort()])
+const skuList = computed(() => {
+  const fromClaims = claims.value.map(c => c['Артикул продавца'] || 'Без артикула')
+  const fromAssortment = knownSkus.value.map(s => s.supplier_article)
+  return ['Все', ...Array.from(new Set([...fromClaims, ...fromAssortment])).sort()]
+})
 const filteredSkuList = computed(() => skuList.value.filter(s => String(s).toLowerCase().includes(skuSearch.value.toLowerCase())))
 const invoiceList = computed(() => ['Все', ...Array.from(new Set(claims.value.map(c => c['Инвойс'] || 'Не указан'))).filter(i => i !== 'Не указан' && i !== '0').sort()])
 const filteredInvoiceList = computed(() => invoiceList.value.filter(i => String(i).toLowerCase().includes(invoiceSearch.value.toLowerCase())))
 
 const matrixData = computed(() => {
-  const skus = Array.from(new Set(filteredClaims.value.map(c => c['Артикул продавца'] || 'Без артикула'))).sort()
+  const fromClaims = filteredClaims.value.map(c => c['Артикул продавца'] || 'Без артикула')
+  const fromAssortment = knownSkus.value.map(s => s.supplier_article)
+  const skus = Array.from(new Set([...fromClaims, ...fromAssortment])).sort()
   const matrix = []
   
   Object.keys(CATEGORIES).forEach(catId => {
@@ -167,7 +262,9 @@ const matrixData = computed(() => {
 // Логика ключа: субпричина (если есть и не UNKNOWN), иначе основная причина.
 // Это даёт точные ярлыки: «Некомплект», «Повреждён» вместо размытого «Брак / качество».
 const reasonMatrixData = computed(() => {
-  const skus = Array.from(new Set(filteredClaims.value.map(c => c['Артикул продавца'] || 'Без артикула'))).sort()
+  const fromClaims = filteredClaims.value.map(c => c['Артикул продавца'] || 'Без артикула')
+  const fromAssortment = knownSkus.value.map(s => s.supplier_article)
+  const skus = Array.from(new Set([...fromClaims, ...fromAssortment])).sort()
   const map = {}
 
   filteredClaims.value.forEach(c => {
@@ -243,10 +340,12 @@ const topInvoices = computed(() => {
   
   return Object.entries(map).map(([inv, d]) => {
     const skuSummary = Object.entries(d.skus).map(([s, cnt]) => `${s} (${cnt} шт)`).join(' • ')
-    return { 
-      inv, 
-      count: d.count, 
+    const topSkus = Object.entries(d.skus).sort((a,b) => b[1]-a[1]).slice(0, 3)
+    return {
+      inv,
+      count: d.count,
       supplies: Array.from(d.supplies),
+      skus: topSkus,
       hoverText: `Артикулы: ${skuSummary} | Поставки: ${Array.from(d.supplies).join(', ')}`
     }
   }).sort((a,b) => b.count - a.count).slice(0, 15)
@@ -385,7 +484,8 @@ const openMatrixDetails = async (sku, catId, catName) => {
         const res = await apiFetch(`/api/v1/analytics/claim-media/${c.SRID || c.srid}`)
         const media = await res.json()
         c.photos = media.photos || ""
-      } catch { c.photos = "" }
+        c.videos = media.video_paths || ""
+      } catch { c.photos = ""; c.videos = "" }
     }
   }
 }
@@ -399,12 +499,14 @@ const openInvoiceDetails = async (invoiceObj) => {
         const res = await apiFetch(`/api/v1/analytics/claim-media/${c.SRID || c.srid}`)
         const media = await res.json()
         c.photos = media.photos || ""
-      } catch { c.photos = "" }
+        c.videos = media.video_paths || ""
+      } catch { c.photos = ""; c.videos = "" }
     }
   }
 }
 
 const parsePhotos = (str) => str ? str.split(' ').map(g => g.split('|').pop().replace(/^\/\//, 'https://')).slice(0, 8) : []
+const parseVideos = (str) => str ? (str.match(/\/\/[^\s"'\]\[,;<>]+/g) || []).map(u => 'https:' + u) : []
 
 onMounted(fetchData)
 </script>
@@ -420,16 +522,19 @@ onMounted(fetchData)
       <div class="relative">
         <div class="flex items-center bg-white border border-slate-200 rounded-xl px-4 py-2.5 cursor-pointer hover:border-blue-500 transition-colors shadow-xs" @click="showCalendarPopover = !showCalendarPopover">
           <Calendar class="w-4 h-4 text-slate-400 mr-2.5" />
-          <span class="text-xs font-bold text-slate-700 tracking-tight">{{ formatDateDisplay(startDate) }} — {{ formatDateDisplay(endDate) }}</span>
+          <span class="text-xs font-bold text-slate-700 tracking-tight">
+            {{ activePeriodLabel === 'current_month' ? 'Текущий месяц' : activePeriodLabel === 'prev_month' ? 'Прошлый месяц' : activePeriodLabel || (formatDateDisplay(startDate) + ' — ' + formatDateDisplay(endDate)) }}
+          </span>
         </div>
         <div v-if="showCalendarPopover" class="absolute right-0 mt-2 bg-white border border-slate-100 rounded-2xl shadow-2xl z-[150] p-4 w-72 animate-in zoom-in-95 duration-150">
-          <div class="mb-4 border-b border-slate-100 pb-3">
-            <button 
-              @click.stop="setPreviousMonth" 
-              class="w-full text-center text-xs font-black bg-blue-50 hover:bg-blue-100 text-blue-700 py-2.5 rounded-xl transition-all shadow-sm tracking-wide uppercase border border-blue-100/50"
-            >
-              Прошлый месяц
-            </button>
+          <div class="mb-4 border-b border-slate-100 pb-3 space-y-2">
+            <div class="grid grid-cols-2 gap-1.5">
+              <button @click.stop="setCurrentMonth" :class="activePeriodLabel === 'current_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Текущий месяц</button>
+              <button @click.stop="setPreviousMonth" :class="activePeriodLabel === 'prev_month' ? 'bg-slate-800 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'" class="text-center text-xs font-black py-2 rounded-xl transition-all">Прошлый месяц</button>
+            </div>
+            <div class="grid grid-cols-4 gap-1">
+              <button v-for="m in MONTHS_PRESETS" :key="m.label" @click.stop="selectSpecificMonth(m)" :class="activePeriodLabel === m.label ? 'bg-slate-800 text-white' : 'hover:bg-slate-100 text-slate-600'" class="text-center text-[11px] font-bold py-1.5 rounded-lg transition-all">{{ m.label }}</button>
+            </div>
           </div>
           <div class="flex justify-between items-center mb-3">
             <button @click="changeCalendarMonth(-1)" class="p-1 hover:bg-slate-100 rounded-lg text-xs font-bold">◀</button>
@@ -556,7 +661,157 @@ onMounted(fetchData)
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
           <div v-for="inv in topInvoices" :key="inv.inv" class="p-3 border rounded-xl bg-slate-50/30 hover:border-orange-200 cursor-pointer group" :title="inv.hoverText" @click="openInvoiceDetails(inv)">
             <div class="flex justify-between text-xs font-bold mb-1"><span class="text-slate-700 group-hover:text-blue-600 truncate mr-2">🧾 {{ inv.inv }}</span><span class="text-orange-600">{{ inv.count }} шт</span></div>
-            <div class="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden"><div class="bg-orange-400 h-full rounded-full group-hover:bg-orange-500 transition-all" :style="{ width: `${(inv.count / maxInvoiceCount) * 100}%` }"></div></div>
+            <div class="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden mb-2"><div class="bg-orange-400 h-full rounded-full group-hover:bg-orange-500 transition-all" :style="{ width: `${(inv.count / maxInvoiceCount) * 100}%` }"></div></div>
+            <div class="flex flex-wrap gap-1">
+              <span v-for="[sku, cnt] in inv.skus" :key="sku" class="text-[10px] font-bold px-1.5 py-0.5 bg-blue-50 text-blue-600 border border-blue-100 rounded-md truncate max-w-[120px]" :title="`${sku} — ${cnt} шт`">{{ sku }} <span class="text-blue-400">{{ cnt }}</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ УМНЫЙ ПОИСК ПО КОММЕНТАРИЯМ ══ -->
+      <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-100 bg-slate-50/60 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <MessageSquare class="w-4 h-4 text-violet-500" />
+            <h2 class="text-sm font-black text-slate-700 uppercase tracking-wider">Поиск по комментариям</h2>
+          </div>
+          <span v-if="smartResults.length" class="text-xs font-bold text-violet-600 bg-violet-50 px-3 py-1 rounded-full">
+            {{ smartResults.length }} {{ smartResults.length === 1 ? 'результат' : smartResults.length < 5 ? 'результата' : 'результатов' }}
+          </span>
+        </div>
+
+        <!-- Фильтры поиска -->
+        <div class="p-5 border-b border-slate-100 space-y-3">
+          <!-- Текстовый поиск -->
+          <div class="relative">
+            <Search class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+            <input
+              v-model="smartQuery"
+              type="text"
+              placeholder="Поиск по тексту комментария..."
+              class="w-full pl-10 pr-4 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition"
+            />
+            <button v-if="smartQuery" @click="smartQuery = ''" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-red-400 transition">
+              <X class="w-4 h-4" />
+            </button>
+          </div>
+
+          <!-- Фильтры: категория + артикул + период -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <!-- Категория товара -->
+            <select v-model="smartCategory"
+              class="px-3 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition font-medium text-slate-700">
+              <option v-for="cat in smartCategories" :key="cat" :value="cat">{{ cat === 'Все' ? 'Все категории' : cat }}</option>
+            </select>
+
+            <!-- Артикулы (множественный выбор) -->
+            <div class="relative sm:col-span-1">
+              <div class="flex items-center bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 cursor-pointer min-h-[42px]" @click="showSmartSkuDropdown = !showSmartSkuDropdown">
+                <span v-if="smartSkus.length === 0" class="text-sm font-medium text-slate-400 flex-1">Все артикулы</span>
+                <div v-else class="flex flex-wrap gap-1 flex-1 min-w-0">
+                  <span v-for="s in smartSkus" :key="s"
+                    class="inline-flex items-center gap-1 text-[11px] font-bold px-1.5 py-0.5 bg-violet-100 text-violet-700 rounded-md">
+                    {{ s }}
+                    <button @click.stop="toggleSmartSku(s)" class="hover:text-red-500"><X class="w-3 h-3" /></button>
+                  </span>
+                </div>
+                <X v-if="smartSkus.length > 0" class="w-3.5 h-3.5 text-slate-300 hover:text-red-400 flex-shrink-0 ml-1" @click.stop="smartSkus = []" />
+              </div>
+              <div v-if="showSmartSkuDropdown" class="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-[100] p-2">
+                <input type="text" v-model="smartSkuSearch" class="w-full bg-slate-50 rounded-lg p-2 text-sm mb-1 focus:outline-none" placeholder="Поиск артикула..." @click.stop />
+                <div class="max-h-52 overflow-y-auto custom-scroll">
+                  <div v-for="s in filteredSmartSkuList" :key="s"
+                    @click.stop="toggleSmartSku(s)"
+                    :class="['flex items-center gap-2 px-3 py-2 text-sm font-semibold rounded-lg cursor-pointer transition-colors',
+                      smartSkus.includes(s) ? 'bg-violet-50 text-violet-700' : 'hover:bg-slate-50 text-slate-700']">
+                    <div :class="['w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors',
+                      smartSkus.includes(s) ? 'bg-violet-600 border-violet-600' : 'border-slate-300']">
+                      <svg v-if="smartSkus.includes(s)" class="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 10 10">
+                        <path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </div>
+                    {{ s }}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Период от -->
+            <input type="date" v-model="smartDateFrom"
+              class="px-3 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition text-slate-700" />
+
+            <!-- Период до -->
+            <input type="date" v-model="smartDateTo"
+              class="px-3 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition text-slate-700" />
+          </div>
+
+          <!-- Только с видео -->
+          <button @click="smartOnlyVideo = !smartOnlyVideo"
+            :class="['flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition',
+              smartOnlyVideo ? 'bg-violet-600 border-violet-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100']">
+            🎥 Только с видео
+          </button>
+        </div>
+
+        <!-- Результаты -->
+        <div class="divide-y divide-slate-50">
+          <div v-if="!smartQuery && smartCategory === 'Все' && smartSkus.length === 0 && !smartDateFrom && !smartDateTo"
+            class="py-12 text-center text-slate-400 text-sm font-medium">
+            Введите слово или выберите фильтр — найдём все подходящие возвраты с комментариями
+          </div>
+
+          <div v-else-if="smartResults.length === 0"
+            class="py-10 text-center text-slate-400 text-sm font-medium">
+            Ничего не найдено — попробуйте другой запрос
+          </div>
+
+          <div v-else>
+            <div v-for="claim in smartResultsPaged" :key="claim.SRID || claim.srid"
+              @click="openSmartClaim(claim)"
+              class="px-5 py-4 hover:bg-violet-50/40 cursor-pointer transition-colors group">
+              <div class="flex items-start gap-4">
+                <!-- Превью фото -->
+                <div class="flex-shrink-0 w-14 h-14 rounded-xl overflow-hidden border border-slate-100 bg-slate-50">
+                  <img v-if="parsePhotos(claim.photos || '').length"
+                    :src="parsePhotos(claim.photos || '')[0]"
+                    class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                  <div v-else class="w-full h-full flex items-center justify-center text-slate-300">
+                    <ImageIcon class="w-5 h-5" />
+                  </div>
+                </div>
+
+                <!-- Данные -->
+                <div class="flex-1 min-w-0">
+                  <div class="flex flex-wrap items-center gap-2 mb-1.5">
+                    <span class="text-xs font-black text-slate-700">{{ claim['Артикул продавца'] }}</span>
+                    <span v-if="claim.category && claim.category !== 'Прочее'"
+                      class="text-[10px] font-bold px-2 py-0.5 bg-violet-100 text-violet-700 rounded-full">{{ claim.category }}</span>
+                    <span class="text-[10px] font-medium text-slate-400">{{ claim.claim_date_iso }}</span>
+                    <span v-if="claim['Инвойс'] && claim['Инвойс'] !== 'Не указан'"
+                      class="text-[10px] font-medium text-slate-400">🧾 {{ claim['Инвойс'] }}</span>
+                    <span v-if="parsePhotos(claim.photos || '').length"
+                      class="text-[10px] font-bold text-blue-500">📷 {{ parsePhotos(claim.photos || '').length }}</span>
+                    <span v-if="parseVideos(claim.videos || claim.db_videos || '').length"
+                      class="text-[10px] font-bold text-rose-500">🎥 {{ parseVideos(claim.videos || claim.db_videos || '').length }}</span>
+                  </div>
+                  <p class="text-sm text-slate-600 leading-snug line-clamp-2">
+                    <span v-if="claim['Комментарий покупателя']">"{{ claim['Комментарий покупателя'] }}"</span>
+                    <span v-else class="text-slate-300 italic">Без комментария</span>
+                  </p>
+                </div>
+
+                <ArrowRight class="w-4 h-4 text-slate-300 group-hover:text-violet-500 flex-shrink-0 mt-1 transition-colors" />
+              </div>
+            </div>
+
+            <!-- Показать ещё -->
+            <div v-if="hasMoreSmartResults" class="px-5 py-4 text-center">
+              <button @click="smartPage++"
+                class="px-6 py-2.5 text-sm font-bold text-violet-600 bg-violet-50 hover:bg-violet-100 rounded-xl transition-colors">
+                Показать ещё (осталось {{ smartResults.length - smartResultsPaged.length }})
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -590,6 +845,9 @@ onMounted(fetchData)
               <div class="flex-1 min-w-0">
                 <div class="flex flex-wrap items-center gap-3 mb-3">
                   <div class="text-[10px] font-black text-slate-400 uppercase">Инвойс: <span class="text-slate-800 ml-1">{{ claim['Инвойс'] || '---' }}</span></div>
+                  <div v-if="claim['Артикул продавца']" class="text-[10px] font-black px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
+                    SKU: {{ claim['Артикул продавца'] }}
+                  </div>
                   <div class="text-[10px] font-black text-slate-400 uppercase">Поставка: <span class="text-blue-600 ml-1">{{ claim['Номер поставки_ОРИГИНАЛ'] || claim['Номер поставки'] || '---' }}</span></div>
                   <!-- Причина возврата (ЯМ = классификация Маркета, Ozon = строка причины) -->
                   <div v-if="claim['Причина ЯМ']" class="text-[10px] font-black px-2 py-1 rounded-full bg-rose-50 text-rose-600 uppercase tracking-tight">
@@ -614,6 +872,12 @@ onMounted(fetchData)
                 </div>
                 <div v-if="claim.photos === undefined || claim.photos === null" class="col-span-4 py-4 text-center text-xs text-slate-400 animate-pulse">Загрузка фото...</div>
                 <div v-else-if="claim.platform === 'ozon' && !parsePhotos(claim.photos).length" class="col-span-4 py-4 text-center text-xs text-slate-400">Фото недоступны (FBO)</div>
+                <a v-for="(vid, idx) in parseVideos(claim.videos || claim.db_videos)" :key="`v${idx}`" :href="vid" target="_blank" rel="noopener"
+                  class="relative group aspect-square rounded-lg overflow-hidden border border-white shadow-sm bg-slate-800 flex items-center justify-center col-span-2">
+                  <span class="text-white text-[10px] font-bold flex flex-col items-center gap-1">
+                    <span class="text-2xl">🎥</span>Видео {{ idx + 1 }}
+                  </span>
+                </a>
               </div>
             </div>
           </div>

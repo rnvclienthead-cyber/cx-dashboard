@@ -125,6 +125,9 @@ const loadDashboardData = async () => {
 
 const formatMoney = (v) => new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(v || 0)
 
+// ─── PPM коэффициент — переключатель периода ─────────────────────────────────
+const ppmPeriod = ref('current_month')
+
 // ─── Модальное окно ───────────────────────────────────────────────────────────
 const activeModal = ref(null)
 
@@ -460,6 +463,431 @@ watch(() => platformStore.platform, loadDashboardData)
         </div>
         <p class="text-[10px] text-slate-400 border-t border-slate-100 pt-3 mt-4">Данные обновляются в реальном времени на основе API маркетплейсов и ИИ-анализа.</p>
       </div>
+    </div>
+
+    <!-- Воронка: Отправка деталей -->
+    <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+      <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2 mb-5">
+        <span class="w-2 h-4 bg-sky-500 rounded-md block"></span>
+        Доотправка деталей
+      </h3>
+
+      <!-- Воронка: верхний ряд — 3 основных шага -->
+      <div class="grid grid-cols-3 gap-3 mb-3">
+        <div class="bg-sky-50 rounded-2xl p-4 text-center">
+          <div class="text-2xl font-black text-sky-700">{{ dashboardData?.reshipment_funnel?.sent ?? '—' }}</div>
+          <div class="text-xs font-bold text-sky-600 mt-1">Ссылок отправлено</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">Токен в WB-чат</div>
+        </div>
+        <div class="bg-amber-50 rounded-2xl p-4 text-center">
+          <div class="text-2xl font-black text-amber-700">{{ dashboardData?.reshipment_funnel?.form_submitted ?? '—' }}</div>
+          <div class="text-xs font-bold text-amber-600 mt-1">Форм заполнено</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            {{ dashboardData?.reshipment_funnel?.sent > 0
+              ? Math.round(dashboardData.reshipment_funnel.form_submitted / dashboardData.reshipment_funnel.sent * 100) + '% от ссылок'
+              : '—' }}
+          </div>
+        </div>
+        <div class="bg-violet-50 rounded-2xl p-4 text-center">
+          <div class="text-2xl font-black text-violet-700">{{ dashboardData?.reshipment_funnel?.approved ?? '—' }}</div>
+          <div class="text-xs font-bold text-violet-600 mt-1">Одобрено</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            {{ dashboardData?.reshipment_funnel?.form_submitted > 0
+              ? Math.round(dashboardData.reshipment_funnel.approved / dashboardData.reshipment_funnel.form_submitted * 100) + '% от заявок'
+              : '—' }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Нижний ряд — разбивка по перевозчикам + отправлено + доставлено -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+        <div class="bg-blue-50 rounded-2xl p-4 text-center">
+          <div class="text-2xl font-black text-blue-700">{{ dashboardData?.reshipment_funnel?.approved_wb ?? '—' }}</div>
+          <div class="text-xs font-bold text-blue-600 mt-1">Одобрено ВБ</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            {{ dashboardData?.reshipment_funnel?.approved > 0
+              ? Math.round(dashboardData.reshipment_funnel.approved_wb / dashboardData.reshipment_funnel.approved * 100) + '% от одобренных'
+              : '—' }}
+          </div>
+          <div class="text-[10px] text-blue-500 font-semibold mt-1">
+            {{ dashboardData?.reshipment_funnel?.approved_wb_cost > 0
+              ? formatMoney(dashboardData.reshipment_funnel.approved_wb_cost)
+              : '—' }}
+          </div>
+        </div>
+        <div class="bg-indigo-50 rounded-2xl p-4 text-center">
+          <div class="text-2xl font-black text-indigo-700">{{ dashboardData?.reshipment_funnel?.approved_yandex ?? '—' }}</div>
+          <div class="text-xs font-bold text-indigo-600 mt-1">Одобрено Яндекс</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            {{ dashboardData?.reshipment_funnel?.approved > 0
+              ? Math.round(dashboardData.reshipment_funnel.approved_yandex / dashboardData.reshipment_funnel.approved * 100) + '% от одобренных'
+              : '—' }}
+          </div>
+          <div class="text-[10px] text-indigo-500 font-semibold mt-1">
+            {{ dashboardData?.reshipment_funnel?.approved_yandex_cost > 0
+              ? formatMoney(dashboardData.reshipment_funnel.approved_yandex_cost)
+              : '—' }}
+          </div>
+        </div>
+        <div class="bg-orange-50 rounded-2xl p-4 text-center">
+          <div class="text-2xl font-black text-orange-700">{{ dashboardData?.reshipment_funnel?.shipped ?? '—' }}</div>
+          <div class="text-xs font-bold text-orange-600 mt-1">Отправлено</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            {{ dashboardData?.reshipment_funnel?.approved > 0
+              ? Math.round(dashboardData.reshipment_funnel.shipped / dashboardData.reshipment_funnel.approved * 100) + '% от одобренных'
+              : '—' }}
+          </div>
+        </div>
+        <div class="bg-emerald-50 rounded-2xl p-4 text-center">
+          <div class="text-2xl font-black text-emerald-700">{{ dashboardData?.reshipment_funnel?.delivered ?? '—' }}</div>
+          <div class="text-xs font-bold text-emerald-600 mt-1">Доставлено</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            {{ dashboardData?.reshipment_funnel?.shipped > 0
+              ? Math.round(dashboardData.reshipment_funnel.delivered / dashboardData.reshipment_funnel.shipped * 100) + '% от отправленных'
+              : '—' }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Затраты + Отзывы -->
+      <div class="pt-4 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="flex items-center gap-4 bg-slate-50 rounded-2xl p-4">
+          <div class="p-3 bg-white rounded-xl shadow-sm text-slate-600 flex-shrink-0">
+            <DollarSign class="w-5 h-5" />
+          </div>
+          <div>
+            <div class="text-lg font-black text-slate-800">{{ formatMoney(dashboardData?.reshipment_funnel?.total_cost) }}</div>
+            <div class="text-xs font-bold text-slate-500">Общие затраты на доставку</div>
+            <div class="text-[10px] text-slate-400">СДЭК + Яндекс, по всем одобренным</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-4 bg-green-50 rounded-2xl p-4">
+          <div class="p-3 bg-white rounded-xl shadow-sm text-green-600 flex-shrink-0">
+            <Star class="w-5 h-5" />
+          </div>
+          <div>
+            <div class="text-lg font-black text-green-800">{{ dashboardData?.reshipment_funnel?.reviews_left ?? '—' }}</div>
+            <div class="text-xs font-bold text-green-700">Отзывов обновлено / оставлено</div>
+            <div class="text-[10px] text-slate-400">
+              {{ dashboardData?.reshipment_funnel?.approved > 0 && dashboardData?.reshipment_funnel?.reviews_left > 0
+                ? Math.round(dashboardData.reshipment_funnel.reviews_left / dashboardData.reshipment_funnel.approved * 100) + '% от одобренных'
+                : '—' }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Экономика доотправок -->
+    <div v-if="dashboardData?.reshipment_economics?.requests_with_data > 0"
+         class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+
+      <!-- Заголовок -->
+      <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-2 mb-2">
+        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
+          <span class="w-2 h-4 bg-emerald-500 rounded-md block"></span>
+          Экономика доотправок — выгода инструмента
+        </h3>
+        <span class="text-[11px] text-slate-400 sm:text-right">
+          По {{ dashboardData.reshipment_economics.requests_with_data }} заявкам с данными финотчёта WB<br>
+          <span class="text-slate-300">(из {{ dashboardData.reshipment_funnel.approved }} одобренных · данные динамические, обновляются с отчётами WB)</span>
+        </span>
+      </div>
+
+      <!-- Глоссарий -->
+      <div class="bg-slate-50 rounded-2xl p-4 mb-5 text-[11px] text-slate-500 space-y-1.5">
+        <div><span class="font-bold text-slate-700">Выплата WB (ppvz)</span> — сумма, которую WB перечисляет нам после вычета своих комиссий за продажу. Это наша реальная выручка.</div>
+        <div><span class="font-bold text-slate-700">Себестоимость (СС)</span> — затраты на производство/закупку товара. При доотправке детали товар остаётся у клиента (дефектный) — СС потеряна в обоих сценариях.</div>
+        <div><span class="font-bold text-slate-700">WB-расходы при возврате</span> — эквайринг (~4% от суммы покупки при возврате средств клиенту) + штрафы + логистика. Возникают при любом варианте возврата.</div>
+        <div><span class="font-bold text-slate-700">Обратная логистика</span> — стоимость доставки товара от клиента к нам на ПВЗ, которую берёт WB (в среднем {{ formatMoney(dashboardData.reshipment_economics.avg_return_delivery) }}/шт по финотчёту).</div>
+      </div>
+
+      <!-- Блок 1: Потери при возврате (альтернативные сценарии) -->
+      <div class="mb-5">
+        <div class="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-3">
+          Если бы согласовывали возврат — потери по тем же {{ dashboardData.reshipment_economics.requests_with_data }} заявкам
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <!-- V1 -->
+          <div class="bg-red-50 border border-red-100 rounded-2xl p-4">
+            <div class="flex items-start justify-between gap-2 mb-3">
+              <div>
+                <div class="text-[10px] font-bold text-red-400 uppercase tracking-wider mb-1">Вариант 1 — деньги клиенту, товар у него</div>
+                <div class="text-3xl font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v1) }}</div>
+                <div class="text-[11px] text-red-400 mt-0.5">≈ {{ formatMoney(Math.round(dashboardData.reshipment_economics.loss_if_return_v1 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку</div>
+              </div>
+              <TrendingDown class="w-7 h-7 text-red-300 flex-shrink-0 mt-1" />
+            </div>
+            <div class="space-y-1.5 text-[12px]">
+              <div class="flex justify-between items-center py-1 border-b border-red-100">
+                <span class="text-red-600">Себестоимость товара (дефектный, не реализуем)</span>
+                <span class="font-bold text-red-700">{{ formatMoney(dashboardData.reshipment_economics.total_cog) }}</span>
+              </div>
+              <div class="flex justify-between items-center py-1">
+                <span class="text-red-600">WB-расходы: эквайринг + штрафы при возврате</span>
+                <span class="font-bold text-red-700">{{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+              </div>
+            </div>
+          </div>
+          <!-- V2 -->
+          <div class="bg-orange-50 border border-orange-100 rounded-2xl p-4">
+            <div class="flex items-start justify-between gap-2 mb-3">
+              <div>
+                <div class="text-[10px] font-bold text-orange-400 uppercase tracking-wider mb-1">Вариант 2 — деньги клиенту + товар к нам (дефектный)</div>
+                <div class="text-3xl font-black text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v2) }}</div>
+                <div class="text-[11px] text-orange-400 mt-0.5">≈ {{ formatMoney(Math.round(dashboardData.reshipment_economics.loss_if_return_v2 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку · товар приходит, но не реализуем</div>
+              </div>
+              <TrendingDown class="w-7 h-7 text-orange-300 flex-shrink-0 mt-1" />
+            </div>
+            <div class="space-y-1.5 text-[12px]">
+              <div class="flex justify-between items-center py-1 border-b border-orange-100">
+                <span class="text-orange-600">Себестоимость товара (дефектный, не реализуем)</span>
+                <span class="font-bold text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.total_cog) }}</span>
+              </div>
+              <div class="flex justify-between items-center py-1 border-b border-orange-100">
+                <span class="text-orange-600">WB-расходы: эквайринг + штрафы</span>
+                <span class="font-bold text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+              </div>
+              <div class="flex justify-between items-center py-1">
+                <span class="text-orange-600">+ Обратная логистика WB → ПВЗ (≈ {{ formatMoney(dashboardData.reshipment_economics.avg_return_delivery) }}/шт)</span>
+                <span class="font-bold text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.ret_logistics) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Блок 2: Наш реальный результат (V3) -->
+      <div class="mb-5">
+        <div class="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-3">Наш результат с инструментом доотправок</div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="bg-slate-50 rounded-2xl p-4">
+            <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Выплата WB сохранена (ppvz)</div>
+            <div class="text-2xl font-black text-slate-800">{{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }}</div>
+            <div class="text-[11px] text-slate-400 mt-1">Выручка после всех комиссий WB, не аннулирована возвратом</div>
+          </div>
+          <div class="bg-slate-50 rounded-2xl p-4">
+            <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Заплатили за доставку деталей</div>
+            <div class="text-2xl font-black text-slate-800">{{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }}</div>
+            <div class="text-[11px] text-slate-400 mt-1">СДЭК + Яндекс, по {{ dashboardData.reshipment_economics.requests_with_data }} заявкам с финданными (все одобренные — {{ formatMoney(dashboardData.reshipment_funnel.total_cost) }})</div>
+          </div>
+          <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'bg-emerald-50' : 'bg-rose-50'" class="rounded-2xl p-4">
+            <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'text-emerald-400' : 'text-rose-400'" class="text-[10px] font-bold uppercase tracking-wider mb-1">Чистый результат (ppvz − СС − доставка)</div>
+            <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'text-emerald-800' : 'text-rose-700'" class="text-2xl font-black">
+              {{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}
+            </div>
+            <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'text-emerald-400' : 'text-rose-400'" class="text-[11px] mt-1">
+              Убыток меньше, чем В1 ({{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v1) }}) и В2 ({{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v2) }}). Разница — наша выгода.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Блок 3: Выгода (разница между V3 и вариантами возврата) -->
+      <div class="mb-5">
+        <div class="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-3">Чистая выгода = разница между нашим результатом и потерями при возврате</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
+            <div class="flex items-start justify-between gap-2 mb-3">
+              <div>
+                <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Выгода vs Вариант 1 (деньги + товар у клиента)</div>
+                <div class="text-3xl font-black text-emerald-700">+{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v1) }}</div>
+                <div class="text-[12px] text-emerald-500 mt-0.5">В среднем +{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v1) }} на каждую заявку</div>
+              </div>
+              <TrendingUp class="w-7 h-7 text-emerald-400 flex-shrink-0 mt-1" />
+            </div>
+            <div class="bg-emerald-100 rounded-xl p-3 text-[11px] text-emerald-800 space-y-1">
+              <div class="font-bold mb-1">Формула: наш результат − потери В1</div>
+              <div class="flex justify-between">
+                <span>Наш результат (ppvz − СС − доставка)</span>
+                <span class="font-semibold">{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}</span>
+              </div>
+              <div class="flex justify-between border-t border-emerald-200 pt-1">
+                <span>Минус потери В1 (−СС − WB-расходы)</span>
+                <span class="font-semibold">−({{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v1) }})</span>
+              </div>
+              <div class="flex justify-between font-bold border-t border-emerald-300 pt-1 text-emerald-900">
+                <span>= Выгода (СС взаимно отменяется)</span>
+                <span>+{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v1) }}</span>
+              </div>
+              <div class="text-[10px] text-emerald-600 pt-1">
+                Упрощённо: ppvz ({{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }}) + WB-расходы ({{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}) − доставка ({{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }})
+              </div>
+            </div>
+          </div>
+          <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
+            <div class="flex items-start justify-between gap-2 mb-3">
+              <div>
+                <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Выгода vs Вариант 2 (деньги + товар к нам)</div>
+                <div class="text-3xl font-black text-emerald-700">+{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v2) }}</div>
+                <div class="text-[12px] text-emerald-500 mt-0.5">В среднем +{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v2) }} на каждую заявку</div>
+              </div>
+              <TrendingUp class="w-7 h-7 text-emerald-400 flex-shrink-0 mt-1" />
+            </div>
+            <div class="bg-emerald-100 rounded-xl p-3 text-[11px] text-emerald-800 space-y-1">
+              <div class="font-bold mb-1">Формула: наш результат − потери В2</div>
+              <div class="flex justify-between">
+                <span>Наш результат (ppvz − СС − доставка)</span>
+                <span class="font-semibold">{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}</span>
+              </div>
+              <div class="flex justify-between border-t border-emerald-200 pt-1">
+                <span>Минус потери В2 (−СС − WB − логистика)</span>
+                <span class="font-semibold">−({{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v2) }})</span>
+              </div>
+              <div class="flex justify-between font-bold border-t border-emerald-300 pt-1 text-emerald-900">
+                <span>= Выгода (СС взаимно отменяется)</span>
+                <span>+{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v2) }}</span>
+              </div>
+              <div class="text-[10px] text-emerald-600 pt-1">
+                ppvz ({{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }}) + WB-расходы ({{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}) + логистика обр. ({{ formatMoney(dashboardData.reshipment_economics.ret_logistics) }}) − доставка ({{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }})
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Блок 4: Прошлый месяц — все возвраты WB -->
+      <div v-if="dashboardData.reshipment_economics.prev_month_all_returns" class="pt-5 border-t border-slate-100">
+        <div class="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-3">
+          Прошлый месяц — все возвраты WB (до / с инструментом)
+        </div>
+
+        <!-- Все возвраты из финотчёта -->
+        <div class="bg-red-50 border border-red-100 rounded-2xl p-4 mb-3">
+          <div class="flex items-start justify-between gap-2 mb-3">
+            <div>
+              <div class="text-[10px] font-bold text-red-400 uppercase tracking-wider mb-1">Все возвраты за прошлый месяц (финотчёт WB)</div>
+              <div class="text-2xl font-black text-red-700">{{ dashboardData.reshipment_economics.prev_month_all_returns.returns_count }} возвратов</div>
+              <div class="text-[11px] text-red-400 mt-0.5">Возврат клиентам: {{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.total_retail_reversed) }}</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[12px]">
+            <div class="bg-white rounded-xl p-3">
+              <div class="text-[10px] font-bold text-red-400 uppercase mb-1">Эквайринг при возвратах</div>
+              <div class="text-lg font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.total_acquiring) }}</div>
+              <div class="text-[10px] text-slate-400 mt-0.5">прямые потери, из финотчёта</div>
+            </div>
+            <div class="bg-white rounded-xl p-3">
+              <div class="text-[10px] font-bold text-red-400 uppercase mb-1">Обратная логистика (оценка)</div>
+              <div class="text-lg font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.ret_logistics_estimated) }}</div>
+              <div class="text-[10px] text-slate-400 mt-0.5">≈ {{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.avg_return_delivery) }}/шт × {{ dashboardData.reshipment_economics.prev_month_all_returns.returns_count }} возвратов</div>
+            </div>
+            <div class="bg-white rounded-xl p-3">
+              <div class="text-[10px] font-bold text-red-400 uppercase mb-1">Итого прямые потери (без СС)</div>
+              <div class="text-lg font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.total_loss_estimated) }}</div>
+              <div class="text-[10px] text-slate-400 mt-0.5">эквайринг + оценка логистики</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Гипотетический расчёт: 50% возвратов через инструмент -->
+        <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
+          <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-3">
+            Гипотеза: если бы отправляли детали по 50% всех возвратов
+          </div>
+
+          <!-- Формула -->
+          <div class="flex flex-wrap items-center gap-2 mb-4 text-sm font-bold">
+            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
+              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Всего возвратов</div>
+              <div class="text-slate-800">{{ dashboardData.reshipment_economics.prev_month_all_returns.returns_count }}</div>
+            </div>
+            <div class="text-slate-400 text-lg">×</div>
+            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
+              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Охват</div>
+              <div class="text-slate-800">50%</div>
+            </div>
+            <div class="text-slate-400 text-lg">=</div>
+            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
+              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Заявок</div>
+              <div class="text-slate-800">{{ Math.round(dashboardData.reshipment_economics.prev_month_all_returns.returns_count * 0.5) }}</div>
+            </div>
+            <div class="text-slate-400 text-lg">×</div>
+            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
+              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Выгода / заявку</div>
+              <div class="text-slate-800">{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v2) }}</div>
+            </div>
+            <div class="text-emerald-600 text-lg">=</div>
+            <div class="bg-emerald-100 border-2 border-emerald-300 rounded-xl px-4 py-2 text-center shadow-sm">
+              <div class="text-[10px] text-emerald-600 font-normal mb-0.5">Итого выгода</div>
+              <div class="text-emerald-700 text-base">+{{ formatMoney(Math.round(dashboardData.reshipment_economics.prev_month_all_returns.returns_count * 0.5 * dashboardData.reshipment_economics.avg_benefit_vs_v2)) }}</div>
+            </div>
+          </div>
+
+          <!-- Пояснение откуда взята выгода/заявку -->
+          <div class="bg-white/70 rounded-xl px-3 py-2 text-[11px] text-slate-500 leading-relaxed">
+            <span class="font-bold text-slate-600">{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v2) }}/заявку</span> —
+            средняя выгода vs В2 по {{ dashboardData.reshipment_economics.requests_with_data }} текущим заявкам с фин. отчётом WB
+            (выплата WB + расходы WB на возврат − стоимость доставки детали).
+            Оценочные затраты на доставку:
+            {{ formatMoney(Math.round(dashboardData.reshipment_economics.prev_month_all_returns.returns_count * 0.5 * (dashboardData.reshipment_economics.total_delivery_cost / dashboardData.reshipment_economics.requests_with_data))) }}
+            (≈ {{ formatMoney(Math.round(dashboardData.reshipment_economics.total_delivery_cost / dashboardData.reshipment_economics.requests_with_data)) }}/заявку).
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Коэффициент реализации PPM -->
+    <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm" @click.stop>
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
+          <span class="w-2 h-4 bg-amber-500 rounded-md block"></span>
+          Коэффициент реализации — Рекламационные акты
+        </h3>
+        <!-- Переключатель периода -->
+        <div class="flex bg-slate-100 rounded-xl p-1 gap-1 self-start sm:self-auto">
+          <button v-for="p in [{k:'current_month',l:'Текущий месяц'},{k:'prev_month',l:'Прошлый месяц'},{k:'all',l:'Всё время'}]" :key="p.k"
+            @click="ppmPeriod = p.k"
+            :class="ppmPeriod === p.k ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'"
+            class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all">
+            {{ p.l }}
+          </button>
+        </div>
+      </div>
+
+      <template v-if="dashboardData?.ppm_realization">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <!-- Отправлено -->
+          <div class="bg-slate-50 rounded-2xl p-4 text-center">
+            <div class="text-2xl font-black text-slate-800">{{ dashboardData.ppm_realization[ppmPeriod]?.total_sent ?? '—' }}</div>
+            <div class="text-xs font-bold text-slate-600 mt-1">Актов отправлено</div>
+            <div class="text-[10px] text-slate-400 mt-0.5">базовый показатель</div>
+          </div>
+          <!-- Ответ завода -->
+          <div class="rounded-2xl p-4 text-center" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_reply || 0) > 0 ? 'bg-emerald-50' : 'bg-slate-50'">
+            <div class="text-2xl font-black" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_reply || 0) > 0 ? 'text-emerald-700' : 'text-slate-400'">
+              {{ dashboardData.ppm_realization[ppmPeriod]?.got_reply ?? '—' }}
+            </div>
+            <div class="text-[11px] font-black mt-1" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_reply || 0) > 0 ? 'text-emerald-500' : 'text-slate-400'">
+              {{ dashboardData.ppm_realization[ppmPeriod]?.got_reply_pct ?? 0 }}%
+            </div>
+            <div class="text-xs font-bold mt-0.5" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_reply || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'">Получен ответ</div>
+          </div>
+          <!-- Дата исправления -->
+          <div class="rounded-2xl p-4 text-center" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_improvement_date || 0) > 0 ? 'bg-blue-50' : 'bg-slate-50'">
+            <div class="text-2xl font-black" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_improvement_date || 0) > 0 ? 'text-blue-700' : 'text-slate-400'">
+              {{ dashboardData.ppm_realization[ppmPeriod]?.got_improvement_date ?? '—' }}
+            </div>
+            <div class="text-[11px] font-black mt-1" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_improvement_date || 0) > 0 ? 'text-blue-500' : 'text-slate-400'">
+              {{ dashboardData.ppm_realization[ppmPeriod]?.got_improvement_date_pct ?? 0 }}%
+            </div>
+            <div class="text-xs font-bold mt-0.5" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_improvement_date || 0) > 0 ? 'text-blue-600' : 'text-slate-500'">Дата исправления</div>
+          </div>
+          <!-- Инвойс исправления -->
+          <div class="rounded-2xl p-4 text-center" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_correction_invoice || 0) > 0 ? 'bg-violet-50' : 'bg-slate-50'">
+            <div class="text-2xl font-black" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_correction_invoice || 0) > 0 ? 'text-violet-700' : 'text-slate-400'">
+              {{ dashboardData.ppm_realization[ppmPeriod]?.got_correction_invoice ?? '—' }}
+            </div>
+            <div class="text-[11px] font-black mt-1" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_correction_invoice || 0) > 0 ? 'text-violet-500' : 'text-slate-400'">
+              {{ dashboardData.ppm_realization[ppmPeriod]?.got_correction_invoice_pct ?? 0 }}%
+            </div>
+            <div class="text-xs font-bold mt-0.5" :class="(dashboardData.ppm_realization[ppmPeriod]?.got_correction_invoice || 0) > 0 ? 'text-violet-600' : 'text-slate-500'">Инвойс исправления</div>
+          </div>
+        </div>
+      </template>
+
+      <p class="text-[10px] text-slate-400 mt-4 border-t border-slate-100 pt-3">
+        % считается от числа отправленных актов в выбранном периоде. <button @click="router.push('/production')" class="text-amber-600 font-bold hover:underline">Перейти в PPM →</button>
+      </p>
     </div>
     </template>
 
