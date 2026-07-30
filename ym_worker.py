@@ -30,6 +30,7 @@ YM_RETURNS_FROM = datetime(2026, 1, 1, tzinfo=timezone.utc)
 import requests
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from backend import ym_client
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
@@ -64,28 +65,21 @@ YM_REFUND_STATUS_MAP = {
 
 
 def _hdr():
-    return {"Api-Key": YM_API_KEY, "Content-Type": "application/json"}
+    return ym_client.headers(YM_API_KEY)
 
 
-class RateLimitError(Exception):
-    pass
-
-
-def _request(method, path, **kwargs):
-    """HTTP-запрос. При 420 — сразу RateLimitError (caller пропускает задачу)."""
-    r = getattr(requests, method)(f"{BASE}{path}", headers=_hdr(), timeout=30, **kwargs)
-    if r.status_code == 420:
-        raise RateLimitError(f"420 rate limit на {path}. Попробуем на следующем cron-запуске.")
-    r.raise_for_status()
-    return r.json()
+# Единая реализация — backend/ym_client.py (используется и routers/cx_responses.py,
+# и ym_chat_sync.py). Здесь оставлены только тонкие обёртки, чтобы не переписывать
+# полтора десятка вызовов _get(...)/_post(...) ниже по файлу.
+RateLimitError = ym_client.RateLimitError
 
 
 def _get(path, params=None):
-    return _request("get", path, params=params or {})
+    return ym_client.get(path, params=params, key=YM_API_KEY)
 
 
 def _post(path, body):
-    return _request("post", path, json=body)
+    return ym_client.post(path, body, key=YM_API_KEY)
 
 
 def _log_db(action, status, details=""):
@@ -1322,11 +1316,16 @@ def sync_feedbacks_backfill():
 
 # ── Точка входа ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    from backend import cron_lock
     task = sys.argv[1] if len(sys.argv) > 1 else "hourly"
 
     if not YM_API_KEY or not YM_CAMPAIGN_ID or not YM_BUSINESS_ID:
         log.error("Не заданы YM_API_KEY / YM_CAMPAIGN_ID / YM_BUSINESS_ID в .env")
         sys.exit(1)
+
+    # Защита от повторного запуска: если предыдущий вызов ym_worker.py (любая
+    # задача) ещё не завершился, новый процесс тут же выходит — см. Фазу 5.
+    _lock_conn = cron_lock.acquire_or_exit(engine, "ym_worker", log_fn=log.info, log_db=_log_db)
 
     def run(fn):
         try:

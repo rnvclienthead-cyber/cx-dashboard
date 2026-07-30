@@ -26,7 +26,6 @@ import ReturnScanView from '../views/ReturnScanView.vue'
 import ReturnCardView from '../views/ReturnCardView.vue'
 import ReturnBatchView from '../views/ReturnBatchView.vue'
 import PnLView from '../views/PnLView.vue'
-import CxResponsesView from '../views/CxResponsesView.vue'
 import ReviewsView from '../views/ReviewsView.vue'
 import QuestionsView from '../views/QuestionsView.vue'
 import ChatsView from '../views/ChatsView.vue'
@@ -54,7 +53,6 @@ export const MODULE_ROUTES = [
   { module: 'cx_responses', path: '/questions' },
   { module: 'cx_responses', path: '/chats' },
   { module: 'cx_responses', path: '/returns' },
-  { module: 'cx_responses', path: '/cx-responses' },
 ]
 
 const router = createRouter({
@@ -87,7 +85,6 @@ const router = createRouter({
     { path: '/docs',                      name: 'docs',              component: DocsView,               meta: { requiresAuth: true } },
     { path: '/pnl',                       name: 'pnl',               component: PnLView,                meta: { requiresAuth: true } },
     { path: '/faq',                       name: 'faq',               component: FAQView,                meta: { requiresAuth: true } },
-    { path: '/cx-responses',             name: 'cx-responses',      component: CxResponsesView,        meta: { requiresAuth: true } },
     { path: '/reviews',                  name: 'reviews',           component: ReviewsView,            meta: { requiresAuth: true } },
     { path: '/questions',                name: 'questions',         component: QuestionsView,          meta: { requiresAuth: true } },
     { path: '/chats',                    name: 'chats',             component: ChatsView,              meta: { requiresAuth: true } },

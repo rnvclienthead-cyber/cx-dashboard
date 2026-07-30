@@ -339,8 +339,9 @@ async def lifespan(app: FastAPI):
     from . import reshipment_notify
     reshipment_notify.init_notify_table(engine)
 
-    # Инициализируем курсор WB событий, захватываем незалинкованные токены из истории
-    wb_chat.init_event_cursor(get_db)
+    # cx_unified_queue: общий VIEW очереди (отзывы+вопросы+чаты+претензии
+    # всех площадок) вместо Python-строки _QUEUE_UNION — Фаза 3 унификации.
+    cx_responses.init_unified_queue_view(engine)
 
     # При --workers 2 каждый процесс поднимает lifespan. Фоновые задачи
     # (опрос СДЭК/Яндекс, синки) должны крутиться только в одном процессе,
@@ -352,6 +353,11 @@ async def lifespan(app: FastAPI):
 
     bg_tasks = []
     if is_leader:
+        # Инициализируем курсор WB событий, захватываем незалинкованные токены из истории.
+        # ВАЖНО: только на лидере — раньше это шло до проверки is_leader и при
+        # --workers 2+ каждый процесс независимо дёргал живой API WB при старте.
+        wb_chat.init_event_cursor(get_db)
+
         from .routers.cx_responses import start_photo_sync_worker
         logging.getLogger("uvicorn.error").info("cx-backend: leader — starting background workers")
         bg_tasks = [

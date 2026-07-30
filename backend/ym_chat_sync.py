@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 
-import requests
 from sqlalchemy import text
+
+from . import ym_client
 
 try:
     from dotenv import load_dotenv
@@ -22,21 +22,20 @@ except Exception:
 
 logger = logging.getLogger("ym_chat_sync")
 
-YM_BASE = "https://api.partner.market.yandex.ru"
 SYNC_INTERVAL = 45  # секунд
 HISTORY_LIMIT_CHATS = 30
 
 
 def _key() -> str:
-    return os.getenv("YM_API_KEY", "")
+    return ym_client.api_key()
 
 
 def _business_id() -> str:
-    return os.getenv("YM_BUSINESS_ID", "")
+    return ym_client.business_id()
 
 
 def _hdr() -> dict:
-    return {"Api-Key": _key(), "Content-Type": "application/json"}
+    return ym_client.headers(_key())
 
 
 def _parse_ts(raw) -> datetime | None:
@@ -50,22 +49,11 @@ def _parse_ts(raw) -> datetime | None:
 
 
 def _list_chats(statuses: list[str], *, limit: int = 50) -> list[dict]:
-    biz = _business_id()
-    url = f"{YM_BASE}/v2/businesses/{biz}/chats"
-    r = requests.post(url, headers=_hdr(), json={"statuses": statuses, "limit": limit}, timeout=30)
-    r.raise_for_status()
-    data = r.json() or {}
-    result = data.get("result") or data
-    return result.get("chats") or []
+    return ym_client.list_chats(statuses, limit=limit, biz=_business_id(), key=_key())
 
 
 def _fetch_history(chat_id: int | str) -> dict:
-    biz = _business_id()
-    url = f"{YM_BASE}/v2/businesses/{biz}/chats/history"
-    r = requests.post(url, headers=_hdr(), params={"chatId": chat_id}, json={}, timeout=30)
-    r.raise_for_status()
-    data = r.json() or {}
-    return data.get("result") or data
+    return ym_client.fetch_chat_history(chat_id, biz=_business_id(), key=_key())
 
 
 def _context_fields(ctx: dict | None) -> dict:
@@ -151,6 +139,12 @@ def _upsert_chat(conn, chat: dict, *, needs_answer: bool) -> str | None:
         "created": created,
         "updated": updated,
     })
+    # Клиент ждёт ответа — вернуть чат из архива
+    if needs_answer:
+        conn.execute(text("""
+            DELETE FROM cx_dismissed_items
+            WHERE mp = 'ym' AND item_type = 'chat' AND item_id = :cid
+        """), {"cid": chat_id})
     return chat_id
 
 
@@ -270,29 +264,40 @@ def sync_chats(db) -> int:
 
         conn.commit()
 
+        archived = conn.execute(text("""
+            WITH targets AS (
+              SELECT c.chat_id
+              FROM ym_chats c
+              LEFT JOIN cx_dismissed_items d
+                ON d.item_id = c.chat_id AND d.mp = 'ym' AND d.item_type = 'chat'
+              WHERE d.item_id IS NULL
+                AND lower(COALESCE(c.last_sender, '')) IN ('seller', 'partner', 'shop')
+                AND COALESCE(
+                  (SELECT MAX(m.created_at) FROM ym_chat_messages m WHERE m.chat_id = c.chat_id),
+                  c.waiting_since, c.updated_at, c.created_at
+                ) < now() - interval '3 days'
+            ),
+            ins AS (
+              INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+              SELECT 'chat', chat_id, 'ym', 'ym_chat_sync',
+                     'Авто: нет ответа клиента >3 дн после нашего'
+              FROM targets
+              ON CONFLICT (item_type, item_id, mp) DO NOTHING
+              RETURNING item_id
+            )
+            SELECT count(*) FROM ins
+        """)).scalar() or 0
+        if archived:
+            conn.commit()
+            logger.info("[YmChat] auto-archived seller-silent>3d: %s", archived)
+
     logger.info("[YmChat] synced=%d history=%d waiting=%d", synced, hist, len(waiting))
     return synced
 
 
 def send_message(chat_id: str, text: str) -> None:
     """Отправка текста. Требует scope communication у YM_API_KEY."""
-    biz = _business_id()
-    url = f"{YM_BASE}/v2/businesses/{biz}/chats/message"
-    # chatId — обязательный query-параметр (как у /chats/history)
-    cid: int | str = int(chat_id) if str(chat_id).isdigit() else chat_id
-    r = requests.post(
-        url,
-        headers=_hdr(),
-        params={"chatId": cid},
-        json={"message": text[:4000]},
-        timeout=25,
-    )
-    if r.status_code == 403:
-        raise PermissionError(
-            "YM токен без scope communication/all-methods — отправка недоступна. "
-            "Выпустите новый Api-Key с правом «Общение с покупателями»."
-        )
-    r.raise_for_status()
+    ym_client.send_chat_message(chat_id, text, biz=_business_id(), key=_key())
 
 
 async def start_ym_chat_sync_worker(get_db_func) -> None:

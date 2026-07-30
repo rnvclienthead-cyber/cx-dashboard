@@ -106,13 +106,16 @@
             <template v-if="chatFilter === 'review'">Бот оставил черновик или передал менеджеру</template>
             <template v-else-if="chatFilter === 'new'">Только новые сообщения клиента</template>
             <template v-else-if="chatFilter === 'pending'">
-              Ждёт ответа: {{ pendingCustomerCount }} от клиента
-              <span v-if="pendingSystemCount"> · {{ pendingSystemCount }} оповещение МП</span>
-              <span v-if="pendingUnknownCount"> · {{ pendingUnknownCount }} без отправителя</span>
+              <template v-if="currentMp === 'ozon'">
+                Ждёт ответа: {{ pendingCustomerCount }} от клиента
+                <span v-if="pendingSystemCount"> · {{ pendingSystemCount }} оповещение Ozon</span>
+                <span v-if="pendingUnknownCount"> · {{ pendingUnknownCount }} без отправителя</span>
+              </template>
+              <template v-else>Клиент ждёт ответа: {{ pendingChatCount }}</template>
             </template>
             <template v-else>Все чаты · нажмите фильтр выше</template>
           </p>
-          <div v-if="chatFilter === 'pending'" class="flex items-center gap-1 w-full basis-full">
+          <div v-if="chatFilter === 'pending' && currentMp === 'ozon'" class="flex items-center gap-1 w-full basis-full">
             <button v-for="f in senderFilters" :key="f.key" @click="senderFilter = f.key"
               :class="['text-[10px] px-2 py-0.5 rounded-full border transition-colors',
                 senderFilter === f.key ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-500 border-gray-200']">
@@ -147,7 +150,7 @@
                     : 'hover:bg-gray-50 border-l-[3px] border-l-transparent opacity-60']">
 
               <div class="shrink-0 w-[60px] h-[84px] rounded-lg overflow-hidden bg-gray-100 border border-gray-200 flex items-center justify-center">
-                <img v-if="item.product_photo || item.nm_id"
+                <img v-if="item.product_photo || (chatMp(item) === 'wb' && item.nm_id)"
                   :src="item.product_photo || wbPhotoUrl(item.nm_id)"
                   class="w-full h-full object-cover"
                   @error="e => e.target.style.display='none'" />
@@ -170,15 +173,17 @@
                     </span>
                     <span v-if="hasNewMsg(item)" class="w-2 h-2 rounded-full bg-blue-500 animate-pulse block"></span>
                     <span v-if="item.needs_answer" class="text-xs text-orange-600 font-semibold">Ждёт</span>
-                    <span v-if="item.needs_answer && senderKind(item) === 'system'"
-                      class="text-[10px] font-medium px-1 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200"
-                      title="Последнее сообщение — оповещение маркетплейса, не клиент">МП</span>
-                    <span v-else-if="item.needs_answer && senderKind(item) === 'customer'"
-                      class="text-[10px] font-medium px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-100"
-                      title="Последнее сообщение от покупателя">клиент</span>
-                    <span v-else-if="item.needs_answer && senderKind(item) === 'unknown'"
-                      class="text-[10px] font-medium px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100"
-                      title="Отправитель ещё не определён (нет истории)">?</span>
+                    <template v-if="item.needs_answer && chatMp(item) === 'ozon'">
+                      <span v-if="senderKind(item) === 'system'"
+                        class="text-[10px] font-medium px-1 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200"
+                        title="Последнее сообщение — оповещение Ozon, не клиент">Ozon</span>
+                      <span v-else-if="senderKind(item) === 'customer'"
+                        class="text-[10px] font-medium px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-100"
+                        title="Последнее сообщение от покупателя">клиент</span>
+                      <span v-else-if="senderKind(item) === 'unknown'"
+                        class="text-[10px] font-medium px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100"
+                        title="Отправитель ещё не определён">?</span>
+                    </template>
                     <span class="text-xs text-gray-400">{{ fmtAge(item.age_sec) }}</span>
                   </div>
                 </div>
@@ -186,7 +191,7 @@
                   {{ listSubtitle(item) }}
                 </p>
                 <p :class="['text-xs truncate mt-0.5 leading-tight', item.needs_answer ? 'text-gray-700' : 'text-gray-400']">
-                  {{ item.body || '—' }}
+                  {{ previewBody(item.body) }}
                 </p>
               </div>
             </div>
@@ -227,7 +232,7 @@
           <div class="bg-white border-b border-gray-200 px-5 py-3 shrink-0">
             <div class="flex items-center gap-3">
               <div class="w-[72px] h-24 rounded-xl overflow-hidden bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center">
-                <img v-if="chatItem.product_photo || chatItem.nm_id"
+                <img v-if="chatItem.product_photo || (chatMp(chatItem) === 'wb' && chatItem.nm_id)"
                   :src="chatItem.product_photo || wbPhotoUrl(chatItem.nm_id)"
                   class="w-full h-full object-cover"
                   @error="e => e.target.style.display='none'" />
@@ -252,9 +257,20 @@
                   </span>
                 </div>
                 <p class="text-xs text-gray-400 mt-0.5">
-                  {{ chatItem.contact || 'Покупатель' }}
-                  <template v-if="chatMp(chatItem) === 'wb'"> · нм {{ chatItem.nm_id || '—' }}</template>
-                  <template v-else-if="chatItem.order_number"> · заказ {{ chatItem.order_number }}</template>
+                  <template v-if="chatMp(chatItem) === 'ym'">
+                    {{ ymChatTypeLabel(chatItem) || 'Яндекс Маркет' }}
+                    <template v-if="chatItem.order_number"> · заказ {{ chatItem.order_number }}</template>
+                    <template v-else-if="chatItem.sku && !ymChatType(chatItem)"> · {{ chatItem.sku }}</template>
+                  </template>
+                  <template v-else-if="chatMp(chatItem) === 'ozon'">
+                    <template v-if="chatItem.order_number">Заказ {{ chatItem.order_number }}</template>
+                    <template v-else>{{ chatItem.contact || 'Покупатель' }}</template>
+                    <template v-if="chatItem.sku && chatItem.contact !== chatItem.sku"> · {{ chatItem.sku }}</template>
+                  </template>
+                  <template v-else>
+                    {{ chatItem.contact || 'Покупатель' }}
+                    <template v-if="chatMp(chatItem) === 'wb'"> · нм {{ chatItem.nm_id || '—' }}</template>
+                  </template>
                 </p>
               </div>
               <a v-if="marketplaceChatUrl(chatItem)" :href="marketplaceChatUrl(chatItem)" target="_blank" rel="noopener"
@@ -265,26 +281,6 @@
                 class="shrink-0 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-600 hover:border-rose-300 hover:text-rose-700 hover:bg-rose-50 font-medium transition-colors">
                 Закрыть чат
               </button>
-            </div>
-
-            <!-- Подсказка бота: черновик / передача менеджеру -->
-            <div v-if="activeReviewHint" class="mt-2 rounded-xl border px-3 py-2.5"
-              :class="activeReviewHint.zone === 'draft' ? 'border-amber-200 bg-amber-50' : 'border-rose-200 bg-rose-50'">
-              <div class="flex items-start justify-between gap-2">
-                <div class="min-w-0 flex-1">
-                  <p class="text-[11px] font-semibold"
-                    :class="activeReviewHint.zone === 'draft' ? 'text-amber-800' : 'text-rose-800'">
-                    {{ activeReviewHint.zone === 'draft' ? 'Черновик бота — проверьте и отправьте' : 'Бот передал менеджеру' }}
-                    <span class="font-normal opacity-70"> · {{ Math.round((activeReviewHint.confidence || 0) * 100) }}%</span>
-                  </p>
-                  <p v-if="activeReviewHint.reason" class="text-[10px] text-gray-500 mt-0.5">{{ activeReviewHint.reason }}</p>
-                  <p v-if="activeReviewHint.reply_text" class="text-xs text-gray-800 mt-1.5 whitespace-pre-line">{{ activeReviewHint.reply_text }}</p>
-                </div>
-                <button v-if="activeReviewHint.reply_text" @click="useReviewDraft"
-                  :class="['shrink-0 text-[11px] px-2.5 py-1 rounded-lg', mpUi.btnSoft]">
-                  В поле ввода
-                </button>
-              </div>
             </div>
 
             <!-- Контекст клиента -->
@@ -311,16 +307,16 @@
                 </button>
               </div>
 
-              <!-- Детали возврата -->
+              <!-- Сводка по возврату. Решение (одобрить/отказать) принимается
+                   только на /returns — это единственное место с этой логикой,
+                   здесь её больше не дублируем (Фаза 4 унификации). -->
               <div v-if="expandedClaimId && expandedClaimId === chatContext.specific?.claim?.claim_id"
                 class="mt-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2.5">
                 <div class="flex items-center justify-between mb-1.5">
                   <div class="flex items-center gap-2 text-xs font-semibold text-orange-800">
                     <span>{{ chatContext.specific.claim.claim_type_label || 'Возврат' }}</span>
                     <span class="text-orange-300">·</span>
-                    <span :class="chatContext.specific.claim.status_label==='Одобрено'
-                      ? 'text-emerald-600'
-                      : (['Отказ','Закрыта'].includes(chatContext.specific.claim.status_label) ? 'text-slate-600' : 'text-orange-700')">
+                    <span :class="claimStatusClass(chatContext.specific.claim.status_label)">
                       {{ chatContext.specific.claim.status_label }}
                     </span>
                   </div>
@@ -329,6 +325,12 @@
                 <p v-if="chatContext.specific.claim.body && chatContext.specific.claim.body !== '—'"
                   class="text-xs text-slate-700 leading-relaxed">{{ chatContext.specific.claim.body }}</p>
                 <p v-else class="text-xs text-gray-400 italic">Комментарий не указан</p>
+
+                <button
+                  v-if="chatContext.specific.claim.claim_id"
+                  @click="openReturnFromChat(chatContext.specific.claim.claim_id)"
+                  class="mt-2.5 w-full text-[11px] font-semibold px-2.5 py-1.5 rounded-lg bg-orange-600 text-white hover:bg-orange-700 text-center transition-colors"
+                >Открыть возврат и принять решение →</button>
               </div>
             </template>
           </div>
@@ -530,6 +532,7 @@
                 <p class="text-[11px] text-gray-400 truncate">{{ a.good_name || '—' }}</p>
                 <p class="text-xs text-gray-600 mt-1">{{ a.last_message || '—' }}</p>
                 <p class="text-[10px] text-gray-400 mt-1">
+                  <span v-if="a.mp" class="uppercase font-semibold text-gray-500">{{ a.mp }} · </span>
                   Закрыл {{ a.dismissed_by || '—' }}{{ a.note ? ' · ' + a.note : '' }}
                 </p>
               </div>
@@ -570,8 +573,7 @@
                   Работа бота · {{ pbMpLabel }}
                 </p>
                 <p v-if="pbMp !== 'wb'" class="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5">
-                  Автобот пока реально гоняет только WB. Настройки Ozon/ЯМ сохраняются и заработают после подключения бота к их чатам.
-                  Подсказки при открытии уже смотрят флаг площадки.
+                  Автоотправка подключена и для Ozon/ЯМ: при включённом тумблере и выключенном shadow бот пишет клиенту (zone=auto). Пока тумблер выключен — только журнал при ручном прогоне.
                 </p>
                 <p v-else-if="currentMp === 'all'" class="text-[11px] text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-2.5 py-1.5">
                   В сайдбаре выбрано «все площадки» — показаны настройки WB. Переключите WB / Ozon / ЯМ в сайдбаре, чтобы править другую.
@@ -662,6 +664,23 @@
                     </div>
                     <p class="text-[11px] text-gray-400 mt-1">Ниже — меню уточнения 1–5, а не сразу менеджеру.</p>
                   </div>
+                </div>
+
+                <div class="pt-1">
+                  <label class="text-xs font-medium text-gray-700 block mb-1">
+                    Тестовый allowlist chat_id
+                    <span class="font-normal text-gray-400">· {{ pbMpLabel }}</span>
+                  </label>
+                  <textarea
+                    rows="2"
+                    :value="mpSettingVal('bot_test_chat_ids')"
+                    @change="setMpSettingVal('bot_test_chat_ids', $event.target.value)"
+                    placeholder="id1, id2, id3 — пусто = все чаты очереди"
+                    class="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-300 resize-y"
+                  />
+                  <p class="text-[11px] text-gray-400 mt-1">
+                    Если заполнено — бот обрабатывает <span class="font-medium text-gray-600">только</span> эти чаты (удобно для пилота на 4–5 диалогах). После теста очистите поле.
+                  </p>
                 </div>
               </div>
 
@@ -801,7 +820,10 @@
           <div class="bg-white rounded-2xl border border-gray-200 p-5">
             <h2 class="text-sm font-semibold text-gray-900 mb-2">Шаблоны автоответов</h2>
             <p class="text-xs text-gray-500 leading-relaxed mb-3">
-              Темы и тексты ответов — общие для всех площадок. Режим темы можно менять в любой момент.
+              Сейчас показаны шаблоны для
+              <span class="font-medium text-gray-600">{{ pbMpLabel }}</span>.
+              Темы доотправки детали на Ozon/ЯМ скрыты — бот ведёт на возврат.
+              Режим темы (Авто / Согласование / Менеджер) общий для всех площадок.
             </p>
             <div class="grid sm:grid-cols-3 gap-2">
               <div class="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
@@ -820,7 +842,7 @@
           </div>
 
           <!-- Темы -->
-          <div v-for="t in pbThemes" :key="t.theme_key"
+          <div v-for="t in visiblePbThemes" :key="t.theme_key"
             :class="['bg-white rounded-2xl border overflow-hidden',
               t.zone==='auto' ? 'border-l-4 border-l-emerald-400 border-gray-200'
               : t.zone==='draft' ? 'border-l-4 border-l-amber-400 border-gray-200'
@@ -829,10 +851,10 @@
             <div class="px-5 py-4">
               <div class="flex items-start justify-between gap-3 flex-wrap">
                 <div class="min-w-0 flex-1">
-                  <h3 class="text-sm font-semibold text-gray-900">{{ t.name }}</h3>
-                  <p class="text-xs text-gray-500 mt-0.5 leading-relaxed">{{ t.when_text }}</p>
-                  <p v-if="t.note" :class="['text-[11px] rounded-lg px-2.5 py-1.5 mt-2 leading-snug', mpUi.note]">
-                    {{ t.note }}
+                  <h3 class="text-sm font-semibold text-gray-900">{{ themeDisplayName(t) }}</h3>
+                  <p class="text-xs text-gray-500 mt-0.5 leading-relaxed">{{ themeDisplayWhen(t) }}</p>
+                  <p v-if="themeDisplayNote(t)" :class="['text-[11px] rounded-lg px-2.5 py-1.5 mt-2 leading-snug', mpUi.note]">
+                    {{ themeDisplayNote(t) }}
                   </p>
                 </div>
                 <div class="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5 shrink-0">
@@ -850,6 +872,10 @@
 
             <!-- Варианты по веткам -->
             <div class="border-t border-gray-100 bg-gray-50/60 px-5 py-3 space-y-4">
+              <p v-if="!Object.keys(groupedVariants(t)).length"
+                class="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5">
+                Нет текста для {{ pbMpLabel }}. Добавьте вариант кнопкой ниже — иначе бот уйдёт в ИИ-черновик или FAQ.
+              </p>
               <div v-for="(vars, bkey) in groupedVariants(t)" :key="bkey">
                 <p v-if="bkey" class="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
                   {{ vars[0].branch_label || bkey }}
@@ -861,11 +887,16 @@
                       @blur="saveVariant(v)"
                       class="w-full border-0 p-0 text-xs text-gray-700 resize-y focus:outline-none bg-transparent leading-relaxed"></textarea>
                     <div class="flex items-center justify-between gap-2 pt-1.5 mt-1 border-t border-gray-50">
-                      <label class="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer">
-                        <input type="checkbox" v-model="v.active" @change="saveVariant(v)"
-                          :class="['w-3.5 h-3.5 rounded', mpUi.accent]" />
-                        Используется
-                      </label>
+                      <div class="flex items-center gap-2">
+                        <span class="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+                          {{ (v.mp || 'wb') === 'ozon' ? 'Ozon' : (v.mp || 'wb') === 'ym' ? 'ЯМ' : 'WB' }}
+                        </span>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer">
+                          <input type="checkbox" v-model="v.active" @change="saveVariant(v)"
+                            :class="['w-3.5 h-3.5 rounded', mpUi.accent]" />
+                          Используется
+                        </label>
+                      </div>
                       <button @click="deleteVariant(t, v)"
                         class="text-[11px] text-gray-400 hover:text-rose-600 transition-colors">Удалить</button>
                     </div>
@@ -876,6 +907,11 @@
                   </button>
                 </div>
               </div>
+              <button v-if="!Object.keys(groupedVariants(t)).length"
+                @click="addVariant(t, '', '')"
+                :class="['text-[11px] font-medium transition-colors', mpUi.text]">
+                + Добавить вариант для {{ pbMpLabel }}
+              </button>
             </div>
           </div>
           </template>
@@ -970,7 +1006,7 @@
                     </p>
                     <p v-if="row.reason" class="text-[10px] text-gray-400 mt-1">{{ row.reason }}</p>
                   </div>
-                  <button @click="openChatFromTriage({ chat_id: row.chat_id, client_name: '', good_name: '', last_message: row.client_message })"
+                  <button @click="openChatFromTriage({ chat_id: row.chat_id, mp: row.mp || pbMp, client_name: '', good_name: '', last_message: row.client_message })"
                     :class="['text-[11px] shrink-0', mpUi.text]">Открыть</button>
                 </div>
               </div>
@@ -999,6 +1035,10 @@ import { Centrifuge } from 'centrifuge'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
 import { usePermissionsStore } from '../stores/permissions'
+import { useToast } from '../composables/useToast'
+import { CX_BASE, fmtAge, ageCls } from '../utils/cx'
+
+const { toast, showToast } = useToast()
 
 const router = useRouter()
 const route  = useRoute()
@@ -1008,6 +1048,21 @@ const isAdmin = computed(() => permissionsStore.isAdmin)
 function openReviewCard(reviewId) {
   if (!reviewId) return
   router.push({ path: '/reviews', query: { review: 'wb:' + reviewId } })
+}
+
+function openReturnFromChat(claimId) {
+  if (!claimId) return
+  const q = { claim: claimId }
+  const d = chatContext.value?.specific?.claim
+  if (d?.claim_id === claimId && d?.is_archive) q.tab = 'archive'
+  else if (['Одобрено', 'Отказ', 'Закрыта', 'Отклонено'].includes(d?.status_label)) q.tab = 'archive'
+  router.push({ path: '/returns', query: q })
+}
+
+function claimStatusClass(label) {
+  if (label === 'Одобрено') return 'text-emerald-600'
+  if (['Отказ', 'Закрыта', 'Отклонено'].includes(label)) return 'text-slate-600'
+  return 'text-orange-700'
 }
 
 function wbChatUrl(chatId) {
@@ -1039,16 +1094,37 @@ function listSubtitle(item) {
   const mp = chatMp(item)
   if (mp === 'ym') {
     const t = ymChatTypeLabel(item)
-    return [t, item.order_number].filter(Boolean).join(' · ') || 'Яндекс Маркет'
+    return [t, item.order_number || item.sku].filter(Boolean).join(' · ') || 'Яндекс Маркет'
   }
-  if (mp === 'ozon') return item.sku || item.order_number || 'Ozon'
+  if (mp === 'ozon') {
+    const contact = String(item.contact || '')
+    const art = item.sku && contact !== item.sku ? item.sku : ''
+    const ord = item.order_number
+      ? (contact.includes(item.order_number) ? '' : `Заказ ${item.order_number}`)
+      : ''
+    return [art, ord].filter(Boolean).join(' · ') || 'Ozon'
+  }
   return item.sku || item.nm_id || '—'
 }
 function chatHeaderTitle(item) {
   const mp = chatMp(item)
-  if (mp === 'ym') return ymChatTypeLabel(item) || item.sku || 'Чат Яндекс Маркет'
-  if (mp === 'ozon') return item.sku || item.order_number || 'Чат Ozon'
+  if (mp === 'ym') {
+    return item.contact && item.contact !== 'Покупатель'
+      ? item.contact
+      : (ymChatTypeLabel(item) || item.sku || 'Чат Яндекс Маркет')
+  }
+  if (mp === 'ozon') {
+    // Артикул в заголовке, если уже резолвили; иначе заказ / подпись
+    return item.sku || item.contact || item.order_number || 'Чат Ozon'
+  }
   return item.sku || (item.nm_id ? `Арт. ${item.nm_id}` : 'Товар без артикула')
+}
+function previewBody(text) {
+  const s = String(text || '').trim()
+  if (!s) return '—'
+  if (/^!\[[^\]]*\]\(https?:\/\/[^)]+\)$/.test(s) || (s.startsWith('![') && s.includes('http') && s.length < 400))
+    return '📷 Фото'
+  return s.replace(/!\[[^\]]*\]\(https?:\/\/[^)]+\)/g, '📷').trim() || '—'
 }
 function marketplaceChatLabel(item) {
   const mp = chatMp(item)
@@ -1083,6 +1159,11 @@ function marketplaceChatUrl(item) {
 async function openChatFromQuery(chatId) {
   if (!chatId) return
   tab.value = 'chats'
+  const mpQ = String(route.query.mp || '').toLowerCase()
+  const mp = ['wb', 'ozon', 'ym'].includes(mpQ) ? mpQ : 'wb'
+  if (mp !== 'wb' && currentMp.value !== mp && currentMp.value !== 'all') {
+    platformStore.setPlatform(mp)
+  }
   if (!queueItems.value.length) await loadQueue()
   const found = queueItems.value.find(i => i.id === chatId)
   if (found) {
@@ -1091,13 +1172,13 @@ async function openChatFromQuery(chatId) {
   }
   // Чата нет в текущей очереди (старше фильтра / уже отвечен) — открываем по id
   await selectChat({
-    id: chatId, item_type: 'chat', mp: 'wb',
+    id: chatId, item_type: 'chat', mp,
     contact: 'Покупатель', sku: '', nm_id: null,
     body: '', last_ts: Date.now(), needs_answer: true,
   })
 }
 
-const BASE = '/api/v1/cx-responses'
+const BASE = CX_BASE
 const PB   = '/api/v1/chat-playbook'
 const platformStore = usePlatformStore()
 const currentMp = computed(() => platformStore.platform || 'all')
@@ -1124,6 +1205,68 @@ function chatSendPath(item) {
 // ── Вкладки: переписка / настройка автоответов ──────────────────────────────
 const tab        = ref('chats')
 const pbThemes   = ref([])
+/** Темы только про доотправку WB — на Ozon/ЯМ бот их не использует (→ возврат). */
+const WB_ONLY_THEME_KEYS = new Set([
+  'nekomplekt', 'soglasie', 'ssylka', 'status_zayavki', 'otkaz_dootpravki',
+])
+const OZON_THEME_UI = {
+  dengi: {
+    note: 'Деньгами управляет Ozon и банк. Бот не обещает сроки от продавца.',
+  },
+  srok_hraneniya: {
+    note: 'Сроком хранения управляет Ozon, не продавец.',
+    when: 'Продлить хранение на ПВЗ Ozon — направляем в поддержку Ozon.',
+  },
+  dostavka_wb: {
+    name: 'Где мой заказ / сроки доставки',
+    when: 'Сдвиг срока, статус доставки, «когда приедет» на Ozon.',
+    note: 'Сроки формирует Ozon. Бот направляет в карточку заказа и поддержку Ozon.',
+  },
+  cheque: {
+    when: 'Где скачать чек по заказу Ozon.',
+  },
+  teh_sboi: {
+    note: 'Техсбой на стороне Ozon — в поддержку площадки.',
+  },
+  nevozvratny: {
+    note: 'Возвратность определяет Ozon.',
+  },
+  vozvrat: {
+    note: 'На Ozon: раздел «Заказы» → «Вернуть». Доотправки деталей нет.',
+  },
+  brak: {
+    note: 'На Ozon: «Заказы» → «Вернуть» → причина «брак», лучше с фото.',
+  },
+}
+const visiblePbThemes = computed(() => {
+  const list = pbThemes.value || []
+  if (pbMp.value === 'ozon' || pbMp.value === 'ym') {
+    return list.filter(t => !WB_ONLY_THEME_KEYS.has(t.theme_key))
+  }
+  return list
+})
+function themeDisplayName(t) {
+  if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.name) {
+    return OZON_THEME_UI[t.theme_key].name
+  }
+  return t.name
+}
+function themeDisplayWhen(t) {
+  if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.when) {
+    return OZON_THEME_UI[t.theme_key].when
+  }
+  return t.when_text
+}
+function themeDisplayNote(t) {
+  if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.note) {
+    return OZON_THEME_UI[t.theme_key].note
+  }
+  // Не показываем WB-заметки на Ozon/ЯМ
+  if ((pbMp.value === 'ozon' || pbMp.value === 'ym') && /WB|Wildberries|доотправ/i.test(t.note || '')) {
+    return ''
+  }
+  return t.note || ''
+}
 const pbSettings = ref([])
 const pbLoading  = ref(false)
 const pbSection  = ref('settings')
@@ -1280,6 +1423,9 @@ function setSettingNum(key, value, save = true) {
 function setMpSettingNum(key, value, save = true) {
   setSettingNum(mpCtrlKey(key), value, save)
 }
+function setMpSettingVal(key, value) {
+  patchSetting(mpCtrlKey(key), value ?? '')
+}
 
 const BOT = '/api/v1/chat-bot'
 const botStatus   = ref(null)
@@ -1297,18 +1443,6 @@ const botLogFilters = [
 const reviewItems   = ref([])
 const reviewLoading = ref(false)
 const reviewCount   = ref(0)
-const reviewByChat  = computed(() => {
-  const m = {}
-  for (const r of reviewItems.value) m[r.chat_id] = r
-  return m
-})
-
-function useReviewDraft() {
-  const t = activeReviewHint.value?.reply_text
-  if (!t) return
-  chatReply.value = String(t).replace(/^\s+/, '')
-  nextTick(autoGrowReply)
-}
 
 function zoneLabel(z) {
   if (z === 'auto') return 'Готов ответить'
@@ -1330,14 +1464,14 @@ function themeLabel(t) {
 
 async function loadBotStatus() {
   try {
-    const r = await apiFetch(`${BOT}/status`)
+    const r = await apiFetch(`${BOT}/status?mp=${encodeURIComponent(pbMp.value || 'wb')}`)
     botStatus.value = await r.json()
   } catch { /* тихо */ }
 }
 
 async function loadBotLog() {
   try {
-    const r = await apiFetch(`${BOT}/log?limit=60`)
+    const r = await apiFetch(`${BOT}/log?limit=60&mp=${encodeURIComponent(pbMp.value || '')}`)
     const d = await r.json()
     let items = d.items || []
     if (botLogFilter.value === 'auto') items = items.filter(i => i.zone === 'auto')
@@ -1351,7 +1485,8 @@ async function loadBotLog() {
 async function runBotOnce() {
   botRunning.value = true
   try {
-    const r = await apiFetch(`${BOT}/run-once?limit=15`, { method: 'POST' })
+    const mp = pbMp.value || 'wb'
+    const r = await apiFetch(`${BOT}/run-once?limit=15&mp=${encodeURIComponent(mp)}`, { method: 'POST' })
     const d = await r.json()
     botLastRun.value = d
     if (!d.ok) {
@@ -1360,7 +1495,8 @@ async function runBotOnce() {
       showToast('Новых чатов для разбора нет — все уже прогнаны или нет свежих', 'ok')
     } else {
       const z = d.by_zone || {}
-      showToast(`Готово: ${d.processed} из 15 · авто ${z.auto||0} · черновик ${z.draft||0} · менеджеру ${z.human||0}`, 'ok')
+      const shadowNote = d.shadow ? ' · только журнал' : ''
+      showToast(`Готово (${mp}): ${d.processed} · авто ${z.auto||0} · черновик ${z.draft||0} · менеджеру ${z.human||0}${shadowNote}`, 'ok')
     }
     await loadBotLog()
     await loadReviewQueue(true)
@@ -1501,9 +1637,10 @@ async function openChatFromTriage(ch) {
   if (!queueItems.value.length) await loadQueue()
   const found = queueItems.value.find(i => i.id === ch.chat_id)
   if (found) { selectChat(found); return }
+  const mp = String(ch.mp || 'wb').toLowerCase()
   // чата нет в очереди (например, старше 30 дней) — открываем по минимальным данным
   selectChat({
-    id: ch.chat_id, item_type: 'chat', mp: 'wb',
+    id: ch.chat_id, item_type: 'chat', mp: ['wb', 'ozon', 'ym'].includes(mp) ? mp : 'wb',
     contact: ch.client_name, sku: ch.good_name, nm_id: ch.nm_id,
     body: ch.last_message, last_ts: ch.last_ts, needs_answer: ch.needs_answer,
   })
@@ -1517,7 +1654,8 @@ const arLoading = ref(false)
 async function loadArchive() {
   arLoading.value = true
   try {
-    const r = await apiFetch(`${TR}/archive`)
+    const mp = currentMp.value === 'all' ? 'all' : currentMp.value
+    const r = await apiFetch(`${TR}/archive?mp=${encodeURIComponent(mp)}`)
     const d = await r.json()
     arItems.value = d.items || []
     arTotal.value = d.total || 0
@@ -1529,7 +1667,10 @@ function openArchive() { tab.value = 'archive'; loadArchive() }
 
 async function restoreChat(a) {
   try {
-    await apiFetch(`${TR}/restore`, { method: 'POST', body: JSON.stringify({ chat_id: a.chat_id }) })
+    await apiFetch(`${TR}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ chat_id: a.chat_id, mp: a.mp || 'wb' }),
+    })
     arItems.value = arItems.value.filter(x => x.chat_id !== a.chat_id)
     arTotal.value = Math.max(0, arTotal.value - 1)
     showToast('Чат вернулся в работу', 'ok')
@@ -1538,7 +1679,15 @@ async function restoreChat(a) {
 
 function groupedVariants(theme) {
   const out = {}
+  const want = pbMp.value === 'ozon' ? 'ozon' : pbMp.value === 'ym' ? 'ym' : 'wb'
   for (const v of (theme.variants || [])) {
+    const vmp = (v.mp || '').toLowerCase() || 'wb'
+    // В сайдбаре Ozon/ЯМ — только их шаблоны; WB — legacy '' и wb
+    if (want === 'ozon' || want === 'ym') {
+      if (vmp !== want) continue
+    } else if (vmp !== 'wb' && vmp !== '') {
+      continue
+    }
     (out[v.branch_key || ''] ||= []).push(v)
   }
   return out
@@ -1569,17 +1718,20 @@ async function saveVariant(v) {
 
 async function addVariant(theme, branchKey, branchLabel) {
   try {
+    const mp = pbMp.value === 'ozon' ? 'ozon' : pbMp.value === 'ym' ? 'ym' : 'wb'
     const r = await apiFetch(`${PB}/variants`, {
       method: 'POST',
       body: JSON.stringify({
         theme_key: theme.theme_key, branch_key: branchKey || '',
         branch_label: branchLabel || '', body: 'Новый вариант ответа — впишите текст',
+        mp,
       }),
     })
     const d = await r.json()
     theme.variants.push({
       id: d.id, theme_key: theme.theme_key, branch_key: branchKey || '',
-      branch_label: branchLabel || '', body: 'Новый вариант ответа — впишите текст', active: true,
+      branch_label: branchLabel || '', body: 'Новый вариант ответа — впишите текст',
+      active: true, mp,
     })
   } catch { showToast('Не удалось добавить вариант', 'error') }
 }
@@ -1640,9 +1792,11 @@ const chatContextLoading = ref(false)
 async function loadChatContext(item) {
   chatContext.value = null
   if (!item?.id) return
+  const mp = chatMp(item)
+  if (!['wb', 'ozon', 'ym'].includes(mp)) return
   chatContextLoading.value = true
   try {
-    const r = await apiFetch(`${BASE}/chat-context/wb/${encodeURIComponent(item.id)}`)
+    const r = await apiFetch(`${BASE}/chat-context/${mp}/${encodeURIComponent(item.id)}`)
     const d = await r.json()
     if (d.specific?.claim || d.specific?.review || d.reviews?.length || d.questions?.length || d.claims?.length)
       chatContext.value = d
@@ -1654,6 +1808,8 @@ async function loadChatContext(item) {
 // ── Фильтры ──────────────────────────────────────────────────────────────────
 const chatFilter      = ref('')   // '' | pending | review | new
 const senderFilter    = ref('all') // all | customer | system | unknown
+// Просто переключатель раскрытия карточки — вся детализация уже приходит
+// вместе с chatContext.specific.claim, отдельной загрузки не требуется.
 const expandedClaimId = ref('')
 
 const unreadChatCount = computed(() =>
@@ -1681,7 +1837,7 @@ const senderFilters = computed(() => [
 function setChatFilter(key) {
   const next = chatFilter.value === key ? '' : key
   chatFilter.value = next
-  if (next !== 'pending') senderFilter.value = 'all'
+  if (next !== 'pending' || currentMp.value !== 'ozon') senderFilter.value = 'all'
   currentPage.value = 1
   if (next === 'review') loadReviewQueue(true)
 }
@@ -1698,7 +1854,8 @@ const filteredItems = computed(() => {
 
   if (chatFilter.value === 'pending') {
     list = list.filter(i => i.needs_answer)
-    if (senderFilter.value !== 'all') {
+    // Фильтр клиент/Ozon-оповещение — только для Ozon
+    if (currentMp.value === 'ozon' && senderFilter.value !== 'all') {
       list = list.filter(i => senderKind(i) === senderFilter.value)
     }
   } else if (chatFilter.value === 'new') {
@@ -1752,7 +1909,11 @@ async function loadQueue() {
   }
 }
 
-watch(currentMp, () => loadQueue())
+watch(currentMp, () => {
+  senderFilter.value = 'all'
+  loadQueue()
+  if (tab.value === 'archive') loadArchive()
+})
 
 watch(chatFilter, () => { currentPage.value = 1 })
 
@@ -1769,11 +1930,6 @@ const chatSuggestMiss = ref(null)
 const chatSuggestLoading = ref(false)
 const chatSuggestGenerating = ref(false)
 let chatPollTimer = null
-
-const activeReviewHint = computed(() => {
-  if (!chatItem.value?.id) return null
-  return reviewByChat.value[chatItem.value.id] || null
-})
 
 function clearSuggest() {
   chatSuggest.value = null
@@ -1829,7 +1985,9 @@ async function generateSuggestAi() {
   if (!chatItem.value?.id || chatSuggestGenerating.value) return
   chatSuggestGenerating.value = true
   try {
-    const r = await apiFetch(`${BOT}/suggest/${encodeURIComponent(chatItem.value.id)}/generate`, {
+    const mp = chatMp(chatItem.value)
+    const q = `?mp=${encodeURIComponent(mp || 'wb')}`
+    const r = await apiFetch(`${BOT}/suggest/${encodeURIComponent(chatItem.value.id)}/generate${q}`, {
       method: 'POST',
     })
     const d = await r.json()
@@ -1881,10 +2039,9 @@ async function fetchChatMsgs(scroll = false) {
     const r = await apiFetch(chatMessagesPath(chatItem.value))
     const d = await r.json()
     const msgs = (d.messages || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-    if (msgs.length !== chatMsgs.value.length) {
-      chatMsgs.value = msgs
-      if (scroll) scrollChatBottom()
-    }
+    // Всегда подменяем ленту с сервера (иначе local+API дубли остаются на экране)
+    chatMsgs.value = msgs
+    if (scroll) scrollChatBottom()
   } catch { /* тихо */ }
 }
 
@@ -1892,8 +2049,7 @@ async function selectChat(item) {
   chatLastViewed.value[item.id] = item.last_ts || Date.now()
   _saveViewed()
   expandedClaimId.value = ''
-  if (chatMp(item) === 'wb') loadChatContext(item)
-  else chatContext.value = null
+  loadChatContext(item)
   chatItem.value    = item
   chatMsgs.value    = []
   chatReply.value   = ''
@@ -1966,21 +2122,6 @@ async function sendChatMessage() {
 }
 
 // ── Форматирование ─────────────────────────────────────────────────────────
-function fmtAge(sec) {
-  if (sec == null) return '?'
-  if (sec < 3600)  return `${Math.round(sec / 60)} мин`
-  if (sec < 86400) return `${Math.round(sec / 3600)} ч`
-  return `${Math.round(sec / 86400)} дн`
-}
-
-function ageCls(sec) {
-  if (sec == null)       return 'bg-gray-100 text-gray-500'
-  if (sec > 86400 * 2)   return 'bg-red-100 text-red-700'
-  if (sec > 86400)       return 'bg-orange-100 text-orange-700'
-  if (sec > 3600 * 4)    return 'bg-yellow-100 text-yellow-700'
-  return 'bg-green-100 text-green-700'
-}
-
 function fmtTs(s) {
   if (!s) return ''
   return new Date(s).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
@@ -2006,13 +2147,6 @@ function isNewDay(idx) {
   if (!cur || !prev) return false
   const a = new Date(cur), b = new Date(prev)
   return a.getFullYear() !== b.getFullYear() || a.getMonth() !== b.getMonth() || a.getDate() !== b.getDate()
-}
-
-// ── Toast ──────────────────────────────────────────────────────────────────
-const toast = ref(null)
-function showToast(msg, type = 'ok') {
-  toast.value = { msg, type }
-  setTimeout(() => { toast.value = null }, 3000)
 }
 
 // ── Centrifugo real-time ──────────────────────────────────────────────────

@@ -22,7 +22,6 @@ logger = logging.getLogger("cx_responses")
 _IMG_MD_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 _IMG_MD_URL_RE = re.compile(r"!\[[^\]]*\]\((https?://[^)]+)\)")
 
-WB_CONTENT_BASE = "https://content-api.wildberries.ru"
 _PHOTO_SYNC_INTERVAL = 86400   # раз в 24 часа
 
 
@@ -30,22 +29,17 @@ def _sync_product_photos(get_db_func) -> int:
     """Загружает фото товаров из WB Content API v2 и сохраняет в wb_product_photos."""
     # Приоритет: WB_CONTENT_KEY (отдельный токен с правом "Контент"),
     # иначе WB_API_KEY как запасной вариант
-    key = (os.getenv("WB_CONTENT_KEY", "")
-           or os.getenv("WB_API_KEY", "")
-           or os.getenv("WB_FEEDBACKS_TOKEN", ""))
+    key = wb_client.content_key()
     if not key:
         logger.warning("[PhotoSync] нет WB_CONTENT_KEY или WB_API_KEY")
         return 0
 
-    headers = {"Authorization": key, "Content-Type": "application/json"}
     saved = 0
     cursor: dict = {}
 
     while True:
-        body = {"settings": {"cursor": {**{"limit": 100}, **cursor}, "filter": {"withPhoto": 1}}}
         try:
-            r = requests.post(f"{WB_CONTENT_BASE}/content/v2/get/cards/list",
-                              json=body, headers=headers, timeout=30)
+            r = wb_client.list_cards_page_raw(cursor, 100, key=key, timeout=30)
             if r.status_code == 401:
                 logger.error("[PhotoSync] 401 — токен не имеет права 'Контент'. "
                              "Добавьте WB_CONTENT_KEY в .env")
@@ -113,10 +107,7 @@ async def start_photo_sync_worker(get_db_func):
 
 from ..database import get_db
 from .auth import get_current_user
-
-WB_FEEDBACKS_BASE = "https://feedbacks-api.wildberries.ru"
-WB_CHAT_BASE      = "https://buyer-chat-api.wildberries.ru"
-YM_BASE           = "https://api.partner.market.yandex.ru"
+from .. import wb_client, ym_client, ozon_client
 
 
 def _cs_access(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -147,23 +138,19 @@ public_router = APIRouter(
 
 
 def _wb_key() -> str:
-    return os.getenv("WB_API_KEY", "")
-
-
-def _wb_headers() -> dict:
-    return {"Authorization": _wb_key(), "Content-Type": "application/json"}
+    return wb_client.api_key()
 
 
 def _ym_key() -> str:
-    return os.getenv("YM_API_KEY", "")
+    return ym_client.api_key()
 
 
 def _ym_business_id() -> str:
-    return os.getenv("YM_BUSINESS_ID", "")
+    return ym_client.business_id()
 
 
 def _ym_campaign_id() -> str:
-    return os.getenv("YM_CAMPAIGN_ID", "")
+    return ym_client.campaign_id()
 
 
 def _ym_cabinet_chat_url(
@@ -202,11 +189,11 @@ def _ozon_cabinet_chat_url(chat_id: str | None = None) -> str:
 
 
 def _ozon_client_id() -> str:
-    return os.getenv("OZON_CLIENT_ID", "")
+    return ozon_client.client_id()
 
 
 def _ozon_api_key() -> str:
-    return os.getenv("OZON_API_KEY", "")
+    return ozon_client.api_key()
 
 
 def _ozon_proxy_url(file_url: str) -> str:
@@ -231,13 +218,16 @@ def _ym_proxy_or_direct(file_url: str) -> str:
     return u
 
 
-def _ym_headers() -> dict:
-    return {"Api-Key": _ym_key(), "Content-Type": "application/json"}
-
-
 # ── Очередь ──────────────────────────────────────────────────────────────────
+#
+# cx_unified_queue — настоящий SQL VIEW (не Python-строка), объединяющий
+# отзывы/вопросы/чаты/претензии всех площадок для /queue. Определение и
+# миграция — в init_unified_queue_view() ниже, вызывается один раз при
+# старте приложения (backend/main.py). Роутер только читает из готового
+# VIEW по имени — единый источник правды для схемы очереди.
+UNIFIED_QUEUE_VIEW = "cx_unified_queue"
 
-_QUEUE_UNION = """
+_UNIFIED_QUEUE_VIEW_SQL = """
     SELECT
         f.id::text                                         AS id,
         'wb'::text                                         AS mp,
@@ -364,22 +354,68 @@ _QUEUE_UNION = """
 
     SELECT
         c.chat_id, 'ozon', 'chat',
-        COALESCE(c.context_article, c.order_number, c.context_sku::text),
-        NULL::text,
+        -- sku = наш артикул (для product_photos); не подставляем номер заказа
+        COALESCE(
+            NULLIF(TRIM(c.context_article), ''),
+            (
+              SELECT o.supplier_article FROM ozon_orders o
+              WHERE NULLIF(TRIM(c.order_number), '') IS NOT NULL
+                AND (
+                  o.posting_number = c.order_number
+                  OR o.order_number = c.order_number
+                  OR o.posting_number LIKE c.order_number || '-%'
+                )
+                AND NULLIF(TRIM(o.supplier_article), '') IS NOT NULL
+              ORDER BY o.created_at DESC NULLS LAST
+              LIMIT 1
+            )
+        ),
+        c.context_sku::text,
         c.last_message, NULL::int, NULL::text, NULL::text,
         NULL::text, c.order_number::text,
-        COALESCE(c.order_number, 'Покупатель'),
-        COALESCE(c.waiting_since, c.updated_at, now()),
-        EXTRACT(epoch FROM now()-COALESCE(c.waiting_since, c.updated_at, now()))::int,
-        EXTRACT(epoch FROM COALESCE(c.updated_at, now()))::bigint * 1000,
+        CASE
+          WHEN NULLIF(TRIM(c.context_article), '') IS NOT NULL
+            THEN TRIM(c.context_article)
+          WHEN NULLIF(TRIM(c.order_number), '') IS NOT NULL
+            THEN 'Заказ ' || TRIM(c.order_number)
+          WHEN c.context_sku IS NOT NULL
+            THEN 'Ozon · SKU ' || c.context_sku::text
+          ELSE 'Покупатель'
+        END,
+        COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND m.sender_type IN ('customer', 'buyer', 'client')),
+            c.waiting_since, c.created_at, c.updated_at, now()
+        ),
+        EXTRACT(epoch FROM now() - COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND m.sender_type IN ('customer', 'buyer', 'client')),
+            c.waiting_since, c.created_at, c.updated_at, now()
+        ))::int,
+        -- last_ts для UI: время последнего сообщения (не touch синка!)
+        EXTRACT(epoch FROM COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.created_at, c.updated_at, now()
+        ))::bigint * 1000,
         c.needs_answer,
         c.last_sender
     FROM ozon_chats c
     WHERE c.chat_status ILIKE 'OPENED'
       AND (c.chat_type IS NULL OR upper(c.chat_type) LIKE '%BUYER%')
-      AND (
-            c.needs_answer = true
-            OR COALESCE(c.updated_at, now()) > now() - INTERVAL '7 days'
+      -- как WB: только активность за 30 дней (по сообщениям, не по sync touch)
+      AND COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.created_at, c.updated_at, now()
+          ) > now() - INTERVAL '30 days'
+      -- мы ответили, клиент молчит >3 дн — не держим в очереди (уходят в архив)
+      AND NOT (
+            lower(COALESCE(c.last_sender, '')) IN ('seller', 'courier')
+            AND COALESCE(
+              (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+              c.waiting_since, c.created_at, c.updated_at, now()
+            ) < now() - INTERVAL '3 days'
           )
       AND c.chat_id NOT IN
           (SELECT item_id FROM cx_dismissed_items WHERE mp='ozon' AND item_type='chat')
@@ -388,21 +424,93 @@ _QUEUE_UNION = """
 
     SELECT
         c.chat_id, 'ym', 'chat',
-        COALESCE(c.context_type, c.order_id, 'чат'),
+        COALESCE(
+            (
+              SELECT o.supplier_article FROM ym_orders o
+              WHERE c.order_id IS NOT NULL
+                AND o.order_id::text = c.order_id
+                AND NULLIF(TRIM(o.supplier_article), '') IS NOT NULL
+              LIMIT 1
+            ),
+            (
+              SELECT r.supplier_article FROM ym_returns r
+              WHERE (
+                (c.return_id IS NOT NULL AND r.return_id::text = c.return_id)
+                OR (c.order_id IS NOT NULL AND r.order_id::text = c.order_id)
+              )
+              AND NULLIF(TRIM(r.supplier_article), '') IS NOT NULL
+              ORDER BY r.created_at DESC NULLS LAST
+              LIMIT 1
+            )
+        ),
         NULL::text,
         c.last_message, NULL::int, NULL::text, NULL::text,
         NULL::text, c.order_id,
         COALESCE(NULLIF(TRIM(c.customer_name), ''), 'Покупатель'),
-        COALESCE(c.waiting_since, c.updated_at, c.created_at, now()),
-        EXTRACT(epoch FROM now()-COALESCE(c.waiting_since, c.updated_at, c.created_at, now()))::int,
-        EXTRACT(epoch FROM COALESCE(c.updated_at, c.created_at, now()))::bigint * 1000,
+        COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND lower(COALESCE(m.sender_type, '')) IN ('customer', 'buyer', 'client', 'user')),
+            c.waiting_since, c.updated_at, c.created_at, now()
+        ),
+        EXTRACT(epoch FROM now()-COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND lower(COALESCE(m.sender_type, '')) IN ('customer', 'buyer', 'client', 'user')),
+            c.waiting_since, c.updated_at, c.created_at, now()
+        ))::int,
+        EXTRACT(epoch FROM COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.updated_at, c.created_at, now()
+        ))::bigint * 1000,
         c.needs_answer,
         c.last_sender
     FROM ym_chats c
-    WHERE COALESCE(c.updated_at, c.created_at, now()) > now() - INTERVAL '30 days'
+    WHERE COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.updated_at, c.created_at, now()
+          ) > now() - INTERVAL '30 days'
       AND c.chat_id NOT IN
           (SELECT item_id FROM cx_dismissed_items WHERE mp='ym' AND item_type='chat')
+
+    UNION ALL
+
+    -- WB претензии/возвраты: заявки, ожидающие решения продавца (Фаза 3 —
+    -- возвраты как полноценная 4-я ветка общей очереди, наравне с
+    -- отзывами/вопросами/чатами). id: claim_id, а если он ещё не пришёл от
+    -- WB — падаем на srid (как и фронт ReturnsView.vue уже делает:
+    -- item.claim_id || item.srid), чтобы строка не терялась без id.
+    SELECT
+        COALESCE(c.claim_id::text, c.srid), 'wb', 'claim',
+        c.supplier_article, c.nm_id::text,
+        COALESCE(NULLIF(TRIM(c.user_comment),''), '—'),
+        NULL::int, NULL::text, NULL::text,
+        c.photos, c.srid, NULL::text,
+        COALESCE(c.claim_date, c.order_date),
+        EXTRACT(epoch FROM now()-COALESCE(c.claim_date, c.order_date))::int,
+        NULL::bigint,
+        NULL::boolean,
+        NULL::text
+    FROM wb_claims c
+    WHERE c.status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+      AND NOT COALESCE(c.is_archive, false)
+      AND COALESCE(c.claim_id::text, c.srid) NOT IN
+          (SELECT item_id FROM cx_dismissed_items WHERE mp='wb' AND item_type='claim')
 """
+
+
+def init_unified_queue_view(engine) -> None:
+    """Создаёт/обновляет cx_unified_queue — общий VIEW очереди обращений.
+
+    Идемпотентно (CREATE OR REPLACE VIEW), вызывается при каждом старте
+    приложения из backend/main.py, как и другие init_*_tables() модулей.
+    Требует уже существующих таблиц cx_dismissed_items, wb_feedbacks,
+    ym_feedbacks, wb_questions, ym_questions, wb_chats, ozon_reviews,
+    ozon_chats, ozon_chat_messages, ym_chats, ym_chat_messages, wb_claims.
+    """
+    with engine.connect() as conn:
+        conn.execute(text(f"CREATE OR REPLACE VIEW {UNIFIED_QUEUE_VIEW} AS {_UNIFIED_QUEUE_VIEW_SQL}"))
+        conn.commit()
 
 
 @router.get("/queue")
@@ -411,7 +519,10 @@ def get_queue(
     mp: str = Query("all"),
 ):
     """Сводная очередь обращений — все площадки, сортировка по давности."""
-    mp_filter = "" if mp == "all" else f"AND mp = '{mp}'"
+    # Значение mp всегда через параметр (:mp) — в SQL-текст попадает только
+    # наличие/отсутствие условия, никогда сама строка mp (защита от SQL-инъекции).
+    mp_filter = "" if mp == "all" else "AND mp = :mp"
+    mp_params = {} if mp == "all" else {"mp": mp}
 
     with db.bind.connect() as conn:
         counts = conn.execute(text(f"""
@@ -420,11 +531,12 @@ def get_queue(
                 COUNT(*) FILTER (WHERE item_type='review')  AS reviews,
                 COUNT(*) FILTER (WHERE item_type='question') AS questions,
                 COUNT(*) FILTER (WHERE item_type='chat')    AS chats,
+                COUNT(*) FILTER (WHERE item_type='claim')   AS claims,
                 COUNT(*) FILTER (WHERE mp='wb')             AS wb,
                 COUNT(*) FILTER (WHERE mp='ym')             AS ym,
                 COUNT(*) FILTER (WHERE mp='ozon')           AS ozon
-            FROM ({_QUEUE_UNION}) q WHERE 1=1 {mp_filter}
-        """)).mappings().first()
+            FROM {UNIFIED_QUEUE_VIEW} q WHERE 1=1 {mp_filter}
+        """), mp_params).mappings().first()
 
         rows = conn.execute(text(f"""
             SELECT q.*,
@@ -435,13 +547,13 @@ def get_queue(
                      JOIN product_photos pp2 ON pp2.supplier_article = wf.supplier_article
                      WHERE wf.nm_id::text = q.nm_id LIMIT 1)
                 ) AS product_photo
-            FROM ({_QUEUE_UNION}) q
+            FROM {UNIFIED_QUEUE_VIEW} q
             LEFT JOIN product_photos pp ON pp.supplier_article = q.sku
             WHERE 1=1 {mp_filter}
             ORDER BY
                 CASE WHEN item_type='review' AND rating IS NOT NULL AND rating<=3 THEN 0 ELSE 1 END,
                 age_sec DESC NULLS LAST
-        """)).mappings().all()
+        """), mp_params).mappings().all()
 
     def _row(r):
         d = dict(r)
@@ -485,7 +597,8 @@ def get_queue(
             item["cabinet_url"] = _ozon_cabinet_chat_url(str(item.get("id") or ""))
         elif item.get("mp") == "ym":
             meta = ym_cab.get(str(item.get("id") or ""), {})
-            ctx = meta.get("context_type") or item.get("sku")
+            # Не подставлять sku (артикул) — иначе тип чата ломается
+            ctx = meta.get("context_type")
             item["context_type"] = ctx
             item["cabinet_chat_id"] = meta.get("cabinet_chat_id")
             item["cabinet_url"] = _ym_cabinet_chat_url(
@@ -530,13 +643,19 @@ def get_archive(
     per_page: int = Query(25, ge=5, le=200),
 ):
     """Отвеченные и вручную закрытые обращения."""
-    mp_cond   = "" if mp == "all"   else f"AND a.mp = '{mp}'"
-    type_cond = "" if item_type == "all" else f"AND a.item_type = '{item_type}'"
+    # Значения mp/item_type всегда через параметры — в SQL-текст попадает
+    # только наличие/отсутствие условия, никогда сами строки (защита от SQL-инъекции).
+    mp_cond   = "" if mp == "all"   else "AND a.mp = :mp"
+    type_cond = "" if item_type == "all" else "AND a.item_type = :item_type"
     offset = (page - 1) * per_page
 
     # Доп. фильтры (параметризованные)
     conds = ""
     params = {"lim": per_page, "off": offset}
+    if mp != "all":
+        params["mp"] = mp
+    if item_type != "all":
+        params["item_type"] = item_type
     if sku.strip():
         conds += " AND a.sku ILIKE :sku"
         params["sku"] = f"%{sku.strip()}%"
@@ -1052,47 +1171,209 @@ def review_card(
     return {"review": review, "chats": chats, "returns": returns, "reshipments": reshipments}
 
 
+def _normalize_claim_photos(raw) -> list:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(u) for u in raw if u]
+    s = str(raw).strip()
+    if not s:
+        return []
+    # В БД фото через пробел; URL могут быть без схемы
+    out = []
+    for u in s.split():
+        u = u.strip()
+        if not u:
+            continue
+        if u.startswith("//"):
+            u = "https:" + u
+        out.append(u)
+    return out
+
+
+def _claim_row_to_item(row: dict) -> dict:
+    d = _decode_claim(dict(row))
+    d["photos"] = _normalize_claim_photos(d.get("photos"))
+    for k in ("claim_date", "order_date"):
+        v = d.get(k)
+        if hasattr(v, "isoformat"):
+            d[k] = v.isoformat()
+    return d
+
+
 @router.get("/claims")
 def list_claims(
     active: bool = True,
     status: str = "",
     claim_type: str = Query("", alias="type"),
+    q: str = Query("", description="Поиск: артикул / srid / claim_id / комментарий"),
     page: int = 1,
     per_page: int = 25,
     db: Session = Depends(get_db),
 ):
-    """Список wb_claims с фильтрами: active, status, type."""
+    """Список wb_claims с фильтрами: active, status, type, q."""
     offset = (page - 1) * per_page
     filters, params = ["1=1"], {}
-    filters.append("is_archive = :arch")
+    filters.append("c.is_archive = :arch")
     params["arch"] = not active
     if status:
-        filters.append("status = :status")
-        params["status"] = status
+        # Поддержка и кодов, и русских статусов из БД
+        st = status.strip()
+        status_aliases = {
+            "0": ["На рассмотрении", "0", "0.0", "Открыта"],
+            "1": ["Отказ", "Отклонено", "1", "1.0"],
+            "2": ["Одобрено", "2", "2.0"],
+            "3": ["Отказ", "Закрыта", "3"],
+            "На рассмотрении": ["На рассмотрении", "0", "0.0", "Открыта"],
+            "Отказ": ["Отказ", "Отклонено", "1", "1.0", "3"],
+            "Одобрено": ["Одобрено", "2", "2.0"],
+            "Закрыта": ["Закрыта"],
+            "Отклонено": ["Отказ", "Отклонено", "1", "1.0"],
+        }
+        aliases = status_aliases.get(st, [st])
+        placeholders = []
+        for i, a in enumerate(aliases):
+            key = f"st{i}"
+            placeholders.append(f":{key}")
+            params[key] = a
+        filters.append(f"c.status IN ({', '.join(placeholders)})")
     if claim_type:
-        filters.append("claim_type = :ctype")
+        filters.append("c.claim_type = :ctype")
         params["ctype"] = claim_type
+    q = (q or "").strip()
+    if q:
+        params["q"] = f"%{q}%"
+        params["q_exact"] = q
+        filters.append("""(
+            c.supplier_article ILIKE :q
+            OR c.srid ILIKE :q
+            OR c.claim_id::text ILIKE :q
+            OR coalesce(c.user_comment,'') ILIKE :q
+            OR c.nm_id::text = :q_exact
+        )""")
     where = " AND ".join(filters)
     with db.bind.connect() as conn:
         total = conn.execute(
-            text(f"SELECT COUNT(*) FROM wb_claims WHERE {where}"), params
+            text(f"SELECT COUNT(*) FROM wb_claims c WHERE {where}"), params
         ).scalar()
         rows = conn.execute(text(f"""
             SELECT c.claim_id::text, c.srid, c.supplier_article, c.nm_id,
-                   c.claim_type, c.status, c.user_comment,
+                   c.claim_type, c.status, c.status_ex, c.user_comment,
                    c.is_archive, c.claim_date, c.order_date, c.income_id,
                    c.photos, c.correction, c.audit_status, c.audit_comment,
                    COALESCE(pp.photo_url, wpp.photo_url) AS product_photo
             FROM wb_claims c
             LEFT JOIN product_photos pp  ON pp.supplier_article = c.supplier_article
-            LEFT JOIN wb_product_photos wpp ON wpp.nm_id = c.nm_id
+            LEFT JOIN wb_product_photos wpp ON wpp.nm_id::text = c.nm_id::text
             WHERE {where}
-            ORDER BY c.claim_date DESC
+            ORDER BY c.claim_date DESC NULLS LAST
             LIMIT :lim OFFSET :off
         """), {**params, "lim": per_page, "off": offset}).mappings().all()
-    items = [_decode_claim(dict(r)) for r in rows]
+    items = [_claim_row_to_item(dict(r)) for r in rows]
     return {"items": items, "total": total, "page": page,
             "total_pages": max(1, -(-total // per_page))}
+
+
+class ClaimDecisionPayload(BaseModel):
+    action: str
+    comment: str = ""
+
+
+@router.get("/claims/{claim_id}")
+def get_claim_detail(claim_id: str, db: Session = Depends(get_db)):
+    """Карточка претензии + живые actions с WB + связанный чат."""
+    from .. import wb_claims_api
+
+    with db.bind.connect() as conn:
+        row = conn.execute(text("""
+            SELECT c.claim_id::text, c.srid, c.supplier_article, c.nm_id,
+                   c.claim_type, c.status, c.status_ex, c.user_comment,
+                   c.is_archive, c.claim_date, c.order_date, c.income_id,
+                   c.photos, c.correction, c.audit_status, c.audit_comment,
+                   COALESCE(pp.photo_url, wpp.photo_url) AS product_photo
+            FROM wb_claims c
+            LEFT JOIN product_photos pp  ON pp.supplier_article = c.supplier_article
+            LEFT JOIN wb_product_photos wpp ON wpp.nm_id::text = c.nm_id::text
+            WHERE c.claim_id::text = :cid
+            LIMIT 1
+        """), {"cid": claim_id}).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Претензия не найдена")
+        item = _claim_row_to_item(dict(row))
+
+        # Связанный чат по srid / order_rid
+        chat = None
+        srid = item.get("srid") or ""
+        if srid:
+            chat = conn.execute(text("""
+                SELECT chat_id, client_name, needs_answer, last_ts
+                FROM wb_chats
+                WHERE order_rid = :r
+                   OR EXISTS (
+                     SELECT 1 FROM wb_chat_messages m
+                     WHERE m.chat_id = wb_chats.chat_id
+                       AND m.attachments->'goodCard'->>'rid' = :r
+                   )
+                ORDER BY last_ts DESC NULLS LAST
+                LIMIT 1
+            """), {"r": srid}).mappings().first()
+            if chat:
+                chat = dict(chat)
+                if hasattr(chat.get("last_ts"), "isoformat"):
+                    chat["last_ts"] = chat["last_ts"].isoformat()
+
+    live = wb_claims_api.fetch_claim_from_wb(claim_id)
+    raw_actions = list((live or {}).get("actions") or [])
+    live_status = (live or {}).get("status") if live else item.get("status")
+    item["actions"] = wb_claims_api.map_actions(raw_actions, status=live_status or item.get("status"))
+    item["actions_raw"] = raw_actions
+    if live:
+        # Подтянуть свежий статус с WB, если есть
+        from ..wb_mini_sync import _map_claim_status, _status_ex_label
+        wb_comment = str(live.get("wb_comment") or live.get("wbComment") or "")
+        st_ex_raw = live.get("status_description") or live.get("status_ex") or ""
+        mapped = _map_claim_status(live.get("status", ""), str(st_ex_raw), wb_comment)
+        item["status"] = mapped
+        item["status_ex"] = _status_ex_label(st_ex_raw, wb_comment) or item.get("status_ex")
+        item = _decode_claim(item)
+        if wb_comment and not item.get("wb_comment"):
+            item["wb_comment"] = wb_comment
+        # Пересчитать кнопки уже по финальному статусу
+        item["actions"] = wb_claims_api.map_actions(raw_actions, status=item.get("status"))
+
+    item["chat"] = chat
+    item["can_decide"] = bool(item.get("actions")) and any(a.get("primary") for a in item["actions"])
+    item["can_change_decision"] = any(a.get("is_change") for a in (item.get("actions") or []))
+    return item
+
+
+@router.post("/claims/{claim_id}/decision")
+def decide_claim(
+    claim_id: str,
+    payload: ClaimDecisionPayload,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Одобрить / отказать по претензии WB (из чата или очереди возвратов)."""
+    from .. import wb_claims_api
+
+    action = (payload.action or "").strip()
+    if not action:
+        raise HTTPException(status_code=400, detail="Не указано действие")
+    result = wb_claims_api.decide_claim(
+        db, claim_id, action, payload.comment or ""
+    )
+    if not result.get("ok"):
+        code = int(result.get("status_code") or 502)
+        if code < 400 or code > 599:
+            code = 502
+        raise HTTPException(status_code=code, detail=result.get("error") or "Ошибка WB")
+
+    logger.info(
+        "[WB Claims] decision claim=%s action=%s by=%s",
+        claim_id, action, current_user.get("username") or current_user.get("sub") or "?",
+    )
+    return result
 
 
 @router.get("/chat-context/wb/{chat_id}")
@@ -1148,7 +1429,7 @@ def get_wb_chat_context(chat_id: str, db: Session = Depends(get_db)):
 
             cr = conn.execute(text("""
                 SELECT claim_id::text, claim_type, user_comment AS body,
-                       status, is_archive, claim_date
+                       status, is_archive, claim_date, srid
                 FROM wb_claims WHERE srid = :rid LIMIT 1
             """), {"rid": rid}).mappings().first()
             if cr:
@@ -1203,6 +1484,191 @@ def get_wb_chat_context(chat_id: str, db: Session = Depends(get_db)):
     }
 
 
+def _ozon_return_as_claim(row: dict) -> dict:
+    """Привести строку ozon_returns к форме specific.claim для UI чата."""
+    d = dict(row)
+    reason = (d.get("return_reason") or "").strip() or "—"
+    status = (d.get("status_ru") or d.get("status_sys") or "").strip() or "—"
+    return {
+        "claim_id": str(d.get("return_id") or d.get("posting_number") or d.get("id") or ""),
+        "claim_type": "return",
+        "claim_type_label": "Возврат Ozon",
+        "body": reason,
+        "status": status,
+        "status_label": status,
+        "claim_date": _ru_date(d.get("return_date")),
+        "supplier_article": d.get("supplier_article"),
+        "posting_number": d.get("posting_number"),
+        "order_number": d.get("order_number"),
+    }
+
+
+def _ym_return_as_claim(row: dict) -> dict:
+    """Привести строку ym_returns к форме specific.claim для UI чата."""
+    d = dict(row)
+    body = (d.get("return_comment") or d.get("reason_type") or "").strip() or "—"
+    status = (d.get("status_ru") or d.get("status") or "").strip() or "—"
+    return {
+        "claim_id": str(d.get("return_id") or d.get("id") or ""),
+        "claim_type": "return",
+        "claim_type_label": "Возврат ЯМ",
+        "body": body,
+        "status": status,
+        "status_label": status,
+        "claim_date": _ru_date(d.get("created_at")),
+        "supplier_article": d.get("supplier_article"),
+        "order_id": d.get("order_id"),
+    }
+
+
+@router.get("/chat-context/ozon/{chat_id}")
+def get_ozon_chat_context(chat_id: str, db: Session = Depends(get_db)):
+    """Возврат по заказу/SKU чата Ozon + последние возвраты по тому же артикулу."""
+    with db.bind.connect() as conn:
+        chat = conn.execute(text("""
+            SELECT order_number, context_sku, context_article
+            FROM ozon_chats WHERE chat_id = :cid
+        """), {"cid": chat_id}).mappings().first()
+        if not chat:
+            return {"specific": {}, "reviews": [], "questions": [], "claims": []}
+
+        order_number = (chat.get("order_number") or "").strip() or None
+        sku = chat.get("context_sku")
+        article = (chat.get("context_article") or "").strip() or None
+
+        specific_claim = None
+        if order_number or sku is not None:
+            cr = conn.execute(text("""
+                SELECT return_id, posting_number, order_number, ozon_sku,
+                       supplier_article, return_reason, status_ru, status_sys,
+                       return_date, id
+                FROM ozon_returns
+                WHERE (
+                    (:ord IS NOT NULL AND (
+                        posting_number = :ord
+                        OR order_number = :ord
+                        OR posting_number LIKE :ord || '-%'
+                    ))
+                    OR (:sku IS NOT NULL AND ozon_sku = :sku)
+                )
+                ORDER BY
+                    CASE
+                      WHEN :ord IS NOT NULL AND (
+                        posting_number = :ord OR order_number = :ord
+                      ) THEN 0
+                      WHEN :ord IS NOT NULL AND posting_number LIKE :ord || '-%' THEN 1
+                      ELSE 2
+                    END,
+                    return_date DESC NULLS LAST
+                LIMIT 1
+            """), {"ord": order_number, "sku": sku}).mappings().first()
+            if cr:
+                specific_claim = _ozon_return_as_claim(dict(cr))
+
+        claims = []
+        if article or sku is not None:
+            rows = conn.execute(text("""
+                SELECT return_id, posting_number, order_number, ozon_sku,
+                       supplier_article, return_reason, status_ru, status_sys,
+                       return_date, id
+                FROM ozon_returns
+                WHERE (
+                    (:art IS NOT NULL AND supplier_article = :art)
+                    OR (:sku IS NOT NULL AND ozon_sku = :sku)
+                )
+                ORDER BY return_date DESC NULLS LAST
+                LIMIT 5
+            """), {"art": article, "sku": sku}).mappings().all()
+            claims = [_ozon_return_as_claim(dict(r)) for r in rows]
+
+    return {
+        "specific": {"claim": specific_claim, "review": None},
+        "reviews": [],
+        "questions": [],
+        "claims": claims,
+    }
+
+
+@router.get("/chat-context/ym/{chat_id}")
+def get_ym_chat_context(chat_id: str, db: Session = Depends(get_db)):
+    """Возврат по return_id/order_id чата ЯМ + последние по заказу/артикулу."""
+    with db.bind.connect() as conn:
+        chat = conn.execute(text("""
+            SELECT return_id, order_id, context_type, customer_name
+            FROM ym_chats WHERE chat_id = :cid
+        """), {"cid": chat_id}).mappings().first()
+        if not chat:
+            return {"specific": {}, "reviews": [], "questions": [], "claims": []}
+
+        return_id = (str(chat.get("return_id") or "").strip() or None)
+        order_id = (str(chat.get("order_id") or "").strip() or None)
+
+        article = None
+        if order_id:
+            ar = conn.execute(text("""
+                SELECT supplier_article FROM ym_orders
+                WHERE order_id::text = :oid
+                  AND NULLIF(TRIM(supplier_article), '') IS NOT NULL
+                LIMIT 1
+            """), {"oid": order_id}).mappings().first()
+            if ar:
+                article = ar["supplier_article"]
+        if not article and (return_id or order_id):
+            ar = conn.execute(text("""
+                SELECT supplier_article FROM ym_returns
+                WHERE (
+                    (:rid IS NOT NULL AND return_id::text = :rid)
+                    OR (:oid IS NOT NULL AND order_id::text = :oid)
+                )
+                AND NULLIF(TRIM(supplier_article), '') IS NOT NULL
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 1
+            """), {"rid": return_id, "oid": order_id}).mappings().first()
+            if ar:
+                article = ar["supplier_article"]
+
+        specific_claim = None
+        if return_id or order_id:
+            cr = conn.execute(text("""
+                SELECT return_id, order_id, supplier_article, return_comment,
+                       reason_type, status_ru, status, created_at, id
+                FROM ym_returns
+                WHERE (
+                    (:rid IS NOT NULL AND return_id::text = :rid)
+                    OR (:oid IS NOT NULL AND order_id::text = :oid)
+                )
+                ORDER BY
+                    CASE WHEN :rid IS NOT NULL AND return_id::text = :rid THEN 0 ELSE 1 END,
+                    created_at DESC NULLS LAST
+                LIMIT 1
+            """), {"rid": return_id, "oid": order_id}).mappings().first()
+            if cr:
+                specific_claim = _ym_return_as_claim(dict(cr))
+
+        claims = []
+        if return_id or order_id or article:
+            rows = conn.execute(text("""
+                SELECT return_id, order_id, supplier_article, return_comment,
+                       reason_type, status_ru, status, created_at, id
+                FROM ym_returns
+                WHERE (
+                    (:rid IS NOT NULL AND return_id::text = :rid)
+                    OR (:oid IS NOT NULL AND order_id::text = :oid)
+                    OR (:art IS NOT NULL AND supplier_article = :art)
+                )
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 5
+            """), {"rid": return_id, "oid": order_id, "art": article}).mappings().all()
+            claims = [_ym_return_as_claim(dict(r)) for r in rows]
+
+    return {
+        "specific": {"claim": specific_claim, "review": None},
+        "reviews": [],
+        "questions": [],
+        "claims": claims,
+    }
+
+
 @router.get("/wb-photo/{nm_id}")
 def wb_product_photo(nm_id: str, db: Session = Depends(get_db)):
     """Фото товара WB — редирект на CDN URL из кэша Content API."""
@@ -1236,12 +1702,7 @@ def download_wb_chat_file(file_id: str):
     if file_id.startswith("http"):
         return RedirectResponse(file_id)
     try:
-        r = requests.get(
-            f"{WB_CHAT_BASE}/api/v1/seller/download/{file_id}",
-            headers={"Authorization": _wb_key()},
-            timeout=25,
-        )
-        r.raise_for_status()
+        r = wb_client.download_chat_file(file_id, timeout=25)
         return Response(
             content=r.content,
             media_type=r.headers.get("Content-Type", "image/jpeg"),
@@ -1260,12 +1721,7 @@ def download_ozon_chat_file(url: str = Query(..., min_length=8)):
     if not cid or not key:
         raise HTTPException(status_code=400, detail="Ozon ключи не настроены")
     try:
-        r = requests.get(
-            url,
-            headers={"Client-Id": cid, "Api-Key": key},
-            timeout=30,
-        )
-        r.raise_for_status()
+        r = ozon_client.download_chat_file(url, timeout=30)
         return Response(
             content=r.content,
             media_type=r.headers.get("Content-Type", "image/jpeg"),
@@ -1280,11 +1736,8 @@ def download_ym_chat_file(url: str = Query(..., min_length=8)):
     """Прокси вложений ЯМ (если URL с partner API)."""
     if "api.partner.market.yandex.ru" not in url and "yandex" not in url:
         raise HTTPException(status_code=400, detail="Недопустимый URL файла ЯМ")
-    key = _ym_key()
-    headers = {"Api-Key": key} if key else {}
     try:
-        r = requests.get(url, headers=headers, timeout=30)
-        r.raise_for_status()
+        r = ym_client.download_chat_file(url, timeout=30)
         return Response(
             content=r.content,
             media_type=r.headers.get("Content-Type", "application/octet-stream"),
@@ -1409,13 +1862,7 @@ def answer_wb_feedback(
         raise HTTPException(status_code=503, detail="WB_API_KEY не настроен")
 
     try:
-        r = requests.patch(
-            f"{WB_FEEDBACKS_BASE}/api/v1/feedbacks",
-            headers=_wb_headers(),
-            json={"id": feedback_id, "text": txt},
-            timeout=20,
-        )
-        r.raise_for_status()
+        wb_client.answer_feedback(feedback_id, txt, timeout=20)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"WB API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -1453,13 +1900,7 @@ def answer_wb_question(
         raise HTTPException(status_code=503, detail="WB_API_KEY не настроен")
 
     try:
-        r = requests.patch(
-            f"{WB_FEEDBACKS_BASE}/api/v1/questions",
-            headers=_wb_headers(),
-            json={"id": question_id, "text": txt},
-            timeout=20,
-        )
-        r.raise_for_status()
+        wb_client.answer_question(question_id, txt, timeout=20)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"WB API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -1494,13 +1935,7 @@ def answer_ym_feedback(
         raise HTTPException(status_code=503, detail="YM_API_KEY или YM_BUSINESS_ID не настроены")
 
     try:
-        r = requests.post(
-            f"{YM_BASE}/v2/businesses/{_ym_business_id()}/goods-feedback/comments",
-            headers=_ym_headers(),
-            json={"feedbackId": feedback_id, "text": txt},
-            timeout=20,
-        )
-        r.raise_for_status()
+        ym_client.answer_feedback(feedback_id, txt, biz=_ym_business_id(), key=_ym_key(), timeout=20)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"ЯМ API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -1538,13 +1973,7 @@ def answer_ym_question(
         raise HTTPException(status_code=503, detail="YM_API_KEY или YM_BUSINESS_ID не настроены")
 
     try:
-        r = requests.post(
-            f"{YM_BASE}/v1/businesses/{_ym_business_id()}/questions/{question_id}/answers",
-            headers=_ym_headers(),
-            json={"text": txt},
-            timeout=20,
-        )
-        r.raise_for_status()
+        ym_client.answer_question(question_id, txt, biz=_ym_business_id(), key=_ym_key(), timeout=20)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"ЯМ API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -1565,19 +1994,12 @@ def answer_ym_question(
 
 # ── Ответ на отзыв Ozon ──────────────────────────────────────────────────────
 
-OZON_BASE = "https://api-seller.ozon.ru"
-
-
 def _oz_key() -> str:
-    return os.getenv("OZON_API_KEY", "")
+    return ozon_client.api_key()
 
 
 def _oz_cid() -> str:
-    return os.getenv("OZON_CLIENT_ID", "")
-
-
-def _oz_headers() -> dict:
-    return {"Client-Id": _oz_cid(), "Api-Key": _oz_key(), "Content-Type": "application/json"}
+    return ozon_client.client_id()
 
 
 @router.post("/ozon/reviews/{review_id}/answer")
@@ -1594,13 +2016,7 @@ def answer_ozon_review(
         raise HTTPException(status_code=503, detail="OZON_API_KEY / OZON_CLIENT_ID не настроены")
 
     try:
-        r = requests.post(
-            f"{OZON_BASE}/v1/review/comment/create",
-            headers=_oz_headers(),
-            json={"review_uuid": review_id, "text": txt},
-            timeout=20,
-        )
-        r.raise_for_status()
+        ozon_client.answer_review(review_id, txt, timeout=20)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Ozon API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -1638,13 +2054,8 @@ def send_ozon_chat_message(
         raise HTTPException(status_code=503, detail="OZON_API_KEY / OZON_CLIENT_ID не настроены")
 
     try:
-        r = requests.post(
-            f"{OZON_BASE}/v1/chat/send/message",
-            headers=_oz_headers(),
-            json={"chat_id": chat_id, "text": txt[:1000]},
-            timeout=20,
-        )
-        r.raise_for_status()
+        from .. import ozon_chat_sync
+        ozon_chat_sync.send_message(chat_id, txt)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Ozon Chat API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -1772,13 +2183,7 @@ def send_wb_chat_message(
         )
 
     try:
-        r = requests.post(
-            f"{WB_CHAT_BASE}/api/v1/seller/message",
-            files={"replySign": (None, reply_sign), "message": (None, txt[:1000])},
-            headers={"Authorization": _wb_key()},
-            timeout=20,
-        )
-        r.raise_for_status()
+        wb_client.send_chat_message(reply_sign, txt, timeout=20)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"WB Chat API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -1976,28 +2381,21 @@ def confirm_moderation(
     # Отправляем через соответствующий API
     try:
         if mp == "wb" and itype == "review":
-            r = requests.patch(f"{WB_FEEDBACKS_BASE}/api/v1/feedbacks",
-                headers=_wb_headers(), json={"id": item_id, "text": txt}, timeout=20)
-            r.raise_for_status()
+            wb_client.answer_feedback(item_id, txt, timeout=20)
             with db.bind.connect() as conn:
                 conn.execute(text("UPDATE wb_feedbacks SET state='answered',answer_text=:a WHERE id=:i"),
                              {"a": txt, "i": item_id})
                 conn.commit()
 
         elif mp == "wb" and itype == "question":
-            r = requests.patch(f"{WB_FEEDBACKS_BASE}/api/v1/questions",
-                headers=_wb_headers(), json={"id": item_id, "text": txt}, timeout=20)
-            r.raise_for_status()
+            wb_client.answer_question(item_id, txt, timeout=20)
             with db.bind.connect() as conn:
                 conn.execute(text("UPDATE wb_questions SET state='answered',answer_text=:a WHERE id=:i"),
                              {"a": txt, "i": item_id})
                 conn.commit()
 
         elif mp == "ym" and itype == "review":
-            r = requests.post(
-                f"{YM_BASE}/v2/businesses/{_ym_business_id()}/goods-feedback/comments",
-                headers=_ym_headers(), json={"feedbackId": item_id, "text": txt}, timeout=20)
-            r.raise_for_status()
+            ym_client.answer_feedback(item_id, txt, biz=_ym_business_id(), key=_ym_key(), timeout=20)
             with db.bind.connect() as conn:
                 conn.execute(text("UPDATE ym_feedbacks SET answered_at=now(),answer_text=:a WHERE feedback_id=:i"),
                              {"a": txt, "i": item_id})
@@ -2166,9 +2564,7 @@ def _run_auto_replies(db) -> dict:
                     queued += 1
                 else:
                     try:
-                        r = requests.patch(f"{WB_FEEDBACKS_BASE}/api/v1/feedbacks",
-                            headers=_wb_headers(), json={"id": iid, "text": body_tpl}, timeout=20)
-                        r.raise_for_status()
+                        wb_client.answer_feedback(iid, body_tpl, timeout=20)
                         with db.bind.connect() as conn:
                             conn.execute(text("UPDATE wb_feedbacks SET state='answered',answer_text=:a WHERE id=:i"),
                                          {"a": body_tpl, "i": iid})
@@ -2215,10 +2611,7 @@ def _run_auto_replies(db) -> dict:
                     queued += 1
                 else:
                     try:
-                        r = requests.post(
-                            f"{YM_BASE}/v2/businesses/{_ym_business_id()}/goods-feedback/comments",
-                            headers=_ym_headers(), json={"feedbackId": row[0], "text": body_tpl}, timeout=20)
-                        r.raise_for_status()
+                        ym_client.answer_feedback(row[0], body_tpl, biz=_ym_business_id(), key=_ym_key(), timeout=20)
                         with db.bind.connect() as conn:
                             conn.execute(text("UPDATE ym_feedbacks SET answered_at=now(),answer_text=:a WHERE feedback_id=:i"),
                                          {"a": body_tpl, "i": row[0]})

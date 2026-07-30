@@ -4,15 +4,21 @@
   WB_CHAT_ENABLED=false  → воркер работает, события читает, в чат НЕ пишет (мониторинг)
   WB_CHAT_ENABLED=true   → авто-отвечает ссылкой на форму + шлёт уведомления об отправке
 
-Триггер: менеджер вручную пишет WB_TRIGGER_KEYWORD (по умолч. #от) в чате продавца.
-  Система видит это событие → записывает chatID → (если enabled) отвечает ссылкой на форму.
+Триггер: менеджер вручную пишет WB_TRIGGER_KEYWORD (по умолч. #от) в чате продавца,
+  или вставляет ссылку на форму с токеном. Система видит новое сообщение продавца →
+  записывает chatID → (если enabled) отвечает ссылкой на форму.
+
+Источник данных: этот модуль НЕ опрашивает WB /seller/events сам — события чатов
+  опрашивает wb_chat_sync.py (каждые 5с) и сохраняет всё в wb_chat_messages; здесь
+  мы только читаем оттуда новые сообщения продавца (см. _worker_once), чтобы не
+  дублировать опрос одного и того же эндпоинта двумя независимыми процессами.
 """
 import os
 import re
 import asyncio
-import requests as _req
 from typing import Optional
 from backend.database import db_session
+from backend import wb_client
 
 TOKEN_PATTERN  = re.compile(
     r'(?:https?://)?box\.vidovito\.com(?:/reshipment/form)?\?t=([\w\-]+)',
@@ -26,18 +32,11 @@ try:
 except ImportError:
     pass
 
-WB_CHAT_BASE = "https://buyer-chat-api.wildberries.ru"
 FORM_BASE_URL = "https://cxvo.ru/reshipment/form"
-
-_next_event_ts: int = 0
 
 
 def _key() -> str:
-    return os.getenv("WB_API_KEY", "")
-
-
-def _h() -> dict:
-    return {"Authorization": _key()}
+    return wb_client.api_key()
 
 
 def is_enabled() -> bool:
@@ -52,9 +51,7 @@ def _trigger() -> str:
 
 def get_chats() -> list[dict]:
     """Список всех чатов продавца."""
-    r = _req.get(f"{WB_CHAT_BASE}/api/v1/seller/chats", headers=_h(), timeout=90)
-    r.raise_for_status()
-    return (r.json() or {}).get("result") or []
+    return wb_client.get_chats(key=_key())
 
 
 def ensure_chat_order_rid_column(engine_or_conn) -> None:
@@ -178,33 +175,23 @@ def backfill_order_rids_from_wb(db=None) -> dict:
 
 def get_chat_messages(chat_id: str, take: int = 30) -> list[dict]:
     """Получить последние сообщения конкретного чата (для поиска токена в истории)."""
-    r = _req.get(
-        f"{WB_CHAT_BASE}/api/v1/seller/chat/messages",
-        headers=_h(),
-        params={"chatID": chat_id, "take": take},
-        timeout=15,
-    )
-    r.raise_for_status()
-    return (r.json() or {}).get("messages") or []
+    return wb_client.get_chat_messages(chat_id, take=take, key=_key(), timeout=15)
 
 
 def get_events(next_ts: int = 0) -> dict:
-    """Новые события чатов. next_ts = курсор пагинации (мс)."""
-    params = {"next": next_ts} if next_ts else {}
-    r = _req.get(f"{WB_CHAT_BASE}/api/v1/seller/events", params=params, headers=_h(), timeout=15)
+    """Новые события чатов. next_ts = курсор пагинации (мс).
+
+    Используется только вспомогательными скриптами (scripts/) для ручной
+    отладки — сам wb_chat.py больше не опрашивает /seller/events напрямую
+    (см. docstring модуля), это делает wb_chat_sync.py."""
+    r = wb_client.get_chat_events_raw(next_ts, key=_key(), timeout=15)
     r.raise_for_status()
     return r.json() or {}
 
 
 def send_message(reply_sign: str, text: str) -> dict:
     """Отправить сообщение в чат покупателю (multipart)."""
-    r = _req.post(
-        f"{WB_CHAT_BASE}/api/v1/seller/message",
-        files={"replySign": (None, reply_sign), "message": (None, text[:1000])},
-        headers=_h(),
-        timeout=15,
-    )
-    r.raise_for_status()
+    r = wb_client.send_chat_message(reply_sign, text, key=_key(), timeout=15)
     return r.json() or {}
 
 
@@ -284,51 +271,82 @@ def send_rejection_notification(reply_sign: str, reason: str = "") -> bool:
 
 # ── Воркер ────────────────────────────────────────────────────────────────────
 
-async def _worker_once(get_db) -> None:
-    """Один проход: опросить события, обработать триггеры."""
-    global _next_event_ts
+def _ensure_trigger_cursor(db) -> None:
+    from sqlalchemy import text as sql_text
+    db.execute(sql_text("""
+        CREATE TABLE IF NOT EXISTS wb_chat_trigger_cursor (
+            id               INTEGER PRIMARY KEY DEFAULT 1,
+            last_message_id  BIGINT NOT NULL DEFAULT 0,
+            updated_at       TIMESTAMP DEFAULT now()
+        )
+    """))
+    db.execute(sql_text(
+        "INSERT INTO wb_chat_trigger_cursor (id, last_message_id) VALUES (1, 0) "
+        "ON CONFLICT (id) DO NOTHING"
+    ))
 
+
+async def _worker_once(get_db) -> None:
+    """Один проход: обработать триггеры в НОВЫХ сообщениях продавца.
+
+    Раньше этот воркер сам опрашивал WB /seller/events своим отдельным курсором
+    в памяти — тем же эндпоинтом, который уже опрашивает wb_chat_sync.py каждые
+    5 секунд и сохраняет всё в wb_chat_messages. Чтобы не дублировать опрос
+    одного и того же эндпоинта, здесь просто читаем то, что wb_chat_sync уже
+    сохранил (курсор — wb_chat_trigger_cursor.last_message_id, по id новой
+    таблицы wb_chat_messages). Бизнес-логика (токен/хэштег-триггер) не менялась.
+    """
     if not _key():
         return
 
     from sqlalchemy import text as sql_text
 
+    rows = []
     try:
-        data = await asyncio.to_thread(get_events, _next_event_ts)
+        with db_session() as db:
+            _ensure_trigger_cursor(db)
+            last_id = db.execute(sql_text(
+                "SELECT last_message_id FROM wb_chat_trigger_cursor WHERE id = 1"
+            )).scalar() or 0
+            rows = db.execute(sql_text("""
+                SELECT id, chat_id, text
+                FROM wb_chat_messages
+                WHERE id > :last_id AND sender = 'seller'
+                ORDER BY id ASC
+                LIMIT 500
+            """), {"last_id": last_id}).mappings().all()
+            rows = list(rows)
+            if rows:
+                max_id = max(r["id"] for r in rows)
+                db.execute(sql_text(
+                    "UPDATE wb_chat_trigger_cursor SET last_message_id = :v, updated_at = now() WHERE id = 1"
+                ), {"v": max_id})
+                db.commit()
     except Exception as e:
-        print(f"[WB Chat] get_events error: {e}")
+        print(f"[WB Chat] read new seller messages error: {e}")
         return
 
-    events = data.get("events") or []
-    new_next = data.get("next") or _next_event_ts
-
-    for event in events:
-        chat_id = str(event.get("chatID", ""))
-        message = event.get("message") or {}
-        sender = message.get("sender", "")
-        text_body = message.get("text", "")
-
-        if sender != "seller":
-            continue
+    for row in rows:
+        chat_id = str(row["chat_id"] or "")
+        text_body = row["text"] or ""
 
         # Новая схема: токен в ссылке
         token_match = TOKEN_PATTERN.search(text_body)
         if token_match:
             token = token_match.group(1)
-            print(f"[WB Chat] Token '{token}' found in event chat {chat_id}")
+            print(f"[WB Chat] Token '{token}' found in message, chat {chat_id}")
 
-            # Получаем все чаты и ищем тот, у кого токен в lastMessage
-            # Event.chatID может быть неверным (WB отдаёт chatID другого чата),
-            # поэтому ищем по реальному lastMessage
+            # chat_id из сообщения иногда не совпадает с реальным чатом (тот же
+            # нюанс, что и раньше с event.chatID) — перепроверяем по lastMessage
+            # в списке чатов.
             try:
                 await asyncio.sleep(0.5)
                 chats = await asyncio.to_thread(get_chats)
             except Exception as e:
                 print(f"[WB Chat] get_chats error: {e}")
-                _next_event_ts = new_next
                 continue
 
-            real_chat_id = chat_id  # fallback на event.chatID
+            real_chat_id = chat_id  # fallback на chat_id из сообщения
             chat_data = None
             for c in chats:
                 last_msg = (c.get("lastMessage") or {}).get("text", "")
@@ -340,7 +358,6 @@ async def _worker_once(get_db) -> None:
             if real_chat_id != chat_id:
                 print(f"[WB Chat] Token chat corrected: {chat_id} → {real_chat_id}")
 
-            # Если по lastMessage не нашли — ищем по chatID из события
             if not chat_data:
                 chat_data = next((c for c in chats if str(c.get("chatID", "")) == chat_id), None)
 
@@ -392,7 +409,6 @@ async def _worker_once(get_db) -> None:
                 except Exception as e:
                     print(f"[WB Chat] Pending save error: {e}")
 
-            _next_event_ts = new_next
             continue
 
         # Старая схема: хэштег-триггер (оставляем для обратной совместимости)
@@ -461,16 +477,28 @@ async def _worker_once(get_db) -> None:
         except Exception as e:
             print(f"[WB Chat] DB pending write error: {e}")
 
-    _next_event_ts = new_next
+
+_SCAN_CHATS_EVERY_N_CYCLES = 5  # полное сканирование /seller/chats — раз в ~5 мин, а не каждую минуту
 
 
 async def start_worker(get_db) -> None:
-    """Фоновый asyncio воркер. Запускается из lifespan FastAPI."""
-    print("[WB Chat] Worker started (polls every 60s)")
+    """Фоновый asyncio воркер. Запускается из lifespan FastAPI.
+
+    _worker_once читает уже сохранённые сообщения из БД (дёшево, не ходит в API WB),
+    поэтому крутится каждые 60с. Полное сканирование /seller/chats (scan_chats_for_tokens)
+    само по себе — HTTP-запрос к WB, поэтому вызывается реже: раньше дёргало этот
+    эндпоинт каждую минуту круглосуточно, теперь — раз в ~5 минут, той же частотой,
+    что и аналогичное сканирование в wb_mini_sync.
+    """
+    print("[WB Chat] Worker started (messages every 60s, full chat scan every ~5 min)")
+    cycle = 0
     while True:
         await asyncio.sleep(60)
-        if _key():
-            await _worker_once(get_db)
+        if not _key():
+            continue
+        await _worker_once(get_db)
+        cycle += 1
+        if cycle % _SCAN_CHATS_EVERY_N_CYCLES == 0:
             try:
                 # Блокирующий вызов к API WB — в отдельный поток, чтобы не морозить event loop
                 await asyncio.to_thread(scan_chats_for_tokens, get_db)
@@ -661,8 +689,11 @@ def scan_chats_for_tokens(get_db) -> int:
 
 
 def init_event_cursor(get_db=None) -> None:
-    """Вызвать при старте: сканируем чаты на токены, устанавливаем курсор событий."""
-    global _next_event_ts
+    """Вызвать при старте: сканируем чаты на токены, ставим курсор триггеров на
+    текущий момент (последний уже сохранённый id в wb_chat_messages), чтобы при
+    каждом перезапуске backend не переобрабатывать всю накопленную историю
+    сообщений продавца через логику триггеров."""
+    from sqlalchemy import text as sql_text
     if not _key():
         return
     try:
@@ -672,9 +703,15 @@ def init_event_cursor(get_db=None) -> None:
             if linked:
                 print(f"[WB Chat] Init scan: linked {linked} token(s) from active chats")
 
-        data = get_events(0)
-        new_next = data.get("newestEventTime") or data.get("next") or 0
-        _next_event_ts = new_next
-        print(f"[WB Chat] Initialized, next_ts={_next_event_ts}")
+        with db_session() as db:
+            _ensure_trigger_cursor(db)
+            max_id = db.execute(sql_text("SELECT COALESCE(MAX(id), 0) FROM wb_chat_messages")).scalar() or 0
+            db.execute(sql_text("""
+                UPDATE wb_chat_trigger_cursor
+                SET last_message_id = GREATEST(last_message_id, :v), updated_at = now()
+                WHERE id = 1
+            """), {"v": max_id})
+            db.commit()
+        print(f"[WB Chat] Trigger cursor initialized at message id={max_id}")
     except Exception as e:
         print(f"[WB Chat] Init cursor failed (no WB API key?): {e}")

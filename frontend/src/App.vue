@@ -38,6 +38,11 @@ const closeMobile = () => { isMobileOpen.value = false }
 const route = useRoute()
 let activityTimer = null
 
+// «Возвраты» пока умеют только WB (claims API есть только у Wildberries) —
+// общий переключатель площадки там ни на что не влияет, поэтому прячем его,
+// чтобы не выглядело как сломанный фильтр.
+const showPlatformSwitcher = computed(() => availablePlatforms.value.length > 1 && route.path !== '/returns')
+
 function pingActivity () {
   if (!permissionsStore.loaded) return
   apiFetch('/api/v1/cx-control/activity/ping', {
@@ -204,8 +209,8 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
         </div>
       </div>
 
-      <!-- Переключатель платформ (скрыт, если доступна только одна) -->
-      <div v-if="availablePlatforms.length > 1"
+      <!-- Переключатель платформ (скрыт, если доступна только одна, и на /returns — там пока только WB) -->
+      <div v-if="showPlatformSwitcher"
            class="border-b border-slate-200 flex-shrink-0"
            :class="isCollapsed ? 'px-2 py-2' : 'px-3 py-3'">
 

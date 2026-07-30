@@ -290,10 +290,15 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+import { useToast } from '../composables/useToast'
+import { useCxTemplates } from '../composables/useCxTemplates'
+import { useCxQueueActions } from '../composables/useCxQueueActions'
+import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls } from '../utils/cx'
 
-const BASE = '/api/v1/cx-responses'
 const platformStore = usePlatformStore()
 const currentMp = computed(() => platformStore.platform || 'all')
+
+const { toast, showToast } = useToast()
 
 // ── Навигация ──────────────────────────────────────────────────────────────
 const sections = [
@@ -309,14 +314,6 @@ function switchSection(key) {
 watch(currentMp, () => {
   if (activeSection.value === 'queue') loadQueue()
 })
-
-// ── Стили ──────────────────────────────────────────────────────────────────
-const mpBadgeCls = {
-  wb:   'bg-purple-100 text-purple-700',
-  ym:   'bg-yellow-100 text-yellow-700',
-  ozon: 'bg-blue-100 text-blue-700',
-  all:  'bg-gray-100 text-gray-600',
-}
 
 // ── Очередь ────────────────────────────────────────────────────────────────
 const queueLoading = ref(false)
@@ -359,7 +356,7 @@ async function loadQueue() {
   }
 }
 
-// ── Отправка ───────────────────────────────────────────────────────────────
+// ── Отправка / модерация / dismiss (общая логика — см. composables/useCxQueueActions) ──
 function replyEndpoint(item) {
   const id = encodeURIComponent(String(item.id))
   const map = {
@@ -369,137 +366,14 @@ function replyEndpoint(item) {
   return map[`${item.mp}:${item.item_type}`] || null
 }
 
-async function sendReply(item) {
-  const txt = item._reply?.trim()
-  if (!txt) return
-  const path = replyEndpoint(item)
-  if (!path) { showToast('Этот тип нельзя отправить', 'error'); return }
-  try {
-    await apiFetch(`${BASE}${path}`, {
-      method: 'POST',
-      body: JSON.stringify({ text: txt }),
-    })
-    showToast('Ответ отправлен', 'ok')
-    queueItems.value = queueItems.value.filter(i =>
-      !(i.mp === item.mp && i.item_type === item.item_type && String(i.id) === String(item.id))
-    )
-  } catch (e) {
-    showToast('Ошибка отправки: ' + (e?.message || ''), 'error')
-  }
-}
+const { sendReply: _sendReply, confirmMod, rejectMod, dismissItem } = useCxQueueActions(queueItems, showToast)
+function sendReply(item) { return _sendReply(item, replyEndpoint) }
 
-// ── Модерация ──────────────────────────────────────────────────────────────
-async function confirmMod(item) {
-  try {
-    await apiFetch(`${BASE}/moderation/${item.pending_mod_id}/confirm`, { method: 'POST' })
-    showToast('Ответ отправлен', 'ok')
-    queueItems.value = queueItems.value.filter(i => i !== item)
-  } catch (e) {
-    showToast('Ошибка: ' + (e?.message || ''), 'error')
-  }
-}
-
-async function rejectMod(item) {
-  try {
-    await apiFetch(`${BASE}/moderation/${item.pending_mod_id}`, { method: 'DELETE' })
-    item.pending_mod_id = null
-    item.pending_draft  = null
-    showToast('Черновик отклонён', 'ok')
-  } catch {
-    showToast('Ошибка', 'error')
-  }
-}
-
-// ── Dismiss ────────────────────────────────────────────────────────────────
-async function dismissItem(item) {
-  if (!confirm('Закрыть без ответа и перенести в архив?')) return
-  try {
-    await apiFetch(`${BASE}/dismiss`, {
-      method: 'POST',
-      body: JSON.stringify({ mp: item.mp, item_type: item.item_type, item_id: String(item.id), note: '' }),
-    })
-    queueItems.value = queueItems.value.filter(i => i !== item)
-    showToast('Перенесено в архив', 'ok')
-  } catch {
-    showToast('Ошибка', 'error')
-  }
-}
-
-// ── Шаблоны ────────────────────────────────────────────────────────────────
-const templates   = ref([])
-const tplLoading  = ref(false)
-const tplFormOpen = ref(false)
-const editTpl     = ref({})
-
-const tplDefaults = () => ({
-  title: '', body: '', mp: 'all', item_type: 'question', tone: 'neutral',
-  auto_reply: false, min_rating: null, max_rating: null, require_no_text: false,
-  stop_words: '', ignore_questions: false, requires_confirmation: false,
-})
-
-async function loadTemplates() {
-  tplLoading.value = true
-  try {
-    const r = await apiFetch(`${BASE}/templates`)
-    const d = await r.json()
-    templates.value = Array.isArray(d) ? d : (d.templates || [])
-  } finally {
-    tplLoading.value = false
-  }
-}
-
-function openTplForm(t = null) {
-  editTpl.value     = t ? { ...t } : tplDefaults()
-  tplFormOpen.value = true
-}
-
-async function saveTpl() {
-  const method = editTpl.value.id ? 'PUT' : 'POST'
-  const url    = editTpl.value.id ? `${BASE}/templates/${editTpl.value.id}` : `${BASE}/templates`
-  await apiFetch(url, { method, body: JSON.stringify(editTpl.value) })
-  tplFormOpen.value = false
-  await loadTemplates()
-  showToast('Шаблон сохранён', 'ok')
-}
-
-async function deleteTpl(id) {
-  if (!confirm('Удалить шаблон?')) return
-  await apiFetch(`${BASE}/templates/${id}`, { method: 'DELETE' })
-  await loadTemplates()
-  showToast('Шаблон удалён', 'ok')
-}
-
-function relevantTemplates(item) {
-  if (!Array.isArray(templates.value)) return []
-  return templates.value.filter(t => {
-    if (t.mp !== 'all' && t.mp !== item.mp) return false
-    if (t.item_type !== 'all' && t.item_type !== 'question') return false
-    return true
-  }).slice(0, 6)
-}
-
-// ── Форматирование ─────────────────────────────────────────────────────────
-function fmtAge(sec) {
-  if (sec == null) return '?'
-  if (sec < 3600)  return `${Math.round(sec / 60)} мин`
-  if (sec < 86400) return `${Math.round(sec / 3600)} ч`
-  return `${Math.round(sec / 86400)} дн`
-}
-
-function ageCls(sec) {
-  if (sec == null)       return 'bg-gray-100 text-gray-500'
-  if (sec > 86400 * 2)   return 'bg-red-100 text-red-700'
-  if (sec > 86400)       return 'bg-orange-100 text-orange-700'
-  if (sec > 3600 * 4)    return 'bg-yellow-100 text-yellow-700'
-  return 'bg-green-100 text-green-700'
-}
-
-// ── Toast ──────────────────────────────────────────────────────────────────
-const toast = ref(null)
-function showToast(msg, type = 'ok') {
-  toast.value = { msg, type }
-  setTimeout(() => { toast.value = null }, 3000)
-}
+// ── Шаблоны (общая логика — см. composables/useCxTemplates) ─────────────────
+const {
+  templates, tplLoading, tplFormOpen, editTpl,
+  loadTemplates, openTplForm, saveTpl, deleteTpl, relevantTemplates,
+} = useCxTemplates('question', showToast)
 
 // ── Init ───────────────────────────────────────────────────────────────────
 onMounted(async () => {

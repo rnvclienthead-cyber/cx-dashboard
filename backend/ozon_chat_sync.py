@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 import requests
 from sqlalchemy import text
 
+from . import ozon_client
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -32,25 +34,22 @@ MAX_HISTORY_CHATS = 80  # за цикл дотягиваем историю в �
 
 
 def _cid() -> str:
-    return os.getenv("OZON_CLIENT_ID", "")
+    return ozon_client.client_id()
 
 
 def _key() -> str:
-    return os.getenv("OZON_API_KEY", "")
+    return ozon_client.api_key()
 
 
 def _hdr() -> dict:
-    return {
-        "Client-Id": _cid(),
-        "Api-Key": _key(),
-        "Content-Type": "application/json",
-    }
+    return ozon_client.headers(_cid(), _key())
 
 
+# Единая реализация — backend/ozon_client.py (используется и ozon_worker.py,
+# и routers/cx_responses.py). Обёртка с прежней сигнатурой (path, body) сохранена,
+# чтобы не переписывать все вызовы _post(...) ниже по файлу.
 def _post(path: str, body: dict) -> dict:
-    r = requests.post(f"{OZON_BASE}{path}", headers=_hdr(), json=body, timeout=25)
-    r.raise_for_status()
-    return r.json() or {}
+    return ozon_client.post(path, body, timeout=25)
 
 
 def _parse_ts(raw) -> datetime | None:
@@ -77,6 +76,118 @@ def _msg_text(data) -> str:
 
 
 _IMG_RE = re.compile(r"!\[[^\]]*\]\((https?://[^)]+)\)")
+# Полный номер отправления Ozon: 0162883533-0295-1
+_POSTING_RE = re.compile(r"\b(\d{5,}-\d{2,5}-\d{1,3})\b")
+_ORDER_RE = re.compile(r"\b(\d{5,}-\d{2,5})\b")
+# Сколько чатов за цикл синка резолвим через Posting API
+_API_RESOLVE_BUDGET = 25
+
+
+def _preview_text(body: str) -> str:
+    """Превью для списка: не показываем сырой markdown картинок."""
+    s = (body or "").strip()
+    if not s:
+        return ""
+    if _IMG_RE.fullmatch(s) or (s.startswith("![") and "http" in s and len(s) < 400):
+        return "📷 Фото"
+    cleaned = _IMG_RE.sub("📷", s).strip()
+    return cleaned[:500]
+
+
+def _posting_candidates(order_number: str | None, texts: list[str]) -> list[str]:
+    """Кандидаты posting_number: из текста сообщений + суффиксы -1..-10 к заказу."""
+    found: list[str] = []
+
+    def _add(p: str):
+        p = (p or "").strip()
+        if p and p not in found:
+            found.append(p)
+
+    for t in texts:
+        for m in _POSTING_RE.findall(t or ""):
+            _add(m)
+
+    base = (order_number or "").strip()
+    if base and _POSTING_RE.fullmatch(base):
+        _add(base)
+        parts = base.rsplit("-", 1)
+        base = parts[0] if len(parts) == 2 else base
+    if base and _ORDER_RE.fullmatch(base):
+        for i in range(1, 11):
+            _add(f"{base}-{i}")
+    return found
+
+
+def _fetch_posting_product(posting_number: str) -> dict | None:
+    """FBO/FBS get → offer_id (наш артикул) и sku."""
+    for path in ("/v2/posting/fbo/get", "/v3/posting/fbs/get"):
+        try:
+            r = _post(path, {"posting_number": posting_number})
+        except requests.HTTPError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (400, 404):
+                continue
+            logger.debug("[OzonChat] posting get %s %s: %s", path, posting_number, e)
+            continue
+        except Exception as e:
+            logger.debug("[OzonChat] posting get %s %s: %s", path, posting_number, e)
+            continue
+        res = r.get("result") or r
+        prods = res.get("products") or []
+        if not prods:
+            continue
+        p = prods[0] or {}
+        article = str(p.get("offer_id") or "").strip()
+        if not article:
+            continue
+        sku_raw = p.get("sku")
+        try:
+            ozon_sku = int(sku_raw) if sku_raw is not None else None
+        except (TypeError, ValueError):
+            ozon_sku = None
+        return {
+            "posting_number": str(res.get("posting_number") or posting_number),
+            "order_number": str(res.get("order_number") or "") or None,
+            "order_id": res.get("order_id"),
+            "status": res.get("status"),
+            "supplier_article": article,
+            "sku_name": p.get("name"),
+            "ozon_sku": ozon_sku,
+            "price": p.get("price"),
+            "created_at": res.get("in_process_at") or res.get("created_at"),
+        }
+    return None
+
+
+def _cache_ozon_order(conn, info: dict) -> None:
+    """Кэш отправления в ozon_orders (чтобы не бить API повторно)."""
+    if not info.get("posting_number") or not info.get("supplier_article"):
+        return
+    try:
+        conn.execute(text("""
+            INSERT INTO ozon_orders
+                (posting_number, order_id, order_number, status,
+                 supplier_article, sku_name, created_at, price)
+            VALUES
+                (:pnum, :oid, :onum, :status,
+                 :article, :sname, :created, :price)
+            ON CONFLICT (posting_number) DO UPDATE SET
+                supplier_article = COALESCE(EXCLUDED.supplier_article, ozon_orders.supplier_article),
+                sku_name         = COALESCE(EXCLUDED.sku_name, ozon_orders.sku_name),
+                status           = COALESCE(EXCLUDED.status, ozon_orders.status),
+                synced_at        = NOW()
+        """), {
+            "pnum": info["posting_number"],
+            "oid": info.get("order_id"),
+            "onum": info.get("order_number"),
+            "status": info.get("status"),
+            "article": info["supplier_article"],
+            "sname": info.get("sku_name"),
+            "created": _parse_ts(info.get("created_at")),
+            "price": info.get("price"),
+        })
+    except Exception as e:
+        logger.debug("[OzonChat] cache ozon_orders: %s", e)
 
 
 def _msg_images(data, is_image: bool = False) -> list[str]:
@@ -283,6 +394,15 @@ def _sync_history(conn, chat_id: str) -> int:
             "read": bool(m.get("is_read")),
             "att": ",".join(imgs) if imgs else None,
         })
+        # Убираем локальный дубль после отправки из CX (message_id = local-...)
+        if sender == "seller" and body:
+            conn.execute(text("""
+                DELETE FROM ozon_chat_messages
+                WHERE chat_id = :cid
+                  AND message_id LIKE 'local-%'
+                  AND sender_type = 'seller'
+                  AND text = :txt
+            """), {"cid": chat_id, "txt": body[:4000]})
         stored += 1
 
         if not last_text and body and sender in ("customer", "seller"):
@@ -291,6 +411,15 @@ def _sync_history(conn, chat_id: str) -> int:
         elif not last_text and body:
             last_text = body
             last_sender = sender
+        # Номер отправления часто в тексте клиента (контекст API пустой)
+        if sender == "customer" and body and not last_order:
+            m_post = _POSTING_RE.search(body)
+            if m_post:
+                last_order = "-".join(m_post.group(1).split("-")[:2])
+            else:
+                m_ord = _ORDER_RE.search(body)
+                if m_ord:
+                    last_order = m_ord.group(1)
 
     # Если превью пустое — любое первое сообщение
     if not last_text and messages:
@@ -325,6 +454,13 @@ def _sync_history(conn, chat_id: str) -> int:
     # (не от system/notification Ozon и не от seller).
     needs = bool(customer_last)
 
+    # Время последнего сообщения клиента — для «ждёт N дн», не время синка
+    last_cust_at = None
+    for m in messages:
+        if _sender_type(m.get("user")) == "customer":
+            last_cust_at = _parse_ts(m.get("created_at"))
+            break
+
     conn.execute(text("""
         UPDATE ozon_chats SET
             last_message    = COALESCE(NULLIF(:msg, ''), last_message),
@@ -336,24 +472,218 @@ def _sync_history(conn, chat_id: str) -> int:
                 ELSE false
             END,
             waiting_since   = CASE
-                WHEN chat_status ILIKE 'OPENED' AND :needs AND waiting_since IS NULL THEN NOW()
-                WHEN NOT (chat_status ILIKE 'OPENED' AND :needs) THEN NULL
-                ELSE waiting_since
+                WHEN chat_status ILIKE 'OPENED' AND :needs THEN COALESCE(:wait_at, waiting_since, NOW())
+                ELSE NULL
             END,
             updated_at = NOW()
         WHERE chat_id = :cid
     """), {
         "cid": chat_id,
-        "msg": (last_text or "")[:500],
+        "msg": _preview_text(last_text or ""),
         "sender": last_sender,
         "sku": int(last_sku) if last_sku and str(last_sku).isdigit() else None,
         "ord": last_order,
         "needs": needs,
+        "wait_at": last_cust_at,
     })
+
+    # Ozon SKU / заказ / отправление → наш supplier_article (для фото и возвратов)
+    _resolve_article(conn, chat_id, allow_api=True)
+
+    # Клиент написал — вернуть из архива
+    if needs:
+        conn.execute(text("""
+            DELETE FROM cx_dismissed_items
+            WHERE mp = 'ozon' AND item_type = 'chat' AND item_id = :cid
+        """), {"cid": chat_id})
+    # Мы ответили, клиент молчит >3 дней — в архив (как массовое правило)
+    elif last_sender == "seller":
+        last_any = None
+        for m in messages:
+            last_any = _parse_ts(m.get("created_at"))
+            if last_any:
+                break
+        if last_any and (datetime.now(timezone.utc).replace(tzinfo=None) - last_any).total_seconds() > 3 * 86400:
+            conn.execute(text("""
+                INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+                VALUES ('chat', :cid, 'ozon', 'ozon_chat_sync',
+                        'Авто: нет ответа клиента >3 дн после нашего')
+                ON CONFLICT (item_type, item_id, mp) DO NOTHING
+            """), {"cid": chat_id})
     return stored
 
 
+def _resolve_article(conn, chat_id: str, allow_api: bool = True) -> bool:
+    """Заполнить context_article (+ sku) из returns/orders или Posting API по отправлению.
+
+    Возвращает True, если артикул уже есть / удалось заполнить.
+    """
+    global _api_resolve_left
+
+    row = conn.execute(text("""
+        SELECT context_article, context_sku, order_number
+        FROM ozon_chats WHERE chat_id = :cid
+    """), {"cid": chat_id}).mappings().first()
+    if not row:
+        return False
+    if (row.get("context_article") or "").strip():
+        return True
+
+    # 1) БД: returns + orders (в т.ч. posting LIKE order-% )
+    conn.execute(text("""
+        UPDATE ozon_chats c SET
+            context_article = COALESCE(
+                NULLIF(TRIM(c.context_article), ''),
+                (
+                    SELECT r.supplier_article
+                    FROM ozon_returns r
+                    WHERE c.context_sku IS NOT NULL
+                      AND r.ozon_sku = c.context_sku
+                      AND NULLIF(TRIM(r.supplier_article), '') IS NOT NULL
+                    ORDER BY r.return_date DESC NULLS LAST
+                    LIMIT 1
+                ),
+                (
+                    SELECT r.supplier_article
+                    FROM ozon_returns r
+                    WHERE NULLIF(TRIM(c.order_number), '') IS NOT NULL
+                      AND (
+                        r.posting_number = c.order_number
+                        OR r.order_number = c.order_number
+                        OR r.posting_number LIKE c.order_number || '-%'
+                      )
+                      AND NULLIF(TRIM(r.supplier_article), '') IS NOT NULL
+                    ORDER BY r.return_date DESC NULLS LAST
+                    LIMIT 1
+                ),
+                (
+                    SELECT o.supplier_article
+                    FROM ozon_orders o
+                    WHERE NULLIF(TRIM(c.order_number), '') IS NOT NULL
+                      AND (
+                        o.posting_number = c.order_number
+                        OR o.order_number = c.order_number
+                        OR o.posting_number LIKE c.order_number || '-%'
+                      )
+                      AND NULLIF(TRIM(o.supplier_article), '') IS NOT NULL
+                    ORDER BY o.created_at DESC NULLS LAST
+                    LIMIT 1
+                )
+            ),
+            context_sku = COALESCE(
+                c.context_sku,
+                (
+                    SELECT r.ozon_sku FROM ozon_returns r
+                    WHERE c.context_sku IS NULL
+                      AND NULLIF(TRIM(c.order_number), '') IS NOT NULL
+                      AND (
+                        r.posting_number = c.order_number
+                        OR r.order_number = c.order_number
+                        OR r.posting_number LIKE c.order_number || '-%'
+                      )
+                      AND r.ozon_sku IS NOT NULL
+                    ORDER BY r.return_date DESC NULLS LAST
+                    LIMIT 1
+                )
+            )
+        WHERE c.chat_id = :cid
+          AND NULLIF(TRIM(c.context_article), '') IS NULL
+    """), {"cid": chat_id})
+
+    art = conn.execute(text(
+        "SELECT context_article FROM ozon_chats WHERE chat_id = :cid"
+    ), {"cid": chat_id}).scalar()
+    if (art or "").strip():
+        return True
+
+    if not allow_api or _api_resolve_left <= 0:
+        return False
+
+    # 2) Тексты сообщений → кандидаты posting_number → FBO/FBS API
+    msgs = conn.execute(text("""
+        SELECT text FROM ozon_chat_messages
+        WHERE chat_id = :cid AND text IS NOT NULL AND text <> ''
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT 30
+    """), {"cid": chat_id}).fetchall()
+    texts = [r[0] for r in msgs if r and r[0]]
+    order_number = (row.get("order_number") or "").strip() or None
+    candidates = _posting_candidates(order_number, texts)
+    if not candidates:
+        return False
+
+    _api_resolve_left -= 1
+    for pn in candidates:
+        info = _fetch_posting_product(pn)
+        if not info:
+            continue
+        _cache_ozon_order(conn, info)
+        conn.execute(text("""
+            UPDATE ozon_chats SET
+                context_article = COALESCE(NULLIF(TRIM(context_article), ''), :art),
+                context_sku     = COALESCE(context_sku, :sku),
+                order_number    = COALESCE(NULLIF(TRIM(order_number), ''), :ord),
+                updated_at      = NOW()
+            WHERE chat_id = :cid
+        """), {
+            "cid": chat_id,
+            "art": info["supplier_article"],
+            "sku": info.get("ozon_sku"),
+            "ord": info.get("order_number") or order_number,
+        })
+        logger.info(
+            "[OzonChat] article via posting %s → %s (chat=%s)",
+            pn, info["supplier_article"], chat_id[:8],
+        )
+        return True
+    return False
+
+
+_api_resolve_left = _API_RESOLVE_BUDGET
+
+
+def backfill_chat_articles(db, limit: int = 40) -> int:
+    """One-shot / периодический резолв артикулов для открытых чатов без article."""
+    global _api_resolve_left
+    _api_resolve_left = max(limit, _API_RESOLVE_BUDGET)
+    done = 0
+    with db.bind.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT chat_id FROM ozon_chats
+            WHERE chat_status ILIKE 'OPENED'
+              AND (chat_type IS NULL OR upper(chat_type) LIKE '%BUYER%')
+              AND NULLIF(TRIM(context_article), '') IS NULL
+              AND (
+                NULLIF(TRIM(order_number), '') IS NOT NULL
+                OR context_sku IS NOT NULL
+                OR EXISTS (
+                  SELECT 1 FROM ozon_chat_messages m
+                  WHERE m.chat_id = ozon_chats.chat_id
+                    AND m.text ~ '[0-9]{5,}-[0-9]{2,}-[0-9]+'
+                )
+              )
+            ORDER BY updated_at DESC NULLS LAST
+            LIMIT :lim
+        """), {"lim": limit}).fetchall()
+        for (cid,) in rows:
+            try:
+                if _resolve_article(conn, cid, allow_api=True):
+                    done += 1
+                conn.commit()
+            except Exception as e:
+                logger.warning("[OzonChat] backfill %s: %s", cid, e)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+    logger.info("[OzonChat] backfill articles: %d / %d", done, len(rows))
+    return done
+
+
 def sync_chats(db) -> int:
+    global _api_resolve_left
+    _api_resolve_left = _API_RESOLVE_BUDGET
+
     if not _cid() or not _key():
         return 0
 
@@ -412,11 +742,61 @@ def sync_chats(db) -> int:
                 logger.error("[OzonChat] upsert error: %s", e)
         conn.commit()
 
+        # Добиваем хвост: seller last + тишина >3д (даже если history в этом цикле не трогали)
+        archived = conn.execute(text("""
+            WITH targets AS (
+              SELECT c.chat_id
+              FROM ozon_chats c
+              LEFT JOIN cx_dismissed_items d
+                ON d.item_id = c.chat_id AND d.mp = 'ozon' AND d.item_type = 'chat'
+              WHERE d.item_id IS NULL
+                AND lower(COALESCE(c.last_sender, '')) IN ('seller', 'courier')
+                AND COALESCE(
+                  (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+                  c.waiting_since, c.updated_at, c.created_at
+                ) < now() - interval '3 days'
+            ),
+            ins AS (
+              INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+              SELECT 'chat', chat_id, 'ozon', 'ozon_chat_sync',
+                     'Авто: нет ответа клиента >3 дн после нашего'
+              FROM targets
+              ON CONFLICT (item_type, item_id, mp) DO NOTHING
+              RETURNING item_id
+            )
+            SELECT count(*) FROM ins
+        """)).scalar() or 0
+        if archived:
+            conn.execute(text("""
+                UPDATE ozon_chats c SET needs_answer = false, waiting_since = NULL, updated_at = now()
+                WHERE EXISTS (
+                  SELECT 1 FROM cx_dismissed_items d
+                  WHERE d.item_id = c.chat_id AND d.mp = 'ozon' AND d.item_type = 'chat'
+                    AND d.note LIKE 'Авто: нет ответа клиента%'
+                )
+                  AND c.needs_answer = true
+            """))
+            conn.commit()
+            logger.info("[OzonChat] auto-archived seller-silent>3d: %s", archived)
+
+    # Добиваем артикулы по номерам отправлений (FBO/FBS get) — чаты без sku в контексте
+    try:
+        filled = backfill_chat_articles(db, limit=30)
+        if filled:
+            logger.info("[OzonChat] posting→article filled=%d", filled)
+    except Exception as e:
+        logger.warning("[OzonChat] article backfill: %s", e)
+
     logger.info(
         "[OzonChat] synced chats=%d history=%d unique=%d",
         synced, history_done, len(by_id),
     )
     return synced
+
+
+def send_message(chat_id: str, text: str) -> None:
+    """Отправка текста покупателю через Seller Chat API."""
+    ozon_client.send_chat_message(chat_id, text)
 
 
 async def start_ozon_chat_sync_worker(get_db_func) -> None:

@@ -3,38 +3,27 @@
 Сохраняет первое фото по supplier_article в таблицу product_photos.
 Запускается раз в 24 часа из main.py.
 """
-import os
 import asyncio
 import logging
-import requests
 from sqlalchemy import text
+
+from . import ozon_client
 
 logger = logging.getLogger("ozon_photo_sync")
 
-OZON_BASE     = "https://api-seller.ozon.ru"
 SYNC_INTERVAL = 604800  # 7 дней
 
 
 def _cid() -> str:
-    return os.getenv("OZON_CLIENT_ID", "")
+    return ozon_client.client_id()
 
 
 def _key() -> str:
-    return os.getenv("OZON_API_KEY", "")
-
-
-def _hdr() -> dict:
-    return {
-        "Client-Id": _cid(),
-        "Api-Key":   _key(),
-        "Content-Type": "application/json",
-    }
+    return ozon_client.api_key()
 
 
 def _post(path: str, body: dict) -> dict:
-    r = requests.post(f"{OZON_BASE}{path}", headers=_hdr(), json=body, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return ozon_client.post(path, body, timeout=30)
 
 
 def _collect_articles(get_db_func) -> list[str]:

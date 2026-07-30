@@ -1,22 +1,13 @@
 """Лёгкий воркер: частое обновление отзывов и возвратов WB (каждые 5 мин)."""
-import os
 import asyncio
-import requests as _req
 from datetime import datetime, timedelta
 from sqlalchemy import text
 from backend.database import db_session
-from backend import broadcaster
-
-FEEDBACKS_BASE = "https://feedbacks-api.wildberries.ru"
-RETURNS_BASE   = "https://returns-api.wildberries.ru"
+from backend import broadcaster, wb_client
 
 
 def _key() -> str:
-    return os.getenv("WB_API_KEY", "").strip('"')
-
-
-def _h() -> dict:
-    return {"Authorization": _key()}
+    return wb_client.api_key()
 
 
 def _photo_url(p) -> str:
@@ -37,13 +28,7 @@ def sync_recent_feedbacks(db) -> int:
     if not key:
         return 0
     try:
-        r = _req.get(
-            f"{FEEDBACKS_BASE}/api/v1/feedbacks",
-            params={"isAnswered": "false", "take": 100, "skip": 0, "order": "dateDesc"},
-            headers=_h(), timeout=30,
-        )
-        r.raise_for_status()
-        feedbacks = r.json().get("data", {}).get("feedbacks") or []
+        feedbacks = wb_client.list_feedbacks(is_answered=False, take=100, skip=0, key=key)
     except Exception as e:
         print(f"[MiniSync] feedbacks API error: {e}")
         return 0
@@ -105,6 +90,117 @@ def sync_recent_feedbacks(db) -> int:
     return count
 
 
+def sync_recent_questions(db) -> int:
+    """Забирает последние 100 неотвеченных вопросов и обновляет wb_questions.
+
+    Раньше вопросы тянул только ночной worker.py (раз в 2ч/сутки) — теперь это
+    единственный источник для вопросов WB, обновляется каждые 5 минут вместе
+    с отзывами и претензиями (см. sync_recent_feedbacks выше)."""
+    key = _key()
+    if not key:
+        return 0
+    try:
+        questions = wb_client.list_questions(is_answered=False, take=100, skip=0, key=key)
+    except Exception as e:
+        print(f"[MiniSync] questions API error: {e}")
+        return 0
+
+    count = 0
+    for q in questions:
+        qid = str(q.get("id", "")).strip()
+        if not qid:
+            continue
+        q_text = (q.get("text") or "").strip()
+        if not q_text:
+            continue
+        sku = (q.get("productDetails") or {}).get("supplierArticle") or "Без артикула"
+        ans_obj = q.get("answer") or {}
+        try:
+            db.execute(text("""
+                INSERT INTO wb_questions (id, supplier_article, created_date, text, answer_text, state)
+                VALUES (:id, :sku, :created, :text, :ans, 'active')
+                ON CONFLICT (id) DO UPDATE SET
+                    text        = EXCLUDED.text,
+                    answer_text = COALESCE(EXCLUDED.answer_text, wb_questions.answer_text),
+                    state       = 'active'
+            """), {
+                "id":      qid,
+                "sku":     sku,
+                "created": q.get("createdDate"),
+                "text":    q_text,
+                "ans":     ans_obj.get("text") if ans_obj else None,
+            })
+            count += 1
+        except Exception as e:
+            print(f"[MiniSync] question insert error: {e}")
+
+    if count:
+        db.commit()
+        print(f"[MiniSync] questions synced: {count}")
+    return count
+
+
+def sync_all_answered_questions(db) -> int:
+    """
+    Тянет отвеченные вопросы WB (isAnswered=true) с пагинацией (до 14 дней назад)
+    и сохраняет их как state='archive'. Запускается раз в день — аналог
+    sync_all_answered_wb, но для вопросов.
+    """
+    key = _key()
+    if not key:
+        return 0
+
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=14)).isoformat()
+    total = 0
+
+    for skip in range(0, 10001, 1000):
+        try:
+            questions = wb_client.list_questions(is_answered=True, take=1000, skip=skip, key=key)
+        except Exception as e:
+            print(f"[MiniSync] sync_all_answered_questions error skip={skip}: {e}")
+            break
+
+        if not questions:
+            break
+
+        try:
+            for q in questions:
+                qid = str(q.get("id", "")).strip()
+                if not qid:
+                    continue
+                q_text = (q.get("text") or "").strip()
+                sku = (q.get("productDetails") or {}).get("supplierArticle") or "Без артикула"
+                ans_obj = q.get("answer") or {}
+                db.execute(text("""
+                    INSERT INTO wb_questions (id, supplier_article, created_date, text, answer_text, state)
+                    VALUES (:id, :sku, :created, :text, :ans, 'archive')
+                    ON CONFLICT (id) DO UPDATE SET
+                        answer_text = COALESCE(EXCLUDED.answer_text, wb_questions.answer_text),
+                        state       = 'archive'
+                """), {
+                    "id":      qid,
+                    "sku":     sku,
+                    "created": q.get("createdDate"),
+                    "text":    q_text,
+                    "ans":     ans_obj.get("text") if ans_obj else None,
+                })
+                total += 1
+            db.commit()
+        except Exception as e:
+            print(f"[MiniSync] sync_all_answered_questions DB error: {e}")
+            break
+
+        dates = [q.get("createdDate", "")[:10] for q in questions if q.get("createdDate")]
+        if dates and min(dates) < cutoff:
+            break
+        if len(questions) < 1000:
+            break
+
+    print(f"[MiniSync] sync_all_answered_questions: {total} processed")
+    return total
+
+
 def sync_answered_feedbacks_for_active_requests(db) -> int:
     """Синхронизирует отвеченные отзывы по nm_id активных заявок (чтобы найти отзыв конкретного клиента)."""
     key = _key()
@@ -123,13 +219,7 @@ def sync_answered_feedbacks_for_active_requests(db) -> int:
     total = 0
     for nm_id in nm_ids:
         try:
-            r = _req.get(
-                f"{FEEDBACKS_BASE}/api/v1/feedbacks",
-                params={"isAnswered": "true", "take": 50, "skip": 0, "order": "dateDesc", "nm": int(nm_id)},
-                headers=_h(), timeout=20,
-            )
-            r.raise_for_status()
-            feedbacks = r.json().get("data", {}).get("feedbacks") or []
+            feedbacks = wb_client.list_feedbacks(is_answered=True, take=50, skip=0, nm_id=int(nm_id), key=key, timeout=20)
         except Exception as e:
             print(f"[MiniSync] answered feedbacks API error nm={nm_id}: {e}")
             continue
@@ -301,28 +391,11 @@ def _fetch_claims_page(
     claim_id=None,
     nm_id=None,
 ) -> list:
-    params: dict = {
-        "limit": limit,
-        "offset": offset,
-        "is_archive": "true" if is_archive else "false",
-    }
-    if claim_id:
-        params["id"] = claim_id
-    if nm_id:
-        params["nm_id"] = int(nm_id) if str(nm_id).isdigit() else nm_id
-    r = _req.get(
-        f"{RETURNS_BASE}/api/v1/claims",
-        params=params,
-        headers=_h(), timeout=30,
-    )
+    r = wb_client.get_claims_page_raw(is_archive=is_archive, limit=limit, offset=offset, claim_id=claim_id, nm_id=nm_id)
     if r.status_code == 429:
         import time as _time
         _time.sleep(25)
-        r = _req.get(
-            f"{RETURNS_BASE}/api/v1/claims",
-            params=params,
-            headers=_h(), timeout=30,
-        )
+        r = wb_client.get_claims_page_raw(is_archive=is_archive, limit=limit, offset=offset, claim_id=claim_id, nm_id=nm_id)
     r.raise_for_status()
     return (r.json() or {}).get("claims") or []
 
@@ -764,12 +837,7 @@ def scan_unlinked_tokens(db) -> int:
             return len(rows) - len(unlinked)
 
         # Список WB чатов
-        resp = _req.get(
-            f"https://buyer-chat-api.wildberries.ru/api/v1/seller/chats",
-            headers={"Authorization": key}, timeout=15
-        )
-        resp.raise_for_status()
-        chats = (resp.json() or {}).get("result") or []
+        chats = wb_client.get_chats(key=key, timeout=15)
     except Exception as e:
         print(f"[MiniSync] scan_tokens error: {e}")
         return 0
@@ -1003,13 +1071,7 @@ def sync_all_answered_wb(db) -> int:
 
     for skip in range(0, 10001, 1000):
         try:
-            r = _req.get(
-                f"{FEEDBACKS_BASE}/api/v1/feedbacks",
-                params={"isAnswered": "true", "take": 1000, "skip": skip, "order": "dateDesc"},
-                headers=_h(), timeout=30,
-            )
-            r.raise_for_status()
-            feedbacks = r.json().get("data", {}).get("feedbacks") or []
+            feedbacks = wb_client.list_feedbacks(is_answered=True, take=1000, skip=skip, key=key)
         except Exception as e:
             print(f"[MiniSync] sync_all_answered error skip={skip}: {e}")
             break
@@ -1109,16 +1171,8 @@ def _post_wb_feedback_reply(feedback_id: str, existing_answer: str | None) -> bo
     else:
         text_to_post = _MSG_REVIEW_REPLY
     try:
-        resp = _req.patch(
-            f"{FEEDBACKS_BASE}/api/v1/feedbacks",
-            headers={"Authorization": f"Bearer {key}"},
-            json={"id": feedback_id, "text": text_to_post},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            return True
-        print(f"[MiniSync] WB feedback reply error {resp.status_code}: {resp.text[:200]}")
-        return False
+        wb_client.answer_feedback(feedback_id, text_to_post, key=key, timeout=10)
+        return True
     except Exception as e:
         print(f"[MiniSync] WB feedback reply exception: {e}")
         return False
@@ -1385,6 +1439,8 @@ async def start_mini_sync_worker(get_db) -> None:
                 await asyncio.sleep(2)
                 await asyncio.to_thread(sync_recent_claims, db)
                 await asyncio.sleep(2)
+                await asyncio.to_thread(sync_recent_questions, db)
+                await asyncio.sleep(2)
                 await asyncio.to_thread(scan_unlinked_tokens, db)
                 await asyncio.sleep(2)
                 await asyncio.to_thread(sync_reshipment_review_snapshots, db)
@@ -1404,6 +1460,8 @@ async def start_mini_sync_worker(get_db) -> None:
                     await asyncio.to_thread(sync_all_answered_wb, db)
                     await asyncio.sleep(3)
                     await asyncio.to_thread(archive_old_active_feedbacks, db)
+                    await asyncio.sleep(3)
+                    await asyncio.to_thread(sync_all_answered_questions, db)
                     _last_daily = today
 
             # Уведомляем фронтенд об обновлении данных

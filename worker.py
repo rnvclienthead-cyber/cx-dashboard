@@ -11,6 +11,7 @@ import boto3 # type: ignore
 import gspread # type: ignore
 from PIL import Image # type: ignore
 from dotenv import load_dotenv # type: ignore
+from backend import wb_client
 
 load_dotenv()
 
@@ -114,7 +115,6 @@ def fetch_wb_claims():
     except Exception as e:
         print(f"⚠️ Ошибка загрузки справочника артикулов: {e}")
 
-    claims_url = "https://returns-api.wildberries.ru/api/v1/claims"
     all_claims = []
     
     for archive in ["false", "true"]:
@@ -124,7 +124,9 @@ def fetch_wb_claims():
         
         while True:
             try:
-                response = requests.get(claims_url, headers=headers, params=params, timeout=30)
+                response = wb_client.get_claims_page_raw(
+                    is_archive=(archive == "true"), limit=params["limit"], offset=params["offset"],
+                )
                 if response.status_code == 429:
                     time.sleep(30); continue
                     
@@ -254,12 +256,7 @@ def sync_claims_to_db(df):
 def fetch_feedbacks_archive():
     print("⏳ Запуск сбора архивных отзывов (Voice of Customer)...")
     log_to_system("Синхронизатор VOC", "INFO", "Старт парсинга архива отзывов")
-    
-    headers = {
-        "Authorization": os.getenv("WB_API_KEY"), 
-        "Content-Type": "application/json"
-    }
-    
+
     upsert_sql = text("""
         INSERT INTO wb_feedbacks (id, supplier_article, nm_id, created_date, valuation, text, answer_text, photos, state)
         VALUES (:id, :sku, :nm_id, :created, :val, :text, :ans, :photos, 'archive')
@@ -277,8 +274,7 @@ def fetch_feedbacks_archive():
 
     try:
         while True:
-            url = f"https://feedbacks-api.wildberries.ru/api/v1/feedbacks/archive?isAnswered=true&take={take}&skip={skip}&order=dateDesc"
-            resp = requests.get(url, headers=headers)
+            resp = wb_client.list_feedbacks_archive_raw(take=take, skip=skip)
 
             if resp.status_code == 422:
                 print("🏁 Достигнут предел архива WB (лимит пагинации).")
@@ -338,11 +334,7 @@ def fetch_feedbacks_archive():
 
 def fetch_new_feedbacks():
     print("⏳ Запуск сбора НОВЫХ (неотвеченных) отзывов...")
-    headers = {
-        "Authorization": os.getenv("WB_API_KEY"), 
-        "Content-Type": "application/json"
-    }
-    
+
     upsert_sql = text("""
         INSERT INTO wb_feedbacks (id, supplier_article, nm_id, created_date, valuation, text, answer_text, photos, state)
         VALUES (:id, :sku, :nm_id, :created, :val, :text, :ans, :photos, 'active')
@@ -361,8 +353,7 @@ def fetch_new_feedbacks():
 
     try:
         while True:
-            url = f"https://feedbacks-api.wildberries.ru/api/v1/feedbacks?isAnswered=false&take={take}&skip={skip}&order=dateDesc"
-            resp = requests.get(url, headers=headers)
+            resp = wb_client.list_feedbacks_raw(is_answered=False, take=take, skip=skip)
 
             if resp.status_code == 422:
                 break
@@ -418,11 +409,7 @@ def fetch_new_feedbacks():
 
 def fetch_questions():
     print("⏳ Запуск сбора ВОПРОСОВ (новых и отвеченных)...")
-    headers = {
-        "Authorization": os.getenv("WB_API_KEY"), 
-        "Content-Type": "application/json"
-    }
-    
+
     upsert_sql = text("""
         INSERT INTO wb_questions (id, supplier_article, created_date, text, answer_text, state)
         VALUES (:id, :sku, :created, :text, :ans, :state)
@@ -439,9 +426,8 @@ def fetch_questions():
             take = 5000
             
             while True:
-                url = f"https://feedbacks-api.wildberries.ru/api/v1/questions?isAnswered={is_answered}&take={take}&skip={skip}&order=dateDesc"
-                resp = requests.get(url, headers=headers)
-                
+                resp = wb_client.list_questions_raw(is_answered=(is_answered == "true"), take=take, skip=skip)
+
                 if resp.status_code == 422:
                     break
                 elif resp.status_code != 200:
@@ -1208,10 +1194,53 @@ def sync_wb_report_detail():
 
 # =========================================================================
 # ПОРЯДОК ЗАПУСКА
+#
+# Запуск (PYTHONPATH=/root/cx-dashboard):
+#   python3 worker.py hourly   — не делает почти ничего (см. ниже), можно убрать из cron
+#   python3 worker.py daily    — инвойсы/матрица/логистика/финотчёт + ИИ-тегирование (cron: 0 3 * * *)
+#   python3 worker.py full     — claims/отзывы/вопросы + всё из daily, вручную (ретро-синк/тест/бэкфилл)
+#
+# ВАЖНО (история): до этой правки "hourly" и "daily" не распознавались кодом,
+# и оба проваливались в полный ночной цикл — из-за этого он гонялся каждые
+# 2 часа круглосуточно вместо одного раза в сутки. Теперь неизвестный режим
+# явно завершается с ошибкой (как в ym_worker.py/ozon_worker.py), а не тихо
+# запускает тяжёлый цикл.
+#
+# ВАЖНО (единый источник данных): претензии/отзывы/вопросы WB больше не тянет
+# ни "hourly", ни cron вообще — единственный источник теперь backend/wb_mini_sync.py
+# (работает внутри backend непрерывно, раз в 5 минут). До этого их независимо
+# опрашивали 2 процесса на 2 разных графиках — это и была основная дублирующая
+# нагрузка на API WB. "full" оставлен как единственный, ручной способ наполнить
+# эти таблицы, если backend не запущен (первичный сев базы, тест окружения).
 # =========================================================================
 if __name__ == "__main__":
     import subprocess
+    from backend import cron_lock
     mode = sys.argv[1] if len(sys.argv) > 1 else "full"
+
+    # Защита от повторного запуска: если предыдущий вызов worker.py (любой
+    # режим) ещё не завершился, новый процесс тут же выходит — см. Фазу 5.
+    _lock_conn = cron_lock.acquire_or_exit(engine_local, "worker", log_db=log_to_system)
+
+    def run(fn, *args, label=None, **kwargs):
+        """Сбой одной задачи не должен обрывать остальные (как в ym_worker.py/ozon_worker.py)."""
+        name = label or getattr(fn, "__name__", str(fn))
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            print(f"❌ Ошибка в {name}: {e}")
+            log_to_system(name, "ERROR", str(e))
+
+    def run_ai_tagger_wb():
+        print("🤖 Запуск ИИ-тегирования WB-претензий...")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        try:
+            subprocess.run(
+                [sys.executable, os.path.join(script_dir, "ai_tagger.py"), "wb"],
+                timeout=3600
+            )
+        except Exception as e:
+            log_to_system("AI-тегировщик WB", "ERROR", f"Сбой запуска: {e}")
 
     if mode == "logistics":
         print("💰 СИНК ЛОГИСТИКИ ВБ (продажи + заказы)")
@@ -1291,35 +1320,54 @@ if __name__ == "__main__":
             sys.exit(1)
         sys.exit(0)
 
-    # mode == "full" — полный ночной цикл в 01:00
-    print("🚀 СТАРТ ЧИСТОГО ВОРКЕРА")
-    log_to_system("Единый Воркер", "INFO", "Запуск полного ночного цикла автоматизации")
-    try:
-        sync_invoices()
-        sync_assortment_matrix()
-        sync_cogs_matrix()
-        sync_factories()
-        sync_claims_to_db(fetch_wb_claims())
-        fetch_feedbacks_archive()
-        fetch_new_feedbacks()
-        fetch_questions()
-        fetch_and_save_logistics("https://statistics-api.wildberries.ru/api/v1/supplier/sales", "SALE")
-        fetch_and_save_orders("https://statistics-api.wildberries.ru/api/v1/supplier/orders")
-        sync_wb_report_detail()
-        print("🏁 СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА")
-        log_to_system("Единый Воркер", "SUCCESS", "Синхронизация данных по всем API выполнена успешно")
-    except Exception as e:
-        print(f"💥 ОШИБКА: {e}")
-        log_to_system("Единый Воркер", "FAIL", f"Критический сбой выполнения воркера: {e}")
-        sys.exit(1)
+    if mode == "hourly":
+        # Претензии, отзывы и вопросы WB больше НЕ опрашиваются отсюда: единственный
+        # источник для них теперь backend/wb_mini_sync.py (крутится внутри backend
+        # постоянно, раз в 5 минут — это ближе к реальному времени, чем раз в 2 часа,
+        # и раньше эти же данные тянулись отсюда ВТОРЫМ, полностью независимым
+        # процессом). Режим оставлен как безопасный no-op, чтобы старая запись
+        # в cron ("0 */2 * * * worker.py hourly") ничего не ломала — её можно
+        # убрать из crontab при следующем деплое.
+        print("ℹ️ WB hourly: пропущен — претензии/отзывы/вопросы теперь синкает wb_mini_sync внутри backend (раз в 5 мин)")
+        log_to_system("Воркер WB (hourly)", "INFO", "no-op: перенесено на wb_mini_sync, см. cron можно удалить")
+        sys.exit(0)
 
-    # Автоматическое ИИ-тегирование WB-возвратов после синхронизации
-    print("🤖 Запуск ИИ-тегирования WB-претензий...")
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        subprocess.run(
-            [sys.executable, os.path.join(script_dir, "ai_tagger.py"), "wb"],
-            timeout=3600
-        )
-    except Exception as e:
-        log_to_system("AI-тегировщик WB", "ERROR", f"Сбой запуска: {e}")
+    if mode == "daily":
+        # Инвойсы, ассортимент, себестоимость, заводы, логистика, заказы, финотчёт — раз в сутки.
+        print("🚀 WB daily: инвойсы + ассортимент + логистика + финотчёт")
+        log_to_system("Воркер WB (daily)", "INFO", "Старт: инвойсы, матрица, логистика, финотчёт")
+        run(sync_invoices)
+        run(sync_assortment_matrix)
+        run(sync_cogs_matrix)
+        run(sync_factories)
+        run(fetch_and_save_logistics, "https://statistics-api.wildberries.ru/api/v1/supplier/sales", "SALE")
+        run(fetch_and_save_orders, "https://statistics-api.wildberries.ru/api/v1/supplier/orders")
+        run(sync_wb_report_detail)
+        log_to_system("Воркер WB (daily)", "SUCCESS", "Дневная синхронизация выполнена")
+        print("🏁 WB daily завершён")
+        run_ai_tagger_wb()
+        sys.exit(0)
+
+    if mode == "full":
+        # Ручной полный прогон (hourly + daily вместе) — для ретро-синка/теста, не для cron.
+        print("🚀 WB full: полный прогон (hourly + daily вручную)")
+        log_to_system("Воркер WB (full)", "INFO", "Ручной полный прогон: hourly + daily")
+        run(sync_invoices)
+        run(sync_assortment_matrix)
+        run(sync_cogs_matrix)
+        run(sync_factories)
+        run(lambda: sync_claims_to_db(fetch_wb_claims()), label="sync_claims_wb")
+        run(fetch_feedbacks_archive)
+        run(fetch_new_feedbacks)
+        run(fetch_questions)
+        run(fetch_and_save_logistics, "https://statistics-api.wildberries.ru/api/v1/supplier/sales", "SALE")
+        run(fetch_and_save_orders, "https://statistics-api.wildberries.ru/api/v1/supplier/orders")
+        run(sync_wb_report_detail)
+        log_to_system("Воркер WB (full)", "SUCCESS", "Полный прогон завершён")
+        print("🏁 WB full завершён")
+        run_ai_tagger_wb()
+        sys.exit(0)
+
+    print(f"❌ Неизвестный режим запуска: '{mode}'. Используй: hourly | daily | full | logistics | logistics_backfill | report_detail | ratings")
+    log_to_system("Воркер WB", "ERROR", f"Неизвестный режим запуска: '{mode}'")
+    sys.exit(1)

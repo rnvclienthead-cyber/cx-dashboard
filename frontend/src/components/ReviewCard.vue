@@ -74,7 +74,7 @@
         <div v-if="data.chats.length">
           <p class="text-xs font-medium text-gray-500 mb-2">Чаты по этому товару ({{ data.chats.length }})</p>
           <div class="space-y-1.5">
-            <router-link v-for="c in data.chats" :key="c.chat_id" to="/chats"
+            <router-link v-for="c in data.chats" :key="c.chat_id" :to="{ path: '/chats', query: { chat: c.chat_id, mp: 'wb' } }"
               class="flex items-center justify-between gap-2 px-3 py-2 bg-gray-50 hover:bg-violet-50 rounded-lg border border-gray-100 transition-colors">
               <div class="min-w-0">
                 <span class="text-sm text-gray-700 font-medium">{{ c.client_name || 'Клиент' }}</span>
@@ -89,7 +89,7 @@
         <div v-if="data.returns.length">
           <p class="text-xs font-medium text-gray-500 mb-2">Возвраты по этому товару ({{ data.returns.length }})</p>
           <div class="space-y-1.5">
-            <router-link v-for="rt in data.returns" :key="rt.srid" to="/returns"
+            <router-link v-for="rt in data.returns" :key="rt.srid" :to="{ path: '/returns', query: { srid: rt.srid } }"
               class="flex items-center justify-between gap-2 px-3 py-2 bg-gray-50 hover:bg-emerald-50 rounded-lg border border-gray-100 transition-colors">
               <div class="min-w-0">
                 <span class="text-sm text-gray-700">{{ rt.claim_type_label }}</span>

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from backend import ozon_client
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
@@ -44,19 +45,14 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 
 def _hdr():
-    return {
-        "Client-Id":    OZON_CLIENT_ID,
-        "Api-Key":      OZON_API_KEY,
-        "Content-Type": "application/json",
-    }
+    return ozon_client.headers(OZON_CLIENT_ID, OZON_API_KEY)
 
 
+# Единая реализация — backend/ozon_client.py (используется и routers/cx_responses.py,
+# и ozon_chat_sync.py). Тонкая обёртка сохранена, чтобы не переписывать вызовы
+# _post(...) по всему файлу.
 def _post(path, body):
-    r = requests.post(f"{BASE}{path}", headers=_hdr(), json=body, timeout=30)
-    if r.status_code == 429:
-        raise RuntimeError(f"Rate limit (429) на {path}")
-    r.raise_for_status()
-    return r.json()
+    return ozon_client.post(path, body, timeout=30)
 
 
 def _log_db(action, status, details=""):
@@ -383,11 +379,16 @@ def sync_reviews():
 
 # ── Точка входа ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    from backend import cron_lock
     task = sys.argv[1] if len(sys.argv) > 1 else "hourly"
 
     if not OZON_CLIENT_ID or not OZON_API_KEY:
         log.error("Не заданы OZON_CLIENT_ID / OZON_API_KEY в .env")
         sys.exit(1)
+
+    # Защита от повторного запуска: если предыдущий вызов ozon_worker.py (любая
+    # задача) ещё не завершился, новый процесс тут же выходит — см. Фазу 5.
+    _lock_conn = cron_lock.acquire_or_exit(engine, "ozon_worker", log_fn=log.info, log_db=_log_db)
 
     def run(fn, *args, **kwargs):
         try:

@@ -37,14 +37,15 @@
 6. Обработка ошибки воркера       R/A   -     -     -     -     I
 ```
 
-**Детальные шаги воркера WB (worker.py)**
-1. `hourly`: Запрашивает WB API → возвраты за последние 2 ч → сохраняет в `wb_claims`
-2. `hourly`: Запрашивает отзывы → сохраняет в `wb_feedbacks`
-3. `daily`: Запрашивает заказы → `wb_orders`
-4. `daily`: Обновляет ассортимент → `wb_assortment`
-5. `daily`: Обновляет финансовую логистику → `wb_logistics`
-6. `daily`: Скачивает инвойсы из Google Sheets → `wb_invoices`
-7. `daily`: Скачивает себестоимость из Google Sheets → `wb_cogs`
+**Детальные шаги воркера WB (worker.py + wb_mini_sync.py)**
+1. `wb_mini_sync.py` (фоновый процесс внутри backend, каждые 5 мин): претензии → `wb_claims`, отзывы → `wb_feedbacks`, вопросы → `wb_questions`
+2. `worker.py daily`: запрашивает заказы → `wb_orders`
+3. `worker.py daily`: обновляет ассортимент → `wb_assortment`
+4. `worker.py daily`: обновляет финансовую логистику → `wb_logistics`
+5. `worker.py daily`: скачивает инвойсы из Google Sheets → `wb_invoices`
+6. `worker.py daily`: скачивает себестоимость из Google Sheets → `wb_cogs`
+
+> `worker.py hourly` больше не тянет претензии/отзывы/вопросы — сейчас это безопасный no-op. До июля 2026 из-за бага в разборе аргументов он дублировал их же опрос вторым независимым процессом; `wb_mini_sync.py` теперь единственный источник.
 
 ---
 

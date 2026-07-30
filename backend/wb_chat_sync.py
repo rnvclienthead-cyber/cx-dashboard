@@ -13,14 +13,13 @@
 
 Rate-limit: WB ~1 req/s, при 429 — пауза и повтор.
 """
-import os
 import re
 import time
 import asyncio
 import logging
 import requests
 from sqlalchemy import text
-from . import centrifugo
+from . import centrifugo, wb_client
 
 logger = logging.getLogger("wb_chat_sync")
 
@@ -55,7 +54,6 @@ def _is_closing(text_body: str) -> bool:
         return True
     return bool(_CLOSING_RE.search(s))
 
-WB_CHAT_BASE  = "https://buyer-chat-api.wildberries.ru"
 SYNC_INTERVAL = 5            # было 60; для бота с меню 1–5 нужна быстрая реакция
 BACKFILL_DAYS = 60           # глубина первичного бэкфилла
 REQ_DELAY     = 0.8          # пауза между запросами (rate-limit)
@@ -63,20 +61,14 @@ MAX_PAGES     = 400          # предохранитель на один про
 
 
 def _key() -> str:
-    return os.getenv("WB_API_KEY", "") or os.getenv("WB_FEEDBACKS_TOKEN", "")
-
-
-def _h() -> dict:
-    return {"Authorization": _key()}
+    return wb_client.api_key()
 
 
 def _fetch_events(next_ts: int) -> dict:
     """Один запрос событий. Возвращает result-объект {events, next, ...}."""
-    params = {"next": next_ts} if next_ts else {}
     for attempt in range(4):
         try:
-            r = requests.get(f"{WB_CHAT_BASE}/api/v1/seller/events",
-                             params=params, headers=_h(), timeout=25)
+            r = wb_client.get_chat_events_raw(next_ts, key=_key(), timeout=25)
             if r.status_code == 429:
                 time.sleep(3)
                 continue
@@ -209,6 +201,11 @@ def _upsert_event(conn, e: dict):
                 updated_at   = now()
         """), {"cid": cid, "cn": cname, "nm": nm_id, "gn": gname, "msg": body,
                "ts": ts, "closing": closing, "rs": reply_sign})
+        # Клиент написал — вернуть чат из архива в работу
+        conn.execute(text("""
+            DELETE FROM cx_dismissed_items
+            WHERE mp = 'wb' AND item_type = 'chat' AND item_id = :cid
+        """), {"cid": cid})
     elif sender == "seller":
         conn.execute(text("""
             INSERT INTO wb_chats
