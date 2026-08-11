@@ -517,20 +517,58 @@
                 {{ chatSuggestGenerating ? 'Генерируем…' : 'Сгенерировать ответ' }}
               </button>
             </div>
-            <div v-if="chatTemplatesLoading || visibleChatTemplates.length" class="mb-2">
-              <p class="mb-1 text-[10px] font-medium text-gray-400">Быстрые шаблоны</p>
-              <div v-if="chatTemplatesLoading" class="text-[10px] text-gray-400">Загружаем…</div>
-              <div v-else class="flex gap-1.5 overflow-x-auto pb-1">
-                <button v-for="template in visibleChatTemplates" :key="template.id"
-                  type="button"
-                  :title="template.title"
-                  @click="applyChatTemplate(template)"
-                  :class="['shrink-0 max-w-52 truncate rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
-                    isChatTemplateActive(template)
-                      ? mpUi.chipOn
-                      : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50']">
-                  {{ template.title }}
-                </button>
+            <div v-if="chatTemplatesLoading || visibleChatTemplates.length" class="relative mb-2">
+              <div class="flex min-w-0 items-center gap-1.5">
+                <p class="shrink-0 text-[10px] font-medium text-gray-400">Быстрые шаблоны</p>
+                <div v-if="chatTemplatesLoading" class="text-[10px] text-gray-400">Загружаем…</div>
+                <template v-else>
+                  <div class="flex min-w-0 flex-1 gap-1.5 overflow-hidden">
+                    <button v-for="template in compactChatTemplates" :key="template.id"
+                      type="button"
+                      :title="template.title"
+                      @click="applyChatTemplate(template)"
+                      :class="['min-w-0 max-w-44 truncate rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
+                        isChatTemplateActive(template)
+                          ? mpUi.chipOn
+                          : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50']">
+                      {{ template.title }}
+                    </button>
+                  </div>
+                  <button v-if="hasMoreChatTemplates" type="button"
+                    @click="chatTemplatesExpanded = !chatTemplatesExpanded"
+                    :aria-expanded="chatTemplatesExpanded"
+                    aria-controls="chat-template-panel"
+                    :class="['flex min-h-9 shrink-0 items-center gap-1 rounded-lg border px-2 text-[11px] font-medium transition-colors focus:outline-none focus:ring-2',
+                      chatTemplatesExpanded ? mpUi.chipOn : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50']">
+                    <span>{{ chatTemplatesExpanded ? 'Свернуть' : `Все · ${visibleChatTemplates.length}` }}</span>
+                    <svg :class="['h-3.5 w-3.5 transition-transform', chatTemplatesExpanded ? 'rotate-180' : '']"
+                      viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </button>
+                </template>
+              </div>
+              <div v-if="chatTemplatesExpanded" id="chat-template-panel"
+                class="absolute inset-x-0 bottom-full z-20 mb-2 max-h-64 overflow-y-auto rounded-xl border border-gray-200 bg-white p-2.5 shadow-lg">
+                <div class="mb-2 flex items-center justify-between gap-3 px-0.5">
+                  <p class="text-xs font-semibold text-gray-700">Все шаблоны · {{ visibleChatTemplates.length }}</p>
+                  <button type="button" @click="chatTemplatesExpanded = false"
+                    class="min-h-9 rounded-lg px-2 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-300">
+                    Свернуть
+                  </button>
+                </div>
+                <div class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  <button v-for="template in visibleChatTemplates" :key="template.id"
+                    type="button"
+                    :title="template.title"
+                    @click="applyChatTemplate(template)"
+                    :class="['min-h-[44px] rounded-lg border px-3 py-2 text-left text-xs font-medium leading-snug transition-colors',
+                      isChatTemplateActive(template)
+                        ? mpUi.chipOn
+                        : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50']">
+                    {{ template.title }}
+                  </button>
+                </div>
               </div>
             </div>
             <div v-if="chatSendWarning" role="alert"
@@ -2388,6 +2426,7 @@ const chatSuggestLoading = ref(false)
 const chatSuggestGenerating = ref(false)
 const chatTemplates = ref([])
 const chatTemplatesLoading = ref(false)
+const chatTemplatesExpanded = ref(false)
 const chatTemplateGreeting = ref('Здравствуйте!')
 const chatTemplateSignature = ref('')
 let chatPollTimer = null
@@ -2486,8 +2525,11 @@ const visibleChatTemplates = computed(() => {
     if (suggestedTheme && a.theme_key === suggestedTheme && b.theme_key !== suggestedTheme) return -1
     if (suggestedTheme && b.theme_key === suggestedTheme && a.theme_key !== suggestedTheme) return 1
     return 0
-  }).slice(0, 12)
+  })
 })
+
+const compactChatTemplates = computed(() => visibleChatTemplates.value.slice(0, 2))
+const hasMoreChatTemplates = computed(() => visibleChatTemplates.value.length > compactChatTemplates.value.length)
 
 function normalizeChatTemplateText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
@@ -2538,6 +2580,7 @@ function isChatTemplateActive(template) {
 }
 
 function applyChatTemplate(template) {
+  chatTemplatesExpanded.value = false
   chatReply.value = polishChatTemplate(template.body)
   nextTick(autoGrowReply)
 }
@@ -2716,6 +2759,7 @@ async function selectChat(item) {
   chatSuggestLoading.value = false
   chatSuggestGenerating.value = false
   chatTemplatesLoading.value = false
+  chatTemplatesExpanded.value = false
   chatLoading.value = true
   loadChatContext(item, requestId)
   const mp = chatMp(item)

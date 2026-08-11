@@ -311,7 +311,6 @@ def chat_templates(
         ORDER BY
           CASE WHEN :theme != '' AND v.theme_key = :theme THEN 0 ELSE 1 END,
           t.sort_order, v.theme_key, v.sort_order, v.id
-        LIMIT 12
     """), {
         "mp": mp,
         "theme": theme,
