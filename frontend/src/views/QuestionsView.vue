@@ -8,13 +8,17 @@
         <!-- Строка 1: заголовок + счётчики -->
         <div class="flex items-center justify-between gap-4 py-3">
           <div class="flex items-center gap-3">
-            <div class="w-9 h-9 rounded-xl bg-sky-50 flex items-center justify-center text-sky-600 shrink-0">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <div :class="['w-9 h-9 rounded-xl flex items-center justify-center shrink-0',
+              hasQualityQuestionsAccess ? 'bg-violet-50 text-violet-600' : 'bg-sky-50 text-sky-600']">
+              <ClipboardPenLine v-if="hasQualityQuestionsAccess" class="w-[18px] h-[18px]" aria-hidden="true" />
+              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
               </svg>
             </div>
             <div>
-              <h1 class="text-sm font-medium text-gray-900 leading-tight">Вопросы</h1>
+              <h1 class="text-sm font-medium text-gray-900 leading-tight">
+                {{ hasQualityQuestionsAccess ? 'Уточнения по вопросам' : 'Вопросы' }}
+              </h1>
               <p class="text-xs text-gray-400 leading-tight mt-0.5">{{ questionsSubtitle }}</p>
             </div>
           </div>
@@ -23,7 +27,7 @@
             class="flex items-center gap-2">
             <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200">
               <span class="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>
-              {{ counts.questions }} вопросов
+              {{ counts.questions }} {{ hasQualityQuestionsAccess ? 'уточнений' : 'вопросов' }}
             </span>
           </div>
         </div>
@@ -58,14 +62,14 @@
       <div v-if="queueLoading" class="flex items-center justify-center py-20">
         <div class="text-center">
           <div class="w-10 h-10 border-4 border-sky-500 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
-          <p class="text-gray-400 text-sm">Загружаем вопросы…</p>
+          <p class="text-gray-400 text-sm">{{ hasQualityQuestionsAccess ? 'Загружаем уточнения…' : 'Загружаем вопросы…' }}</p>
         </div>
       </div>
 
       <div v-else-if="filteredItems.length === 0" class="flex flex-col items-center justify-center py-20">
         <div class="text-5xl mb-4">🎉</div>
-        <p class="text-gray-500 font-medium">Вопросов нет</p>
-        <p class="text-gray-400 text-sm mt-1">Все вопросы обработаны</p>
+        <p class="text-gray-500 font-medium">{{ hasQualityQuestionsAccess ? 'Уточнений нет' : 'Вопросов нет' }}</p>
+        <p class="text-gray-400 text-sm mt-1">{{ hasQualityQuestionsAccess ? 'Все уточнения обработаны' : 'Все вопросы обработаны' }}</p>
       </div>
 
       <div v-else class="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -472,6 +476,7 @@ import { usePermissionsStore } from '../stores/permissions'
 import { useToast } from '../composables/useToast'
 import { useCxQueueActions } from '../composables/useCxQueueActions'
 import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls } from '../utils/cx'
+import { ClipboardPenLine } from 'lucide-vue-next'
 
 const platformStore = usePlatformStore()
 const permissionsStore = usePermissionsStore()

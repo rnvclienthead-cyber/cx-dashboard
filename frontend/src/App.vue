@@ -6,7 +6,7 @@ import {
   Database, Bot, ClipboardCheck, BrainCircuit, ScrollText, MessageSquare,
   LineChart, AlertTriangle, Star, ShieldAlert, BadgeDollarSign, LayoutGrid,
   ChevronLeft, ChevronRight, Menu, PackageCheck, LogOut, KeyRound, X, Eye, EyeOff,
-  BookOpen, HelpCircle, BarChart3, Gauge, MessagesSquare, PackageX, MessageSquareQuote
+  BookOpen, HelpCircle, BarChart3, Gauge, MessagesSquare, PackageX, ClipboardPenLine
 } from 'lucide-vue-next'
 import { usePlatformStore } from './stores/platform'
 import { usePermissionsStore } from './stores/permissions'
@@ -531,7 +531,7 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           active-class="bg-violet-50 text-violet-700 font-semibold"
           :title="isCollapsed ? 'Уточнения по вопросам' : ''"
         >
-          <MessageSquareQuote class="w-4 h-4 flex-shrink-0" />
+          <ClipboardPenLine class="w-4 h-4 flex-shrink-0" />
           <span v-if="!isCollapsed">Уточнения по вопросам</span>
         </RouterLink>
 
