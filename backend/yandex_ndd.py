@@ -1,12 +1,11 @@
-"""Яндекс Доставка по России (NDD) — расчёт цены, поиск ПВЗ и создание заказа склад(ПВЗ)->ПВЗ.
+"""Яндекс Доставка по России (NDD) — расчёт цены, поиск ПВЗ и создание заказа склад→ПВЗ.
 
 Используется тот же YANDEX_DELIVERY_API_KEY, что и в yandex_delivery.py (Express/Cargo) —
 это другой продукт Яндекса, но авторизация общая для аккаунта.
 
-Заказ создаётся полностью через API (offers/create -> offers/confirm), без выданного
-менеджером platform_station_id склада — источником может быть обычный ПВЗ (куда мы физически
-привозим посылку), так же как и destination. Ключевое поле точки — available_for_dropoff:
-только такие точки принимают отправления от нас (не все ПВЗ, что выдают заказы, их принимают).
+Источник отправки — наш склад в ЛК Яндекса (Техническая 17Б). Курьер забирает посылки
+по расписанию (вторник). Destination — ПВЗ получателя (platform_station).
+Поиск клиентских ПВЗ по-прежнему через available_for_dropoff / nearest pickup.
 """
 import os
 import math
@@ -27,12 +26,12 @@ logger = logging.getLogger(__name__)
 YD_API_KEY = os.getenv("YANDEX_DELIVERY_API_KEY", "")
 NDD_BASE   = "https://b2b.taxi.yandex.net/api/b2b/platform"
 
-# Наш склад-отправитель (Казань) и ближайший к нему ПВЗ Яндекса, принимающий отправления —
-# туда физически везём посылки. ID найден один раз (см. FROM_PVZ_ADDRESS) и захардкожен в .env,
-# чтобы не искать заново на каждый запрос — при переезде склада обновить оба значения.
-FROM_ADDRESS     = os.getenv("YD_FROM_FULLNAME", "Казань, улица Техническая, 23Б")
-FROM_PVZ_ADDRESS = os.getenv("YD_NDD_FROM_PVZ_ADDRESS", "Казань, улица Чернышевского, 33")
-FROM_PVZ_ID      = os.getenv("YD_NDD_FROM_PVZ_ID", "019840850cff72889d44bbe3f4d4a81e")
+# Наш склад в ЛК Яндекса (Казань, Техническая 17Б). Боевые значения — в .env (YD_NDD_FROM_PVZ_*).
+# Раньше сдавали в ПВЗ Кулагина 6 — больше не используем.
+FROM_ADDRESS     = os.getenv("YD_FROM_FULLNAME", "Казань, улица Техническая, 17Б")
+FROM_PVZ_ADDRESS = os.getenv("YD_NDD_FROM_PVZ_ADDRESS", "Казань, улица Техническая, 17Б")
+FROM_PVZ_ID      = os.getenv("YD_NDD_FROM_PVZ_ID", "019f3b915e357758b6b311a4aa67fd11")
+WAREHOUSE_STATION_ID = FROM_PVZ_ID
 
 _BAD_GEO_WORDS = ("село", "деревня", "станица", "снт", "садоводческ", "посёлок", "кп ")
 
@@ -262,6 +261,18 @@ def calculate_price(destination_platform_station_id: str, total_weight_g: int = 
         return None
 
 
+def next_pickup_date_hint() -> str:
+    """Ближайший вторник забора (для подсказок на складе)."""
+    from datetime import date, timedelta
+    d = date.today()
+    # Если сегодня вторник — ещё сегодня; иначе ближайший следующий.
+    days_ahead = (1 - d.weekday()) % 7
+    nxt = d + timedelta(days=days_ahead)
+    months = ("", "янв", "фев", "мар", "апр", "май", "июн",
+              "июл", "авг", "сен", "окт", "ноя", "дек")
+    return f"{nxt.day} {months[nxt.month]}"
+
+
 def create_order(
     req_id: int,
     customer_name: str,
@@ -274,7 +285,8 @@ def create_order(
 ) -> dict:
     """
     Полное автосоздание заказа: offers/create -> offers/confirm.
-    Источник и назначение — обычные ПВЗ (platform_station по id), склад регистрировать не нужно.
+    Источник — наш склад (platform_station = WAREHOUSE_STATION_ID), назначение — ПВЗ клиента.
+    Посылки копятся на складе до еженедельного забора курьера (вторник).
     Возвращает {'request_id': ..., 'price': float|None}. Бросает исключение при ошибке API.
     """
     name_parts = (customer_name or "Клиент").strip().split(maxsplit=1)
@@ -333,23 +345,30 @@ def create_order(
 # Статусная модель Яндекс NDD → наши статусы reshipment_requests
 # (из официальной документации Яндекс Доставки по России)
 #
-# Важно: SORTING_CENTER_LOADED в API часто приходит сразу после создания заказа
-# (описание «Создан в сортировочном центре», в ЛК — «Отнести в пункт»).
-# Это ещё не сдача: у нас заказ должен оставаться в packed, пока склад
-# не отметит «сдано» / не появится SORTING_CENTER_AT_START.
-# Поэтому LOADED и PREPARED намеренно не маппим — иначе «собраны» уезжают в «в пути».
+# Цепочка при заборе со склада (вторник):
+#   SORTING_CENTER_LOADED  — заказ создан, ждёт курьера на складе → у нас packed
+#   SORTING_CENTER_AT_START — принят курьером/на СЦ
+#   SORTING_CENTER_PREPARED — готов к отгрузке в службу доставки (уже после забора!)
+#   SORTING_CENTER_TRANSMITTED — отправлен в службу доставки
+#
+# Раньше PREPARED не маппили вместе с LOADED — из‑за этого после сдачи
+# заявки зависали в «Собраны», хотя в ЛК Яндекса уже «в пути».
 STATUS_MAP = {
-    "SORTING_CENTER_AT_START":                 "shipped",    # принято Яндексом на ПВЗ сдачи
+    "SORTING_CENTER_AT_START":                 "shipped",     # принято на ПВЗ/СЦ сдачи
+    "SORTING_CENTER_PREPARED":                 "shipped",     # готов к отгрузке (после сдачи)
     "SORTING_CENTER_TRANSMITTED":               "in_transit",
     "DELIVERY_AT_START":                        "in_transit",
     "DELIVERY_AT_START_SORT":                   "in_transit",
     "DELIVERY_TRANSPORTATION":                  "in_transit",  # «Едет к получателю»
     "DELIVERY_TRANSPORTATION_RECIPIENT":        "in_transit",
+    "DELIVERY_LOADED":                          "in_transit",
     "DELIVERY_ARRIVED_PICKUP_POINT":            "ready_for_pickup",
     "DELIVERY_TRANSMITTED_TO_RECIPIENT":        "delivered",
     "DELIVERY_DELIVERED":                       "delivered",
+    # Возврат (в ЛК Яндекса — «Возвращается»)
     "RETURN_PREPARING":                         "returned",
     "RETURN_ARRIVED_DELIVERY":                  "returned",
+    "RETURN_TRANSPORTATION_STARTED":            "returned",  # едет обратно после ПВЗ
     "SORTING_CENTER_RETURN_PREPARING":          "returned",
     "SORTING_CENTER_RETURN_ARRIVED":            "returned",
     "SORTING_CENTER_RETURN_PREPARING_SENDER":   "returned",
@@ -367,17 +386,56 @@ def get_order_place_barcode(request_id: str) -> Optional[str]:
 
 
 def get_order_status(request_id: str) -> dict:
-    """Статус заказа по request_id."""
+    """Статус заказа по request_id.
+
+    Берём текущий state; если он не маппится (например LOADED / TIME_INTERVALS_UPDATED),
+    смотрим историю и выбираем самый «дальний» известный статус.
+    CANCELLED после ожидания на ПВЗ (= истек срок хранения) → returned.
+    """
     sc, sd = _get("/request/info", {"request_id": request_id})
     if sc != 200:
         return {"status": "unknown"}
-    state = sd.get("state", {})
-    return {
-        "status":      state.get("status", ""),
-        "description": state.get("description", ""),
+    state = sd.get("state", {}) or {}
+    raw = state.get("status", "") or ""
+    description = state.get("description", "") or ""
+    result = {
+        "status":      raw,
+        "description": description,
         "courier_order_id": sd.get("courier_order_id"),
         "sharing_url": sd.get("sharing_url"),
     }
+    if raw in STATUS_MAP:
+        return result
+
+    # Текущий статус «служебный» — ищем в истории максимальный по нашей цепочке
+    try:
+        hc, hd = _get("/request/history", {"request_id": request_id})
+        if hc == 200:
+            order = ["shipped", "in_transit", "ready_for_pickup", "delivered", "returned"]
+            best_raw, best_idx, best_desc = None, -1, ""
+            seen_at_pvz = False
+            for h in (hd or {}).get("state_history") or []:
+                st = h.get("status") or ""
+                if st == "DELIVERY_ARRIVED_PICKUP_POINT":
+                    seen_at_pvz = True
+                # Истёк срок хранения на ПВЗ → возврат (в ЛК: «Возвращается»)
+                if st == "CANCELLED" and seen_at_pvz:
+                    st = "RETURN_TRANSPORTATION_STARTED"  # канонический ключ в STATUS_MAP
+                    mapped = "returned"
+                else:
+                    mapped = STATUS_MAP.get(st)
+                if not mapped or mapped not in order:
+                    continue
+                idx = order.index(mapped)
+                if idx >= best_idx:
+                    best_idx, best_raw, best_desc = idx, st, h.get("description") or ""
+            if best_raw:
+                result["status"] = best_raw
+                result["description"] = best_desc or result["description"]
+                result["from_history"] = True
+    except Exception as e:
+        logger.warning("get_order_status history %s: %s", request_id, e)
+    return result
 
 
 def cancel_order(request_id: str) -> bool:

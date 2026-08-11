@@ -254,6 +254,38 @@ def submit_reshipment(
     _chat_clean  = (wb_chat_id or "").strip() or None
     _token_clean = (chat_token or "").strip() or None
 
+    # Токен одноразовый: на сервере жёстко запрещаем повтор (даже если обошли экран формы)
+    if _token_clean:
+        _tok_check = db.execute(text("""
+            SELECT used_at, expired, expires_at, request_id, chat_id
+            FROM reshipment_chat_tokens
+            WHERE token = :t
+        """), {"t": _token_clean}).mappings().first()
+        if not _tok_check:
+            raise HTTPException(
+                status_code=400,
+                detail="Ссылка недействительна. Попросите менеджера выслать новую ссылку в чате.",
+            )
+        if _tok_check["used_at"] or _tok_check["request_id"]:
+            rid = _tok_check["request_id"]
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"По этой ссылке заявка уже принята{f' (#{rid})' if rid else ''}. "
+                    "Попросите менеджера выслать новую ссылку — старую использовать нельзя."
+                ),
+            )
+        if _tok_check["expired"] or (
+            _tok_check["expires_at"]
+            and _tok_check["expires_at"] < __import__("datetime").datetime.utcnow()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Ссылка устарела. Попросите менеджера выслать новую ссылку в чате.",
+            )
+        if not _chat_clean and _tok_check["chat_id"]:
+            _chat_clean = _tok_check["chat_id"]
+
     if not _chat_clean and _token_clean:
         _tok_row = db.execute(text(
             "SELECT chat_id FROM reshipment_chat_tokens WHERE token = :t AND used_at IS NULL"
@@ -266,7 +298,7 @@ def submit_reshipment(
         WHERE status NOT IN ('rejected', 'delivered')
           AND (
             customer_phone = :phone
-            OR (:chat IS NOT NULL AND wb_chat_id = :chat)
+            OR (:chat IS NOT NULL AND (wb_chat_id = :chat OR ym_chat_id = :chat))
           )
         ORDER BY id DESC
         LIMIT 1
@@ -329,35 +361,79 @@ def submit_reshipment(
     # Salebot client ID — чистим значение из формы
     clean_salebot_id = (salebot_client_id or "").strip() or None
 
-    # Если форма пришла из WB чата — достаём reply_sign и nmId из pending
+    # Если форма пришла из чата (WB или ЯМ) — достаём метаданные
     wb_reply_sign  = None
     wb_nm_id       = None
     wb_client_id   = None
+    wb_chat_id_val = None
+    ym_chat_id_val = None
+    marketplace    = "wb"
     clean_chat_id  = (wb_chat_id or "").strip() or None
     clean_token    = (chat_token or "").strip() or None
+    token_mp       = None
+    category_val   = (product_category or "").strip() or None
+    order_num_val  = (order_number or "").strip() or None
 
     # Новая схема: ищем chatID по токену (если воркер уже успел его привязать)
     if not clean_chat_id and clean_token:
         token_row = db.execute(text("""
-            SELECT chat_id FROM reshipment_chat_tokens
+            SELECT chat_id, mp FROM reshipment_chat_tokens
             WHERE token = :token AND used_at IS NULL
         """), {"token": clean_token}).mappings().first()
         if token_row and token_row["chat_id"]:
             clean_chat_id = token_row["chat_id"]
+            token_mp = (token_row.get("mp") or "").strip().lower() or None
 
     if clean_chat_id:
-        pending = db.execute(text("""
-            SELECT reply_sign, nm_id, client_id FROM wb_chat_pending WHERE chat_id = :cid
-        """), {"cid": clean_chat_id}).mappings().first()
-        if pending:
-            wb_reply_sign = pending["reply_sign"]
-            wb_nm_id      = pending["nm_id"]
-            wb_client_id  = pending["client_id"]
+        # Явный mp с токена или автодетект по таблицам чатов
+        mp = token_mp
+        if not mp:
+            if db.execute(text(
+                "SELECT 1 FROM ym_chats WHERE chat_id = :cid"
+            ), {"cid": clean_chat_id}).first():
+                mp = "ym"
+            elif db.execute(text(
+                "SELECT 1 FROM wb_chats WHERE chat_id = :cid"
+            ), {"cid": clean_chat_id}).first():
+                mp = "wb"
+            elif db.execute(text(
+                "SELECT 1 FROM wb_chat_pending WHERE chat_id = :cid"
+            ), {"cid": clean_chat_id}).first():
+                mp = "wb"
+
+        if mp == "ym":
+            marketplace = "ym"
+            ym_chat_id_val = clean_chat_id
+            ym_row = db.execute(text("""
+                SELECT order_id, context_article FROM ym_chats WHERE chat_id = :cid
+            """), {"cid": clean_chat_id}).mappings().first()
+            if ym_row:
+                if not order_num_val and ym_row.get("order_id"):
+                    order_num_val = ym_row["order_id"]
+                if not category_val and ym_row.get("context_article"):
+                    category_val = ym_row["context_article"]
+        else:
+            marketplace = "wb"
+            wb_chat_id_val = clean_chat_id
+            pending = db.execute(text("""
+                SELECT reply_sign, nm_id, client_id FROM wb_chat_pending WHERE chat_id = :cid
+            """), {"cid": clean_chat_id}).mappings().first()
+            if pending:
+                wb_reply_sign = pending["reply_sign"]
+                wb_nm_id      = pending["nm_id"]
+                wb_client_id  = pending["client_id"]
+            if not wb_reply_sign:
+                chat_meta = db.execute(text("""
+                    SELECT reply_sign, nm_id FROM wb_chats WHERE chat_id = :cid
+                """), {"cid": clean_chat_id}).mappings().first()
+                if chat_meta:
+                    wb_reply_sign = chat_meta.get("reply_sign") or wb_reply_sign
+                    wb_nm_id = wb_nm_id or chat_meta.get("nm_id")
 
     try:
         result = db.execute(text("""
             INSERT INTO reshipment_requests
-                (customer_name, customer_email, customer_phone, order_number,
+                (customer_name, customer_email, customer_phone, order_number, marketplace,
                  product_category, problem_type, items_to_send,
                  shipping_address, address_postal, address_region,
                  address_city, address_street, address_house,
@@ -365,10 +441,10 @@ def submit_reshipment(
                  yandex_pvz_code, yandex_pvz_address, yandex_pvz_name, yandex_cost,
                  client_lat, client_lon, cdek_pvz_lat, cdek_pvz_lng, yandex_pvz_lat, yandex_pvz_lng,
                  photo_files, privacy_consent,
-                 wb_chat_id, wb_reply_sign, wb_nm_id, wb_client_id,
+                 wb_chat_id, wb_reply_sign, wb_nm_id, wb_client_id, ym_chat_id,
                  salebot_client_id, chat_token)
             VALUES
-                (:name, :email, :phone, :order_num,
+                (:name, :email, :phone, :order_num, :marketplace,
                  :category, :problem_type, :items,
                  :address, :postal, :region,
                  :city, :street, :house,
@@ -376,15 +452,16 @@ def submit_reshipment(
                  :yandex_pvz_code, :yandex_pvz_address, :yandex_pvz_name, :yandex_cost,
                  :client_lat, :client_lon, :cdek_pvz_lat, :cdek_pvz_lng, :yandex_pvz_lat, :yandex_pvz_lng,
                  :photos, :consent,
-                 :wb_chat_id, :wb_reply_sign, :wb_nm_id, :wb_client_id,
+                 :wb_chat_id, :wb_reply_sign, :wb_nm_id, :wb_client_id, :ym_chat_id,
                  :salebot_client_id, :chat_token)
             RETURNING id
         """), {
             "name":          customer_name.strip(),
             "email":         customer_email,
             "phone":         customer_phone.strip(),
-            "order_num":     order_number,
-            "category":      product_category,
+            "order_num":     order_num_val,
+            "marketplace":   marketplace,
+            "category":      category_val,
             "problem_type":  problem_type,
             "items":         items_to_send.strip(),
             "address":       shipping_address,
@@ -409,35 +486,58 @@ def submit_reshipment(
             "yandex_pvz_lng":     yandex_pvz_lng,
             "photos":        photo_files,
             "consent":       personal_data_consent,
-            "wb_chat_id":        clean_chat_id,
+            "wb_chat_id":        wb_chat_id_val,
             "wb_reply_sign":     wb_reply_sign,
             "wb_nm_id":          wb_nm_id,
             "wb_client_id":      wb_client_id,
+            "ym_chat_id":        ym_chat_id_val,
             "salebot_client_id": clean_salebot_id,
             "chat_token":        clean_token,
         })
         db.commit()
         new_id = result.scalar()
 
-        # Обновляем статус pending записи
-        if clean_chat_id:
+        # Обновляем статус pending записи (только WB)
+        if wb_chat_id_val:
             db.execute(text("""
                 UPDATE wb_chat_pending
                 SET status = 'form_submitted', request_id = :req_id, updated_at = NOW()
                 WHERE chat_id = :cid
-            """), {"req_id": new_id, "cid": clean_chat_id})
+            """), {"req_id": new_id, "cid": wb_chat_id_val})
             db.commit()
 
-        # Помечаем токен как использованный и привязываем к заявке
+        # Помечаем токен как использованный атомарно (второй клиент с той же ссылкой не пройдёт)
         if clean_token:
-            db.execute(text("""
+            claimed = db.execute(text("""
                 UPDATE reshipment_chat_tokens
-                SET used_at = NOW(), request_id = :req_id
+                SET used_at = NOW(), request_id = :req_id,
+                    mp = COALESCE(mp, :mp),
+                    chat_id = COALESCE(NULLIF(chat_id, ''), :cid)
                 WHERE token = :token
-            """), {"req_id": new_id, "token": clean_token})
+                  AND used_at IS NULL
+                  AND request_id IS NULL
+                  AND COALESCE(expired, FALSE) IS NOT TRUE
+                RETURNING token
+            """), {
+                "req_id": new_id,
+                "token": clean_token,
+                "mp": marketplace if (wb_chat_id_val or ym_chat_id_val) else None,
+                "cid": wb_chat_id_val or ym_chat_id_val,
+            }).first()
+            if not claimed:
+                # Гонка: кто-то успел использовать токен между проверкой и INSERT
+                db.execute(text("DELETE FROM reshipment_requests WHERE id = :id"), {"id": new_id})
+                db.commit()
+                raise HTTPException(
+                    status_code=409,
+                    detail="По этой ссылке заявка уже принята. Попросите менеджера выслать новую ссылку.",
+                )
             db.commit()
 
         return {"status": "success", "id": new_id, "message": "Заявка принята. Мы свяжемся с вами."}
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка при сохранении: {e}")
@@ -562,7 +662,7 @@ def cdek_webhook(payload: dict, db: Session = Depends(get_db)):
                 confirmed_at = CASE WHEN :new_status IN ('delivered','returned') THEN COALESCE(confirmed_at, NOW()) ELSE confirmed_at END,
                 confirmation_token = COALESCE(confirmation_token, :token)
             WHERE cdek_number = :num AND status = ANY(:from_list)
-            RETURNING id, salebot_client_id, wb_reply_sign, client_pvz_address
+            RETURNING id, salebot_client_id, wb_reply_sign, ym_chat_id, marketplace, client_pvz_address
         """), {"new_status": new_status, "num": cdek_number,
                "token": secrets.token_hex(32), "from_list": list(from_list)}).mappings().first()
         db.commit()
@@ -575,7 +675,6 @@ def cdek_webhook(payload: dict, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             salebot_id = row.get("salebot_client_id")
-            wb_sign = row.get("wb_reply_sign")
             salebot_sent = False
             try:
                 from ..salebot import (notify_shipped, notify_in_transit,
@@ -594,21 +693,20 @@ def cdek_webhook(payload: dict, db: Session = Depends(get_db)):
             except Exception:
                 pass
 
-            if not salebot_sent and wb_sign:
-                try:
-                    from .. import wb_chat as _wbc
-                    pvz_addr = row.get("client_pvz_address") or ""
-                    if new_status == "shipped":
-                        _wbc.send_message(wb_sign, f"📦 Ваша посылка отправлена!\nСлужба доставки: СДЭК\nТрек-номер: {cdek_number}")
-                    elif new_status == "in_transit":
-                        _wbc.send_message(wb_sign, f"🚚 Ваша посылка в пути!\nТрек-номер СДЭК: {cdek_number}\nСкоро прибудет в ваш город.")
-                    elif new_status == "ready_for_pickup":
-                        pvz_line = f"\nАдрес ПВЗ: {pvz_addr}" if pvz_addr else "\nЗаберите её в пункте выдачи СДЭК."
-                        _wbc.send_message(wb_sign, f"📬 Ваша посылка готова к выдаче!\nТрек-номер СДЭК: {cdek_number}{pvz_line}")
-                    elif new_status == "delivered":
-                        _wbc.send_message(wb_sign, "✅ Посылка получена! Надеемся, деталь подошла.")
-                except Exception:
-                    pass
+            if not salebot_sent:
+                pvz_addr = row.get("client_pvz_address") or ""
+                msg = None
+                if new_status == "shipped":
+                    msg = f"📦 Ваша посылка отправлена!\nСлужба доставки: СДЭК\nТрек-номер: {cdek_number}"
+                elif new_status == "in_transit":
+                    msg = f"🚚 Ваша посылка в пути!\nТрек-номер СДЭК: {cdek_number}\nСкоро прибудет в ваш город."
+                elif new_status == "ready_for_pickup":
+                    pvz_line = f"\nАдрес ПВЗ: {pvz_addr}" if pvz_addr else "\nЗаберите её в пункте выдачи СДЭК."
+                    msg = f"📬 Ваша посылка готова к выдаче!\nТрек-номер СДЭК: {cdek_number}{pvz_line}"
+                elif new_status == "delivered":
+                    msg = "✅ Посылка получена! Надеемся, деталь подошла."
+                if msg:
+                    _wb_notify(dict(row), msg)
 
     return {"ok": True}
 
@@ -618,7 +716,7 @@ def cdek_webhook(payload: dict, db: Session = Depends(get_db)):
 @router.post("/generate-token")
 def generate_chat_token(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Генерирует одноразовый токен (живёт 7 дней).
-    Воркер привязывает chatID когда менеджер отправит ссылку в WB чат."""
+    Воркер привязывает chatID когда менеджер отправит ссылку в чат WB или ЯМ."""
     token = secrets.token_urlsafe(12)
     db.execute(text("""
         INSERT INTO reshipment_chat_tokens (token, created_by, expires_at)
@@ -643,11 +741,11 @@ def generate_chat_token(db: Session = Depends(get_db), current_user=Depends(get_
 def check_token(token: str, db: Session = Depends(get_db)):
     """Форма клиента проверяет токен при загрузке."""
     row = db.execute(text("""
-        SELECT used_at, expired, expires_at FROM reshipment_chat_tokens WHERE token = :token
+        SELECT used_at, expired, expires_at, request_id FROM reshipment_chat_tokens WHERE token = :token
     """), {"token": token}).mappings().first()
     if not row:
         return {"valid": False, "reason": "not_found"}
-    if row["used_at"]:
+    if row["used_at"] or row["request_id"]:
         return {"valid": False, "reason": "used"}
     if row["expired"] or (row["expires_at"] and row["expires_at"] < __import__("datetime").datetime.utcnow()):
         return {"valid": False, "reason": "expired"}
@@ -665,10 +763,10 @@ def get_requests(
     where = "WHERE 1=1"
     params: dict = {}
     if status:
-        where += " AND status = :status"
+        where += " AND r.status = :status"
         params["status"] = status
     if carrier:
-        where += " AND delivery_method = :carrier"
+        where += " AND r.delivery_method = :carrier"
         params["carrier"] = carrier
 
     rows = db.execute(text(f"""
@@ -685,6 +783,11 @@ def get_requests(
                r.shipped_at, r.confirmed_at, r.review_requested,
                r.review_step, r.review_msg1_at, r.review_msg2_at, r.review_msg3_at,
                r.wb_chat_id, r.wb_nm_id, r.wb_client_id, r.wb_reply_sign, r.delivery_method,
+               r.ym_chat_id, r.marketplace,
+               y.cabinet_chat_id AS ym_cabinet_chat_id,
+               y.context_type AS ym_context_type,
+               y.context_article AS ym_context_article,
+               y.order_id AS ym_order_id,
                r.salebot_client_id, r.salebot_messenger, r.salebot_blocked,
                r.promo_code, r.promo_sent_at, r.chat_token, r.confirmation_token,
                -- Отзыв ДО отправки (зафиксирован при одобрении; on_approve — устаревший тип для старых заявок)
@@ -695,7 +798,9 @@ def get_requests(
                (SELECT s.valuation FROM wb_feedback_snapshots s
                 WHERE s.request_id = r.id AND s.snapshot_type = 'after'
                 ORDER BY s.captured_at DESC LIMIT 1) AS wb_after_rating
-        FROM reshipment_requests r {where}
+        FROM reshipment_requests r
+        LEFT JOIN ym_chats y ON y.chat_id = r.ym_chat_id
+        {where}
         ORDER BY r.updated_at DESC
     """), params).mappings().all()
 
@@ -1104,7 +1209,7 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
 
     if not is_yandex and not cdek_uuid:  # Не создавать повторно если уже есть
         try:
-            from ..cdek import create_order, calculate_cost_by_city, find_nearest_pvz
+            from ..cdek import create_order, calculate_cost_for_pvz, find_nearest_pvz
             city = row.get("address_city") or row.get("client_pvz_city")
             pvz_code = row.get("client_pvz_code") or ""
             if not pvz_code and city:
@@ -1122,12 +1227,11 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
                 cdek_uuid   = cdek_result["uuid"]
                 cdek_number = cdek_result.get("cdek_number") or ""
                 cdek_tariff = cdek_result.get("tariff_code")
-                # Стоимость с НДС по выбранному тарифу (то, что реально спишется)
-                if city:
-                    try:
-                        cost = calculate_cost_by_city(city, tariff_code=cdek_tariff)
-                    except Exception:
-                        pass
+                # Считаем по ПВЗ (Орёл), не по названию села клиента (Звягинки → ложные ~1000₽)
+                try:
+                    cost = calculate_cost_for_pvz(pvz_code, tariff_code=cdek_tariff) or cost
+                except Exception:
+                    pass
             else:
                 cdek_error = "ПВЗ не найден — заказ СДЭК не создан"
         except Exception as e:
@@ -1176,36 +1280,28 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
                 SELECT claim_id FROM wb_claims WHERE LOWER(srid) = LOWER(:srid) LIMIT 1
             """), {"srid": srid_for_claim}).mappings().first()
             if claim_row and claim_row["claim_id"]:
-                import requests as _http
-                _wb_key = os.getenv("WB_API_KEY", "")
-                _resp = _http.patch(
-                    "https://returns-api.wildberries.ru/api/v1/claim",
-                    headers={"Authorization": _wb_key, "Content-Type": "application/json"},
-                    json={
-                        "id":      claim_row["claim_id"],
-                        "action":  "rejectcustom",
-                        # WB API требует поле comment (не text) — иначе 400 Validation error
-                        "comment": "Ваша претензия закрыта — недостающая деталь направлена вам отдельным отправлением. Ожидайте посылку в ближайшее время.",
-                    },
-                    timeout=10,
+                from .. import wb_claims_api
+                _comment = (
+                    "Ваша претензия закрыта — недостающая деталь направлена вам отдельным отправлением. "
+                    "Ожидайте посылку в ближайшее время."
                 )
-                if _resp.status_code == 200:
+                _resp = wb_claims_api.patch_claim(
+                    claim_row["claim_id"], "rejectcustom", _comment
+                )
+                if _resp.get("ok"):
                     print(f"[WB Claims] Рекламация {claim_row['claim_id']} отклонена (reshipment #{req_id})")
-                    # Сразу актуализируем локальный статус — не ждём mini-sync
-                    db.execute(text("""
-                        UPDATE wb_claims
-                        SET status = 'Отказ',
-                            status_ex = :ex,
-                            is_archive = true,
-                            last_sync = NOW()
-                        WHERE LOWER(srid) = LOWER(:srid)
-                    """), {
-                        "srid": srid_for_claim,
-                        "ex": "Товар остается у покупателя (Заявка отклонена) — доотправка детали",
-                    })
-                    db.commit()
+                    wb_claims_api.apply_local_status(
+                        db,
+                        claim_id=str(claim_row["claim_id"]),
+                        srid=srid_for_claim,
+                        action="rejectcustom",
+                        wb_comment="Товар остается у покупателя (Заявка отклонена) — доотправка детали",
+                    )
                 else:
-                    print(f"[WB Claims] Не удалось отклонить {claim_row['claim_id']}: {_resp.status_code} {_resp.text[:200]}")
+                    print(
+                        f"[WB Claims] Не удалось отклонить {claim_row['claim_id']}: "
+                        f"{_resp.get('status_code')} {_resp.get('text', '')[:200]}"
+                    )
         except Exception as _e:
             print(f"[WB Claims] Ошибка при отклонении рекламации для #{req_id}: {_e}")
 
@@ -1279,8 +1375,17 @@ def yandex_create(req_id: int, payload: YandexCreateRequest, db: Session = Depen
     if not pvz_code:
         raise HTTPException(status_code=400, detail="У заявки нет подобранного ПВЗ Яндекса")
 
+    from .. import yandex_ndd
+
+    # Если уже есть заказ (например, создан со старой точки сдачи) — отменяем и создаём заново
+    old_track = (row.get("track_number") or "").strip()
+    if old_track:
+        try:
+            yandex_ndd.cancel_order(old_track)
+        except Exception as e:
+            print(f"[yandex-create] cancel old {old_track}: {e}")
+
     try:
-        from .. import yandex_ndd
         yd_result = yandex_ndd.create_order(
             req_id=req_id,
             customer_name=row["customer_name"],
@@ -1377,8 +1482,7 @@ def recreate_shipment(
         if not pvz_code:
             raise HTTPException(status_code=400, detail="Нет ПВЗ СДЭК у заявки")
         try:
-            from ..cdek import create_order, calculate_cost_by_city
-            city = row.get("address_city") or row.get("client_pvz_city")
+            from ..cdek import create_order, calculate_cost_for_pvz
             cdek_result = create_order(
                 req_id=req_id,
                 customer_name=row["customer_name"],
@@ -1390,11 +1494,10 @@ def recreate_shipment(
             cdek_uuid = cdek_result["uuid"]
             cdek_number = cdek_result.get("cdek_number") or ""
             new_track = cdek_number or cdek_uuid
-            if city:
-                try:
-                    new_cost = calculate_cost_by_city(city, tariff_code=cdek_result.get("tariff_code"))
-                except Exception:
-                    pass
+            try:
+                new_cost = calculate_cost_for_pvz(pvz_code, tariff_code=cdek_result.get("tariff_code"))
+            except Exception:
+                pass
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"СДЭК API: {e}")
 
@@ -1671,10 +1774,11 @@ def reject_request(req_id: int, payload: RejectRequest, background_tasks: Backgr
     })
     db.commit()
     # Первое сообщение — отказ
+    mp_label = "Яндекс Маркета" if (row.get("marketplace") or "").lower() == "ym" else "Wildberries"
     rejection_msg = (
         "К сожалению, мы не можем выполнить вашу заявку на отправку детали — "
         "запрашиваемая позиция отсутствует на нашем складе. "
-        "Рекомендуем оформить возврат в личном кабинете Wildberries."
+        f"Рекомендуем оформить возврат в личном кабинете {mp_label}."
     )
     _wb_notify(row, f"❌ {rejection_msg}")
     salebot_id = row.get("salebot_client_id")
@@ -1790,7 +1894,7 @@ def _do_warehouse_confirm(req_id: int, processed_by: Optional[str], db: Session,
         raise HTTPException(status_code=400, detail="У заявки не указан город клиента — невозможно найти ПВЗ СДЭК")
 
     try:
-        from ..cdek import create_order, calculate_cost_by_city, find_nearest_pvz
+        from ..cdek import create_order, calculate_cost_for_pvz, find_nearest_pvz
         pvz_code = row.get("client_pvz_code") or find_nearest_pvz(city)
         if not pvz_code:
             raise HTTPException(status_code=502, detail=f"Не найдены ПВЗ СДЭК в городе {city}")
@@ -1809,13 +1913,12 @@ def _do_warehouse_confirm(req_id: int, processed_by: Optional[str], db: Session,
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ошибка СДЭК API: {e}")
 
-    # Пересчитываем стоимость если не сохранена
+    # Пересчитываем стоимость по ПВЗ (не по названию села)
     cost = row.get("cdek_cost")
-    if not cost:
-        try:
-            cost = calculate_cost_by_city(city)
-        except Exception:
-            pass
+    try:
+        cost = calculate_cost_for_pvz(pvz_code, tariff_code=cdek_result.get("tariff_code")) or cost
+    except Exception:
+        pass
 
     token = secrets.token_hex(32)
     db.execute(text("""
@@ -2828,7 +2931,19 @@ def mark_shipped(req_id: int, processed_by: Optional[str] = None, db: Session = 
 
 
 def _wb_notify(req: dict, msg: str) -> None:
-    """Отправить уведомление клиенту в WB-чат, если есть reply_sign."""
+    """Уведомить клиента в чат площадки (WB или Яндекс Маркет)."""
+    ym_chat_id = (req.get("ym_chat_id") or "").strip()
+    if ym_chat_id or (req.get("marketplace") or "").lower() == "ym":
+        cid = ym_chat_id
+        if not cid:
+            return
+        try:
+            from .. import ym_chat_sync
+            ym_chat_sync.send_message(cid, msg)
+        except Exception as e:
+            print(f"[YM Notify] req#{req.get('id')}: {e}")
+        return
+
     reply_sign = req.get("wb_reply_sign")
     if not reply_sign:
         return
@@ -2844,18 +2959,28 @@ class SendWbMessageRequest(BaseModel):
 
 @router.post("/requests/{req_id}/send-wb-message")
 def send_wb_message(req_id: int, payload: SendWbMessageRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Отправить произвольное сообщение клиенту в WB-чат."""
+    """Отправить произвольное сообщение клиенту в чат WB или Яндекс Маркета."""
     req = _check_exists(req_id, db)
-    reply_sign = req.get("wb_reply_sign")
-    if not reply_sign:
-        raise HTTPException(status_code=400, detail="У заявки нет привязанного WB-чата (reply_sign отсутствует)")
     text_msg = payload.text.strip()
     if not text_msg:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
+
+    ym_chat_id = (req.get("ym_chat_id") or "").strip()
+    if ym_chat_id:
+        try:
+            from .. import ym_chat_sync
+            ym_chat_sync.send_message(ym_chat_id, text_msg)
+            return {"status": "ok", "channel": "ym"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка отправки в чат ЯМ: {e}")
+
+    reply_sign = req.get("wb_reply_sign")
+    if not reply_sign:
+        raise HTTPException(status_code=400, detail="У заявки нет привязанного чата WB/ЯМ")
     try:
         from .. import wb_chat
         wb_chat.send_message(reply_sign, text_msg)
-        return {"status": "ok"}
+        return {"status": "ok", "channel": "wb"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка отправки в WB чат: {e}")
 

@@ -34,12 +34,18 @@ def save_to_cache(key: str, data: any):
 # Маппинг refundStatus ЯМ → читаемый статус (дублируем из ym_worker для автономности)
 _YM_STATUS_MAP = {
     "WAITING_FOR_DECISION":  "На рассмотрении",
+    "PREMODERATION_DECISION_WAITING": "На рассмотрении",
+    "PREMODERATION_SELECT_DELIVERY": "На рассмотрении",
+    "PREMODERATION_DISPUTE": "На рассмотрении",
+    "STARTED_BY_USER":       "На рассмотрении",
     "REFUND_IN_PROGRESS":    "Одобрено",
     "REFUNDED":              "Одобрено",
     "WAITING_FOR_RETURN":    "На рассмотрении",
     "RETURNED":              "На рассмотрении",
     "NOT_RETURNED":          "Отказ",
     "FAILED":                "Отказ",
+    "REJECTED":              "Отказ",
+    "CANCELLED":             "Отменено",
 }
 
 # Причины возврата ЯМ (reasonType) → русские метки. Фоллбэк — сырое значение.
@@ -149,33 +155,9 @@ def get_production_claims(
         #   • photos         — пробел-разделённые URL статичных фото (/static/ym_returns/…)
         if platform in ("ym", "all"):
             with db.bind.connect() as conn:
-                try:
-                    inv_rows = conn.execute(text("""
-                        SELECT DISTINCT ON (r.return_id)
-                            r.return_id,
-                            inv.invoice_num,
-                            inv.supply_id
-                        FROM ym_returns r
-                        JOIN ym_orders  o  ON o.order_id = r.order_id
-                                          AND o.supplier_article = r.supplier_article
-                        JOIN ym_supply_items si ON si.offer_id = r.supplier_article
-                        JOIN ym_supplies     s  ON s.request_id = si.request_id
-                                               AND s.requested_date < o.created_at
-                        JOIN wb_invoices inv ON (
-                            inv.supply_id = s.marketplace_request_id
-                            OR inv.supply_id = 'ВРЦ-' || s.request_id::text
-                            OR (s.parent_request_id IS NOT NULL
-                                AND inv.supply_id = 'ВРЦ-' || s.parent_request_id::text)
-                        ) AND inv.marketplace = 'ym'
-                          AND inv.invoice_num NOT IN ('', '0')
-                        WHERE r.supplier_article IS NOT NULL
-                        ORDER BY r.return_id, s.requested_date DESC
-                    """)).mappings().all()
-                    ym_invoice_map = {row["return_id"]: row["invoice_num"] for row in inv_rows}
-                    ym_supply_map  = {row["return_id"]: row["supply_id"]  for row in inv_rows}
-                except Exception:
-                    ym_invoice_map = {}
-                    ym_supply_map  = {}
+                # Связка через поставки ЯМ отключена (в API нет пути возврат→поставка).
+                ym_invoice_map = {}
+                ym_supply_map = {}
                 ym_rows = conn.execute(text("""
                     SELECT
                         r.return_id, r.order_id, r.supplier_article,
@@ -216,11 +198,14 @@ def get_production_claims(
                     }
 
             for r in ym_rows:
+                status_code = r.get("status") or ""
                 status_ru = (
-                    r.get("status_ru")
-                    or _YM_STATUS_MAP.get(r.get("status") or "", "На рассмотрении")
+                    _YM_STATUS_MAP.get(status_code)
+                    or r.get("status_ru")
+                    or "На рассмотрении"
                 )
-                if status_ru.lower() == "отказ":
+                # Отказы и отменённые заявки в карту проблем не берём
+                if status_ru.lower() in ("отказ", "отменено") or status_code in ("REJECTED", "CANCELLED", "NOT_RETURNED", "FAILED"):
                     continue
                 row = {
                     "Артикул продавца":               r["supplier_article"],
@@ -254,10 +239,13 @@ def get_production_claims(
                 all_rows.append(row)
 
         # ── OZON ─────────────────────────────────────────────────────────────
+        # Карта проблем: все причины возвратов (без логистических отмен).
+        # PPM сужает до заводских отдельно.
         if platform in ("ozon", "all"):
+            from ..ozon_returns_filters import ozon_returns_where_sql
             with db.bind.connect() as conn:
 
-                oz_rows = conn.execute(text("""
+                oz_rows = conn.execute(text(f"""
                     SELECT
                         r.return_id, r.order_id, r.order_number, r.posting_number,
                         r.supplier_article, r.product_name,
@@ -269,38 +257,21 @@ def get_production_claims(
                         COALESCE(a.category_1, 'Прочее') AS category
                     FROM ozon_returns r
                     LEFT JOIN wb_assortment a ON LOWER(TRIM(r.supplier_article)) = LOWER(TRIM(a.supplier_article))
-                    WHERE supplier_article IS NOT NULL
-                      AND supplier_article != ''
-                      AND status_sys IN (
-                          'ReturnedToOzon','Utilized','WriteOff','ReceivedBySeller','Lost'
-                      )
-                      AND return_reason IN (
-                          'Товар в неполной комплектации',
-                          'Покупатель отказался при вручении: неполная комплектация',
-                          'Упаковка и товар повреждены',
-                          'Товар не работает / брак',
-                          'Покупатель отказался при вручении: недоволен качеством товара',
-                          'Покупатель получил не те товары',
-                          'Покупатель отказался при вручении: в заказе не тот товар',
-                          'Товар поврежден, но упаковка цела',
-                          'Товар сломался при эксплуатации',
-                          'Блокирующее повреждение',
-                          'Неправильно указаны ОВХ товара',
-                          'Товар поддельный',
-                          'Изменил решение о покупке/Товар не подошёл'
-                      )
+                    WHERE {ozon_returns_where_sql("r", for_ppm=False)}
                 """)).mappings().all()
 
             for r in oz_rows:
                 row = {
                     "Артикул продавца":               r["supplier_article"],
-                    "Инвойс":                         "OZON",
+                    # FBO: инвойса/поставки как у WB нет — не подставляем заглушку
+                    "Инвойс":                         "",
                     "claim_date_iso":                  r["return_date"].strftime("%Y-%m-%d") if r["return_date"] else None,
                     "Решение по возврату покупателю":  r["status_ru"] or "На складе Ozon",
                     "Статус товара":                   r["status_ru"] or "На складе Ozon",
                     "SRID":                            str(r["return_id"]),
                     "Дата заказа":                     r["return_date"].isoformat() if r["return_date"] else None,
-                    "Номер поставки":                  "OZON",
+                    "Номер поставки":                  r.get("posting_number") or "",
+                    "posting_number":                  r.get("posting_number") or "",
                     "Комментарий покупателя":          "",
                     "photos":                          "",
                     "platform":                        "ozon",

@@ -20,17 +20,37 @@ MODULES = [
     {"key": "ppm",          "label": "PPM и Акты"},
     {"key": "voc",          "label": "Отзывы и аналитика"},
     {"key": "cx_control",   "label": "Контроль отдела"},
-    {"key": "cx_responses", "label": "Ответы КС"},
+    {"key": "cx_responses", "label": "КС: возвраты, чаты, отзывы, вопросы"},
     {"key": "ratings",      "label": "Рейтинг товаров"},
     {"key": "finances",     "label": "Финансовые потери"},
     {"key": "pnl",          "label": "P&L по артикулу"},
-    {"key": "reshipment",   "label": "Доотправки"},
+    {"key": "reshipment",   "label": "Отправка деталей"},
     {"key": "faq",          "label": "База знаний FAQ"},
     {"key": "registry",     "label": "Реестр"},
     {"key": "admin_panel",  "label": "Панель управления"},
 ]
 
 MARKETPLACES = ["all", "wb", "ym", "ozon"]
+
+# Роли КС по умолчанию должны видеть рабочий стол обращений
+_CS_DEFAULT_MODULES = ("cx_responses", "reshipment", "faq", "cx_control")
+
+
+def ensure_cs_manager_permissions(engine) -> None:
+    """Гарантирует cs_manager доступ к КС-разделам (отзывы/вопросы/чаты/возвраты)."""
+    with engine.connect() as conn:
+        exists = conn.execute(text(
+            "SELECT 1 FROM roles WHERE name = 'cs_manager' LIMIT 1"
+        )).scalar()
+        if not exists:
+            return
+        for mod in _CS_DEFAULT_MODULES:
+            conn.execute(text("""
+                INSERT INTO role_permissions (role_name, module, marketplace)
+                VALUES ('cs_manager', :m, 'all')
+                ON CONFLICT (role_name, module) DO NOTHING
+            """), {"m": mod})
+        conn.commit()
 
 
 class RoleCreate(BaseModel):

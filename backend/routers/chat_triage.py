@@ -179,35 +179,52 @@ def close_one_chat(payload: CloseOneRequest, db: Session = Depends(get_db),
 
 @router.get("/archive")
 def get_archive(limit: int = Query(200, ge=1, le=1000),
+                mp: str = Query("all"),
                 db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    """Архив: чаты, закрытые вручную или массовым разбором."""
-    rows = db.execute(text("""
-        SELECT d.item_id AS chat_id, d.dismissed_by, d.dismissed_at, d.note,
-               c.client_name, c.good_name, c.nm_id::text AS nm_id,
-               c.last_message, c.last_ts
+    """Архив закрытых чатов (WB / Ozon / ЯМ)."""
+    mp = (mp or "all").lower()
+    mp_filter = "" if mp == "all" else "AND d.mp = :mp"
+    params = {"lim": limit}
+    if mp != "all":
+        params["mp"] = mp
+
+    rows = db.execute(text(f"""
+        SELECT d.item_id AS chat_id, d.mp, d.dismissed_by, d.dismissed_at, d.note,
+               COALESCE(w.client_name, y.customer_name, o.order_number, 'Покупатель') AS client_name,
+               COALESCE(w.good_name, y.context_type, o.context_article, o.context_sku::text) AS good_name,
+               w.nm_id::text AS nm_id,
+               COALESCE(w.last_message, y.last_message, o.last_message) AS last_message,
+               w.last_ts
         FROM cx_dismissed_items d
-        LEFT JOIN wb_chats c ON c.chat_id = d.item_id
-        WHERE d.mp = 'wb' AND d.item_type = 'chat'
+        LEFT JOIN wb_chats w ON w.chat_id = d.item_id AND d.mp = 'wb'
+        LEFT JOIN ozon_chats o ON o.chat_id = d.item_id AND d.mp = 'ozon'
+        LEFT JOIN ym_chats y ON y.chat_id = d.item_id AND d.mp = 'ym'
+        WHERE d.item_type = 'chat' {mp_filter}
         ORDER BY d.dismissed_at DESC
         LIMIT :lim
-    """), {"lim": limit}).mappings().all()
-    total = db.execute(text(
-        "SELECT count(*) FROM cx_dismissed_items WHERE mp='wb' AND item_type='chat'"
-    )).scalar()
+    """), params).mappings().all()
+    total = db.execute(text(f"""
+        SELECT count(*) FROM cx_dismissed_items d
+        WHERE d.item_type = 'chat' {mp_filter}
+    """), {k: v for k, v in params.items() if k != "lim"}).scalar()
     return {"items": [dict(r) for r in rows], "total": total}
 
 
 class RestoreRequest(BaseModel):
     chat_id: str
+    mp: str = "wb"
 
 
 @router.post("/restore")
 def restore_chat(payload: RestoreRequest, db: Session = Depends(get_db),
                  current_user=Depends(get_current_user)):
-    """Вернуть чат из архива в работу."""
+    """Вернуть чат из архива в работу (все площадки)."""
+    mp = (payload.mp or "wb").lower()
+    if mp not in ("wb", "ozon", "ym"):
+        mp = "wb"
     db.execute(text("""
         DELETE FROM cx_dismissed_items
-        WHERE mp='wb' AND item_type='chat' AND item_id = :id
-    """), {"id": payload.chat_id})
+        WHERE mp=:mp AND item_type='chat' AND item_id = :id
+    """), {"id": payload.chat_id, "mp": mp})
     db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "mp": mp}

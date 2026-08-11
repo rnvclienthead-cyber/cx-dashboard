@@ -97,11 +97,13 @@ const resolvedPickup    = ref(null)
 const dadataSuggestions = ref([])
 const dadataLoading     = ref(false)
 const showSuggestions   = ref(false)
+const addressImprecise  = ref(false)  // true если выбран только город без улицы
 let addressDebounce = null
 
 const clearPickup = () => {
   resolvedPickup.value    = null
   pickupError.value       = ''
+  addressImprecise.value  = false
   dadataSuggestions.value = []
   showSuggestions.value   = false
   form.client_pvz_address = ''
@@ -155,6 +157,10 @@ const selectDadataAddress = async (suggestion) => {
   const city = d.city || d.settlement || d.area_with_type || d.region || suggestion.value.split(',')[0].trim()
   const lat = d.geo_lat ? parseFloat(d.geo_lat) : null
   const lon = d.geo_lon ? parseFloat(d.geo_lon) : null
+
+  // Проверяем точность: Dadata granularity "house"/"flat" = точно, всё остальное = только город/улица
+  const granularity = d.granularity || ''
+  addressImprecise.value = !d.street && !d.house && granularity !== 'flat'
 
   form.client_pvz_address = suggestion.value
   form.client_pvz_city    = city
@@ -284,8 +290,15 @@ const submit = async () => {
 
   try {
     const res = await fetch(`${API_BASE}/api/v1/reshipment/submit`, { method: 'POST', body: fd })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.detail || 'Ошибка сервера')
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = typeof data.detail === 'string' ? data.detail : (data.detail?.[0]?.msg || data.detail || 'Ошибка сервера')
+      if (res.status === 409 && /ссылк/i.test(String(detail))) {
+        state.value = 'token_used'
+        return
+      }
+      throw new Error(detail)
+    }
     submittedReqId.value = data.id || null
     state.value = 'success'
   } catch (e) {
@@ -389,7 +402,8 @@ const submit = async () => {
           <h2 class="text-2xl font-black mb-3" style="color:#1E2235;">Заявка уже принята</h2>
           <p class="text-sm leading-relaxed" style="color:#6B7280;">
             По этой ссылке уже была подана заявка.<br>
-            Если у вас вопросы — напишите нам в чате.
+            Если нужна ещё одна отправка — попросите менеджера выслать <b>новую</b> ссылку в чате.<br>
+            Старую ссылку использовать нельзя.
           </p>
         </div>
 
@@ -667,7 +681,7 @@ const submit = async () => {
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
 
-              <p class="text-xs mb-3" style="color:#9CA3AF;">Начните вводить адрес и выберите вариант из списка</p>
+              <p class="text-xs mb-3" style="color:#9CA3AF;">Укажите улицу и номер дома — так ПВЗ подберётся точнее</p>
 
               <!-- Ввод адреса с Dadata autocomplete -->
               <div class="relative">
@@ -731,6 +745,22 @@ const submit = async () => {
                     style="background:#F5C00033; color:#92700A;">
                     Изменить
                   </button>
+                </div>
+              </div>
+
+              <!-- Предупреждение: указан только город, без улицы -->
+              <div v-if="resolvedPickup && addressImprecise"
+                class="mt-2 px-4 py-3 rounded-2xl flex items-start gap-2"
+                style="background:#FFF3CD; border:1.5px solid #F59E0B;">
+                <svg class="w-4 h-4 flex-shrink-0 mt-0.5" style="color:#B45309;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                </svg>
+                <div>
+                  <div class="text-xs font-bold" style="color:#92400E;">Указан только город — уточните адрес</div>
+                  <div class="text-xs mt-0.5 leading-relaxed" style="color:#78350F;">
+                    Без улицы и номера дома ПВЗ будет выбран ближайший к центру города.
+                    Для точного подбора укажите улицу и дом — так ПВЗ окажется рядом с вами.
+                  </div>
                 </div>
               </div>
 

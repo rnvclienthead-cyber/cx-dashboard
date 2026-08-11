@@ -49,11 +49,13 @@ SEED_THEMES = [
      "draft", "", "Надо отличить настоящий брак от неверной сборки.", 50),
     ("vozvrat", "Хочу вернуть товар",
      "«Как сделать возврат», «можно ли вернуть», «возврат возможен» — без требования денег.",
-     "draft", "", "Рядом лежит тема денег — это красная зона.", 60),
+     "auto", "ask_reason",
+     "Сначала уточнить причину. После причины — менеджеру, без инструкции оформления.", 60),
     ("nevozvratny", "Невозвратный товар",
      "«Заказала две, одна лишняя», «не подошёл размер», «почему невозвратный». "
      "Также: товар из категории невозвратных (сушилки и др. — список в API).",
-     "draft", "", "Черновик менеджеру. Привязка к категориям ассортимента.", 70),
+     "draft", "",
+     "Правило только WB (сушилки и др. по списку категорий). На Ozon/ЯМ не применять.", 70),
     ("dostavka_wb", "Где мой заказ",
      "«Когда придёт заказ WB», «статус оформлен N дней», «где посылка», перенос доставки WB.",
      "auto", "", "", 80),
@@ -64,8 +66,9 @@ SEED_THEMES = [
      "«Как собрать», «трубки не подходят / короче», «болт не входит», «накладки молотком», инструкция.",
      "auto", "", "Часто это не брак, а неверный порядок сборки — ответ снимает возврат.", 100),
     ("ekspluataciya", "Товар не работает",
-     "Собрано, но не работает. Швабры: не увлажняется, не крутится, вода не сливается.",
-     "auto", "", "", 110),
+     "Только швабры/вёдра Видовито (артикулы Mop-*): собрано, но не увлажняется, "
+     "не крутится, вода не сливается. На другие товары не применять.",
+     "auto", "", "Видео и текст — только для швабр/вёдер. Иначе → меню уточнения.", 110),
     ("ssylka", "Ссылка не открывается",
      "«Ссылка не работает», «ведёт на главную», «адрес не находит», «что за сайт».",
      "auto", "resend_form_link", "", 120),
@@ -98,6 +101,23 @@ SEED_THEMES = [
      "без запроса детали. Красная зона / человек.",
      "human", "handoff_to_manager",
      "Деньгами управляет WB. Бот не обещает сроки от продавца.", 35),
+    ("zapchasti", "Насадки и запчасти",
+     "«Где купить насадки», «сменные насадки к швабре», «докапить тряпку/насадку».",
+     "auto", "",
+     "Только сменные насадки. Заглушки/крепёж — тема krepezh.", 175),
+    ("krepezh", "Заглушки и крепёж",
+     "«Где купить заглушки», «защёлки», «пробки сливные», мелкий крепёж отдельно.",
+     "auto", "",
+     "Отдельно не продаём — возврат или хозмаг. Не путать с насадками.", 176),
+    ("wrong_item", "Прислали не тот товар",
+     "«Прислали не тот», «другой цвет/модель», «пересорт», «это не наш товар».",
+     "auto", "explain_return",
+     "Ozon: возврат с причиной «прислали не тот товар» + фото упаковки/этикетки.", 55),
+    ("return_expired", "Срок возврата истёк",
+     "«Срок возврата истёк», «не получается оформить возврат», «нет кнопки Вернуть».",
+     "draft", "",
+     "WB: «Покупки» / поддержка WB. Ozon: не давить «Заказы» — в поддержку Ozon. "
+     "Решение за площадкой.", 65),
 ]
 
 # (theme_key, branch_key, branch_label, text, sort)
@@ -110,6 +130,14 @@ SEED_VARIANTS = [
      "Здравствуйте! Досадно, что так вышло с комплектацией. Давайте не будем ничего возвращать — мы просто вышлем недостающую деталь за наш счёт. Отправляем?", 3),
     ("nekomplekt", "sku_denied", "Товара нет в списке",
      "Здравствуйте! Извините за эту ситуацию — комплект должен был приехать полным. По этому товару выслать деталь отдельно мы, к сожалению, не можем. Оформите, пожалуйста, возврат в личном кабинете во вкладке «Покупки» с пометкой «брак» — так товар не уедет к следующему покупателю. Деньги вернутся полностью.", 1),
+    # WB-заглушки для веток Ozon Playbook 2.0 (на WB не используются — см. SEED_OZON_VARIANTS)
+    ("wrong_item", "", "",
+     "Здравствуйте! Извините, что приехал не тот товар. Оформите возврат во вкладке «Покупки» "
+     "с причиной «прислали не тот товар» и приложите фото упаковки и этикетки.", 1),
+    ("return_expired", "", "",
+     "Здравствуйте! Если срок возврата истёк и оформить заявку в кабинете не получается — "
+     "напишите в поддержку маркетплейса: укажите номер заказа, опишите проблему и приложите фото. "
+     "Решение принимает площадка.", 1),
     ("nekomplekt", "sku_denied", "Товара нет в списке",
      "Здравствуйте! Очень жаль, что не хватило детали. Отдельно выслать её по этому товару у нас нет возможности. Самое быстрое решение — оформить возврат во вкладке «Покупки» с пометкой «брак», чтобы этот экземпляр не попал к другому человеку. Будем рады видеть вас снова.", 2),
 
@@ -140,10 +168,12 @@ SEED_VARIANTS = [
     ("brak", "needs_return", "Нужен возврат",
      "Здравствуйте! Очень жаль, что товар пришёл с дефектом — так быть не должно. Оформите, пожалуйста, возврат во вкладке «Покупки» с пометкой «брак»: это важно, чтобы бракованный экземпляр не уехал к другому покупателю. Деньги вернут полностью.", 1),
     ("brak", "needs_return", "Нужен возврат",
-     "Здравствуйте! Извините за такой экземпляр. Правильнее всего оформить возврат с пометкой «брак» — тогда товар изымут из оборота, а деньги вернутся вам в полном объёме. Если решите заказать снова, мы будем рады.", 2),
+     "Здравствуйте! Извините за такой экземпляр. Правильнее всего оформить возврат с пометкой «брак» — тогда товар изымут из оборота, а деньги вернутся вам в полном объёме.", 2),
 
-    ("vozvrat", "", "", "Здравствуйте! Оформить возврат можно в личном кабинете во вкладке «Покупки» — выбираете товар и указываете причину. Если дело в недостающей или сломанной детали, напишите нам: возможно, получится решить быстрее, чем возвратом.", 1),
-    ("vozvrat", "", "", "Здравствуйте! Возврат оформляется во вкладке «Покупки» в вашем личном кабинете. Подскажите, а что именно не подошло? Иногда вопрос решается проще — например, мы досылаем недостающую деталь.", 2),
+    ("vozvrat", "ask_reason", "Уточнить причину",
+     "Подскажите, пожалуйста, почему решили вернуть товар? Например: не подошёл размер, "
+     "обнаружили брак, товар оказался лишним или вы передумали. "
+     "Товар можно найти во вкладке «Покупки».", 1),
 
     ("nevozvratny", "", "",
      "Этот товар невозвратный. Возвратность товара определяет сервис WB. "
@@ -217,6 +247,182 @@ SEED_VARIANTS = [
     ("dengi", "", "",
      "Подключаю коллегу — по срокам возврата денег разберётся он. "
      "Обычно зачислением занимается Wildberries и банк, не продавец.", 1),
+
+    ("zapchasti", "", "",
+     "Здравствуйте! К сожалению, комплектующие и запчасти отдельно у нас на Wildberries "
+     "сейчас не представлены. Рекомендуем поискать подходящие детали в хозяйственных магазинах "
+     "или на маркетплейсах. Если товар с дефектом — оформите возврат во вкладке «Покупки».", 1),
+
+    ("krepezh", "", "",
+     "Здравствуйте! Заглушки, защёлки и другой мелкий крепёж отдельно мы не продаём. "
+     "Их можно поискать в хозяйственном магазине. Если деталь не пришла в комплекте или брак — "
+     "оформите возврат во вкладке «Покупки» с пометкой «брак».", 1),
+]
+
+# Шаблоны Ozon (инструкции «куда нажать» — как отвечают менеджеры / Альфред).
+# (theme_key, branch_key, branch_label, body, sort_order)
+SEED_OZON_VARIANTS = [
+    # ── Playbook 2.0: приоритетные ветки по ответам Альфреда ────────────────
+    ("nekomplekt", "check_tubes", "Проверить трубки / комплект",
+     "Здравствуйте! Пожалуйста, разложите все трубки по длине и проверьте, "
+     "не вложена ли более короткая деталь внутрь более длинной или широкой трубки. "
+     "Похожие детали легко перепутать при сборке. Если деталь не найдётся — напишите нам "
+     "(лучше с фото комплекта). Отдельно прислать недостающую деталь мы, к сожалению, не можем.", 1),
+    ("nekomplekt", "check_tubes", "Проверить трубки / комплект",
+     "Здравствуйте! Часто «пропавшая» трубка оказывается вложена внутрь другой. "
+     "Разложите детали по длине и сверьте с инструкцией. Если чего-то действительно нет — "
+     "пришлите фото полученного комплекта, подскажем следующий шаг. "
+     "Отдельно выслать деталь на Ozon мы не можем.", 2),
+
+    ("nekomplekt", "no_reship_return", "Без досылки → возврат",
+     "Здравствуйте! К сожалению, отдельно прислать или продать недостающую деталь мы не можем. "
+     "Рекомендуем оформить возврат через раздел «Заказы»: выберите товар → нажмите «Вернуть» → "
+     "укажите причину «неполная комплектация» или «брак». К заявке желательно приложить фото "
+     "полученного комплекта. Окончательное решение и дальнейшие инструкции предоставит Ozon.", 1),
+    ("nekomplekt", "no_reship_return", "Без досылки → возврат",
+     "Здравствуйте! Извините за ситуацию с комплектацией. Отдельно выслать деталь мы не можем — "
+     "такой возможности на Ozon нет. Оформите возврат в разделе «Заказы»: товар → «Вернуть» → "
+     "причина «неполная комплектация» (или «брак»), по возможности с фото. "
+     "Решение по заявке принимает Ozon.", 2),
+
+    ("wrong_item", "", "",
+     "Здравствуйте! Приносим извинения за возникшую ситуацию. Откройте раздел «Заказы», "
+     "выберите данный товар, нажмите «Вернуть» и укажите причину «прислали не тот товар». "
+     "К заявке приложите фотографии упаковки, этикетки и полученного товара. "
+     "Окончательное решение и дальнейшие инструкции предоставит Ozon.", 1),
+    ("wrong_item", "", "",
+     "Здравствуйте! Нам очень жаль, что приехал не тот товар (или другой цвет/модель). "
+     "Оформите возврат через раздел «Заказы», указав причину «прислали не тот товар», "
+     "и приложите фото упаковки, этикетки и товара. Решение принимает Ozon.", 2),
+
+    ("return_expired", "", "",
+     "Здравствуйте! Если срок возврата истёк и оформить заявку через раздел «Заказы» "
+     "не получается, рекомендуем обратиться в поддержку Ozon: профиль → «Сообщения» → "
+     "«Поддержка Ozon». Укажите номер заказа, опишите проблему и приложите фото. "
+     "Решение о возможности возврата и дальнейшие инструкции предоставляет Ozon.", 1),
+    ("return_expired", "", "",
+     "Здравствуйте! Понимаем желание вернуть товар. Когда срок возврата истёк и кнопки "
+     "«Вернуть» уже нет — напишите в поддержку Ozon с номером заказа, описанием и фото. "
+     "Решение принимает площадка; мы со своей стороны возврату не препятствуем.", 2),
+
+    ("blagodarnost", "kept_anyway", "Оставил товар",
+     "Здравствуйте! Приносим извинения за неполную комплектацию. Рады, что Вы решили "
+     "оставить товар и пользуетесь им. Желаем комфортного использования.", 1),
+
+    ("dostavka_wb", "", "",
+     "Здравствуйте! Сроки и статус доставки формирует Ozon — продавец на них не влияет. "
+     "Актуальную дату смотрите в карточке заказа в приложении или на сайте Ozon. "
+     "Если срок сдвинулся после оплаты — это обновление логистики маркетплейса. "
+     "Уточнить причину можно в поддержке Ozon: профиль → «Сообщения» → «Поддержка Ozon». "
+     "По самому товару (комплектация, сборка, качество) мы на связи здесь — напишите, поможем.", 1),
+    ("dostavka_wb", "", "",
+     "Здравствуйте! По доставке ориентируйтесь на статус в заказе Ozon — мы со своей стороны "
+     "сроки не меняем и не ускоряем. Если дата изменилась или статус долго стоит на месте, "
+     "напишите в поддержку Ozon: профиль → «Сообщения» → «Поддержка Ozon». "
+     "Если вопрос по товару — пишите нам, разберёмся.", 2),
+
+    ("vozvrat", "", "",
+     "Здравствуйте! Оформить возврат можно в личном кабинете Ozon: раздел «Заказы» → "
+     "выберите товар → нажмите «Вернуть» и укажите причину. "
+     "Окончательное решение по заявке принимает Ozon.", 1),
+    ("vozvrat", "", "",
+     "Здравствуйте! Возврат оформляется через раздел «Заказы»: откройте отправление, "
+     "нажмите «Вернуть» и выберите причину. Если нужно — подскажем по шагам.", 2),
+    ("vozvrat", "ask_reason", "Уточнить причину",
+     "Подскажите, пожалуйста, почему решили вернуть товар? Например: не подошёл размер, "
+     "обнаружили брак, товар оказался лишним или вы передумали. "
+     "Товар можно найти в разделе «Заказы».", 1),
+
+    ("brak", "needs_return", "Нужен возврат",
+     "Здравствуйте! Очень жаль, что товар пришёл с дефектом. Рекомендуем оформить возврат "
+     "через раздел «Заказы»: выберите товар, нажмите «Вернуть» и укажите причину «брак». "
+     "К заявке лучше приложить фото. Так бракованный экземпляр не уедет к другому покупателю, "
+     "а деньги вернут по правилам Ozon.", 1),
+    ("brak", "needs_return", "Нужен возврат",
+     "Здравствуйте! Извините за такой экземпляр. Оформите, пожалуйста, возврат в разделе «Заказы»: "
+     "товар → «Вернуть» → причина «брак», по возможности с фото. "
+     "Решение по заявке принимает Ozon; мы со своей стороны возврату не препятствуем.", 2),
+
+    ("cheque", "", "",
+     "Чек по заказу Ozon можно скачать в личном кабинете: откройте заказ → документы/чек. "
+     "Если файла нет — подскажет поддержка Ozon: профиль → «Сообщения» → «Поддержка Ozon».", 1),
+
+    ("srok_hraneniya", "", "",
+     "Продлить срок хранения в пункте выдачи с нашей стороны нельзя — этим управляет Ozon. "
+     "Напишите в поддержку Ozon: профиль → «Сообщения» → «Поддержка Ozon».", 1),
+
+    ("teh_sboi", "", "",
+     "Похоже на сбой на стороне Ozon — мы на такие ошибки не влияем. "
+     "Обратитесь в поддержку: профиль → «Сообщения» → «Поддержка Ozon». "
+     "Если вопрос по самому товару (сборка, комплектация, качество) — пишите нам сюда, поможем.", 1),
+
+    ("dengi", "", "",
+     "Возвратом денег занимается Ozon и банк — обычно зачисление занимает несколько дней. "
+     "Уточнить статус можно в поддержке Ozon: профиль → «Сообщения» → «Поддержка Ozon». "
+     "Если нужно, подключаю коллегу по вашей заявке.", 1),
+
+    # nevozvratny на Ozon/ЯМ не сидим — тема WB-only (сушилки)
+
+    ("otmena_zakaza", "", "",
+     "Здравствуйте! Отменить заказ можно в приложении Ozon, пока отправление ещё не собрано/не в пути — "
+     "откройте заказ и нажмите «Отменить», если кнопка доступна. "
+     "С нашей стороны отменять заказы Ozon не позволяет. "
+     "Если отмена уже недоступна — можно не забирать из пункта выдачи, деньги вернутся по правилам Ozon.", 1),
+
+    ("sborka", "", "",
+     "Здравствуйте! Давайте разберёмся — чаще всего дело в порядке сборки. "
+     "Подскажите модель или артикул, и я пришлю схему именно для него.", 1),
+    ("sborka", "", "",
+     "Здравствуйте! Скорее всего трубки просто перепутаны местами — они разной длины и на вид почти одинаковые. "
+     "Разложите их по размеру перед сборкой. Напишите, какая модель у вас — пришлю точную схему.", 2),
+
+    ("ekspluataciya", "", "",
+     "Здравствуйте! Давайте проверим два момента: отсек для чистой воды должен быть наполнен полностью, "
+     "и важно, верно ли установлен крутящий механизм. Вот короткое видео: "
+     "https://drive.google.com/file/d/1wyyjqKCyyqF_AxXInQkBzmHDhMLWZIl7/view?usp=sharing", 1),
+
+    ("blagodarnost", "problem_solved", "Проблема решена",
+     "Рады, что удалось разобраться! Желаем приятного пользования. "
+     "Если что-то ещё понадобится — пишите сюда.", 1),
+    ("blagodarnost", "just_thanks", "Просто благодарность",
+     "Пожалуйста! Если что-то ещё понадобится — пишите сюда.", 1),
+
+    ("zapchasti", "", "",
+     "Здравствуйте! Для швабры Видовито подходят фирменные сменные насадки — "
+     "они в продаже на Ozon: https://ozon.ru/t/8MDukTG", 1),
+    ("zapchasti", "", "",
+     "Здравствуйте! Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: "
+     "https://ozon.ru/t/8MDukTG", 2),
+
+    ("krepezh", "", "",
+     "Здравствуйте! Заглушки для сливных отверстий, защёлки и другой мелкий крепёж "
+     "отдельно мы не продаём. Их можно поискать в хозяйственном магазине.\n\n"
+     "Если детали не было в комплекте или она с браком — оформите возврат в разделе «Заказы»: "
+     "товар → «Вернуть» → причина «брак».", 1),
+    ("krepezh", "", "",
+     "Здравствуйте! К сожалению, такие комплектующие (заглушки, крепёж) отдельно в продаже "
+     "не представлены. Рекомендуем хозяйственный магазин либо возврат через «Заказы» → «Вернуть».", 2),
+
+    ("utochnenie", "", "",
+     "Подскажите, пожалуйста, что вам нужно — ответьте цифрой или коротко своими словами:\n"
+     "1 — не хватает детали / неполная комплектация\n"
+     "2 — брак или повреждение товара\n"
+     "3 — вопрос по сборке, размерам или нагрузке\n"
+     "4 — хочу оформить возврат на Ozon\n"
+     "5 — другое (подключу коллегу)", 1),
+
+    ("parametry", "", "",
+     "Точные размеры и нагрузка указаны в карточке товара в разделе «Характеристики». "
+     "Напишите, пожалуйста, что именно нужно: высота, ширина, глубина или нагрузка — "
+     "подскажу цифры по вашей модели.", 1),
+]
+
+# Для Яндекс Маркета пока нужен только новый первый шаг возврата.
+SEED_YM_VARIANTS = [
+    ("vozvrat", "ask_reason", "Уточнить причину",
+     "Подскажите, пожалуйста, почему решили вернуть товар? Например: не подошёл размер, "
+     "обнаружили брак, товар оказался лишним или вы передумали. "
+     "Товар можно найти в разделе «Заказы».", 1),
 ]
 
 SEED_SETTINGS = [
@@ -238,6 +444,35 @@ SEED_SETTINGS = [
     ("closing_auto_close_hours", "48",
      "Через сколько часов после уточняющего вопроса закрывать диалог без ответа."),
 ]
+
+
+_VARIANT_MP_MIGRATION = "chat_variants_blank_legacy_wb_v1"
+
+
+def _migrate_legacy_blank_variant_mp(conn) -> int:
+    """Одноразово закрепляет старый mp='' за WB.
+
+    До этой миграции пустое mp в схеме и API было legacy-обозначением WB.
+    После marker-записи mp='' можно безопасно использовать для явно
+    созданных общих шаблонов; повторный startup их не затронет.
+    """
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _VARIANT_MP_MIGRATION}).scalar()
+    if applied:
+        return 0
+
+    result = conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET mp = 'wb'
+        WHERE COALESCE(mp, '') = ''
+    """))
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _VARIANT_MP_MIGRATION})
+    return result.rowcount or 0
 
 
 def init_playbook_tables(engine):
@@ -267,6 +502,23 @@ def init_playbook_tables(engine):
                 updated_at   TIMESTAMP DEFAULT now(),
                 updated_by   TEXT    DEFAULT ''
             )"""))
+        # mp='' — явно общий шаблон; все legacy-пустые строки ниже
+        # одноразово мигрируются в 'wb'. По умолчанию новые строки — WB.
+        conn.execute(text("""
+            ALTER TABLE cx_chat_variants
+            ADD COLUMN IF NOT EXISTS mp TEXT NOT NULL DEFAULT 'wb'
+        """))
+        conn.execute(text("""
+            ALTER TABLE cx_chat_variants
+            ALTER COLUMN mp SET DEFAULT 'wb'
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_schema_migrations (
+                key        TEXT PRIMARY KEY,
+                applied_at TIMESTAMP NOT NULL DEFAULT now()
+            )
+        """))
+        _migrate_legacy_blank_variant_mp(conn)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_settings (
                 key        TEXT PRIMARY KEY,
@@ -286,8 +538,8 @@ def init_playbook_tables(engine):
         if not conn.execute(text("SELECT count(*) FROM cx_chat_variants")).scalar():
             for tk, bk, bl, body, s in SEED_VARIANTS:
                 conn.execute(text("""
-                    INSERT INTO cx_chat_variants (theme_key, branch_key, branch_label, body, sort_order, updated_by)
-                    VALUES (:tk, :bk, :bl, :body, :s, 'system')
+                    INSERT INTO cx_chat_variants (theme_key, branch_key, branch_label, body, sort_order, mp, updated_by)
+                    VALUES (:tk, :bk, :bl, :body, :s, 'wb', 'system')
                 """), {"tk": tk, "bk": bk, "bl": bl, "body": body, "s": s})
         for k, v, d in SEED_SETTINGS:
             conn.execute(text("""
@@ -299,11 +551,16 @@ def init_playbook_tables(engine):
     # Дозасев новых тем (меню 1–5 и т.п.) без затирания правок из UI
     ensure_new_themes(engine)
     ensure_mp_control_settings(engine)
+    ensure_ozon_variants(engine)
+    ensure_ym_variants(engine)
 
 
 def ensure_new_themes(engine):
     """Добавляет темы/варианты, которых ещё нет. Существующие тексты не трогает."""
-    NEW = {"utochnenie", "cheque", "srok_hraneniya", "teh_sboi", "parametry", "dengi"}
+    NEW = {
+        "utochnenie", "cheque", "srok_hraneniya", "teh_sboi", "parametry", "dengi",
+        "zapchasti", "krepezh", "wrong_item", "return_expired",
+    }
     with engine.connect() as conn:
         for k, n, w, z, a, note, s in SEED_THEMES:
             if k not in NEW:
@@ -319,15 +576,72 @@ def ensure_new_themes(engine):
                 continue
             has = conn.execute(text("""
                 SELECT 1 FROM cx_chat_variants
-                WHERE theme_key = :tk AND coalesce(branch_key,'') = :bk AND body = :body
+                WHERE theme_key = :tk AND coalesce(branch_key,'') = :bk
+                  AND body = :body AND coalesce(mp,'wb') = 'wb'
                 LIMIT 1
             """), {"tk": tk, "bk": bk or "", "body": body}).scalar()
             if has:
                 continue
             conn.execute(text("""
                 INSERT INTO cx_chat_variants
-                    (theme_key, branch_key, branch_label, body, sort_order, updated_by)
-                VALUES (:tk, :bk, :bl, :body, :s, 'system')
+                    (theme_key, branch_key, branch_label, body, sort_order, mp, updated_by)
+                VALUES (:tk, :bk, :bl, :body, :s, 'wb', 'system')
+            """), {"tk": tk, "bk": bk or "", "bl": bl or "", "body": body, "s": s})
+        conn.commit()
+
+
+def ensure_ozon_variants(engine) -> None:
+    """Дозасев Ozon-шаблонов (инструкции «куда нажать»). Существующие тексты не трогает."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for item in SEED_OZON_VARIANTS:
+        groups[(item[0], item[1] or "")].append(item)
+
+    with engine.connect() as conn:
+        conn.execute(text("""
+            ALTER TABLE cx_chat_variants
+            ADD COLUMN IF NOT EXISTS mp TEXT NOT NULL DEFAULT 'wb'
+        """))
+        conn.execute(text("""
+            ALTER TABLE cx_chat_variants
+            ALTER COLUMN mp SET DEFAULT 'wb'
+        """))
+        for (tk, bk), items in groups.items():
+            exists = conn.execute(text("""
+                SELECT 1 FROM cx_chat_variants
+                WHERE theme_key = :tk
+                  AND coalesce(branch_key,'') = :bk
+                  AND coalesce(mp,'') = 'ozon'
+                LIMIT 1
+            """), {"tk": tk, "bk": bk}).scalar()
+            if exists:
+                continue
+            for _tk, _bk, bl, body, s in items:
+                conn.execute(text("""
+                    INSERT INTO cx_chat_variants
+                        (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+                    VALUES (:tk, :bk, :bl, :body, :s, 'ozon', true, 'system')
+                """), {"tk": tk, "bk": bk, "bl": bl or "", "body": body, "s": s})
+        conn.commit()
+
+
+def ensure_ym_variants(engine) -> None:
+    """Дозасев ЯМ-шаблонов, не затирая тексты из интерфейса."""
+    with engine.connect() as conn:
+        for tk, bk, bl, body, s in SEED_YM_VARIANTS:
+            exists = conn.execute(text("""
+                SELECT 1 FROM cx_chat_variants
+                WHERE theme_key = :tk
+                  AND coalesce(branch_key, '') = :bk
+                  AND coalesce(mp, '') = 'ym'
+                LIMIT 1
+            """), {"tk": tk, "bk": bk or ""}).scalar()
+            if exists:
+                continue
+            conn.execute(text("""
+                INSERT INTO cx_chat_variants
+                    (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+                VALUES (:tk, :bk, :bl, :body, :s, 'ym', true, 'system')
             """), {"tk": tk, "bk": bk or "", "bl": bl or "", "body": body, "s": s})
         conn.commit()
 
@@ -342,6 +656,7 @@ BOT_CONTROL_KEYS = (
     "bot_only_no_manager",
     "bot_suggest_on_open",
     "bot_ai_draft",
+    "bot_test_chat_ids",
 )
 BOT_MPS = ("wb", "ozon", "ym")
 
@@ -414,11 +729,30 @@ def get_zone(db: Session, theme_key: str) -> str:
     return row[0] if row[0] in ZONES else "human"
 
 
-def pick_variant(db: Session, theme_key: str, branch_key: str = "") -> Optional[str]:
-    """Случайный активный вариант — чтобы ответы не выглядели под копирку."""
+def pick_variant(db: Session, theme_key: str, branch_key: str = "",
+                 mp: str = "wb") -> Optional[str]:
+    """Случайный активный вариант для площадки.
+
+    Для Ozon/ЯМ: сначала mp-специфичные; если нет — только
+    явно общий mp=''. WB-текст как fallback не используется.
+    """
+    mp = (mp or "wb").strip().lower()
+    if mp not in ("wb", "ozon", "ym"):
+        mp = "wb"
+    # Специфичный текст всегда важнее общего — для всех площадок.
     rows = db.execute(text("""
         SELECT body FROM cx_chat_variants
         WHERE theme_key = :k AND branch_key = :b AND active
+          AND coalesce(mp,'') = :mp
+        ORDER BY sort_order
+    """), {"k": theme_key, "b": branch_key, "mp": mp}).fetchall()
+    if rows:
+        return random.choice([r[0] for r in rows])
+
+    rows = db.execute(text("""
+        SELECT body FROM cx_chat_variants
+        WHERE theme_key = :k AND branch_key = :b AND active
+          AND coalesce(mp,'') = ''
         ORDER BY sort_order
     """), {"k": theme_key, "b": branch_key}).fetchall()
     if not rows:
@@ -442,12 +776,15 @@ class VariantIn(BaseModel):
     branch_label: str = ""
     body: str
     active: bool = True
+    # Пропущенный mp — WB; пустая строка остаётся явным «общим».
+    mp: str = "wb"
 
 
 class VariantUpdate(BaseModel):
     body: Optional[str] = None
     active: Optional[bool] = None
     branch_label: Optional[str] = None
+    mp: Optional[str] = None
 
 
 class SettingUpdate(BaseModel):
@@ -461,8 +798,9 @@ def get_playbook(db: Session = Depends(get_db), current_user=Depends(get_current
         FROM cx_chat_themes ORDER BY sort_order, name
     """)).mappings().all()
     variants = db.execute(text("""
-        SELECT id, theme_key, branch_key, branch_label, body, sort_order, active
-        FROM cx_chat_variants ORDER BY theme_key, branch_key, sort_order, id
+        SELECT id, theme_key, branch_key, branch_label, body, sort_order, active,
+               coalesce(mp,'') AS mp
+        FROM cx_chat_variants ORDER BY theme_key, mp, branch_key, sort_order, id
     """)).mappings().all()
     settings = db.execute(text(
         "SELECT key, value, descr FROM cx_chat_settings ORDER BY key"
@@ -506,15 +844,18 @@ def create_variant(payload: VariantIn, db: Session = Depends(get_db),
                    current_user=Depends(get_current_user)):
     if not payload.body.strip():
         raise HTTPException(400, "Текст не может быть пустым")
+    mp = (payload.mp if payload.mp is not None else "wb").strip().lower()
+    if mp not in ("", "wb", "ozon", "ym"):
+        raise HTTPException(400, "mp: wb|ozon|ym|пусто (общий)")
     nxt = db.execute(text("""
         SELECT COALESCE(max(sort_order), 0) + 1 FROM cx_chat_variants
-        WHERE theme_key = :k AND branch_key = :b
-    """), {"k": payload.theme_key, "b": payload.branch_key}).scalar()
+        WHERE theme_key = :k AND branch_key = :b AND coalesce(mp,'') = :mp
+    """), {"k": payload.theme_key, "b": payload.branch_key, "mp": mp}).scalar()
     row = db.execute(text("""
-        INSERT INTO cx_chat_variants (theme_key, branch_key, branch_label, body, sort_order, active, updated_by)
-        VALUES (:k, :b, :bl, :body, :s, :a, :u) RETURNING id
+        INSERT INTO cx_chat_variants (theme_key, branch_key, branch_label, body, sort_order, active, mp, updated_by)
+        VALUES (:k, :b, :bl, :body, :s, :a, :mp, :u) RETURNING id
     """), {"k": payload.theme_key, "b": payload.branch_key, "bl": payload.branch_label,
-           "body": payload.body.strip(), "s": nxt, "a": payload.active,
+           "body": payload.body.strip(), "s": nxt, "a": payload.active, "mp": mp,
            "u": current_user["username"]}).fetchone()
     db.commit()
     return {"status": "ok", "id": row[0]}
@@ -524,9 +865,13 @@ def create_variant(payload: VariantIn, db: Session = Depends(get_db),
 def update_variant(variant_id: int, payload: VariantUpdate, db: Session = Depends(get_db),
                    current_user=Depends(get_current_user)):
     fields, params = [], {"id": variant_id, "u": current_user["username"]}
-    for col in ("body", "active", "branch_label"):
+    for col in ("body", "active", "branch_label", "mp"):
         val = getattr(payload, col)
         if val is not None:
+            if col == "mp":
+                val = (val or "").strip().lower()
+                if val not in ("", "wb", "ozon", "ym"):
+                    raise HTTPException(400, "mp: wb|ozon|ym|пусто (общий)")
             fields.append(f"{col} = :{col}")
             params[col] = val
     if not fields:

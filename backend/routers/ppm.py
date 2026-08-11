@@ -393,12 +393,20 @@ def compute_abc_xyz(df_monthly: pd.DataFrame,
     result['xyz_class'] = result['xyz_class'].fillna('Z')
     return result
 
-def load_hybrid_data(db: Session, platform: str = 'wb') -> pd.DataFrame:
-    if platform == 'ym':
-        return _load_ym_claims(db)
-    # Обычные отказы не считаем браком.
-    # Исключение: отказ из‑за доотправки детали — брак остаётся, просто закрыт
-    # внутренним инструментом (метка в status_ex или связь с reshipment_requests).
+def _normalize_claims_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if 'supplier_article' in df.columns:
+        df['supplier_article'] = df['supplier_article'].fillna('Без артикула').astype(str).str.strip()
+    if 'created_dt' in df.columns:
+        df['created_dt'] = pd.to_datetime(df['created_dt'], errors='coerce').dt.strftime('%Y-%m-%d')
+    if 'claim_date' in df.columns:
+        df['claim_date'] = pd.to_datetime(df['claim_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    return df
+
+
+def _load_wb_claims(db: Session) -> pd.DataFrame:
+    """WB-претензии для PPM."""
     query = text("""
         SELECT v.*
         FROM view_wb_claims_enriched v
@@ -415,20 +423,49 @@ def load_hybrid_data(db: Session, platform: str = 'wb') -> pd.DataFrame:
     try:
         with db.bind.connect() as conn:
             df = pd.read_sql(query, conn)
-        if df.empty: return df
-        if 'supplier_article' in df.columns:
-            df['supplier_article'] = df['supplier_article'].fillna('Без артикула').astype(str).str.strip()
-        if 'created_dt' in df.columns:
-            df['created_dt'] = pd.to_datetime(df['created_dt'], errors='coerce').dt.strftime('%Y-%m-%d')
-        if 'claim_date' in df.columns:
-            df['claim_date'] = pd.to_datetime(df['claim_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df = _normalize_claims_df(df)
+        if not df.empty:
+            df['platform'] = 'wb'
         return df
     except Exception as e:
-        print(f"Ошибка load_hybrid_data: {e}")
+        print(f"Ошибка _load_wb_claims: {e}")
         return pd.DataFrame()
 
+
+def load_hybrid_data(db: Session, platform: str = 'wb') -> pd.DataFrame:
+    if platform == 'ym':
+        return _load_ym_claims(db)
+    if platform == 'ozon':
+        return _load_ozon_claims(db)
+    if platform == 'all':
+        parts = []
+        for loader in (_load_wb_claims, _load_ym_claims, _load_ozon_claims):
+            try:
+                part = loader(db)
+                if part is not None and not part.empty:
+                    parts.append(part)
+            except Exception as e:
+                print(f"Ошибка load_hybrid_data all/{loader.__name__}: {e}")
+        if not parts:
+            return pd.DataFrame()
+        # Ozon в режиме all не участвует в заводской разбивке (2A)
+        for i, part in enumerate(parts):
+            if 'platform' in part.columns and (part['platform'] == 'ozon').any():
+                part = part.copy()
+                part.loc[part['platform'] == 'ozon', 'factory_name'] = None
+                parts[i] = part
+        return pd.concat(parts, ignore_index=True, sort=False)
+    # Обычные отказы не считаем браком.
+    # Исключение: отказ из‑за доотправки детали — брак остаётся, просто закрыт
+    # внутренним инструментом (метка в status_ex или связь с reshipment_requests).
+    return _load_wb_claims(db)
+
 def _load_ym_claims(db: Session) -> pd.DataFrame:
-    """Возвраты ЯМ в формате view_wb_claims_enriched для совместимости с PPM."""
+    """Возвраты ЯМ в формате view_wb_claims_enriched для совместимости с PPM.
+
+    Связка через поставки ЯМ отключена: в API нет пути «возврат → поставка».
+    Завод — только из ассортимента (manufacturer), иначе «Уточняется».
+    """
     try:
         with db.bind.connect() as conn:
             df = pd.read_sql(text("""
@@ -437,7 +474,18 @@ def _load_ym_claims(db: Session) -> pd.DataFrame:
                     r.created_at               AS created_dt,
                     r.supplier_article,
                     r.return_comment           AS user_comment,
-                    r.status_ru                AS status,
+                    COALESCE(
+                        NULLIF(TRIM(r.status_ru), ''),
+                        CASE r.status
+                            WHEN 'REFUNDED' THEN 'Одобрено'
+                            WHEN 'REFUND_IN_PROGRESS' THEN 'Одобрено'
+                            WHEN 'REJECTED' THEN 'Отказ'
+                            WHEN 'CANCELLED' THEN 'Отменено'
+                            WHEN 'NOT_RETURNED' THEN 'Отказ'
+                            WHEN 'FAILED' THEN 'Отказ'
+                            ELSE 'На рассмотрении'
+                        END
+                    )                          AS status,
                     NULL::text                 AS status_ex,
                     NULL::text                 AS income_id,
                     r.photos,
@@ -445,38 +493,100 @@ def _load_ym_claims(db: Session) -> pd.DataFrame:
                     r.cat_1,  r.cat_2,  r.cat_3,  r.cat_4,  r.cat_5,
                     r.cat_6,  r.cat_7,  r.cat_8,  r.cat_9,  r.cat_10,
                     r.cat_11, r.cat_12, r.cat_13,
-                    NULL::date                 AS order_date,
+                    o.created_at::date         AS order_date,
                     r.created_at               AS claim_date,
-                    f.factory_name,
+                    COALESCE(NULLIF(TRIM(a.manufacturer), ''), 'Уточняется') AS factory_name,
                     NULL::text                 AS container_num,
                     NULL::date                 AS shipment_date,
-                    inv.invoice_num
+                    NULL::text                 AS invoice_num
                 FROM ym_returns r
-                LEFT JOIN (
-                    SELECT DISTINCT ON (supplier_article)
-                        supplier_article, invoice_num
-                    FROM wb_invoices
-                    WHERE marketplace = 'ym'
-                      AND invoice_num NOT IN ('', '0')
-                    ORDER BY supplier_article, supply_id DESC
-                ) inv ON inv.supplier_article = r.supplier_article
-                LEFT JOIN wb_factories f
-                    ON trim(lower(f.invoice_num)) = trim(lower(inv.invoice_num))
-                   AND trim(lower(f.supplier_article)) = trim(lower(r.supplier_article))
+                LEFT JOIN ym_orders o
+                    ON o.order_id = r.order_id
+                   AND TRIM(o.supplier_article) = TRIM(r.supplier_article)
+                LEFT JOIN wb_assortment a
+                    ON TRIM(a.supplier_article) = TRIM(r.supplier_article)
                 WHERE (r.return_type = 'RETURN' OR r.return_type IS NULL)
-                  AND r.status NOT IN ('NOT_RETURNED', 'FAILED')
+                  AND r.status NOT IN ('NOT_RETURNED', 'FAILED', 'CANCELLED', 'REJECTED')
                 ORDER BY r.created_at DESC
             """), conn)
-        if df.empty: return df
-        df['supplier_article'] = df['supplier_article'].fillna('Без артикула').astype(str).str.strip()
-        df['created_dt'] = pd.to_datetime(df['created_dt'], errors='coerce').dt.strftime('%Y-%m-%d')
-        df['claim_date']  = pd.to_datetime(df['claim_date'],  errors='coerce').dt.strftime('%Y-%m-%d')
+        df = _normalize_claims_df(df)
+        if not df.empty:
+            df['platform'] = 'ym'
         return df
     except Exception as e:
         print(f"Ошибка _load_ym_claims: {e}")
         return pd.DataFrame()
 
+
+# Качественные причины Ozon — общие с Картой проблем (см. ozon_returns_filters).
+from ..ozon_returns_filters import ozon_returns_where_sql
+
+
+def _load_ozon_claims(db: Session) -> pd.DataFrame:
+    """FBO-возвраты Ozon для PPM (только заводские причины)."""
+    try:
+        with db.bind.connect() as conn:
+            df = pd.read_sql(text(f"""
+                SELECT
+                    r.return_id::text          AS srid,
+                    r.return_date              AS created_dt,
+                    r.supplier_article,
+                    NULL::text                 AS user_comment,
+                    r.status_ru                AS status,
+                    NULL::text                 AS status_ex,
+                    NULL::text                 AS income_id,
+                    ''::text                   AS photos,
+                    NULL::text                 AS video_paths,
+                    r.cat_1,  r.cat_2,  r.cat_3,  r.cat_4,  r.cat_5,
+                    r.cat_6,  r.cat_7,  r.cat_8,  r.cat_9,  r.cat_10,
+                    r.cat_11, r.cat_12, r.cat_13,
+                    NULL::date                 AS order_date,
+                    r.return_date              AS claim_date,
+                    'Ozon FBO'::text           AS factory_name,
+                    NULL::text                 AS container_num,
+                    NULL::date                 AS shipment_date,
+                    NULL::text                 AS invoice_num
+                FROM ozon_returns r
+                WHERE {ozon_returns_where_sql("r", for_ppm=True)}
+                ORDER BY r.return_date DESC
+            """), conn)
+        df = _normalize_claims_df(df)
+        if not df.empty:
+            df['platform'] = 'ozon'
+        return df
+    except Exception as e:
+        print(f"Ошибка _load_ozon_claims: {e}")
+        return pd.DataFrame()
+
 def load_orders_data(db: Session, platform: str = 'wb') -> pd.DataFrame:
+    empty = pd.DataFrame(columns=['supplier_article', 'month_dt', 'pure_orders'])
+
+    def _read(query):
+        try:
+            with db.bind.connect() as conn:
+                df = pd.read_sql(query, conn)
+            if not df.empty:
+                df['month_dt'] = pd.to_datetime(df['month_dt'], utc=True).dt.tz_localize(None)
+            return df
+        except Exception:
+            return empty.copy()
+
+    if platform == 'all':
+        frames = [
+            load_orders_data(db, 'wb'),
+            load_orders_data(db, 'ym'),
+            load_orders_data(db, 'ozon'),
+        ]
+        frames = [f for f in frames if f is not None and not f.empty]
+        if not frames:
+            return empty
+        df = pd.concat(frames, ignore_index=True)
+        df = (
+            df.groupby(['supplier_article', 'month_dt'], as_index=False)['pure_orders']
+            .sum()
+        )
+        return df
+
     if platform == 'ym':
         query = text("""
             SELECT TRIM(supplier_article) AS supplier_article,
@@ -486,19 +596,27 @@ def load_orders_data(db: Session, platform: str = 'wb') -> pd.DataFrame:
             WHERE status NOT IN ('CANCELLED','PENDING_CANCELLED','PROCESSING_EXPIRED')
             GROUP BY 1, 2
         """)
+    elif platform == 'ozon':
+        # Честный FBO: только schema_code = Fbo, без отменённых, SUM(quantity)
+        query = text("""
+            SELECT TRIM(supplier_article) AS supplier_article,
+                   DATE_TRUNC('month', created_at) AS month_dt,
+                   SUM(COALESCE(quantity, 1))::bigint AS pure_orders
+            FROM ozon_orders
+            WHERE COALESCE(schema_code, 'Fbo') = 'Fbo'
+              AND supplier_article IS NOT NULL
+              AND TRIM(supplier_article) <> ''
+              AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'cancelled_from_split')
+              AND created_at IS NOT NULL
+            GROUP BY 1, 2
+        """)
     else:
         query = text("""
             SELECT TRIM(supplier_article) AS supplier_article,
                    DATE_TRUNC('month', CAST(dt AS TIMESTAMP)) AS month_dt, COUNT(*) AS pure_orders
             FROM wb_orders WHERE cancel_dt IS NULL GROUP BY 1, 2
         """)
-    try:
-        with db.bind.connect() as conn:
-            df = pd.read_sql(query, conn)
-        if not df.empty: df['month_dt'] = pd.to_datetime(df['month_dt'])
-        return df
-    except Exception as e:
-        return pd.DataFrame(columns=['supplier_article', 'month_dt', 'pure_orders'])
+    return _read(query)
 
 @router.get("/orders-by-factory")
 def get_orders_by_factory(
@@ -506,26 +624,67 @@ def get_orders_by_factory(
     db: Session = Depends(get_db)
 ):
     """Чистые заказы с разбивкой по заводам."""
+    # Режим «Все»: только WB+ЯМ (2A — Ozon без заводской цепочки)
+    if platform == 'all':
+        rows = []
+        for p in ('wb', 'ym'):
+            try:
+                part = get_orders_by_factory(platform=p, db=db)
+                rows.extend(part.get('data') or [])
+            except Exception as e:
+                print(f"Ошибка orders-by-factory all/{p}:", e)
+        if not rows:
+            return {"status": "success", "data": []}
+        df = pd.DataFrame(rows)
+        df['orders'] = pd.to_numeric(df['orders'], errors='coerce').fillna(0)
+        df = (
+            df.groupby(['article', 'month_dt', 'factory_name'], as_index=False)['orders']
+            .sum()
+        )
+        df = df.replace({np.nan: None})
+        return {"status": "success", "data": df.to_dict(orient='records')}
+
+    if platform == 'ozon':
+        # FBO: инвойсной цепочки нет — одна «фабрика»-метка для совместимости UI
+        query = text("""
+            SELECT
+                TRIM(supplier_article) AS article,
+                DATE_TRUNC('month', created_at) AS month_dt,
+                'Ozon FBO'::text AS factory_name,
+                SUM(COALESCE(quantity, 1))::bigint AS orders
+            FROM ozon_orders
+            WHERE COALESCE(schema_code, 'Fbo') = 'Fbo'
+              AND supplier_article IS NOT NULL
+              AND TRIM(supplier_article) <> ''
+              AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'cancelled_from_split')
+              AND created_at IS NOT NULL
+            GROUP BY 1, 2, 3
+        """)
+        try:
+            with db.bind.connect() as conn:
+                df = pd.read_sql(query, conn)
+            if df.empty: return {"status": "success", "data": []}
+            df['month_dt'] = pd.to_datetime(df['month_dt']).dt.strftime('%Y-%m-%d')
+            df = df.replace({np.nan: None})
+            return {"status": "success", "data": df.to_dict(orient='records')}
+        except Exception as e:
+            print("Ошибка orders-by-factory Ozon:", e)
+            return {"status": "success", "data": []}
     if platform == 'ym':
+        # Поставки ЯМ отключены: завод только из ассортимента, иначе «Уточняется».
         query = text("""
             SELECT
                 TRIM(o.supplier_article) AS article,
                 DATE_TRUNC('month', o.created_at) AS month_dt,
-                COALESCE(f.factory_name, 'Уточняется') AS factory_name,
+                COALESCE(NULLIF(TRIM(a.manufacturer), ''), 'Уточняется') AS factory_name,
                 COUNT(*) AS orders
             FROM ym_orders o
-            LEFT JOIN (
-                SELECT DISTINCT ON (supplier_article)
-                    supplier_article, invoice_num
-                FROM wb_invoices
-                WHERE marketplace = 'ym'
-                  AND invoice_num NOT IN ('', '0')
-                ORDER BY supplier_article, supply_id DESC
-            ) inv ON inv.supplier_article = o.supplier_article
-            LEFT JOIN wb_factories f
-                ON trim(lower(f.invoice_num)) = trim(lower(inv.invoice_num))
-               AND trim(lower(f.supplier_article)) = trim(lower(o.supplier_article))
+            LEFT JOIN wb_assortment a
+                ON TRIM(a.supplier_article) = TRIM(o.supplier_article)
             WHERE o.status NOT IN ('CANCELLED','PENDING_CANCELLED','PROCESSING_EXPIRED')
+              AND o.supplier_article IS NOT NULL
+              AND TRIM(o.supplier_article) <> ''
+              AND o.created_at IS NOT NULL
             GROUP BY 1, 2, 3
         """)
         try:
@@ -610,15 +769,32 @@ def get_production_claims(
     return {"status": "success", "data": df.to_dict(orient="records")}
 
 
+def _resolve_photo_bytes(url: str, timeout: int = 8):
+    """Читает фото: локальный /static/… с диска, иначе HTTP."""
+    if not url:
+        return None
+    if url.startswith("/static/"):
+        # /static/ym_returns/x.jpg → /root/cx-dashboard/static/ym_returns/x.jpg
+        local = os.path.join("/root/cx-dashboard", url.lstrip("/"))
+        if os.path.isfile(local):
+            with open(local, "rb") as f:
+                return f.read()
+        return None
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+    if not r.ok:
+        return None
+    return r.content
+
+
 def _analyze_photo(url: str) -> dict:
     """Анализирует одно фото: детектирует штрих-коды и оценивает «коробочность»."""
     result = {"url": url, "keep": True, "reason": "ok"}
     try:
-        resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        if not resp.ok:
+        raw = _resolve_photo_bytes(url, timeout=8)
+        if not raw:
             return result  # не смогли скачать — не фильтруем
 
-        img = PILImage.open(io.BytesIO(resp.content)).convert("RGB")
+        img = PILImage.open(io.BytesIO(raw)).convert("RGB")
 
         # 1. Детектирование штрих-кода / QR-кода через pyzbar
         try:
@@ -701,9 +877,9 @@ def get_ppm_dataset(
         df_sys = load_hybrid_data(db, platform)
         df_orders_sys = load_orders_data(db, platform)
 
-        # Исторические данные — только для WB
+        # Исторические данные — только для WB (и в режиме all — как WB-часть)
         df_hist = pd.DataFrame()
-        if platform == 'wb':
+        if platform in ('wb', 'all'):
             try:
                 with db.bind.connect() as conn:
                     df_hist = pd.read_sql(text("SELECT article as article, month_date as month_dt, defects as defects, orders as orders, source as source FROM historical_ppm"), conn)
@@ -715,7 +891,19 @@ def get_ppm_dataset(
             return str(val).strip().lower() in ['1', '1.0', '+', 'true', 'да', 't']
 
         tag_cols = [f"cat_{i}" for i in range(1, 14) if f"cat_{i}" in df_sys.columns]
-        if tag_cols and not df_sys.empty:
+        if platform == 'ozon' and not df_sys.empty:
+            # Числитель уже отфильтрован по quality reasons — считаем все дефектами
+            df_sys['is_defect_marked'] = True
+        elif platform == 'all' and not df_sys.empty:
+            # Ozon: все строки уже PPM-фильтр; WB/YM — по cat_*
+            mask = pd.Series(False, index=df_sys.index)
+            if 'platform' in df_sys.columns:
+                mask = mask | (df_sys['platform'].astype(str) == 'ozon')
+            if tag_cols:
+                for col in tag_cols:
+                    mask = mask | df_sys[col].apply(is_defect)
+            df_sys['is_defect_marked'] = mask
+        elif tag_cols and not df_sys.empty:
             mask = False
             for col in tag_cols: mask = mask | df_sys[col].apply(is_defect)
             df_sys['is_defect_marked'] = mask
@@ -728,20 +916,21 @@ def get_ppm_dataset(
         if not df_sys.empty and date_col in df_sys.columns:
             df_app_sys = df_sys[df_sys['is_defect_marked'] == True].copy()
             if not df_app_sys.empty:
-                df_app_sys['month_dt'] = pd.to_datetime(df_app_sys[date_col]).dt.to_period('M').dt.to_timestamp()
+                df_app_sys['month_dt'] = pd.to_datetime(df_app_sys[date_col], utc=True).dt.tz_localize(None).dt.to_period('M').dt.to_timestamp()
                 sys_metrics = df_app_sys.groupby(['supplier_article', 'month_dt']).size().reset_index(name='defects')
                 sys_metrics.rename(columns={'supplier_article': 'article'}, inplace=True)
 
         if df_orders_sys.empty: df_orders_sys = pd.DataFrame(columns=['article', 'month_dt', 'orders'])
         else: df_orders_sys.rename(columns={'supplier_article': 'article', 'pure_orders': 'orders'}, inplace=True)
 
-        # ABC/XYZ: для WB — полный расчёт с еженедельными данными; для ЯМ — только ABC по месяцам
+        # ABC/XYZ: для WB — полный расчёт с еженедельными данными; для ЯМ/Ozon — по неделям заказов
         df_abc = pd.DataFrame()
         df_weekly = pd.DataFrame()
-        if platform == 'wb':
+        weekly_frames = []
+        if platform in ('wb', 'all'):
             try:
                 with db.bind.connect() as conn:
-                    df_weekly = pd.read_sql(text("""
+                    weekly_frames.append(pd.read_sql(text("""
                         SELECT TRIM(supplier_article) AS article,
                                DATE_TRUNC('week', CAST(dt AS TIMESTAMP)) AS week_dt,
                                COUNT(*) AS orders
@@ -749,13 +938,13 @@ def get_ppm_dataset(
                         WHERE cancel_dt IS NULL
                           AND dt >= CURRENT_DATE - INTERVAL '26 weeks'
                         GROUP BY 1, 2
-                    """), conn)
+                    """), conn))
             except Exception as e:
                 print("XYZ weekly query error:", e)
-        elif platform == 'ym':
+        if platform in ('ym', 'all'):
             try:
                 with db.bind.connect() as conn:
-                    df_weekly = pd.read_sql(text("""
+                    weekly_frames.append(pd.read_sql(text("""
                         SELECT TRIM(supplier_article) AS article,
                                DATE_TRUNC('week', created_at) AS week_dt,
                                COUNT(*) AS orders
@@ -763,9 +952,39 @@ def get_ppm_dataset(
                         WHERE status NOT IN ('CANCELLED','PENDING_CANCELLED','PROCESSING_EXPIRED')
                           AND created_at >= CURRENT_DATE - INTERVAL '26 weeks'
                         GROUP BY 1, 2
-                    """), conn)
+                    """), conn))
             except Exception as e:
                 print("YM XYZ weekly query error:", e)
+        if platform in ('ozon', 'all'):
+            try:
+                with db.bind.connect() as conn:
+                    weekly_frames.append(pd.read_sql(text("""
+                        SELECT TRIM(supplier_article) AS article,
+                               DATE_TRUNC('week', created_at) AS week_dt,
+                               SUM(COALESCE(quantity, 1))::bigint AS orders
+                        FROM ozon_orders
+                        WHERE COALESCE(schema_code, 'Fbo') = 'Fbo'
+                          AND supplier_article IS NOT NULL
+                          AND TRIM(supplier_article) <> ''
+                          AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'cancelled_from_split')
+                          AND created_at >= CURRENT_DATE - INTERVAL '26 weeks'
+                        GROUP BY 1, 2
+                    """), conn))
+            except Exception as e:
+                print("Ozon XYZ weekly query error:", e)
+
+        weekly_frames = [f for f in weekly_frames if f is not None and not f.empty]
+        if weekly_frames:
+            # WB/YM: tz-naive; Ozon timestamptz → UTC. Сводим к naive до concat/groupby.
+            for i, wf in enumerate(weekly_frames):
+                wf = wf.copy()
+                wf['week_dt'] = pd.to_datetime(wf['week_dt'], utc=True).dt.tz_localize(None)
+                weekly_frames[i] = wf
+            df_weekly = pd.concat(weekly_frames, ignore_index=True)
+            if platform == 'all':
+                df_weekly = (
+                    df_weekly.groupby(['article', 'week_dt'], as_index=False)['orders'].sum()
+                )
 
         df_abc = compute_abc_xyz(df_orders_sys, df_weekly=df_weekly)
 
@@ -773,6 +992,10 @@ def get_ppm_dataset(
         sys_metrics['source'] = 'System'
 
         df_total = pd.concat([df_hist, sys_metrics], ignore_index=True)
+        # Режим «Все»: сводка только с апреля 2026 — до этого нет полных точных данных по всем МП
+        if platform == 'all' and not df_total.empty and 'month_dt' in df_total.columns:
+            _all_from = pd.Timestamp('2026-04-01')
+            df_total = df_total[pd.to_datetime(df_total['month_dt']) >= _all_from].copy()
         if not df_abc.empty: df_total = pd.merge(df_total, df_abc, on='article', how='left')
         else: df_total['abc_group'] = 'C'; df_total['xyz_class'] = 'Z'
 
@@ -792,8 +1015,12 @@ def get_ppm_dataset(
             df_total['is_new'] = False
 
         months_ru = {1:'Янв', 2:'Фев', 3:'Мар', 4:'Апр', 5:'Май', 6:'Июн', 7:'Июл', 8:'Авг', 9:'Сен', 10:'Окт', 11:'Ноя', 12:'Дек'}
-        df_total['month_str'] = df_total['month_dt'].dt.month.map(months_ru) + " " + df_total['month_dt'].dt.year.astype(str)
-        df_total['month_dt'] = df_total['month_dt'].dt.strftime('%Y-%m-%d')
+        if not df_total.empty:
+            df_total['month_str'] = df_total['month_dt'].dt.month.map(months_ru) + " " + df_total['month_dt'].dt.year.astype(str)
+            df_total['month_dt'] = df_total['month_dt'].dt.strftime('%Y-%m-%d')
+        else:
+            df_total = pd.DataFrame(columns=['article', 'month_dt', 'defects', 'orders', 'source',
+                                             'abc_group', 'xyz_class', 'is_new', 'month_str'])
 
         df_total = df_total.replace({np.nan: None})
         res = {"status": "success", "data": df_total.to_dict(orient="records")}
@@ -808,9 +1035,10 @@ def _fetch_compress(url, max_px=1200, quality=82, timeout=6):
     При любой ошибке возвращает исходный URL — WeasyPrint скачает сам (graceful fallback)."""
     try:
         from PIL import Image
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        img = Image.open(io.BytesIO(r.content)).convert("RGB")
+        raw = _resolve_photo_bytes(url, timeout=timeout)
+        if not raw:
+            return url
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
         if max(img.width, img.height) > max_px:
             img.thumbnail((max_px, max_px), Image.LANCZOS)
         buf = io.BytesIO()
@@ -1151,8 +1379,24 @@ def generate_ppm_report_excel(
             for n in reversed(range(3))
         ]
 
-        df_all = load_hybrid_data(db, platform)
-        df_ord_raw = load_orders_data(db, platform)
+        # Режим all: отчёт по заводу только WB+ЯМ (2A — без Ozon)
+        if platform == 'all':
+            parts = [_load_wb_claims(db), _load_ym_claims(db)]
+            parts = [p for p in parts if p is not None and not p.empty]
+            df_all = pd.concat(parts, ignore_index=True, sort=False) if parts else pd.DataFrame()
+            ord_parts = [load_orders_data(db, 'wb'), load_orders_data(db, 'ym')]
+            ord_parts = [p for p in ord_parts if p is not None and not p.empty]
+            if ord_parts:
+                df_ord_raw = pd.concat(ord_parts, ignore_index=True)
+                df_ord_raw = (
+                    df_ord_raw.groupby(['supplier_article', 'month_dt'], as_index=False)['pure_orders']
+                    .sum()
+                )
+            else:
+                df_ord_raw = pd.DataFrame()
+        else:
+            df_all = load_hybrid_data(db, platform)
+            df_ord_raw = load_orders_data(db, platform)
         if not df_ord_raw.empty:
             df_ord_raw['month_dt'] = pd.to_datetime(df_ord_raw['month_dt'])
             oc = 'pure_orders' if 'pure_orders' in df_ord_raw.columns else 'orders'

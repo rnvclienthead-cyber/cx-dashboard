@@ -219,7 +219,15 @@ const submitAction = async (claim, action) => {
   }
 }
 
-const parsePhotos = (str) => str ? str.split(' ').map(g => g.split('|').pop().replace(/^\/\//, 'https://')).slice(0, 8) : []
+const parsePhotos = (str) => {
+  if (!str || str === 'nan' || String(str).toLowerCase() === 'none') return []
+  return String(str).split(/\s+/).map(g => {
+    const parts = g.split('|').map(p => p.trim()).filter(Boolean)
+    let url = parts[0] || ''
+    if (url.startsWith('//')) url = 'https:' + url
+    return url
+  }).filter(url => url.startsWith('http') || url.startsWith('/static/')).slice(0, 8)
+}
 const downloadImg = async (url, filename = 'photo.jpg') => {
   try {
     const response = await apiFetch(url)

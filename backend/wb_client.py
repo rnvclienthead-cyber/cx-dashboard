@@ -168,11 +168,22 @@ def list_questions(
 
 
 def answer_question(question_id: str, text: str, *, key: str | None = None, timeout: int = 20) -> requests.Response:
-    """PATCH — опубликовать ответ на вопрос WB. Раньше дублировалось в прямом
-    эндпоинте ответа и в подтверждении модерации."""
+    """PATCH /api/v1/questions — ответ автору вопроса (= кнопка «Отправить автору» в ЛК).
+
+    Тело по доке WB: id + answer.text + state=wbRu (публикация ответа).
+    """
+    txt = (text or "").strip()
+    if not txt:
+        raise ValueError("пустой текст ответа")
     r = requests.patch(
         f"{FEEDBACKS_BASE}/api/v1/questions",
-        headers=auth_headers(key), json={"id": question_id, "text": text}, timeout=timeout,
+        headers=auth_headers(key),
+        json={
+            "id": question_id,
+            "answer": {"text": txt},
+            "state": "wbRu",
+        },
+        timeout=timeout,
     )
     r.raise_for_status()
     return r
@@ -201,11 +212,35 @@ def get_chat_messages(chat_id: str, take: int = 30, *, key: str | None = None, t
     return (r.json() or {}).get("messages") or []
 
 
-def send_chat_message(reply_sign: str, text: str, *, key: str | None = None, timeout: int = 20) -> requests.Response:
-    """Отправить сообщение в чат покупателю (WB требует multipart, не JSON)."""
+def send_chat_message(
+    reply_sign: str,
+    text: str = "",
+    *,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+    key: str | None = None,
+    timeout: int = 20,
+) -> requests.Response:
+    """Отправить текст и/или файлы в чат покупателю через multipart WB.
+
+    ``attachments`` содержит кортежи ``(filename, content, content_type)``.
+    Повторяющееся поле ``file`` передаём списком пар, иначе requests свернёт
+    несколько файлов в один.
+    """
+    txt = (text or "").strip()
+    items = attachments or []
+    if not txt and not items:
+        raise ValueError("пустое сообщение")
+
+    multipart: list[tuple[str, tuple]] = [("replySign", (None, reply_sign))]
+    if txt:
+        multipart.append(("message", (None, txt[:1000])))
+    multipart.extend(
+        ("file", (filename, content, content_type))
+        for filename, content, content_type in items
+    )
     r = requests.post(
         f"{CHAT_BASE}/api/v1/seller/message",
-        files={"replySign": (None, reply_sign), "message": (None, text[:1000])},
+        files=multipart,
         headers={"Authorization": key or api_key()},
         timeout=timeout,
     )

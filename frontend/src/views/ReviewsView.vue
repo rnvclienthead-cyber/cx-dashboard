@@ -486,7 +486,7 @@
 
     <!-- ══ КОНСТРУКТОР (база знаний) ═══════════════════════════════════════ -->
     <div v-if="activeSection === 'constructor'" class="max-w-6xl mx-auto px-4 py-4">
-      <KbConstructor />
+      <KbConstructor :read-only="templatesReadOnly" />
     </div>
 
     <!-- ══ ШАБЛОНЫ ══════════════════════════════════════════════════════════ -->
@@ -693,6 +693,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+import { usePermissionsStore } from '../stores/permissions'
 import KbConstructor from '../components/KbConstructor.vue'
 import ReviewCard from '../components/ReviewCard.vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -703,7 +704,10 @@ import { useCxQueueActions } from '../composables/useCxQueueActions'
 import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls, fmtDateTime } from '../utils/cx'
 
 const platformStore = usePlatformStore()
+const permissionsStore = usePermissionsStore()
 const currentMp = computed(() => platformStore.platform || 'all')
+/** Менеджер КС — только просмотр шаблонов отзывов */
+const templatesReadOnly = computed(() => permissionsStore.role === 'cs_manager')
 
 const { toast, showToast } = useToast()
 

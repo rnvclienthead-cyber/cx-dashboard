@@ -113,17 +113,50 @@ const calendarDisplayLabel = computed(() => {
 })
 
 // ─── Данные ──────────────────────────────────────────────────────────────────
+let _dashLoadSeq = 0
 const loadDashboardData = async () => {
   if (!startDate.value || !endDate.value) return
+  const seq = ++_dashLoadSeq
   loading.value = true
+  dashboardData.value = null // сразу убираем старые цифры при смене периода
   try {
     const res = await apiFetch(`/api/v1/dashboard/executive?start_date=${startDate.value}&end_date=${endDate.value}&platform=${platformStore.platform}`)
+    if (seq !== _dashLoadSeq) return // устаревший ответ после смены периода
     if (res.ok) dashboardData.value = await res.json()
-  } catch (err) { console.error("Ошибка загрузки данных дашборда:", err) }
-  finally { loading.value = false }
+  } catch (err) {
+    if (seq !== _dashLoadSeq) return
+    console.error("Ошибка загрузки данных дашборда:", err)
+  }
+  finally {
+    if (seq === _dashLoadSeq) loading.value = false
+  }
 }
 
 const formatMoney = (v) => new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(v || 0)
+
+// ─── Топ SKU по типам проблем (для решения о доотправке) ─────────────────────
+const selectedProblemCat = ref(1)
+const problemCatTabs = computed(() => dashboardData.value?.top_sku_by_problem || [])
+const activeProblemBlock = computed(() => {
+  const tabs = problemCatTabs.value
+  if (!tabs.length) return null
+  return tabs.find(t => t.cat_id === selectedProblemCat.value) || tabs[0]
+})
+watch(problemCatTabs, (tabs) => {
+  if (!tabs.length) return
+  // По умолчанию — некомплект (1 или 2), иначе первый доступный тип
+  const preferred = tabs.find(t => t.cat_id === 1) || tabs.find(t => t.cat_id === 2) || tabs[0]
+  if (!tabs.find(t => t.cat_id === selectedProblemCat.value)) {
+    selectedProblemCat.value = preferred.cat_id
+  }
+})
+
+const skuProblemIndex = computed(() => dashboardData.value?.sku_problem_index || [])
+const problemZoneClass = (zone) => {
+  if (zone === 'high') return 'bg-rose-100 text-rose-700'
+  if (zone === 'mid') return 'bg-amber-100 text-amber-700'
+  return 'bg-emerald-100 text-emerald-700'
+}
 
 // ─── PPM коэффициент — переключатель периода ─────────────────────────────────
 const ppmPeriod = ref('current_month')
@@ -465,12 +498,174 @@ watch(() => platformStore.platform, loadDashboardData)
       </div>
     </div>
 
+    <!-- Топ SKU по типам проблем — для решения о доотправке -->
+    <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+        <div>
+          <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
+            <span class="w-2 h-4 bg-amber-500 rounded-md block"></span>
+            Топ SKU по типам проблем
+          </h3>
+          <p class="text-[11px] text-slate-400 mt-1">По каким товарам чаще всего жалобы — чтобы решить, куда запускать доотправку деталей</p>
+        </div>
+        <button
+          @click="router.push('/production')"
+          class="text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 px-3 py-2 rounded-xl transition-colors whitespace-nowrap"
+        >Открыть в карте проблем →</button>
+      </div>
+
+      <div v-if="problemCatTabs.length" class="flex flex-wrap gap-1.5 mb-4">
+        <button
+          v-for="tab in problemCatTabs"
+          :key="tab.cat_id"
+          @click="selectedProblemCat = tab.cat_id"
+          :class="selectedProblemCat === tab.cat_id
+            ? ([1,2].includes(tab.cat_id) ? 'bg-amber-600 text-white shadow' : 'bg-slate-800 text-white shadow')
+            : ([1,2].includes(tab.cat_id) ? 'bg-amber-50 text-amber-800 hover:bg-amber-100' : 'bg-slate-100 text-slate-600 hover:bg-slate-200')"
+          class="px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all"
+        >
+          {{ tab.cat_id }}. {{ tab.cat_name }}
+          <span class="opacity-70 ml-1">{{ tab.total }}</span>
+        </button>
+      </div>
+
+      <div v-if="activeProblemBlock" class="overflow-x-auto">
+        <table class="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr class="text-slate-400 font-bold border-b border-slate-100">
+              <th class="pb-3 pr-2">Артикул</th>
+              <th class="pb-3 text-center">Проблем</th>
+              <th class="pb-3 text-center">% типа</th>
+              <th class="pb-3 text-center">Рейтинг</th>
+              <th class="pb-3 text-center">Заказы</th>
+              <th class="pb-3 text-right">Себестоимость</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-50 font-medium">
+            <tr v-for="(row, idx) in activeProblemBlock.skus" :key="row.sku" class="hover:bg-slate-50/50">
+              <td class="py-3.5 font-bold text-slate-700">
+                <span class="text-slate-300 mr-1.5">{{ idx + 1 }}.</span>{{ row.sku }}
+              </td>
+              <td class="py-3.5 text-center text-slate-600 font-semibold">{{ row.defects }}</td>
+              <td class="py-3.5 text-center text-slate-500">{{ row.share_pct }}%</td>
+              <td class="py-3.5 text-center font-black" :class="row.rating == null ? 'text-slate-300' : (row.rating >= 4.5 ? 'text-emerald-600' : row.rating >= 4.0 ? 'text-amber-600' : 'text-rose-600')">
+                {{ row.rating != null ? row.rating + ' ★' : '—' }}
+              </td>
+              <td class="py-3.5 text-center text-slate-600">{{ row.orders || '—' }}</td>
+              <td class="py-3.5 text-right text-slate-700 font-semibold">
+                {{ row.cost != null ? formatMoney(row.cost) : '—' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="text-[10px] text-slate-400 mt-3">
+          Всего по типу «{{ activeProblemBlock.cat_name }}»: <strong class="text-slate-600">{{ activeProblemBlock.total }}</strong> случаев в выбранном периоде.
+          Типы 1–2 (некомплект) выделены — по ним обычно нужна доотправка.
+        </p>
+      </div>
+      <div v-else-if="!loading" class="py-8 text-center text-slate-400 text-sm">
+        За выбранный период размеченных проблем по типам нет.
+      </div>
+      <div v-else class="py-8 text-center text-slate-400 text-sm animate-pulse">Загрузка…</div>
+    </div>
+
+    <!-- Индекс проблемы — сводка по всем типам сразу -->
+    <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+      <div class="mb-5">
+        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
+          <span class="w-2 h-4 bg-rose-500 rounded-md block"></span>
+          Индекс проблемы по SKU
+        </h3>
+        <p class="text-[11px] text-slate-400 mt-1">Какие товары в периоде самые «горячие» — по всем типам проблем сразу</p>
+      </div>
+
+      <!-- Памятка -->
+      <div class="mb-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
+          <div class="text-[11px] font-black text-slate-700 uppercase tracking-wide mb-2">Что такое Частота</div>
+          <p class="text-[12px] text-slate-600 leading-relaxed">
+            Сколько жалоб приходится на <strong class="text-slate-800">1000 заказов</strong> этого товара.
+            Так можно сравнивать ходовые и редкие артикулы честно: у кого жалоб больше <em>относительно продаж</em>.
+          </p>
+          <p class="text-[11px] text-slate-500 mt-2">
+            Пример: частота 20 ≈ 2 жалобы на каждые 100 заказов.
+          </p>
+        </div>
+        <div class="rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
+          <div class="text-[11px] font-black text-slate-700 uppercase tracking-wide mb-2">Что такое Индекс</div>
+          <p class="text-[12px] text-slate-600 leading-relaxed">
+            Оценка приоритета от <strong class="text-slate-800">0 до 100</strong>: чем выше — тем скорее товар надо разбирать
+            (доотправка деталей, акт на завод, контроль качества).
+          </p>
+          <div class="flex flex-wrap gap-2 mt-3 text-[11px] font-bold">
+            <span class="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-700">&lt;30 спокойно</span>
+            <span class="px-2 py-1 rounded-lg bg-amber-100 text-amber-700">30–60 смотреть</span>
+            <span class="px-2 py-1 rounded-lg bg-rose-100 text-rose-700">&gt;60 срочно</span>
+          </div>
+        </div>
+      </div>
+      <div class="mb-5 rounded-2xl border border-amber-100 bg-amber-50/50 px-4 py-3 text-[11px] text-amber-900/80 leading-relaxed">
+        <strong class="text-amber-900">Из чего складывается индекс:</strong>
+        насколько часто жалуются (40%) + сколько жалоб в штуках (25%) + сколько это примерно стоит по себестоимости (25%) + насколько просел рейтинг (10%).
+        Таблица отсортирована по индексу — сверху самые приоритетные. Показаны топ-20.
+      </div>
+
+      <div v-if="skuProblemIndex.length" class="overflow-x-auto">
+        <table class="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr class="text-slate-400 font-bold border-b border-slate-100">
+              <th class="pb-3 pr-2">Артикул</th>
+              <th class="pb-3 text-center">Индекс</th>
+              <th class="pb-3 text-center">Частота</th>
+              <th class="pb-3 text-center">Проблем</th>
+              <th class="pb-3 text-left">Ведущий тип</th>
+              <th class="pb-3 text-center">Рейтинг</th>
+              <th class="pb-3 text-center">Заказы</th>
+              <th class="pb-3 text-right">Себестоимость</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-50 font-medium">
+            <tr v-for="(row, idx) in skuProblemIndex" :key="row.sku" class="hover:bg-slate-50/50">
+              <td class="py-3.5 font-bold text-slate-700">
+                <span class="text-slate-300 mr-1.5">{{ idx + 1 }}.</span>{{ row.sku }}
+              </td>
+              <td class="py-3.5 text-center">
+                <span
+                  class="inline-flex items-center justify-center min-w-[2.25rem] px-2 py-0.5 rounded-lg text-[11px] font-black"
+                  :class="problemZoneClass(row.problem_zone)"
+                >{{ row.problem_index ?? '—' }}</span>
+              </td>
+              <td class="py-3.5 text-center text-slate-700 font-semibold">
+                {{ row.rate_per_1000 != null ? row.rate_per_1000 : '—' }}
+              </td>
+              <td class="py-3.5 text-center text-slate-600 font-semibold">{{ row.defects }}</td>
+              <td class="py-3.5 text-slate-500 truncate max-w-[180px]" :title="row.top_cat_name || ''">
+                <span v-if="row.top_cat_id" class="text-slate-400 mr-1">{{ row.top_cat_id }}.</span>{{ row.top_cat_name || '—' }}
+              </td>
+              <td class="py-3.5 text-center font-black" :class="row.rating == null ? 'text-slate-300' : (row.rating >= 4.5 ? 'text-emerald-600' : row.rating >= 4.0 ? 'text-amber-600' : 'text-rose-600')">
+                {{ row.rating != null ? row.rating + ' ★' : '—' }}
+              </td>
+              <td class="py-3.5 text-center text-slate-600">{{ row.orders || '—' }}</td>
+              <td class="py-3.5 text-right text-slate-700 font-semibold">
+                {{ row.cost != null ? formatMoney(row.cost) : '—' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else-if="!loading" class="py-8 text-center text-slate-400 text-sm">
+        За выбранный период размеченных проблем нет.
+      </div>
+      <div v-else class="py-8 text-center text-slate-400 text-sm animate-pulse">Загрузка…</div>
+    </div>
+
     <!-- Воронка: Отправка деталей -->
     <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
-      <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2 mb-5">
+      <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2 mb-1">
         <span class="w-2 h-4 bg-sky-500 rounded-md block"></span>
         Доотправка деталей
       </h3>
+      <p class="text-[11px] text-slate-400 mb-5">Цифры за выбранный период фильтра дат (по дате создания заявки / ссылки)</p>
 
       <!-- Воронка: верхний ряд — 3 основных шага -->
       <div class="grid grid-cols-3 gap-3 mb-3">
@@ -503,7 +698,7 @@ watch(() => platformStore.platform, loadDashboardData)
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
         <div class="bg-blue-50 rounded-2xl p-4 text-center">
           <div class="text-2xl font-black text-blue-700">{{ dashboardData?.reshipment_funnel?.approved_wb ?? '—' }}</div>
-          <div class="text-xs font-bold text-blue-600 mt-1">Одобрено ВБ</div>
+          <div class="text-xs font-bold text-blue-600 mt-1">Одобрено СДЭК</div>
           <div class="text-[10px] text-slate-400 mt-0.5">
             {{ dashboardData?.reshipment_funnel?.approved > 0
               ? Math.round(dashboardData.reshipment_funnel.approved_wb / dashboardData.reshipment_funnel.approved * 100) + '% от одобренных'
@@ -558,7 +753,7 @@ watch(() => platformStore.platform, loadDashboardData)
           <div>
             <div class="text-lg font-black text-slate-800">{{ formatMoney(dashboardData?.reshipment_funnel?.total_cost) }}</div>
             <div class="text-xs font-bold text-slate-500">Общие затраты на доставку</div>
-            <div class="text-[10px] text-slate-400">СДЭК + Яндекс, по всем одобренным</div>
+            <div class="text-[10px] text-slate-400">СДЭК + Яндекс, по одобренным за период</div>
           </div>
         </div>
         <div class="flex items-center gap-4 bg-green-50 rounded-2xl p-4">
@@ -569,8 +764,8 @@ watch(() => platformStore.platform, loadDashboardData)
             <div class="text-lg font-black text-green-800">{{ dashboardData?.reshipment_funnel?.reviews_left ?? '—' }}</div>
             <div class="text-xs font-bold text-green-700">Отзывов обновлено / оставлено</div>
             <div class="text-[10px] text-slate-400">
-              {{ dashboardData?.reshipment_funnel?.approved > 0 && dashboardData?.reshipment_funnel?.reviews_left > 0
-                ? Math.round(dashboardData.reshipment_funnel.reviews_left / dashboardData.reshipment_funnel.approved * 100) + '% от одобренных'
+              {{ dashboardData?.reshipment_funnel?.delivered > 0 && dashboardData?.reshipment_funnel?.reviews_left > 0
+                ? Math.round(dashboardData.reshipment_funnel.reviews_left / dashboardData.reshipment_funnel.delivered * 100) + '% от доставленных'
                 : '—' }}
             </div>
           </div>
@@ -589,7 +784,7 @@ watch(() => platformStore.platform, loadDashboardData)
         </h3>
         <span class="text-[11px] text-slate-400 sm:text-right">
           По {{ dashboardData.reshipment_economics.requests_with_data }} заявкам с данными финотчёта WB<br>
-          <span class="text-slate-300">(из {{ dashboardData.reshipment_funnel.approved }} одобренных · данные динамические, обновляются с отчётами WB)</span>
+          <span class="text-slate-300">(из {{ dashboardData.reshipment_funnel.approved }} одобренных за период · данные обновляются с отчётами WB)</span>
         </span>
       </div>
 
@@ -612,19 +807,19 @@ watch(() => platformStore.platform, loadDashboardData)
             <div class="flex items-start justify-between gap-2 mb-3">
               <div>
                 <div class="text-[10px] font-bold text-red-400 uppercase tracking-wider mb-1">Вариант 1 — деньги клиенту, товар у него</div>
-                <div class="text-3xl font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v1) }}</div>
-                <div class="text-[11px] text-red-400 mt-0.5">≈ {{ formatMoney(Math.round(dashboardData.reshipment_economics.loss_if_return_v1 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку</div>
+                <div class="text-3xl font-black text-red-700">{{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v1) }}</div>
+                <div class="text-[11px] text-red-400 mt-0.5">≈ {{ formatMoney(-Math.round(dashboardData.reshipment_economics.loss_if_return_v1 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку</div>
               </div>
               <TrendingDown class="w-7 h-7 text-red-300 flex-shrink-0 mt-1" />
             </div>
             <div class="space-y-1.5 text-[12px]">
               <div class="flex justify-between items-center py-1 border-b border-red-100">
-                <span class="text-red-600">Себестоимость товара (дефектный, не реализуем)</span>
-                <span class="font-bold text-red-700">{{ formatMoney(dashboardData.reshipment_economics.total_cog) }}</span>
+                <span class="text-red-600">Себестоимость товара (товар у клиента)</span>
+                <span class="font-bold text-red-700">{{ formatMoney(-dashboardData.reshipment_economics.total_cog) }}</span>
               </div>
               <div class="flex justify-between items-center py-1">
                 <span class="text-red-600">WB-расходы: эквайринг + штрафы при возврате</span>
-                <span class="font-bold text-red-700">{{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+                <span class="font-bold text-red-700">{{ formatMoney(-dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
               </div>
             </div>
           </div>
@@ -633,23 +828,23 @@ watch(() => platformStore.platform, loadDashboardData)
             <div class="flex items-start justify-between gap-2 mb-3">
               <div>
                 <div class="text-[10px] font-bold text-orange-400 uppercase tracking-wider mb-1">Вариант 2 — деньги клиенту + товар к нам (дефектный)</div>
-                <div class="text-3xl font-black text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v2) }}</div>
-                <div class="text-[11px] text-orange-400 mt-0.5">≈ {{ formatMoney(Math.round(dashboardData.reshipment_economics.loss_if_return_v2 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку · товар приходит, но не реализуем</div>
+                <div class="text-3xl font-black text-orange-700">{{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v2) }}</div>
+                <div class="text-[11px] text-orange-400 mt-0.5">≈ {{ formatMoney(-Math.round(dashboardData.reshipment_economics.loss_if_return_v2 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку · товар приходит, но не реализуем</div>
               </div>
               <TrendingDown class="w-7 h-7 text-orange-300 flex-shrink-0 mt-1" />
             </div>
             <div class="space-y-1.5 text-[12px]">
               <div class="flex justify-between items-center py-1 border-b border-orange-100">
                 <span class="text-orange-600">Себестоимость товара (дефектный, не реализуем)</span>
-                <span class="font-bold text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.total_cog) }}</span>
+                <span class="font-bold text-orange-700">{{ formatMoney(-dashboardData.reshipment_economics.total_cog) }}</span>
               </div>
               <div class="flex justify-between items-center py-1 border-b border-orange-100">
                 <span class="text-orange-600">WB-расходы: эквайринг + штрафы</span>
-                <span class="font-bold text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+                <span class="font-bold text-orange-700">{{ formatMoney(-dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
               </div>
               <div class="flex justify-between items-center py-1">
                 <span class="text-orange-600">+ Обратная логистика WB → ПВЗ (≈ {{ formatMoney(dashboardData.reshipment_economics.avg_return_delivery) }}/шт)</span>
-                <span class="font-bold text-orange-700">{{ formatMoney(dashboardData.reshipment_economics.ret_logistics) }}</span>
+                <span class="font-bold text-orange-700">{{ formatMoney(-dashboardData.reshipment_economics.ret_logistics) }}</span>
               </div>
             </div>
           </div>
@@ -676,7 +871,7 @@ watch(() => platformStore.platform, loadDashboardData)
               {{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}
             </div>
             <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'text-emerald-400' : 'text-rose-400'" class="text-[11px] mt-1">
-              Убыток меньше, чем В1 ({{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v1) }}) и В2 ({{ formatMoney(dashboardData.reshipment_economics.loss_if_return_v2) }}). Разница — наша выгода.
+              Убыток меньше, чем В1 ({{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v1) }}) и В2 ({{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v2) }}). Разница — наша выгода.
             </div>
           </div>
         </div>
@@ -741,86 +936,6 @@ watch(() => platformStore.platform, loadDashboardData)
                 ppvz ({{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }}) + WB-расходы ({{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}) + логистика обр. ({{ formatMoney(dashboardData.reshipment_economics.ret_logistics) }}) − доставка ({{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }})
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Блок 4: Прошлый месяц — все возвраты WB -->
-      <div v-if="dashboardData.reshipment_economics.prev_month_all_returns" class="pt-5 border-t border-slate-100">
-        <div class="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-3">
-          Прошлый месяц — все возвраты WB (до / с инструментом)
-        </div>
-
-        <!-- Все возвраты из финотчёта -->
-        <div class="bg-red-50 border border-red-100 rounded-2xl p-4 mb-3">
-          <div class="flex items-start justify-between gap-2 mb-3">
-            <div>
-              <div class="text-[10px] font-bold text-red-400 uppercase tracking-wider mb-1">Все возвраты за прошлый месяц (финотчёт WB)</div>
-              <div class="text-2xl font-black text-red-700">{{ dashboardData.reshipment_economics.prev_month_all_returns.returns_count }} возвратов</div>
-              <div class="text-[11px] text-red-400 mt-0.5">Возврат клиентам: {{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.total_retail_reversed) }}</div>
-            </div>
-          </div>
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[12px]">
-            <div class="bg-white rounded-xl p-3">
-              <div class="text-[10px] font-bold text-red-400 uppercase mb-1">Эквайринг при возвратах</div>
-              <div class="text-lg font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.total_acquiring) }}</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">прямые потери, из финотчёта</div>
-            </div>
-            <div class="bg-white rounded-xl p-3">
-              <div class="text-[10px] font-bold text-red-400 uppercase mb-1">Обратная логистика (оценка)</div>
-              <div class="text-lg font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.ret_logistics_estimated) }}</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">≈ {{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.avg_return_delivery) }}/шт × {{ dashboardData.reshipment_economics.prev_month_all_returns.returns_count }} возвратов</div>
-            </div>
-            <div class="bg-white rounded-xl p-3">
-              <div class="text-[10px] font-bold text-red-400 uppercase mb-1">Итого прямые потери (без СС)</div>
-              <div class="text-lg font-black text-red-700">{{ formatMoney(dashboardData.reshipment_economics.prev_month_all_returns.total_loss_estimated) }}</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">эквайринг + оценка логистики</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Гипотетический расчёт: 50% возвратов через инструмент -->
-        <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
-          <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-3">
-            Гипотеза: если бы отправляли детали по 50% всех возвратов
-          </div>
-
-          <!-- Формула -->
-          <div class="flex flex-wrap items-center gap-2 mb-4 text-sm font-bold">
-            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
-              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Всего возвратов</div>
-              <div class="text-slate-800">{{ dashboardData.reshipment_economics.prev_month_all_returns.returns_count }}</div>
-            </div>
-            <div class="text-slate-400 text-lg">×</div>
-            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
-              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Охват</div>
-              <div class="text-slate-800">50%</div>
-            </div>
-            <div class="text-slate-400 text-lg">=</div>
-            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
-              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Заявок</div>
-              <div class="text-slate-800">{{ Math.round(dashboardData.reshipment_economics.prev_month_all_returns.returns_count * 0.5) }}</div>
-            </div>
-            <div class="text-slate-400 text-lg">×</div>
-            <div class="bg-white rounded-xl px-3 py-2 text-center shadow-sm">
-              <div class="text-[10px] text-slate-400 font-normal mb-0.5">Выгода / заявку</div>
-              <div class="text-slate-800">{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v2) }}</div>
-            </div>
-            <div class="text-emerald-600 text-lg">=</div>
-            <div class="bg-emerald-100 border-2 border-emerald-300 rounded-xl px-4 py-2 text-center shadow-sm">
-              <div class="text-[10px] text-emerald-600 font-normal mb-0.5">Итого выгода</div>
-              <div class="text-emerald-700 text-base">+{{ formatMoney(Math.round(dashboardData.reshipment_economics.prev_month_all_returns.returns_count * 0.5 * dashboardData.reshipment_economics.avg_benefit_vs_v2)) }}</div>
-            </div>
-          </div>
-
-          <!-- Пояснение откуда взята выгода/заявку -->
-          <div class="bg-white/70 rounded-xl px-3 py-2 text-[11px] text-slate-500 leading-relaxed">
-            <span class="font-bold text-slate-600">{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v2) }}/заявку</span> —
-            средняя выгода vs В2 по {{ dashboardData.reshipment_economics.requests_with_data }} текущим заявкам с фин. отчётом WB
-            (выплата WB + расходы WB на возврат − стоимость доставки детали).
-            Оценочные затраты на доставку:
-            {{ formatMoney(Math.round(dashboardData.reshipment_economics.prev_month_all_returns.returns_count * 0.5 * (dashboardData.reshipment_economics.total_delivery_cost / dashboardData.reshipment_economics.requests_with_data))) }}
-            (≈ {{ formatMoney(Math.round(dashboardData.reshipment_economics.total_delivery_cost / dashboardData.reshipment_economics.requests_with_data)) }}/заявку).
           </div>
         </div>
       </div>

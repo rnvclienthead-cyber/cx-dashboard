@@ -201,11 +201,24 @@ def _upsert_event(conn, e: dict):
                 updated_at   = now()
         """), {"cid": cid, "cn": cname, "nm": nm_id, "gn": gname, "msg": body,
                "ts": ts, "closing": closing, "rs": reply_sign})
-        # Клиент написал — вернуть чат из архива в работу
-        conn.execute(text("""
-            DELETE FROM cx_dismissed_items
-            WHERE mp = 'wb' AND item_type = 'chat' AND item_id = :cid
-        """), {"cid": cid})
+        if closing:
+            # Клиент закрыл вопрос («спасибо» и т.п.) — в архив
+            conn.execute(text("""
+                INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+                VALUES ('chat', :cid, 'wb', 'wb_chat_sync',
+                        'Авто: клиент закрыл вопрос (благодарность)')
+                ON CONFLICT (item_type, item_id, mp) DO NOTHING
+            """), {"cid": cid})
+            conn.execute(text("""
+                UPDATE wb_chats SET needs_answer = false, waiting_since = NULL, updated_at = now()
+                WHERE chat_id = :cid
+            """), {"cid": cid})
+        else:
+            # Клиент написал с вопросом — вернуть чат из архива в работу
+            conn.execute(text("""
+                DELETE FROM cx_dismissed_items
+                WHERE mp = 'wb' AND item_type = 'chat' AND item_id = :cid
+            """), {"cid": cid})
     elif sender == "seller":
         conn.execute(text("""
             INSERT INTO wb_chats
@@ -291,6 +304,67 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
 
         if last_ts > _get_cursor(conn):
             _set_cursor(conn, last_ts)
+
+        # Автоархив: наше последнее сообщение, клиент молчит >2 дней
+        archived = conn.execute(text("""
+            WITH targets AS (
+              SELECT c.chat_id
+              FROM wb_chats c
+              LEFT JOIN cx_dismissed_items d
+                ON d.item_id = c.chat_id AND d.mp = 'wb' AND d.item_type = 'chat'
+              WHERE d.item_id IS NULL
+                AND lower(COALESCE(c.last_sender, '')) = 'seller'
+                AND to_timestamp(COALESCE(c.last_ts, 0) / 1000.0)
+                    < now() - interval '2 days'
+            ),
+            ins AS (
+              INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+              SELECT 'chat', chat_id, 'wb', 'wb_chat_sync',
+                     'Авто: нет ответа клиента >2 дн после нашего'
+              FROM targets
+              ON CONFLICT (item_type, item_id, mp) DO NOTHING
+              RETURNING item_id
+            )
+            SELECT count(*) FROM ins
+        """)).scalar() or 0
+        if archived:
+            conn.execute(text("""
+                UPDATE wb_chats c SET needs_answer = false, waiting_since = NULL, updated_at = now()
+                WHERE EXISTS (
+                  SELECT 1 FROM cx_dismissed_items d
+                  WHERE d.item_id = c.chat_id AND d.mp = 'wb' AND d.item_type = 'chat'
+                    AND d.note LIKE 'Авто:%'
+                )
+                  AND c.needs_answer = true
+            """))
+            conn.commit()
+            logger.info("[WBChatSync] auto-archived seller-silent>2d: %s", archived)
+
+        # Уже помеченные is_closing, но ещё не в архиве
+        thanks = conn.execute(text("""
+            WITH targets AS (
+              SELECT c.chat_id FROM wb_chats c
+              LEFT JOIN cx_dismissed_items d
+                ON d.item_id = c.chat_id AND d.mp = 'wb' AND d.item_type = 'chat'
+              WHERE d.item_id IS NULL AND c.is_closing = true
+            ),
+            ins AS (
+              INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+              SELECT 'chat', chat_id, 'wb', 'wb_chat_sync',
+                     'Авто: клиент закрыл вопрос (благодарность)'
+              FROM targets
+              ON CONFLICT (item_type, item_id, mp) DO NOTHING
+              RETURNING item_id
+            )
+            SELECT count(*) FROM ins
+        """)).scalar() or 0
+        if thanks:
+            conn.execute(text("""
+                UPDATE wb_chats SET needs_answer = false, waiting_since = NULL, updated_at = now()
+                WHERE is_closing = true AND needs_answer = true
+            """))
+            conn.commit()
+            logger.info("[WBChatSync] auto-archived thanks/closing: %s", thanks)
 
         logger.info("[WBChatSync] processed %d events, %d pages, cursor=%d",
                     processed, pages, last_ts)

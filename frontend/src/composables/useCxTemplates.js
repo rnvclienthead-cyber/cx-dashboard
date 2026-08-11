@@ -9,9 +9,9 @@ import { CX_BASE } from '../utils/cx'
  *
  * @param {string} itemType - 'review' | 'question' — тип обращений текущего экрана
  * @param {Function} showToast
- * @param {{defaultMinRating?: number|null, defaultMaxRating?: number|null}} [opts]
+ * @param {{defaultMinRating?: number|null, defaultMaxRating?: number|null, alsoTypes?: string[]}} [opts]
  */
-export function useCxTemplates(itemType, showToast, { defaultMinRating = null, defaultMaxRating = null } = {}) {
+export function useCxTemplates(itemType, showToast, { defaultMinRating = null, defaultMaxRating = null, alsoTypes = [] } = {}) {
   const templates   = ref([])
   const tplLoading   = ref(false)
   const tplFormOpen  = ref(false)
@@ -57,11 +57,12 @@ export function useCxTemplates(itemType, showToast, { defaultMinRating = null, d
 
   function relevantTemplates(item) {
     if (!Array.isArray(templates.value)) return []
+    const allowed = new Set([itemType, 'all', ...(alsoTypes || [])])
     return templates.value.filter(t => {
       if (t.mp !== 'all' && t.mp !== item.mp) return false
-      if (t.item_type !== 'all' && t.item_type !== itemType) return false
+      if (!allowed.has(t.item_type)) return false
       return true
-    }).slice(0, 6)
+    }).slice(0, 8)
   }
 
   return {

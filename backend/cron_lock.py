@@ -18,6 +18,7 @@ WORKER_LOCK_IDS = {
     "worker": 87442210,       # WB (worker.py)
     "ym_worker": 87442211,    # Яндекс Маркет (ym_worker.py)
     "ozon_worker": 87442212,  # OZON (ozon_worker.py)
+    "ozon_worker_sticky": 87442213,  # OZON sticky статусы (каждые 30 мин)
 }
 
 

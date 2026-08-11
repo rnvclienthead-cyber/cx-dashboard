@@ -599,12 +599,13 @@ const redownloadLog = async (log) => {
 }
 
 // Действующий завод по артикулу = тот, по которому больше всего РЕАЛЬНЫХ (не 'Уточняется') претензий
+// Ozon FBO не завод — в режиме all / ozon не учитываем как фабрику (2A)
 const activeFactoryBySku = computed(() => {
   const tally = {}
   claimsDetail.value.forEach(c => {
     const sku = String(c['supplier_article'] || '').trim()
     const f = c['factory_name']
-    if (!sku || !f || f === 'Уточняется') return
+    if (!sku || !f || f === 'Уточняется' || f === 'Ozon FBO') return
     if (!tally[sku]) tally[sku] = {}
     tally[sku][f] = (tally[sku][f] || 0) + 1
   })
@@ -620,10 +621,22 @@ const activeFactoryBySku = computed(() => {
 // Эффективный завод претензии: реальный завод; если он не определён ('Уточняется') —
 // подставляем действующий завод артикула, чтобы такие возвраты не висели отдельной строкой
 const effFactory = (c) => {
-  const f = c['factory_name'] || 'Уточняется'
+  let f = c['factory_name'] || 'Уточняется'
+  if (f === 'Ozon FBO') f = 'Уточняется'
   if (f !== 'Уточняется') return f
   const sku = String(c['supplier_article'] || '').trim()
   return activeFactoryBySku.value[sku] || 'Уточняется'
+}
+
+const isClaimDefect = (c) => {
+  // Ozon PPM-claims уже отфильтрованы по заводским причинам — все считаем браком
+  if (c.platform === 'ozon') return true
+  const validVals = ['1','1.0','+','true','да', 't']
+  for (let i = 1; i <= 13; i++) {
+    const val = c[`cat_${i}`]
+    if (val === true || validVals.includes(String(val || '').trim().toLowerCase())) return true
+  }
+  return false
 }
 
 // Набор SKU, помеченных как новинки (из rawDataset)
@@ -683,7 +696,8 @@ const baseTableData = computed(() => {
     skuOrders[sku].xyz = cv < 0.25 ? 'X' : cv < 0.50 ? 'Y' : 'Z'
   }
 
-  // Заказы с разбивкой по заводам (за период); 'Уточняется' прицепляем к действующему заводу артикула
+  // Заказы с разбивкой по заводам (за период); 'Уточняется' прицепляем к действующему заводу артикула.
+  // Ozon FBO — не завод, а метка площадки: считаем как «без завода» (как в effFactory).
   const ordersByFac = {}    // sku -> { завод: заказы }
   const ordersUnclear = {}  // sku -> заказы без определённого завода
   ordersByFactory.value.filter(d => {
@@ -692,36 +706,34 @@ const baseTableData = computed(() => {
     return rowDate >= startYMD.substring(0, 7) + "-01" && rowDate <= endYMD
   }).forEach(d => {
     const sku = String(d['article'] || '').trim()
-    const fac = d['factory_name'] || 'Уточняется'
+    let fac = d['factory_name'] || 'Уточняется'
+    if (fac === 'Ozon FBO') fac = 'Уточняется'
     const n = Number(d['orders']) || 0
     if (fac === 'Уточняется') { ordersUnclear[sku] = (ordersUnclear[sku] || 0) + n }
     else { if (!ordersByFac[sku]) ordersByFac[sku] = {}; ordersByFac[sku][fac] = (ordersByFac[sku][fac] || 0) + n }
   })
   // заказы для строки (артикул + завод): свой завод + безынвойсные, если это действующий завод
+  // или если строка сама «Уточняется» и действующего завода нет (ЯМ без manufacturer / Ozon).
   const ordersForRow = (sku, factory) => {
+    // Ozon: одна псевдо-фабрика, всегда берём общие заказы артикула
+    if (platformStore.platform === 'ozon') return skuOrders[sku]?.orders || 0
     const hasSplit = ordersByFac[sku] || (sku in ordersUnclear)
     if (!hasSplit) return skuOrders[sku]?.orders || 0   // нет разбивки -> общие заказы
     const own = (ordersByFac[sku] && ordersByFac[sku][factory]) || 0
-    const unclear = (activeFactoryBySku.value[sku] === factory) ? (ordersUnclear[sku] || 0) : 0
+    const active = activeFactoryBySku.value[sku]
+    const takeUnclear = active === factory || (factory === 'Уточняется' && !active)
+    const unclear = takeUnclear ? (ordersUnclear[sku] || 0) : 0
     return own + unclear
   }
 
   const map = {}
-  const validVals = ['1','1.0','+','true','да', 't']
   
   claimsDetail.value.forEach(c => {
     const sku = String(c['supplier_article'] || '').trim()
     if (!sku || !skuMatchesFilter(sku)) return
     if (isNovinkiFilter.value && !novinkiSkus.value.has(sku)) return
 
-    let isDefect = false
-    for (let i=1; i<=13; i++) {
-        const val = c[`cat_${i}`]
-        if (val === true || validVals.includes(String(val || '').trim().toLowerCase())) { 
-            isDefect = true; break; 
-        }
-    }
-    if (!isDefect) return 
+    if (!isClaimDefect(c)) return
 
     let claimDateStr = ''
     if (c['created_dt']) {
@@ -749,7 +761,11 @@ const baseTableData = computed(() => {
   Object.keys(skuOrders).forEach(sku => {
     const hasDefects = Object.keys(map).some(k => k.startsWith(`${sku}___`))
     if (!hasDefects && skuOrders[sku].orders > 0 && skuMatchesFilter(sku)) {
-      const knownFactoryClaim = claimsDetail.value.find(c => String(c['supplier_article'] || '').trim() === sku && c['factory_name'] && c['factory_name'] !== 'Уточняется')
+      const knownFactoryClaim = claimsDetail.value.find(c => {
+        const f = c['factory_name']
+        return String(c['supplier_article'] || '').trim() === sku
+          && f && f !== 'Уточняется' && f !== 'Ozon FBO'
+      })
       // Если претензий нет — берём завод из orders-by-factory (там уже работает fallback на wb_assortment)
       const assignedFactory = knownFactoryClaim
         ? knownFactoryClaim['factory_name']
@@ -765,12 +781,38 @@ const baseTableData = computed(() => {
   // PPM и % считаем от ОБЩИХ заказов SKU (skuOrders, те же данные что и в графике),
   // а не от фабричных заказов из orders-by-factory. Это делает цифры сопоставимыми с графиком.
   // Колонка «Заказы» показывает фабричные заказы (traceable через invoice-chain) — для справки.
-  return Object.values(map).map(item => {
+  let rows = Object.values(map)
+
+  // Режим «Все МП» (1A): одна строка на артикул — сумма брака/заказов, завод WB+ЯМ
+  if (platformStore.platform === 'all') {
+    const bySku = {}
+    rows.forEach(item => {
+      const sku = item['Артикул']
+      if (!bySku[sku]) {
+        bySku[sku] = {
+          'Артикул': sku,
+          'Завод': activeFactoryBySku.value[sku] || (item['Завод'] !== 'Уточняется' ? item['Завод'] : 'Уточняется'),
+          'ABC_Группа': item['ABC_Группа'],
+          'Класс XYZ': item['Класс XYZ'],
+          'Брак': 0,
+          'Заказы': skuOrders[sku]?.orders || 0,
+        }
+      }
+      bySku[sku]['Брак'] += item['Брак']
+      if (bySku[sku]['Завод'] === 'Уточняется' && item['Завод'] !== 'Уточняется' && item['Завод'] !== 'Ozon FBO') {
+        bySku[sku]['Завод'] = item['Завод']
+      }
+    })
+    rows = Object.values(bySku)
+  }
+
+  return rows.map(item => {
     const sku = item['Артикул']
     const totalSkuOrders = skuOrders[sku]?.orders || 0
     const ppm = totalSkuOrders > 0 ? Math.floor((item['Брак'] / totalSkuOrders) * 1000000) : 0
     const pct = totalSkuOrders > 0 ? (item['Брак'] / totalSkuOrders) * 100 : 0
-    return { ...item, ppm, pct }
+    const ordersCol = platformStore.platform === 'all' ? totalSkuOrders : item['Заказы']
+    return { ...item, 'Заказы': ordersCol, ppm, pct }
   })
 })
 
@@ -879,7 +921,11 @@ const filterCritical = ref(false)
 const filterFactory = ref('Все')
 
 const availableFactories = computed(() => {
-  const factories = new Set(baseTableData.value.map(r => r['Завод']).filter(Boolean))
+  const factories = new Set(
+    baseTableData.value
+      .map(r => r['Завод'])
+      .filter(f => f && f !== 'Ozon FBO')
+  )
   return ['Все', ...Array.from(factories).sort()]
 })
 
@@ -924,9 +970,13 @@ const buildChart = () => {
     const targetSku = clickedSku.value || singleSelected
     const endYMD = endDate.value.substring(0, 7)
     
+    // Режим «Все МП»: в общей сводке только с апреля 2026 (точные данные по всем площадкам)
+    const allMpFrom = platformStore.platform === 'all' ? '2026-04' : null
+
     const chartSource = rawDataset.value.filter(d => {
         const dMonth = d['month_dt'] ? String(d['month_dt']).substring(0, 7) : ''
         if (dMonth > endYMD) return false
+        if (allMpFrom && dMonth < allMpFrom) return false
         if (isNovinkiFilter.value && !d['is_new']) return false
 
         const article = String(d['article'] || '').trim()
@@ -1117,12 +1167,16 @@ const currentSkuClaims = computed(() => {
   const targetFactory = String(selectedFactory.value).trim().toLowerCase()
   const startYMD = startDate.value
   const endYMD = endDate.value
+  const allMp = platformStore.platform === 'all'
   
   return claimsDetail.value.filter(c => {
     const sku = String(c['supplier_article'] || '').trim().toLowerCase()
-    const factory = String(effFactory(c)).trim().toLowerCase()
-
-    if (sku !== targetSku || factory !== targetFactory) return false
+    if (sku !== targetSku) return false
+    // В режиме «Все» — все претензии артикула (WB+ЯМ+Ozon), без фильтра по заводу
+    if (!allMp) {
+      const factory = String(effFactory(c)).trim().toLowerCase()
+      if (factory !== targetFactory) return false
+    }
 
     let claimDateStr = ''
     if (c['created_dt']) {
@@ -1141,11 +1195,14 @@ const allTimeSkuClaims = computed(() => {
   if (!clickedSku.value) return []
   const targetSku = String(clickedSku.value).trim().toLowerCase()
   const targetFactory = String(selectedFactory.value).trim().toLowerCase()
+  const allMp = platformStore.platform === 'all'
 
   return claimsDetail.value.filter(c => {
     const sku = String(c['supplier_article'] || '').trim().toLowerCase()
+    if (sku !== targetSku) return false
+    if (allMp) return true
     const factory = String(effFactory(c)).trim().toLowerCase()
-    return sku === targetSku && factory === targetFactory
+    return factory === targetFactory
   })
 })
 
@@ -1327,11 +1384,13 @@ const preloadImages = (urls) => {
 
 const parsePhotos = (str) => {
   if (!str || str === 'nan' || String(str).toLowerCase() === 'none') return []
-  return String(str).split(' ').map(g => {
-    let url = g.split('|').pop().trim()
+  return String(str).split(/\s+/).map(g => {
+    // Формат "превью|оригинал" (S3 или /static/…|CDN) — для показа берём превью (первое).
+    const parts = g.split('|').map(p => p.trim()).filter(Boolean)
+    let url = parts[0] || ''
     if (url.startsWith('//')) url = 'https:' + url
     return url
-  }).filter(url => url.startsWith('http'))
+  }).filter(url => url.startsWith('http') || url.startsWith('/static/'))
 }
 
 // Следим и за SKU и за заводом: при смене завода (тот же SKU, другой завод) нужно
@@ -1716,7 +1775,10 @@ onMounted(() => {
         <div class="p-3 bg-blue-600 text-white rounded-xl shadow-lg shadow-blue-200/50">
           <TrendingUp class="w-6 h-6" />
         </div>
-        <h1 class="text-xl font-black tracking-tight text-slate-900">Уровень PPM. Рекламационные акты</h1>
+        <h1 class="text-xl font-black tracking-tight text-slate-900">
+          Уровень PPM. Рекламационные акты
+          <span v-if="platformStore.platform === 'all'" class="ml-2 text-xs font-bold text-blue-600 bg-blue-50 border border-blue-100 px-2.5 py-1 rounded-lg align-middle">Все МП</span>
+        </h1>
       </div>
       
       <div class="flex items-center gap-4">

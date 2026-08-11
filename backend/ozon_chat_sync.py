@@ -27,10 +27,12 @@ logger = logging.getLogger("ozon_chat_sync")
 
 OZON_BASE = "https://api-seller.ozon.ru"
 SYNC_INTERVAL = 45  # как ближе к WB: копим ленту в БД заранее
-HISTORY_LIMIT = 50
+HISTORY_LIMIT = 100
 LIST_PAGE = 100
 MAX_LIST_PAGES = 5
-MAX_HISTORY_CHATS = 80  # за цикл дотягиваем историю в БД
+MAX_HISTORY_CHATS = 120  # за цикл дотягиваем историю в БД
+# Рефреш history, если last_message_id из list новее, чем в БД (ответ из ЛК и т.п.)
+FORCE_HISTORY_ON_LMID_CHANGE = True
 
 
 def _cid() -> str:
@@ -394,14 +396,17 @@ def _sync_history(conn, chat_id: str) -> int:
             "read": bool(m.get("is_read")),
             "att": ",".join(imgs) if imgs else None,
         })
-        # Убираем локальный дубль после отправки из CX (message_id = local-...)
-        if sender == "seller" and body:
+        # Убираем локальный/бот-дубль после синка реального сообщения из API
+        # (message_id = local-... или bot-...). Сравниваем по нормализованным пробелам —
+        # Ozon иногда меняет переносы/пробелы относительно текста при отправке.
+        if sender == "seller" and body and not str(mid).startswith(("local-", "bot-")):
             conn.execute(text("""
                 DELETE FROM ozon_chat_messages
                 WHERE chat_id = :cid
-                  AND message_id LIKE 'local-%'
                   AND sender_type = 'seller'
-                  AND text = :txt
+                  AND (message_id LIKE 'local-%' OR message_id LIKE 'bot-%')
+                  AND regexp_replace(lower(coalesce(text,'')), '\\s+', ' ', 'g')
+                    = regexp_replace(lower(:txt), '\\s+', ' ', 'g')
             """), {"cid": chat_id, "txt": body[:4000]})
         stored += 1
 
@@ -503,11 +508,11 @@ def _sync_history(conn, chat_id: str) -> int:
             last_any = _parse_ts(m.get("created_at"))
             if last_any:
                 break
-        if last_any and (datetime.now(timezone.utc).replace(tzinfo=None) - last_any).total_seconds() > 3 * 86400:
+        if last_any and (datetime.now(timezone.utc).replace(tzinfo=None) - last_any).total_seconds() > 2 * 86400:
             conn.execute(text("""
                 INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
                 VALUES ('chat', :cid, 'ozon', 'ozon_chat_sync',
-                        'Авто: нет ответа клиента >3 дн после нашего')
+                        'Авто: нет ответа клиента >2 дн после нашего')
                 ON CONFLICT (item_type, item_id, mp) DO NOTHING
             """), {"cid": chat_id})
     return stored
@@ -724,13 +729,33 @@ def sync_chats(db) -> int:
                 synced += 1
                 unread_n = int(item.get("unread_count") or 0)
                 # Всегда копим историю в БД (как WB копит события) — открытие чата без live API.
-                # Приоритет: непрочитанные / без ленты / первые N.
+                # Приоритет: непрочитанные / без ленты / сменился last_message_id / первые N.
                 has_msgs = conn.execute(text(
                     "SELECT 1 FROM ozon_chat_messages WHERE chat_id = :cid LIMIT 1"
                 ), {"cid": cid}).scalar()
+                list_lmid = str(item.get("last_message_id") or "").strip()
+                db_lmid = ""
+                if FORCE_HISTORY_ON_LMID_CHANGE and list_lmid:
+                    row_lmid = conn.execute(text(
+                        "SELECT last_message_id FROM ozon_chats WHERE chat_id = :cid"
+                    ), {"cid": cid}).scalar()
+                    db_lmid = str(row_lmid or "").strip()
+                    # last_message_id в upsert уже обновлён — сравниваем с messages
+                    has_lmid_msg = conn.execute(text("""
+                        SELECT 1 FROM ozon_chat_messages
+                        WHERE chat_id = :cid AND message_id = :mid LIMIT 1
+                    """), {"cid": cid, "mid": list_lmid}).scalar()
+                    lmid_missing = not has_lmid_msg
+                else:
+                    lmid_missing = False
                 need_hist = (
                     history_done < MAX_HISTORY_CHATS
-                    and (unread_n > 0 or not has_msgs or history_done < 40)
+                    and (
+                        unread_n > 0
+                        or not has_msgs
+                        or lmid_missing
+                        or history_done < 50
+                    )
                 )
                 if need_hist:
                     try:
@@ -754,12 +779,12 @@ def sync_chats(db) -> int:
                 AND COALESCE(
                   (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
                   c.waiting_since, c.updated_at, c.created_at
-                ) < now() - interval '3 days'
+                ) < now() - interval '2 days'
             ),
             ins AS (
               INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
               SELECT 'chat', chat_id, 'ozon', 'ozon_chat_sync',
-                     'Авто: нет ответа клиента >3 дн после нашего'
+                     'Авто: нет ответа клиента >2 дн после нашего'
               FROM targets
               ON CONFLICT (item_type, item_id, mp) DO NOTHING
               RETURNING item_id
@@ -777,7 +802,20 @@ def sync_chats(db) -> int:
                   AND c.needs_answer = true
             """))
             conn.commit()
-            logger.info("[OzonChat] auto-archived seller-silent>3d: %s", archived)
+            logger.info("[OzonChat] auto-archived seller-silent>2d: %s", archived)
+
+        # Чаты с уже согласованным/закрытым возвратом — как WB «Одобрено»
+        try:
+            closed_ret = archive_waiting_chats_with_settled_returns(conn)
+            if closed_ret:
+                conn.commit()
+                logger.info("[OzonChat] auto-archived settled returns: %s", closed_ret)
+        except Exception as e:
+            logger.warning("[OzonChat] archive settled returns: %s", e)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
     # Добиваем артикулы по номерам отправлений (FBO/FBS get) — чаты без sku в контексте
     try:
@@ -792,6 +830,68 @@ def sync_chats(db) -> int:
         synced, history_done, len(by_id),
     )
     return synced
+
+
+# Статусы возврата Ozon, после которых чат по возврату уже не актуален
+# (аналог WB «Одобрено» / закрытых заявок).
+_SETTLED_RETURN_STATUS = (
+    "ReturnedToOzon", "ReturnedToSeller", "ReceivedBySeller",
+    "Utilized", "Utilizing", "WriteOff", "Lost",
+    "Cancelled", "CancelledByClient", "CancelledByOzon",
+    "MoneyReturned", "Compensated",
+)
+
+
+def archive_waiting_chats_with_settled_returns(conn) -> int:
+    """Ждущие ответа чаты, у которых по order/sku уже закрытый возврат → архив."""
+    statuses = list(_SETTLED_RETURN_STATUS)
+    note = "Авто: возврат согласован/закрыт"
+    closed = conn.execute(text("""
+        WITH waiting AS (
+          SELECT c.chat_id, c.order_number, c.context_sku
+          FROM ozon_chats c
+          LEFT JOIN cx_dismissed_items d
+            ON d.item_id = c.chat_id AND d.mp = 'ozon' AND d.item_type = 'chat'
+          WHERE d.item_id IS NULL
+            AND c.needs_answer = true
+            AND lower(COALESCE(c.last_sender, '')) IN ('customer', 'buyer', 'client')
+        ),
+        matched AS (
+          SELECT DISTINCT w.chat_id
+          FROM waiting w
+          JOIN ozon_returns r ON (
+                NULLIF(TRIM(w.order_number), '') IS NOT NULL
+                AND (
+                  r.posting_number = w.order_number
+                  OR r.order_number = w.order_number
+                  OR r.posting_number LIKE w.order_number || '-%'
+                )
+            )
+          WHERE COALESCE(NULLIF(TRIM(r.status_sys), ''), '') = ANY(:st)
+             OR lower(COALESCE(r.status_ru, '')) LIKE '%%одобр%%'
+             OR lower(COALESCE(r.status_ru, '')) LIKE '%%заверш%%'
+             OR lower(COALESCE(r.status_ru, '')) LIKE '%%возвращ%%денег%%'
+        ),
+        ins AS (
+          INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
+          SELECT 'chat', chat_id, 'ozon', 'ozon_chat_sync', :note
+          FROM matched
+          ON CONFLICT (item_type, item_id, mp) DO NOTHING
+          RETURNING item_id
+        )
+        SELECT count(*) FROM ins
+    """), {"st": statuses, "note": note}).scalar() or 0
+    if closed:
+        conn.execute(text("""
+            UPDATE ozon_chats c SET needs_answer = false, waiting_since = NULL, updated_at = now()
+            WHERE EXISTS (
+              SELECT 1 FROM cx_dismissed_items d
+              WHERE d.item_id = c.chat_id AND d.mp = 'ozon' AND d.item_type = 'chat'
+                AND d.note = :note
+            )
+              AND c.needs_answer = true
+        """), {"note": note})
+    return int(closed)
 
 
 def send_message(chat_id: str, text: str) -> None:

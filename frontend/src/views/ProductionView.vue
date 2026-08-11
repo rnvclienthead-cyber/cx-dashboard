@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { LineChart, LayoutGrid, PackageOpen, X, BarChart2, Search, Download, ChevronLeft, ArrowRight, ChevronRight, Image as ImageIcon, Calendar, Filter, MessageSquare } from 'lucide-vue-next'
+import { LineChart, LayoutGrid, PackageOpen, X, BarChart2, Search, Download, ChevronLeft, ArrowRight, ChevronRight, Image as ImageIcon, Calendar, Filter, MessageSquare, ExternalLink } from 'lucide-vue-next'
 import Plotly from 'plotly.js-dist-min'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
@@ -26,8 +26,10 @@ const selectedInvoice = ref('Все')
 const invoiceSearch = ref('')
 const showInvoiceDropdown = ref(false)
 
-// Режим матрицы: 'ai' — ИИ-теги (cat_1..13), 'ym_reasons' — причины Маркета (только ЯМ)
+// Режим матрицы: 'ai' — ИИ-теги (cat_1..13), 'ym_reasons' — причины площадки (ЯМ / Ozon)
 const matrixMode = ref('ai')
+const isOzon = computed(() => platformStore.platform === 'ozon')
+const isYm = computed(() => platformStore.platform === 'ym')
 
 // --- ОКНО ЕДИНСТВЕННОГО КАЛЕНДАРЬ ---
 const showCalendarPopover = ref(false)
@@ -164,8 +166,16 @@ const fetchData = async () => {
 }
 
 watch(() => platformStore.platform, (p) => {
-  // У WB нет причин Маркета — возвращаемся к ИИ-тегам
-  if (p !== 'ym') matrixMode.value = 'ai'
+  // Ozon: только причины площадки (текста возвратов нет → ИИ-теги бессмысленны)
+  // ЯМ: можно переключать; WB: только ИИ-теги
+  if (p === 'ozon') {
+    matrixMode.value = 'ym_reasons'
+    selectedInvoice.value = 'Все'
+  } else if (p === 'ym') {
+    matrixMode.value = 'ym_reasons'
+  } else {
+    matrixMode.value = 'ai'
+  }
   fetchData()
 })
 
@@ -234,63 +244,100 @@ const filteredSkuList = computed(() => skuList.value.filter(s => String(s).toLow
 const invoiceList = computed(() => ['Все', ...Array.from(new Set(claims.value.map(c => c['Инвойс'] || 'Не указан'))).filter(i => i !== 'Не указан' && i !== '0').sort()])
 const filteredInvoiceList = computed(() => invoiceList.value.filter(i => String(i).toLowerCase().includes(invoiceSearch.value.toLowerCase())))
 
+const _TAG_TRUE = ['1', '1.0', '+', 'true', 'да']
+const _isTagged = (val) => _TAG_TRUE.includes(String(val || '').trim().toLowerCase())
+
+/** Сортировка SKU: сначала самые проблемные, без проблем — в конец */
+const _sortSkusByProblems = (allSkus, counts) => {
+  return [...allSkus].sort((a, b) => {
+    const ca = counts[a] || 0
+    const cb = counts[b] || 0
+    if (cb !== ca) return cb - ca
+    return String(a).localeCompare(String(b), 'ru')
+  })
+}
+
 const matrixData = computed(() => {
   const fromClaims = filteredClaims.value.map(c => c['Артикул продавца'] || 'Без артикула')
   const fromAssortment = knownSkus.value.map(s => s.supplier_article)
-  const skus = Array.from(new Set([...fromClaims, ...fromAssortment])).sort()
+  const allSkus = Array.from(new Set([...fromClaims, ...fromAssortment]))
+  const skuTotals = {}
+  allSkus.forEach(s => { skuTotals[s] = 0 })
+
   const matrix = []
-  
   Object.keys(CATEGORIES).forEach(catId => {
     const row = { id: catId, name: CATEGORIES[catId], total: 0, cells: {} }
-    skus.forEach(sku => row.cells[sku] = 0)
-    
+    allSkus.forEach(sku => { row.cells[sku] = 0 })
+
     filteredClaims.value.forEach(c => {
-      if (['1','1.0','+','true','да'].includes(String(c[catId] || '').trim().toLowerCase())) {
-        const sKey = c['Артикул продавца'] || 'Без артикула'
-        if (row.cells[sKey] !== undefined) {
-          row.cells[sKey]++
-          row.total++
-        }
-      }
+      if (!_isTagged(c[catId])) return
+      const sKey = c['Артикул продавца'] || 'Без артикула'
+      if (row.cells[sKey] === undefined) return
+      row.cells[sKey]++
+      row.total++
+      skuTotals[sKey] = (skuTotals[sKey] || 0) + 1
     })
     matrix.push(row)
   })
-  return { skus, rows: matrix.filter(r => r.total > 0).sort((a,b) => a.id - b.id) }
+
+  const skus = _sortSkusByProblems(allSkus, skuTotals)
+  return { skus, rows: matrix.filter(r => r.total > 0).sort((a, b) => a.id - b.id) }
 })
 
-// Вторая матрица — по причинам/субпричинам ЯМ.
-// Логика ключа: субпричина (если есть и не UNKNOWN), иначе основная причина.
-// Это даёт точные ярлыки: «Некомплект», «Повреждён» вместо размытого «Брак / качество».
+// Вторая матрица — по причинам площадки (ЯМ субпричины / Ozon return_reason).
 const reasonMatrixData = computed(() => {
   const fromClaims = filteredClaims.value.map(c => c['Артикул продавца'] || 'Без артикула')
   const fromAssortment = knownSkus.value.map(s => s.supplier_article)
-  const skus = Array.from(new Set([...fromClaims, ...fromAssortment])).sort()
+  const allSkus = Array.from(new Set([...fromClaims, ...fromAssortment]))
+  const skuTotals = {}
+  allSkus.forEach(s => { skuTotals[s] = 0 })
   const map = {}
 
   filteredClaims.value.forEach(c => {
-    if (c.platform !== 'ym') return
-
-    const hasSub = c.subreason_type && c.subreason_type !== 'UNKNOWN'
-    const code = hasSub ? c.subreason_type : (c.reason_type || 'NONE')
-    const name = hasSub ? (c['Субпричина ЯМ'] || code) : (c['Причина ЯМ'] || 'Без причины')
+    let code, name
+    if (c.platform === 'ym') {
+      const hasSub = c.subreason_type && c.subreason_type !== 'UNKNOWN'
+      code = hasSub ? c.subreason_type : (c.reason_type || 'NONE')
+      name = hasSub ? (c['Субпричина ЯМ'] || code) : (c['Причина ЯМ'] || 'Без причины')
+    } else if (c.platform === 'ozon') {
+      name = (c['Причина ЯМ'] || '').trim() || 'Без причины'
+      code = name
+    } else {
+      return
+    }
 
     if (!map[code]) {
       map[code] = { id: code, name, total: 0, cells: {} }
-      skus.forEach(s => map[code].cells[s] = 0)
+      allSkus.forEach(s => { map[code].cells[s] = 0 })
     }
     const sKey = c['Артикул продавца'] || 'Без артикула'
-    if (map[code].cells[sKey] !== undefined) {
-      map[code].cells[sKey]++
-      map[code].total++
-    }
+    if (map[code].cells[sKey] === undefined) return
+    map[code].cells[sKey]++
+    map[code].total++
+    skuTotals[sKey] = (skuTotals[sKey] || 0) + 1
   })
 
+  const skus = _sortSkusByProblems(allSkus, skuTotals)
   const rows = Object.values(map).filter(r => r.total > 0).sort((a, b) => b.total - a.total)
   return { skus, rows }
 })
 
 // Активная матрица в зависимости от режима
 const activeMatrix = computed(() => matrixMode.value === 'ym_reasons' ? reasonMatrixData.value : matrixData.value)
+
+/** Топ-3 SKU по каждому типу проблемы (для решения о доотправке) */
+const topSkusByProblem = computed(() => {
+  return activeMatrix.value.rows
+    .filter(r => r.total > 0)
+    .map(row => {
+      const top = Object.entries(row.cells)
+        .filter(([, cnt]) => cnt > 0)
+        .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]), 'ru'))
+        .slice(0, 3)
+        .map(([sku, count]) => ({ sku, count }))
+      return { id: row.id, name: row.name, total: row.total, top }
+    })
+})
 
 const maxDefects = computed(() => Math.max(...activeMatrix.value.rows.flatMap(r => Object.values(r.cells)), 1))
 const getCellColor = (count, maxCount) => {
@@ -471,14 +518,24 @@ const openMatrixDetails = async (sku, catId, catName) => {
   const details = filteredClaims.value.filter(c => {
     if (String(c['Артикул продавца']) !== String(sku)) return false
     if (matrixMode.value === 'ym_reasons') {
-      return c.platform === 'ym' && String(c.reason_type || 'NONE') === String(catId)
+      if (c.platform === 'ozon') {
+        const reason = (c['Причина ЯМ'] || '').trim() || 'Без причины'
+        return reason === String(catId)
+      }
+      if (c.platform !== 'ym') return false
+      const hasSub = c.subreason_type && c.subreason_type !== 'UNKNOWN'
+      const code = hasSub ? c.subreason_type : (c.reason_type || 'NONE')
+      return String(code) === String(catId)
     }
     return ['1','1.0','+','true','да'].includes(String(c[catId] || '').trim().toLowerCase())
   })
   modalData.value = { isOpen: true, title: `📦 ${sku} | 🛠 ${catName}`, claims: details, rawSku: sku, catId }
 
+  // Ozon FBO: фото/инвойс недоступны — не дергаем media API
+  if (platformStore.platform === 'ozon') return
+
   for (let c of details) {
-    // lazy-load только для WB (photos=undefined/null); Ozon/YM уже имеют photos="" — не трогаем
+    // lazy-load только для WB (photos=undefined/null); YM уже имеют photos="" — не трогаем
     if (c.photos === undefined || c.photos === null) {
       try {
         const res = await apiFetch(`/api/v1/analytics/claim-media/${c.SRID || c.srid}`)
@@ -505,10 +562,29 @@ const openInvoiceDetails = async (invoiceObj) => {
   }
 }
 
-const parsePhotos = (str) => str ? str.split(' ').map(g => g.split('|').pop().replace(/^\/\//, 'https://')).slice(0, 8) : []
+const parsePhotos = (str) => {
+  if (!str || str === 'nan' || String(str).toLowerCase() === 'none') return []
+  return String(str).split(/\s+/).map(g => {
+    const parts = g.split('|').map(p => p.trim()).filter(Boolean)
+    let url = parts[0] || ''
+    if (url.startsWith('//')) url = 'https:' + url
+    return url
+  }).filter(url => url.startsWith('http') || url.startsWith('/static/')).slice(0, 8)
+}
 const parseVideos = (str) => str ? (str.match(/\/\/[^\s"'\]\[,;<>]+/g) || []).map(u => 'https:' + u) : []
 
-onMounted(fetchData)
+/** Ссылка на карточку возврата в ЛК Ozon: /app/returns/details/common/{return_id} */
+const ozonReturnLkUrl = (claim) => {
+  const id = claim?.SRID || claim?.srid || claim?.return_id
+  if (!id) return null
+  return `https://seller.ozon.ru/app/returns/details/common/${id}`
+}
+
+onMounted(() => {
+  if (platformStore.platform === 'ozon') matrixMode.value = 'ym_reasons'
+  else if (platformStore.platform === 'ym') matrixMode.value = 'ym_reasons'
+  fetchData()
+})
 </script>
 
 <template>
@@ -551,7 +627,7 @@ onMounted(fetchData)
       </div>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6" :class="{ 'md:grid-cols-1': isOzon }">
       <div class="relative">
         <div class="flex items-center bg-white border border-slate-200 rounded-2xl px-4 py-3 cursor-pointer group" @click="showSkuDropdown = !showSkuDropdown">
           <Search class="w-4 h-4 text-slate-400 mr-3 group-hover:text-blue-500 transition-colors" />
@@ -565,7 +641,7 @@ onMounted(fetchData)
           </div>
         </div>
       </div>
-      <div class="relative">
+      <div v-if="!isOzon" class="relative">
         <div class="flex items-center bg-white border border-slate-200 rounded-2xl px-4 py-3 cursor-pointer group" @click="showInvoiceDropdown = !showInvoiceDropdown">
           <PackageOpen class="w-4 h-4 text-slate-400 mr-3 group-hover:text-blue-500 transition-colors" />
           <span class="text-sm font-bold text-slate-700 flex-1">{{ selectedInvoice === 'Все' ? 'Поиск по инвойсу...' : selectedInvoice }}</span>
@@ -585,16 +661,27 @@ onMounted(fetchData)
     <div v-else class="space-y-6">
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Всего заявок в периоде</div><div class="text-3xl font-black text-slate-800">{{ kpis.total }}</div></div>
-        <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Размечено ИИ</div><div class="text-3xl font-black text-blue-600">{{ kpis.tagged }} <span class="text-sm font-semibold text-slate-400">({{ kpis.processed_percent }}%)</span></div></div>
-        <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Изменено вручную</div><div class="text-3xl font-black text-amber-500">{{ kpis.corrected }}</div></div>
-        <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Точность ИИ</div><div class="text-3xl font-black text-emerald-600">{{ kpis.accuracy }}%</div></div>
+        <template v-if="isOzon">
+          <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Уникальных причин</div><div class="text-3xl font-black text-blue-600">{{ reasonMatrixData.rows.length }}</div></div>
+          <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">SKU с возвратами</div><div class="text-3xl font-black text-amber-500">{{ reasonMatrixData.skus.filter(s => (reasonMatrixData.rows.reduce((n,r)=>n+(r.cells[s]||0),0)) > 0).length }}</div></div>
+          <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Схема</div><div class="text-xl font-black text-emerald-600 pt-1">FBO</div></div>
+        </template>
+        <template v-else>
+          <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Размечено ИИ</div><div class="text-3xl font-black text-blue-600">{{ kpis.tagged }} <span class="text-sm font-semibold text-slate-400">({{ kpis.processed_percent }}%)</span></div></div>
+          <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Изменено вручную</div><div class="text-3xl font-black text-amber-500">{{ kpis.corrected }}</div></div>
+          <div class="bg-white border p-5 rounded-2xl shadow-sm"><div class="text-xs font-bold text-slate-400 uppercase">Точность ИИ</div><div class="text-3xl font-black text-emerald-600">{{ kpis.accuracy }}%</div></div>
+        </template>
       </div>
 
       <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
-        <div class="p-5 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
-          <div class="flex items-center gap-2"><LayoutGrid class="w-4 h-4 text-blue-500" /><h2 class="text-sm font-black text-slate-700 uppercase">Матрица проблем</h2></div>
-          <!-- Переключатель карт: ЯМ и Ozon -->
-          <div v-if="platformStore.platform === 'ym' || platformStore.platform === 'ozon'" class="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
+        <div class="p-5 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center flex-wrap gap-2">
+          <div class="flex items-center gap-2">
+            <LayoutGrid class="w-4 h-4 text-blue-500" />
+            <h2 class="text-sm font-black text-slate-700 uppercase">Матрица проблем</h2>
+            <span class="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">SKU слева — самые проблемные</span>
+          </div>
+          <!-- Переключатель карт: только ЯМ (у Ozon ИИ-тегов нет — сразу причины) -->
+          <div v-if="isYm" class="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
             <button
               @click="matrixMode = 'ai'"
               :class="['px-3 py-1.5 text-[11px] font-bold rounded-lg transition-all', matrixMode === 'ai' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700']"
@@ -604,6 +691,7 @@ onMounted(fetchData)
               :class="['px-3 py-1.5 text-[11px] font-bold rounded-lg transition-all', matrixMode === 'ym_reasons' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700']"
             >Причины Маркета</button>
           </div>
+          <span v-else-if="isOzon" class="text-[11px] font-bold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg">Причины Ozon</span>
         </div>
         <div class="overflow-auto max-h-[calc(100vh-350px)] custom-scroll">
           <table class="w-full border-collapse table-fixed min-w-max">
@@ -656,7 +744,45 @@ onMounted(fetchData)
         </div>
       </div>
 
-      <div class="bg-white border border-slate-200 rounded-2xl shadow-xs p-5">
+      <!-- Топ-3 SKU по каждому типу проблемы -->
+      <div v-if="topSkusByProblem.length" class="bg-white border border-slate-200 rounded-2xl shadow-xs p-5">
+        <div class="flex items-center gap-2 mb-4">
+          <BarChart2 class="w-4 h-4 text-blue-500" />
+          <h2 class="text-xs font-black text-slate-700 uppercase tracking-wider">Топ SKU по типам проблем</h2>
+          <span class="text-[10px] text-slate-400 font-medium">для решения о доотправке деталей</span>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div
+            v-for="row in topSkusByProblem"
+            :key="row.id"
+            class="p-3 border rounded-xl bg-slate-50/40"
+            :class="['1','2'].includes(String(row.id)) ? 'border-amber-200 bg-amber-50/40' : 'border-slate-100'"
+          >
+            <div class="flex justify-between items-start gap-2 mb-2">
+              <div class="text-[11px] font-bold text-slate-700 leading-snug">
+                <span v-if="matrixMode === 'ai'" class="text-blue-400 mr-0.5">{{ row.id }}.</span>{{ row.name }}
+              </div>
+              <span class="text-[10px] font-black text-slate-500 whitespace-nowrap">{{ row.total }} шт</span>
+            </div>
+            <div class="space-y-1">
+              <button
+                v-for="(item, idx) in row.top"
+                :key="item.sku"
+                type="button"
+                class="w-full flex items-center justify-between gap-2 text-left px-2 py-1 rounded-lg hover:bg-white transition-colors"
+                @click="openMatrixDetails(item.sku, row.id, row.name)"
+              >
+                <span class="text-[11px] font-bold text-slate-700 truncate">
+                  <span class="text-slate-400 font-black mr-1">{{ idx + 1 }}.</span>{{ item.sku }}
+                </span>
+                <span class="text-[11px] font-black text-blue-600 whitespace-nowrap">{{ item.count }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="!isOzon" class="bg-white border border-slate-200 rounded-2xl shadow-xs p-5">
         <div class="flex items-center gap-2 mb-4"><PackageOpen class="w-4 h-4 text-orange-500" /><h2 class="text-xs font-black text-slate-700 uppercase tracking-wider">Проблемные инвойсы (Топ-15)</h2></div>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
           <div v-for="inv in topInvoices" :key="inv.inv" class="p-3 border rounded-xl bg-slate-50/30 hover:border-orange-200 cursor-pointer group" :title="inv.hoverText" @click="openInvoiceDetails(inv)">
@@ -670,7 +796,7 @@ onMounted(fetchData)
       </div>
 
       <!-- ══ УМНЫЙ ПОИСК ПО КОММЕНТАРИЯМ ══ -->
-      <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
+      <div v-if="!isOzon" class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-100 bg-slate-50/60 flex items-center justify-between">
           <div class="flex items-center gap-2">
             <MessageSquare class="w-4 h-4 text-violet-500" />
@@ -834,7 +960,7 @@ onMounted(fetchData)
         <div class="p-4 md:p-6 border-b border-slate-100 flex justify-between items-start gap-3 bg-slate-50/50">
           <h3 class="text-base md:text-lg font-black text-slate-800 leading-tight">{{ modalData.title }}</h3>
           <div class="flex items-center gap-2 flex-shrink-0">
-            <button @click="downloadAllFromModal" class="hidden sm:flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold hover:bg-blue-700 transition-colors shadow-lg shadow-blue-100"><Download class="w-4 h-4" /> Скачать все</button>
+            <button v-if="!isOzon" @click="downloadAllFromModal" class="hidden sm:flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold hover:bg-blue-700 transition-colors shadow-lg shadow-blue-100"><Download class="w-4 h-4" /> Скачать все</button>
             <button @click="modalData.isOpen = false" class="p-2 bg-white border rounded-xl text-slate-400 hover:text-red-500 transition-colors"><X class="w-5 h-5"/></button>
           </div>
         </div>
@@ -844,11 +970,12 @@ onMounted(fetchData)
             <div class="flex flex-col sm:flex-row gap-4">
               <div class="flex-1 min-w-0">
                 <div class="flex flex-wrap items-center gap-3 mb-3">
-                  <div class="text-[10px] font-black text-slate-400 uppercase">Инвойс: <span class="text-slate-800 ml-1">{{ claim['Инвойс'] || '---' }}</span></div>
+                  <div v-if="!isOzon" class="text-[10px] font-black text-slate-400 uppercase">Инвойс: <span class="text-slate-800 ml-1">{{ claim['Инвойс'] || '---' }}</span></div>
                   <div v-if="claim['Артикул продавца']" class="text-[10px] font-black px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
                     SKU: {{ claim['Артикул продавца'] }}
                   </div>
-                  <div class="text-[10px] font-black text-slate-400 uppercase">Поставка: <span class="text-blue-600 ml-1">{{ claim['Номер поставки_ОРИГИНАЛ'] || claim['Номер поставки'] || '---' }}</span></div>
+                  <div v-if="!isOzon" class="text-[10px] font-black text-slate-400 uppercase">Поставка: <span class="text-blue-600 ml-1">{{ claim['Номер поставки_ОРИГИНАЛ'] || claim['Номер поставки'] || '---' }}</span></div>
+                  <div v-if="isOzon && (claim.posting_number || claim['Номер поставки'])" class="text-[10px] font-black text-slate-400 uppercase">Отправление: <span class="text-blue-600 ml-1">{{ claim.posting_number || claim['Номер поставки'] }}</span></div>
                   <!-- Причина возврата (ЯМ = классификация Маркета, Ozon = строка причины) -->
                   <div v-if="claim['Причина ЯМ']" class="text-[10px] font-black px-2 py-1 rounded-full bg-rose-50 text-rose-600 uppercase tracking-tight">
                     {{ claim['Причина ЯМ'] }}<span v-if="claim['Субпричина ЯМ']" class="font-bold text-rose-400"> · {{ claim['Субпричина ЯМ'] }}</span>
@@ -856,8 +983,18 @@ onMounted(fetchData)
                   <div v-if="claim.platform === 'ozon' && claim['Название товара']" class="text-[10px] font-semibold px-2 py-1 rounded-full bg-blue-50 text-blue-500 max-w-[200px] truncate" :title="claim['Название товара']">
                     {{ claim['Название товара'] }}
                   </div>
+                  <a
+                    v-if="isOzon && ozonReturnLkUrl(claim)"
+                    :href="ozonReturnLkUrl(claim)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="inline-flex items-center gap-1 text-[10px] font-black px-2.5 py-1 rounded-full bg-blue-600 text-white hover:bg-blue-700 transition-colors shadow-sm"
+                    @click.stop
+                  >
+                    <ExternalLink class="w-3 h-3" /> Открыть в ЛК
+                  </a>
                 </div>
-                <p class="text-sm text-slate-700 leading-relaxed font-medium bg-white p-4 rounded-xl border border-slate-100 shadow-sm italic">"{{ claim['Комментарий покупателя'] || (claim.platform === 'ozon' ? 'FBO — комментарий покупателя недоступен' : 'Без комментария') }}"</p>
+                <p v-if="!isOzon" class="text-sm text-slate-700 leading-relaxed font-medium bg-white p-4 rounded-xl border border-slate-100 shadow-sm italic">"{{ claim['Комментарий покупателя'] || 'Без комментария' }}"</p>
                 <!-- Похожий отзыв по этому SKU (справочно, жёсткой связи с возвратом нет) -->
                 <div v-if="claim['Похожий отзыв']" class="mt-2 text-xs bg-amber-50/60 border border-amber-100 rounded-xl p-3">
                   <div class="text-[10px] font-black text-amber-600 uppercase tracking-tight mb-1">💬 Похожий отзыв по этому SKU<span v-if="claim['Похожий отзыв оценка']"> · {{ claim['Похожий отзыв оценка'] }}★</span></div>
@@ -865,13 +1002,12 @@ onMounted(fetchData)
                 </div>
               </div>
 
-              <div class="grid grid-cols-4 gap-2 content-start sm:w-[280px] md:w-[380px]">
+              <div v-if="!isOzon" class="grid grid-cols-4 gap-2 content-start sm:w-[280px] md:w-[380px]">
                 <div v-for="(img, idx) in parsePhotos(claim.photos)" :key="idx" class="relative group aspect-square rounded-lg overflow-hidden border border-white shadow-sm cursor-zoom-in" @click="openLightbox(parsePhotos(claim.photos), idx)">
                   <img :src="img" class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" />
                   <button @click.stop="downloadImg(img, `claim_${claim.SRID || claim.srid}_${idx+1}.jpg`)" class="absolute bottom-1 right-1 p-1 bg-black/50 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity"><Download class="w-3 h-3" /></button>
                 </div>
                 <div v-if="claim.photos === undefined || claim.photos === null" class="col-span-4 py-4 text-center text-xs text-slate-400 animate-pulse">Загрузка фото...</div>
-                <div v-else-if="claim.platform === 'ozon' && !parsePhotos(claim.photos).length" class="col-span-4 py-4 text-center text-xs text-slate-400">Фото недоступны (FBO)</div>
                 <a v-for="(vid, idx) in parseVideos(claim.videos || claim.db_videos)" :key="`v${idx}`" :href="vid" target="_blank" rel="noopener"
                   class="relative group aspect-square rounded-lg overflow-hidden border border-white shadow-sm bg-slate-800 flex items-center justify-center col-span-2">
                   <span class="text-white text-[10px] font-bold flex flex-col items-center gap-1">

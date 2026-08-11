@@ -91,7 +91,8 @@ _SYNC_LABELS = {
     "ym_sync_questions":                "Вопросы покупателей (ЯМ)",
     "ym_sync_ratings":                  "Рейтинги и отзывы (ЯМ)",
     "ym_sync_prices":                   "Цены (ЯМ)",
-    "ym_sync_supplies":                 "Поставки (ЯМ)",
+    # "ym_sync_supplies":                 "Поставки (ЯМ)",  # отключено
+
     "ym_report_realization_generate":   "Отчёт о реализации (ЯМ)",
     "ym_report_services_generate":      "Отчёт по услугам (ЯМ)",
     "ozon_sync_returns":                "Возвраты (OZON)",

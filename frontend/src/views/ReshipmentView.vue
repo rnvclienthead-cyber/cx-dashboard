@@ -1,6 +1,8 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { apiFetch } from '../api'
+import { usePlatformStore } from '../stores/platform'
 import {
   PackageCheck, RefreshCw, X, CheckCircle2, XCircle,
   Truck, ExternalLink, Star, Loader2, Search,
@@ -9,8 +11,12 @@ import {
 } from 'lucide-vue-next'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
+const route = useRoute()
+const router = useRouter()
 const userRole = ref(localStorage.getItem('role') || '')
 const username = ref(localStorage.getItem('username') || '')
+const platformStore = usePlatformStore()
+const currentMp = computed(() => String(platformStore.platform || 'all').toLowerCase())
 
 const requests        = ref([])
 const stats           = ref([])
@@ -183,10 +189,27 @@ const lightboxNext  = () => { lightboxIndex.value = (lightboxIndex.value + 1) % 
 
 const parsePhotos = (photosStr) => (photosStr || '').split(' ').map(u => u.trim()).filter(Boolean)
 
-// ── WB Chat URL ────────────────────────────────────────────────────────────────
+// ── WB / ЯМ Chat URL ───────────────────────────────────────────────────────────
 const wbChatUrl = (chatId) => {
   const uuid = chatId?.split(':').slice(1).join(':') || chatId || ''
   return `https://seller.wildberries.ru/chat-with-clients?chatId=${uuid}`
+}
+
+const ymChatUrl = (req) => {
+  const biz = '203987989'
+  const camp = '146194774'
+  const group = String(req?.ym_context_type || 'DIRECT').toUpperCase()
+  const q = new URLSearchParams({ campaignId: camp, chatGroup: group })
+  const cab = String(req?.ym_cabinet_chat_id || '').trim()
+  if (cab.includes('/')) q.set('chatId', cab)
+  return `https://partner.market.yandex.ru/business/${biz}/arbiter?${q}`
+}
+
+const marketplaceLabel = (req) => {
+  const mp = String(req?.marketplace || 'wb').toLowerCase()
+  if (mp === 'ym') return 'Яндекс Маркет'
+  if (mp === 'ozon') return 'Ozon'
+  return 'WB'
 }
 
 // ── Экономика заявки ─────────────────────────────────────────────────────────
@@ -471,14 +494,23 @@ const approvedCount = computed(() =>
   filteredRequests.value.filter(r => r.status === 'approved').length
 )
 
-// ── Вычисляемые ──────────────────────────────────────────────────────────────
-const filteredRequests = computed(() => {
+// Базовый список: роль + площадка из сайдбара (без статуса/ТК/поиска) — для цифр в фильтрах
+const requestsForMp = computed(() => {
   let list = requests.value
   if (userRole.value === 'cs_manager') {
     list = list.filter(r => ['new', 'matched', 'approved', 'packed', 'rejected', 'shipped', 'in_transit', 'ready_for_pickup', 'delivered'].includes(r.status))
   } else if (userRole.value === 'warehouse_manager') {
     list = list.filter(r => ['approved', 'packed', 'shipped', 'in_transit', 'ready_for_pickup', 'delivered', 'rejected'].includes(r.status))
   }
+  if (currentMp.value && currentMp.value !== 'all') {
+    list = list.filter(r => String(r.marketplace || 'wb').toLowerCase() === currentMp.value)
+  }
+  return list
+})
+
+// ── Вычисляемые ──────────────────────────────────────────────────────────────
+const filteredRequests = computed(() => {
+  let list = requestsForMp.value
   if (filterStatus.value !== 'all') list = list.filter(r => r.status === filterStatus.value)
   if (filterCarrier.value !== 'all') {
     list = list.filter(r => {
@@ -510,6 +542,7 @@ const filteredRequests = computed(() => {
         (r.items_to_send       || '').toLowerCase().includes(q) ||
         (r.customer_phone      || '').includes(q) ||
         (r.wb_chat_id          || '').toLowerCase().includes(q) ||
+        (r.ym_chat_id          || '').toLowerCase().includes(q) ||
         (r.chat_token          || '').toLowerCase().includes(q) ||
         (r.confirmation_token  || '').toLowerCase().includes(q)
       )
@@ -520,20 +553,53 @@ const filteredRequests = computed(() => {
 
 const statsByStatus = computed(() => {
   const map = {}
-  stats.value.forEach(s => { map[s.status] = { cnt: Number(s.cnt), cost: parseFloat(s.total_cost || 0) } })
+  for (const r of requestsForMp.value) {
+    const st = r.status || 'new'
+    if (!map[st]) map[st] = { cnt: 0 }
+    map[st].cnt += 1
+  }
   return map
 })
 
-// Соотношение СДЭК/Яндекс среди заявок, где перевозчик уже определён (с момента одобрения)
+// Соотношение СДЭК/Яндекс среди заявок текущей площадки, где перевозчик уже определён
 const carrierRatio = computed(() => {
   const map = { cdek: 0, yandex: 0 }
-  statsByCarrier.value.forEach(s => { map[s.delivery_method] = Number(s.cnt) })
+  for (const r of requestsForMp.value) {
+    if (r.status === 'rejected') continue
+    if (r.delivery_method === 'yandex') map.yandex += 1
+    else if (r.delivery_method === 'cdek') map.cdek += 1
+    else if (!r.delivery_method && !['new', 'matched'].includes(r.status) && !r.yandex_cost && !r.yandex_pvz_code) {
+      map.cdek += 1
+    }
+  }
   const total = map.cdek + map.yandex
   return {
     cdek: map.cdek, yandex: map.yandex, total,
     cdekPct:   total ? Math.round((map.cdek / total) * 100) : 0,
     yandexPct: total ? Math.round((map.yandex / total) * 100) : 0,
   }
+})
+
+const mpStripeClass = (req) => {
+  const mp = String(req?.marketplace || 'wb').toLowerCase()
+  if (mp === 'ym') return 'bg-orange-400'
+  if (mp === 'ozon') return 'bg-blue-500'
+  return 'bg-violet-500'
+}
+
+const carrierLabel = (req) => {
+  if (req?.delivery_method === 'yandex') return 'Яндекс'
+  if (req?.delivery_method === 'cdek') return 'СДЭК'
+  return ''
+}
+
+const emptyListHint = computed(() => {
+  if (filterStatus.value === 'new') return 'Новых заявок нет'
+  if (filterStatus.value === 'approved') return 'Нет заявок к отправке'
+  if (currentMp.value === 'ym') return 'Заявок с Яндекс Маркета пока нет — ссылки в чатах ЯМ уже работают, ждут заполнения формы'
+  if (currentMp.value === 'ozon') return 'Заявок с Ozon пока нет'
+  if (currentMp.value === 'wb') return 'Нет заявок WB'
+  return 'Нет заявок'
 })
 
 // cdek_cost — теперь справочная цена СДЭК-кандидата у ЛЮБОЙ заявки (даже если выбран
@@ -566,6 +632,27 @@ const load = async () => {
     statsByCarrier.value = d2.by_carrier || []
   } catch (e) { console.error(e) }
   finally { loading.value = false }
+}
+
+async function openFromQuery() {
+  const raw = route.query.id || route.query.req
+  const id = Number(raw || 0)
+  if (!id) return
+  // Сбрасываем фильтр статуса — иначе заявка может быть скрыта
+  if (filterStatus.value !== 'all') filterStatus.value = 'all'
+  if (!requests.value.length) await load()
+  let req = requests.value.find(r => Number(r.id) === id)
+  if (!req) {
+    try {
+      const res = await apiFetch(`${API_BASE}/api/v1/reshipment/requests/${id}`)
+      const d = await res.json()
+      req = d.data || d
+      if (req?.id && !requests.value.some(r => Number(r.id) === Number(req.id))) {
+        requests.value = [req, ...requests.value]
+      }
+    } catch { /* ignore */ }
+  }
+  if (req?.id) await select(req)
 }
 
 const select = async (req) => {
@@ -1078,11 +1165,22 @@ const fmt = (d) => {
 const fmtCost = (v) => v != null ? `${Number(v).toLocaleString('ru-RU')} ₽` : '—'
 
 const onKeydown = (e) => { if (e.key === 'Escape') closeLightbox() }
-onMounted(() => {
+onMounted(async () => {
   filterStatus.value = defaultStatus.value
-  load()
+  await load()
   if (isCS.value) loadPromoCode()
+  await openFromQuery()
   window.addEventListener('keydown', onKeydown)
+})
+watch(() => route.query.id || route.query.req, () => {
+  openFromQuery()
+})
+watch(currentMp, () => {
+  // При смене площадки в сайдбаре — сбросить карточку, если её нет в новом списке
+  if (selected.value && currentMp.value !== 'all') {
+    const mp = String(selected.value.marketplace || 'wb').toLowerCase()
+    if (mp !== currentMp.value) selected.value = null
+  }
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
@@ -1180,25 +1278,24 @@ onUnmounted(() => {
           <Loader2 class="w-5 h-5 animate-spin" />
         </div>
         <div v-else-if="!filteredRequests.length" class="text-center text-sm text-slate-400 py-12 px-4">
-          {{ filterStatus === 'new' ? 'Новых заявок нет' : filterStatus === 'approved' ? 'Нет заявок к отправке' : 'Нет заявок' }}
+          {{ emptyListHint }}
         </div>
 
         <div v-for="req in filteredRequests" :key="req.id"
-          :class="['flex items-start border-b border-slate-100', selected?.id === req.id ? 'bg-emerald-50 border-l-2 border-l-emerald-500' : 'hover:bg-slate-50']">
+          :class="['relative flex items-start border-b border-slate-100',
+            selected?.id === req.id ? 'bg-emerald-50' : 'hover:bg-slate-50']">
+          <!-- Цветовая метка площадки (WB / ЯМ / Ozon) -->
+          <span class="absolute left-0 top-0 bottom-0 w-1 rounded-r"
+            :class="mpStripeClass(req)"
+            :title="marketplaceLabel(req)" />
 
-          <button class="flex-1 text-left px-4 py-3 min-w-0" @click="select(req)">
+          <button class="flex-1 text-left pl-4 pr-4 py-3 min-w-0" @click="select(req)">
             <div class="flex items-start justify-between gap-2 mb-1">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="text-sm font-medium text-slate-800 truncate">{{ req.customer_name }}</span>
               </div>
-              <span class="flex items-center gap-1 flex-shrink-0">
-                <span v-if="req.delivery_method === 'yandex' || req.delivery_method === 'cdek'"
-                  :class="['text-[9px] font-bold px-1.5 py-0.5 rounded-full', req.delivery_method === 'yandex' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700']">
-                  {{ req.delivery_method === 'yandex' ? 'Я' : 'С' }}
-                </span>
-                <span :class="['text-[10px] font-semibold px-2 py-0.5 rounded-full', statusMeta[req.status]?.color]">
-                  {{ statusMeta[req.status]?.label || req.status }}
-                </span>
+              <span :class="['text-[10px] font-semibold px-2 py-0.5 rounded-full flex-shrink-0', statusMeta[req.status]?.color]">
+                {{ statusMeta[req.status]?.label || req.status }}
               </span>
             </div>
             <div class="text-xs text-slate-500 truncate mb-1">{{ req.problem_type }} · {{ req.items_to_send }}</div>
@@ -1206,6 +1303,11 @@ onUnmounted(() => {
               <span>#{{ req.id }}</span>
               <span v-if="req.order_number">· {{ req.order_number }}</span>
               <span v-if="realCost(req) > 0" class="text-emerald-600 font-medium">· {{ fmtCost(realCost(req)) }}</span>
+              <span v-if="carrierLabel(req)"
+                :class="['text-[9px] font-bold px-1.5 py-0.5 rounded-full',
+                  req.delivery_method === 'yandex' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700']">
+                {{ carrierLabel(req) }}
+              </span>
               <template v-if="req.status === 'delivered' && (req.wb_before_rating || req.wb_after_rating)">
                 <span class="text-slate-400">·</span>
                 <span v-if="req.wb_before_rating"
@@ -1244,6 +1346,12 @@ onUnmounted(() => {
             <div class="min-w-0">
               <div class="flex items-center gap-2 mb-1 flex-wrap">
                 <h2 class="text-xl font-bold text-slate-800">{{ selected.customer_name }}</h2>
+                <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full"
+                  :class="String(selected.marketplace || 'wb').toLowerCase() === 'ym'
+                    ? 'bg-yellow-100 text-yellow-800'
+                    : 'bg-violet-100 text-violet-700'">
+                  {{ marketplaceLabel(selected) }}
+                </span>
                 <!-- Статус + дата + тултип с историей -->
                 <div class="relative group">
                   <div class="flex items-center gap-1.5 cursor-default">
@@ -1320,8 +1428,8 @@ onUnmounted(() => {
               <p v-else-if="selected.cdek_number" class="text-[10px] font-mono text-emerald-600 mt-0.5">{{ selected.cdek_number }}</p>
             </div>
           </div>
-          <!-- WB чат (только для КС/админа, не для склада) -->
-          <div v-if="!isWarehouseOnly && selected.wb_chat_id" class="bg-violet-50 rounded-xl border border-violet-200 p-3">
+          <!-- Чаты WB / ЯМ (только для КС/админа, не для склада) -->
+          <div v-if="!isWarehouseOnly && (selected.wb_chat_id || selected.ym_chat_id)" class="bg-violet-50 rounded-xl border border-violet-200 p-3">
             <p class="text-[10px] font-bold text-violet-500 uppercase tracking-wider mb-2 flex items-center gap-1">
               <MessageCircle class="w-3 h-3" /> Чаты
             </p>
@@ -1334,6 +1442,15 @@ onUnmounted(() => {
                   :class="selected.wb_chat_id ? 'text-violet-500' : 'text-slate-400'">WB</span>
                 <span class="text-[11px] font-bold" :class="selected.wb_chat_id ? 'text-violet-600' : 'text-slate-300'">
                   {{ selected.wb_chat_id ? '✓' : '✗' }}
+                </span>
+              </div>
+              <!-- ЯМ -->
+              <div class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border py-1"
+                :class="selected.ym_chat_id ? 'border-yellow-200 bg-yellow-50' : 'border-slate-200 bg-slate-50'">
+                <span class="text-[10px] font-bold uppercase tracking-wider"
+                  :class="selected.ym_chat_id ? 'text-yellow-700' : 'text-slate-400'">ЯМ</span>
+                <span class="text-[11px] font-bold" :class="selected.ym_chat_id ? 'text-yellow-700' : 'text-slate-300'">
+                  {{ selected.ym_chat_id ? '✓' : '✗' }}
                 </span>
               </div>
               <!-- TG -->
@@ -1358,16 +1475,24 @@ onUnmounted(() => {
               </div>
             </div>
             <p v-if="selected.salebot_blocked" class="text-[10px] text-amber-500 italic mb-1.5">⚠ Клиент заблокировал бота</p>
-            <p class="text-xs text-violet-400 italic mb-1.5">Если чат не появился — прокрути левую панель WB вниз</p>
+            <p v-if="selected.wb_chat_id" class="text-xs text-violet-400 italic mb-1.5">Если чат не появился — прокрути левую панель WB вниз</p>
             <div class="flex gap-1.5">
-              <a :href="wbChatUrl(selected.wb_chat_id)" target="_blank"
+              <a v-if="selected.wb_chat_id" :href="wbChatUrl(selected.wb_chat_id)" target="_blank"
                 class="flex items-center justify-center gap-1.5 text-[10px] px-2 py-1.5 bg-violet-600 hover:bg-violet-700 text-white font-semibold rounded-lg transition-colors flex-1">
                 <ExternalLink class="w-3 h-3" /> Открыть чат WB
               </a>
+              <a v-if="selected.ym_chat_id" :href="ymChatUrl(selected)" target="_blank"
+                class="flex items-center justify-center gap-1.5 text-[10px] px-2 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white font-semibold rounded-lg transition-colors flex-1">
+                <ExternalLink class="w-3 h-3" /> Открыть чат ЯМ
+              </a>
             </div>
+            <p v-if="selected.ym_chat_id && selected.ym_context_article" class="text-[10px] text-slate-500 mt-1.5">
+              Товар: <span class="font-mono font-semibold text-slate-700">{{ selected.ym_context_article }}</span>
+              <span v-if="selected.ym_order_id"> · заказ {{ selected.ym_order_id }}</span>
+            </p>
           </div>
           <div v-else-if="!isWarehouseOnly" class="bg-slate-50 rounded-xl border border-slate-200 p-3 flex items-center justify-center">
-            <span class="text-[10px] text-slate-400 italic">WB чат не привязан</span>
+            <span class="text-[10px] text-slate-400 italic">Чат не привязан</span>
           </div>
         </div>
 
@@ -1911,19 +2036,23 @@ onUnmounted(() => {
         <template v-if="isWarehouse && ['approved','packed'].includes(selected.status)">
           <div :class="['rounded-xl border p-4', selected.status === 'packed' ? 'bg-teal-50 border-teal-200' : 'bg-violet-50 border-violet-200']">
             <p :class="['text-xs font-bold uppercase tracking-wider mb-2', selected.status === 'packed' ? 'text-teal-600' : 'text-violet-500']">
-              {{ selected.status === 'packed' ? '✓ Собрано — готово к сдаче' : 'К отправке' }}
+              {{ selected.status === 'packed'
+                ? (selected.delivery_method === 'yandex' ? '✓ Собрано — ждёт забор курьера' : '✓ Собрано — готово к сдаче')
+                : 'К отправке' }}
             </p>
             <p v-if="selected.moderator_comment" class="text-sm text-slate-700 mb-3 italic">«{{ selected.moderator_comment }}»</p>
 
-            <!-- Яндекс: заказ уже создан автоматически при одобрении -->
+            <!-- Яндекс: заказ уже создан автоматически при одобрении; копятся до вторника -->
             <div v-if="selected.delivery_method === 'yandex' && selected.track_number" class="mb-3 text-xs bg-white/70 rounded-lg px-3 py-2 text-slate-600 font-mono">
               Яндекс заказ создан ✓ ({{ selected.track_number }})<br class="font-sans">
-              <span class="font-sans">Отвезти в ПВЗ: <strong>Казань, ул. Кулагина, 6</strong> → получатель <strong>{{ selected.client_pvz_address || '—' }}</strong></span>
+              <span class="font-sans">Забор курьера со склада <strong>Техническая 17Б</strong> — по <strong>вторникам</strong> (10:00–13:00).<br>
+              Получатель: <strong>{{ selected.client_pvz_address || '—' }}</strong></span>
             </div>
             <!-- Яндекс: автосоздание не удалось — кнопка повтора -->
             <div v-else-if="selected.delivery_method === 'yandex'" class="mb-3 text-xs bg-amber-50 rounded-lg px-3 py-2 text-amber-700 border border-amber-200">
               ⚠️ Заказ Яндекс не создался автоматически.<br>
-              Отвезти в ПВЗ: <strong>Казань, ул. Кулагина, 6</strong> → получатель <strong>{{ selected.client_pvz_address || '—' }}</strong>
+              После создания посылка останется на складе до забора курьера (вторник).<br>
+              Получатель: <strong>{{ selected.client_pvz_address || '—' }}</strong>
               <button @click="doYandexRetry(selected.id)" :disabled="panelLoading"
                 class="mt-2 flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
                 <Loader2 v-if="panelLoading" class="w-3 h-3 animate-spin" />
@@ -1953,9 +2082,9 @@ onUnmounted(() => {
                 </button>
               </template>
 
-              <!-- Статус "Собраны", Яндекс: статус обновится автоматически когда Яндекс примет посылку -->
+              <!-- Статус "Собраны", Яндекс: копятся до вторника, статус сам после забора курьера -->
               <template v-else-if="selected.status === 'packed' && selected.delivery_method === 'yandex' && selected.track_number">
-                <p class="text-xs text-slate-500 italic self-center">Сдайте посылку в ПВЗ — статус обновится автоматически</p>
+                <p class="text-xs text-slate-500 italic self-center">Не возить в ПВЗ. Ждёт забор курьера во вторник — статус обновится сам</p>
                 <button @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-xl transition-colors">
                   <Printer class="w-4 h-4" /> Этикетка Яндекс A5

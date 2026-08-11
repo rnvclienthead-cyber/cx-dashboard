@@ -24,10 +24,14 @@ watch(isCollapsed, (val) => {
   localStorage.setItem('sidebar_collapsed', String(val))
 })
 
-// Авто-выбор площадки, если у пользователя только одна
+// Авто-выбор площадки: одна доступная → она; иначе оставляем «Все»
 watch(() => permissionsStore.loaded, (loaded) => {
-  if (loaded && availablePlatforms.value.length === 1) {
-    platformStore.setPlatform(availablePlatforms.value[0])
+  if (!loaded) return
+  const available = availablePlatforms.value
+  if (available.length === 1) {
+    platformStore.setPlatform(available[0])
+  } else if (available.includes('all') && !available.includes(platformStore.platform)) {
+    platformStore.setPlatform('all')
   }
 })
 
@@ -38,10 +42,8 @@ const closeMobile = () => { isMobileOpen.value = false }
 const route = useRoute()
 let activityTimer = null
 
-// «Возвраты» пока умеют только WB (claims API есть только у Wildberries) —
-// общий переключатель площадки там ни на что не влияет, поэтому прячем его,
-// чтобы не выглядело как сломанный фильтр.
-const showPlatformSwitcher = computed(() => availablePlatforms.value.length > 1 && route.path !== '/returns')
+// Переключатель площадки на всех экранах, где >1 МП (в т.ч. Возвраты — WB/ЯМ/Ozon).
+const showPlatformSwitcher = computed(() => availablePlatforms.value.length > 1)
 
 function pingActivity () {
   if (!permissionsStore.loaded) return
@@ -55,22 +57,35 @@ function pingActivity () {
 const newReshipmentCount = ref(0)
 let reshipmentTimer = null
 
+/** Для КС — очередь «новые»; для склада — «на отправку»; иначе тоже новые. */
+function reshipmentBadgeStatus () {
+  const role = permissionsStore.role || localStorage.getItem('role') || ''
+  if (role === 'warehouse_manager') return 'approved'
+  return 'new'
+}
+
 async function fetchReshipmentBadge () {
   if (!permissionsStore.can('reshipment')) return
   try {
     const res = await apiFetch('/api/v1/reshipment/stats')
     const data = await res.json()
-    const newStatus = (data?.data ?? []).find((s) => s.status === 'new')
-    newReshipmentCount.value = parseInt(newStatus?.cnt ?? 0, 10)
+    const target = reshipmentBadgeStatus()
+    const row = (data?.data ?? []).find((s) => s.status === target)
+    newReshipmentCount.value = parseInt(row?.cnt ?? 0, 10)
   } catch { /* silent */ }
 }
 
 watch(() => permissionsStore.loaded, (loaded) => {
   if (loaded && permissionsStore.can('reshipment')) {
     fetchReshipmentBadge()
-    reshipmentTimer = setInterval(fetchReshipmentBadge, 60000)
+    if (!reshipmentTimer) reshipmentTimer = setInterval(fetchReshipmentBadge, 60000)
   }
 }, { immediate: true })
+
+// После смены роли/прав пересчитать сразу
+watch(() => permissionsStore.role, () => {
+  if (permissionsStore.loaded && permissionsStore.can('reshipment')) fetchReshipmentBadge()
+})
 
 onMounted(() => {
   const saved = localStorage.getItem('sidebar_collapsed')
@@ -209,7 +224,7 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
         </div>
       </div>
 
-      <!-- Переключатель платформ (скрыт, если доступна только одна, и на /returns — там пока только WB) -->
+      <!-- Переключатель платформ (скрыт, если доступна только одна) -->
       <div v-if="showPlatformSwitcher"
            class="border-b border-slate-200 flex-shrink-0"
            :class="isCollapsed ? 'px-2 py-2' : 'px-3 py-3'">
@@ -457,6 +472,30 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
 
         <template v-if="permissionsStore.can('cx_responses')">
           <RouterLink
+            to="/returns"
+            :class="[
+              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+            ]"
+            active-class="bg-emerald-50 text-emerald-700 font-semibold"
+            :title="isCollapsed ? 'Возвраты' : ''"
+          >
+            <PackageX class="w-4 h-4 flex-shrink-0" />
+            <span v-if="!isCollapsed">Возвраты</span>
+          </RouterLink>
+          <RouterLink
+            to="/chats"
+            :class="[
+              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+            ]"
+            active-class="bg-emerald-50 text-emerald-700 font-semibold"
+            :title="isCollapsed ? 'Чаты' : ''"
+          >
+            <MessagesSquare class="w-4 h-4 flex-shrink-0" />
+            <span v-if="!isCollapsed">Чаты</span>
+          </RouterLink>
+          <RouterLink
             to="/reviews"
             :class="[
               'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
@@ -479,30 +518,6 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           >
             <HelpCircle class="w-4 h-4 flex-shrink-0" />
             <span v-if="!isCollapsed">Вопросы</span>
-          </RouterLink>
-          <RouterLink
-            to="/chats"
-            :class="[
-              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
-              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
-            ]"
-            active-class="bg-emerald-50 text-emerald-700 font-semibold"
-            :title="isCollapsed ? 'Чаты' : ''"
-          >
-            <MessagesSquare class="w-4 h-4 flex-shrink-0" />
-            <span v-if="!isCollapsed">Чаты</span>
-          </RouterLink>
-          <RouterLink
-            to="/returns"
-            :class="[
-              'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
-              isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
-            ]"
-            active-class="bg-emerald-50 text-emerald-700 font-semibold"
-            :title="isCollapsed ? 'Возвраты' : ''"
-          >
-            <PackageX class="w-4 h-4 flex-shrink-0" />
-            <span v-if="!isCollapsed">Возвраты</span>
           </RouterLink>
         </template>
 

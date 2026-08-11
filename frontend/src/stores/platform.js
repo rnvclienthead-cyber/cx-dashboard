@@ -2,7 +2,8 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 
 export const usePlatformStore = defineStore('platform', () => {
-  const platform = ref('wb')
+  // По умолчанию «Все» — склад и КС видят полный список, пока не выбрали площадку
+  const platform = ref('all')
 
   function setPlatform(p) {
     platform.value = p

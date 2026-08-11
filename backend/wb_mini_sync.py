@@ -1,9 +1,20 @@
 """Лёгкий воркер: частое обновление отзывов и возвратов WB (каждые 5 мин)."""
 import asyncio
+import hashlib
+import io
+import os
+import time
 from datetime import datetime, timedelta
+
+import requests
+from PIL import Image
 from sqlalchemy import text
+
 from backend.database import db_session
 from backend import broadcaster, wb_client
+
+WB_PHOTO_DIR = os.getenv("WB_PHOTO_DIR", "/root/cx-dashboard/static/wb_claims").strip()
+WB_PHOTO_RETENTION_DAYS = int(os.getenv("WB_PHOTO_RETENTION_DAYS", "90"))
 
 
 def _key() -> str:
@@ -20,6 +31,77 @@ def _photo_url(p) -> str:
     if u and not u.startswith("http"):
         u = "https:" + u
     return u
+
+
+def _is_cached_photos(photos: str | None) -> bool:
+    """Уже локальные или S3-превью — не перезаписываем сырым CDN."""
+    if not photos:
+        return False
+    return ("/static/wb_claims/" in photos) or ("storage.yandexcloud.net" in photos)
+
+
+def _cache_wb_photo(cdn_url: str) -> str:
+    """Скачивает фото WB, сжимает, кладёт в /static/wb_claims/. Возвращает превью|оригинал."""
+    if not cdn_url:
+        return ""
+    if cdn_url.startswith("//"):
+        cdn_url = "https:" + cdn_url
+    if not cdn_url.startswith("http"):
+        return cdn_url
+    try:
+        os.makedirs(WB_PHOTO_DIR, exist_ok=True)
+        digest = hashlib.sha1(cdn_url.encode("utf-8")).hexdigest()[:20]
+        filename = f"{digest}.jpg"
+        local_path = os.path.join(WB_PHOTO_DIR, filename)
+        local_url = f"/static/wb_claims/{filename}"
+        if os.path.isfile(local_path) and os.path.getsize(local_path) > 1000:
+            return f"{local_url}|{cdn_url}"
+
+        r = requests.get(cdn_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        img = Image.open(io.BytesIO(r.content))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.thumbnail((1000, 1000))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", optimize=True, quality=85)
+        with open(local_path, "wb") as f:
+            f.write(buf.getvalue())
+        return f"{local_url}|{cdn_url}"
+    except Exception as e:
+        print(f"[MiniSync] photo cache fail: {e}")
+        return cdn_url
+
+
+def cleanup_old_wb_photos(days: int | None = None) -> int:
+    days = WB_PHOTO_RETENTION_DAYS if days is None else days
+    if days <= 0 or not os.path.isdir(WB_PHOTO_DIR):
+        return 0
+    cutoff = time.time() - days * 86400
+    removed = 0
+    for name in os.listdir(WB_PHOTO_DIR):
+        path = os.path.join(WB_PHOTO_DIR, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except Exception:
+            pass
+    if removed:
+        print(f"[MiniSync] cleanup wb photos: removed {removed} (> {days}d)")
+    return removed
+
+
+def _build_claim_photos(item: dict, existing_photos: str | None) -> str | None:
+    """Не затираем уже закэшированные фото; новые — качаем на диск."""
+    if _is_cached_photos(existing_photos):
+        return existing_photos
+    raw = [_photo_url(p) for p in (item.get("photos") or [])]
+    urls = [u for u in raw if u]
+    if not urls:
+        return existing_photos or None
+    cached = [_cache_wb_photo(u) for u in urls]
+    return " ".join(cached) or None
 
 
 def sync_recent_feedbacks(db) -> int:
@@ -283,6 +365,7 @@ def _map_claim_status(raw_st: str, st_ex: str = "", wb_comment: str = "") -> str
     # Актуальные коды returns-api: 0=на рассмотрении, 1=отказ, 2=одобрено.
     # Старый код "3" оставляем как отказ на случай устаревших ответов.
     # status_ex: 1=отказ, 2/5/10=варианты одобрения (см. живые ответы API).
+    # «Закрыта» — локальный ярлык (заявка пропала из окна API), не статус WB.
     status_map = {
         "0": "На рассмотрении",
         "1": "Отказ",
@@ -295,8 +378,18 @@ def _map_claim_status(raw_st: str, st_ex: str = "", wb_comment: str = "") -> str
     if raw in ("2", "2.0"):
         return "Одобрено"
 
-    el = f"{st_ex or ''} {wb_comment or ''}".lower()
+    el = f"{st_ex or ''} {wb_comment or ''} {raw}".lower()
     ex = str(st_ex or "").strip()
+
+    # Отмена клиентом / площадкой
+    if (
+        raw in ("Отменена", "Отменено", "Cancelled", "Canceled")
+        or "отмен" in el
+        or "cancel" in el
+    ):
+        # Не путать отказ (отклонено) с отменой заявки
+        if "отклон" not in el and "отказ" not in el:
+            return "Отменена"
 
     # Числовой status_ex / текст важнее «залипшего» «На рассмотрении» / кода 0.
     if ex in ("1", "1.0") or "отклон" in el or "отказ" in el:
@@ -304,7 +397,7 @@ def _map_claim_status(raw_st: str, st_ex: str = "", wb_comment: str = "") -> str
     if ex in ("2", "2.0", "5", "10") or "одобрен" in el or "придут деньги" in el:
         return "Одобрено"
 
-    if raw in ("Одобрено", "Отказ", "Закрыта"):
+    if raw in ("Одобрено", "Отказ", "Закрыта", "Отменена"):
         return raw
     if status_map.get(raw) == "На рассмотрении" or raw in ("На рассмотрении", "Открыта", ""):
         return "На рассмотрении"
@@ -333,7 +426,11 @@ def _upsert_claim_row(db, item: dict, *, is_archive: bool) -> bool:
     status = _map_claim_status(item.get("status", ""), str(st_ex_raw), wb_comment)
     nm_id = str(item.get("nm_id") or item.get("nmId") or "").strip() or None
     article = str(item.get("supplier_article") or item.get("supplierArticle") or item.get("saName") or "")
-    photos = " ".join(u for u in (_photo_url(p) for p in (item.get("photos") or [])) if u) or None
+    existing_photos = db.execute(
+        text("SELECT photos FROM wb_claims WHERE srid = :srid"),
+        {"srid": srid},
+    ).scalar()
+    photos = _build_claim_photos(item, existing_photos)
     income = str(item.get("income_id") or item.get("incomeId") or "0")
     claim_id = str(item.get("id") or item.get("claim_id") or "")
     try:
@@ -355,8 +452,15 @@ def _upsert_claim_row(db, item: dict, *, is_archive: bool) -> bool:
                                  ELSE wb_claims.status_ex
                                END,
                 user_comment = COALESCE(EXCLUDED.user_comment, wb_claims.user_comment),
-                photos       = CASE WHEN EXCLUDED.photos IS NOT NULL
-                                    THEN EXCLUDED.photos ELSE wb_claims.photos END,
+                photos       = CASE
+                                 WHEN wb_claims.photos IS NOT NULL AND wb_claims.photos <> ''
+                                      AND (wb_claims.photos LIKE '%/static/wb_claims/%'
+                                           OR wb_claims.photos LIKE '%storage.yandexcloud.net%')
+                                 THEN wb_claims.photos
+                                 WHEN EXCLUDED.photos IS NOT NULL AND EXCLUDED.photos <> ''
+                                 THEN EXCLUDED.photos
+                                 ELSE wb_claims.photos
+                               END,
                 nm_id        = COALESCE(EXCLUDED.nm_id, wb_claims.nm_id),
                 income_id    = COALESCE(EXCLUDED.income_id, wb_claims.income_id),
                 is_archive   = EXCLUDED.is_archive,
@@ -809,7 +913,7 @@ def scan_unlinked_tokens(db) -> int:
             chat_id = str(hit["chat_id"])
             try:
                 db.execute(text(
-                    "UPDATE reshipment_chat_tokens SET chat_id=:cid WHERE token=:token AND (chat_id IS NULL OR chat_id='')"
+                    "UPDATE reshipment_chat_tokens SET chat_id=:cid, mp=COALESCE(mp, 'wb') WHERE token=:token AND (chat_id IS NULL OR chat_id='')"
                 ), {"cid": chat_id, "token": tok})
                 req_id = unlinked[tok].get("req_id")
                 if req_id:
@@ -824,7 +928,8 @@ def scan_unlinked_tokens(db) -> int:
                             wb_chat_id = :cid,
                             wb_nm_id = COALESCE(wb_nm_id, :nm),
                             wb_reply_sign = COALESCE(wb_reply_sign, :sign),
-                            matched_srid = COALESCE(matched_srid, :rid)
+                            matched_srid = COALESCE(matched_srid, :rid),
+                            marketplace = COALESCE(NULLIF(marketplace, ''), 'wb')
                         WHERE id = :id AND (wb_chat_id IS NULL OR wb_chat_id = '')
                     """), {"cid": chat_id, "nm": nm, "sign": sign, "rid": rid, "id": req_id})
                 db.commit()
@@ -869,12 +974,12 @@ def scan_unlinked_tokens(db) -> int:
         try:
             nm_from_chat = str((chat.get("goodCard") or {}).get("nmID") or "")
             db.execute(text(
-                "UPDATE reshipment_chat_tokens SET chat_id=:cid WHERE token=:token AND (chat_id IS NULL OR chat_id='')"
+                "UPDATE reshipment_chat_tokens SET chat_id=:cid, mp=COALESCE(mp, 'wb') WHERE token=:token AND (chat_id IS NULL OR chat_id='')"
             ), {"cid": chat_id, "token": token_found})
             req_id = unlinked[token_found].get("req_id")
             if req_id:
                 db.execute(text(
-                    "UPDATE reshipment_requests SET wb_chat_id=:cid, wb_nm_id=COALESCE(wb_nm_id, :nm) WHERE id=:id AND (wb_chat_id IS NULL OR wb_chat_id='')"
+                    "UPDATE reshipment_requests SET wb_chat_id=:cid, wb_nm_id=COALESCE(wb_nm_id, :nm), marketplace=COALESCE(NULLIF(marketplace,''),'wb') WHERE id=:id AND (wb_chat_id IS NULL OR wb_chat_id='')"
                 ), {"cid": chat_id, "nm": int(nm_from_chat) if nm_from_chat else None, "id": req_id})
             db.commit()
             linked += 1
@@ -1462,6 +1567,8 @@ async def start_mini_sync_worker(get_db) -> None:
                     await asyncio.to_thread(archive_old_active_feedbacks, db)
                     await asyncio.sleep(3)
                     await asyncio.to_thread(sync_all_answered_questions, db)
+                    await asyncio.sleep(2)
+                    await asyncio.to_thread(cleanup_old_wb_photos)
                     _last_daily = today
 
             # Уведомляем фронтенд об обновлении данных

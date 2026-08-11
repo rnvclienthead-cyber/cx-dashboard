@@ -8,11 +8,14 @@
 import os
 import time
 import asyncio
+import base64
 import logging
 import re
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response, RedirectResponse
+from pathlib import PurePath
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from sqlalchemy import text, bindparam
 from pydantic import BaseModel
@@ -409,13 +412,13 @@ _UNIFIED_QUEUE_VIEW_SQL = """
             (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
             c.waiting_since, c.created_at, c.updated_at, now()
           ) > now() - INTERVAL '30 days'
-      -- мы ответили, клиент молчит >3 дн — не держим в очереди (уходят в архив)
+      -- мы ответили, клиент молчит >2 дн — не держим в очереди (уходят в архив)
       AND NOT (
             lower(COALESCE(c.last_sender, '')) IN ('seller', 'courier')
             AND COALESCE(
               (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
               c.waiting_since, c.created_at, c.updated_at, now()
-            ) < now() - INTERVAL '3 days'
+            ) < now() - INTERVAL '2 days'
           )
       AND c.chat_id NOT IN
           (SELECT item_id FROM cx_dismissed_items WHERE mp='ozon' AND item_type='chat')
@@ -425,6 +428,7 @@ _UNIFIED_QUEUE_VIEW_SQL = """
     SELECT
         c.chat_id, 'ym', 'chat',
         COALESCE(
+            NULLIF(TRIM(c.context_article), ''),
             (
               SELECT o.supplier_article FROM ym_orders o
               WHERE c.order_id IS NOT NULL
@@ -797,8 +801,37 @@ def undismiss_item(mp: str, item_type: str, item_id: str, db: Session = Depends(
 
 # ── История чата WB ──────────────────────────────────────────────────────────
 
-def _extract_image_ids(attachments) -> list:
-    """Достаёт downloadID вложений-картинок из разных возможных форм ответа WB."""
+def _resolve_wb_chat_id(conn, chat_id: str) -> str | None:
+    """Канонический chat_id в БД: `1:uuid`. В ЛК WB в URL приходит голый uuid."""
+    cid = (chat_id or "").strip()
+    if not cid:
+        return None
+    row = conn.execute(text(
+        "SELECT chat_id FROM wb_chats WHERE chat_id = :c LIMIT 1"
+    ), {"c": cid}).scalar()
+    if row:
+        return str(row)
+    if ":" not in cid:
+        row = conn.execute(text("""
+            SELECT chat_id FROM wb_chats
+            WHERE chat_id = :p1 OR chat_id LIKE :suf
+            ORDER BY CASE WHEN chat_id = :p1 THEN 0 ELSE 1 END, chat_id
+            LIMIT 1
+        """), {"p1": f"1:{cid}", "suf": f"%:{cid}"}).scalar()
+        if row:
+            return str(row)
+    return None
+
+
+def _attachment_kind(name: str = "", url: str = "", mime_type: str = "", default: str = "file") -> str:
+    probe = f"{name} {url} {mime_type}".lower().split("?", 1)[0]
+    if mime_type.lower().startswith("image/") or probe.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+        return "image"
+    return default
+
+
+def _extract_wb_attachments(attachments) -> list[dict]:
+    """Нормализовать WB images/files, не выдавая PDF за изображение."""
     if not attachments:
         return []
     out = []
@@ -807,16 +840,66 @@ def _extract_image_ids(attachments) -> list:
         if not isinstance(arr, list):
             continue
         for a in arr:
+            fid = ""
+            url = ""
+            name = ""
+            mime_type = ""
             if isinstance(a, str):
-                out.append(a)
+                fid = a
             elif isinstance(a, dict):
-                # WB buyer-chat API возвращает downloadID как ключ для скачивания
-                fid = (a.get("downloadID") or a.get("id") or
-                       a.get("fileID") or a.get("fileId"))
-                # url пустой у WB, игнорируем
-                if fid:
-                    out.append(str(fid))
+                fid = str(a.get("downloadID") or a.get("id") or a.get("fileID") or a.get("fileId") or "")
+                url = str(a.get("url") or "")
+                name = str(a.get("name") or a.get("fileName") or a.get("filename") or "")
+                mime_type = str(a.get("contentType") or a.get("mimeType") or a.get("type") or "")
+            if not fid and not url:
+                continue
+            resolved_url = (
+                f"/api/v1/cx-responses/chat-download/wb/{fid}"
+                if fid else url
+            )
+            default_kind = "image" if key in ("images", "photos") else "file"
+            out.append({
+                "type": _attachment_kind(name, url, mime_type, default_kind),
+                "url": resolved_url,
+                "name": name or ("Изображение" if default_kind == "image" else "Документ"),
+                "mimeType": mime_type or None,
+            })
     return out
+
+
+@router.get("/chat-card/{mp}/{chat_id}")
+def get_chat_card(mp: str, chat_id: str, db: Session = Depends(get_db)):
+    """Карточка чата по id (в т.ч. голый uuid из ссылки ЛК WB → `1:uuid`)."""
+    m = _normalize_mp(mp)
+    if m != "wb":
+        raise HTTPException(status_code=404, detail="Пока резолв только для WB")
+    with db.bind.connect() as conn:
+        cid = _resolve_wb_chat_id(conn, chat_id)
+        if not cid:
+            raise HTTPException(status_code=404, detail="Чат не найден")
+        row = conn.execute(text("""
+            SELECT c.chat_id AS id, c.client_name AS contact, c.nm_id,
+                   c.good_name, c.last_message AS body, c.last_ts,
+                   c.needs_answer, c.order_rid,
+                   wpp.photo_url AS product_photo,
+                   CASE
+                     WHEN c.last_ts IS NULL OR c.last_ts <= 0 THEN NULL
+                     WHEN c.last_ts > 1000000000000
+                       THEN GREATEST(0, ((EXTRACT(epoch FROM now()) * 1000 - c.last_ts) / 1000)::int)
+                     ELSE GREATEST(0, (EXTRACT(epoch FROM now()) - c.last_ts)::int)
+                   END AS age_sec
+            FROM wb_chats c
+            LEFT JOIN wb_product_photos wpp ON wpp.nm_id = c.nm_id
+            WHERE c.chat_id = :cid
+            LIMIT 1
+        """), {"cid": cid}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    d = dict(row)
+    d["mp"] = "wb"
+    d["item_type"] = "chat"
+    d["sku"] = d.get("good_name") or (f"Арт. {d['nm_id']}" if d.get("nm_id") else "")
+    return d
 
 
 @router.get("/chat-messages/wb/{chat_id}")
@@ -828,34 +911,37 @@ def get_wb_chat_messages(chat_id: str, db: Session = Depends(get_db)):
     последнее сообщение из wb_chats + наши логи ответов как fallback.
     """
     with db.bind.connect() as conn:
+        resolved = _resolve_wb_chat_id(conn, chat_id) or chat_id
         rows = conn.execute(text(
             "SELECT sender, text, attachments, add_ts "
             "FROM wb_chat_messages WHERE chat_id = :cid ORDER BY add_ts, id"
-        ), {"cid": chat_id}).mappings().all()
+        ), {"cid": resolved}).mappings().all()
 
     if rows:
         msgs = []
         for r in rows:
-            imgs = _extract_image_ids(r.get("attachments"))
+            typed_attachments = _extract_wb_attachments(r.get("attachments"))
             msgs.append({
                 "text": r["text"] or "",
                 "senderType": "seller" if r["sender"] == "seller" else ("wb" if r["sender"] == "wb" else "client"),
                 "createdAt": r["add_ts"],
-                "images": [f"/api/v1/cx-responses/chat-download/wb/{i}" for i in imgs] if imgs else [],
+                "attachments": typed_attachments,
+                "images": [item["url"] for item in typed_attachments if item["type"] == "image"],
             })
-        return {"messages": msgs, "partial": False}
+        return {"messages": msgs, "partial": False, "chat_id": resolved}
 
     # ── Fallback: старый чат без накопленной ленты ──
     msgs = []
     with db.bind.connect() as conn:
+        resolved = _resolve_wb_chat_id(conn, chat_id) or chat_id
         chat = conn.execute(text(
             "SELECT last_message, last_sender, last_ts, waiting_since "
             "FROM wb_chats WHERE chat_id = :cid"
-        ), {"cid": chat_id}).mappings().first()
+        ), {"cid": resolved}).mappings().first()
         replies = conn.execute(text(
             "SELECT answer_text, sent_at FROM cx_response_log "
             "WHERE mp='wb' AND item_type='chat' AND item_id = :cid ORDER BY sent_at"
-        ), {"cid": chat_id}).mappings().all()
+        ), {"cid": resolved}).mappings().all()
 
     if chat and chat.get("last_message"):
         ts = chat.get("last_ts")
@@ -892,22 +978,77 @@ def _iso_to_ms(v) -> int | None:
         return None
 
 
+def _ozon_ui_sender_type(sender_type) -> str:
+    """Единая роль отправителя для UI Ozon.
+
+    courier — исходящая сторона продавца в API Ozon; бот учитывает её
+    как ответ продавца в _last_seller_ts, UI должен делать так же.
+    """
+    value = str(sender_type or "").lower()
+    if value in ("seller", "courier"):
+        return "seller"
+    if value in ("system", "chatbot"):
+        return "system"
+    return "client"
+
+
+def _typed_ozon_attachments(raw: str, is_image: bool, markdown_images: list[str]) -> list[dict]:
+    from urllib.parse import unquote, urlparse
+
+    urls = [u for u in str(raw or "").split(",") if u.startswith("http")]
+    if not urls:
+        urls = list(markdown_images)
+    result = []
+    for url in urls:
+        basename = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+        kind = "image" if (is_image or url in markdown_images) else _attachment_kind(basename, url)
+        result.append({
+            "type": kind,
+            "url": _ozon_proxy_url(url),
+            "name": basename if "." in basename else ("Изображение" if kind == "image" else "Документ"),
+            "mimeType": None,
+        })
+    return result
+
+
+def _ym_ui_sender_type(sender_type) -> str:
+    """Единая роль отправителя для UI Яндекс Маркета."""
+    value = str(sender_type or "").lower()
+    if value in ("seller", "partner", "merchant"):
+        return "seller"
+    if value == "system":
+        return "system"
+    return "client"
+
+
 @router.get("/chat-messages/ozon/{chat_id}")
 def get_ozon_chat_messages(chat_id: str, db: Session = Depends(get_db)):
     """Лента чата Ozon из ozon_chat_messages (+ fallback на превью)."""
-    # Если ленты ещё нет — один раз дотянуть history из API
-    with db.bind.connect() as conn:
-        n = conn.execute(text(
-            "SELECT count(*) FROM ozon_chat_messages WHERE chat_id = :cid"
-        ), {"cid": chat_id}).scalar() or 0
-    if n == 0:
-        try:
-            from .. import ozon_chat_sync
-            with db.bind.connect() as conn:
+    # Всегда подтягиваем history при открытии (иначе ответы из ЛК не видны,
+    # если воркер пропустил чат с unread=0). Не чаще раза в 20 сек на чат.
+    try:
+        from .. import ozon_chat_sync
+        with db.bind.connect() as conn:
+            stale = conn.execute(text("""
+                SELECT 1 FROM ozon_chats
+                WHERE chat_id = :cid
+                  AND (
+                    updated_at IS NULL
+                    OR updated_at < now() - interval '20 seconds'
+                    OR NOT EXISTS (
+                      SELECT 1 FROM ozon_chat_messages m WHERE m.chat_id = :cid
+                    )
+                  )
+                LIMIT 1
+            """), {"cid": chat_id}).scalar()
+            if stale:
                 ozon_chat_sync._sync_history(conn, chat_id)
+                conn.execute(text("""
+                    UPDATE ozon_chats SET updated_at = now() WHERE chat_id = :cid
+                """), {"cid": chat_id})
                 conn.commit()
-        except Exception as e:
-            logger.warning("[ozon messages] live history %s: %s", chat_id, e)
+    except Exception as e:
+        logger.warning("[ozon messages] live history %s: %s", chat_id, e)
 
     with db.bind.connect() as conn:
         rows = conn.execute(text("""
@@ -920,29 +1061,27 @@ def get_ozon_chat_messages(chat_id: str, db: Session = Depends(get_db)):
     if rows:
         msgs = []
         for r in rows:
-            st = str(r.get("sender_type") or "").lower()
-            if st == "seller":
-                sender = "seller"
-            elif st in ("system", "chatbot"):
-                sender = "system"
-            else:
-                sender = "client"
-            imgs = []
+            sender = _ozon_ui_sender_type(r.get("sender_type"))
             raw = r.get("attachments") or ""
-            if raw:
-                imgs = [u for u in str(raw).split(",") if u.startswith("http")]
             # из markdown в тексте, если attachments пусты
-            if not imgs and r.get("text") and "![" in str(r.get("text")):
-                imgs = _IMG_MD_URL_RE.findall(str(r.get("text")))
+            markdown_images = []
+            if r.get("text") and "![" in str(r.get("text")):
+                markdown_images = _IMG_MD_URL_RE.findall(str(r.get("text")))
             body = r.get("text") or ""
+            typed_attachments = _typed_ozon_attachments(
+                raw,
+                bool(r.get("is_image")),
+                markdown_images,
+            )
             # убрать markdown-картинки из текста если уже в images
-            if imgs and "![" in body:
+            if typed_attachments and "![" in body:
                 body = _IMG_MD_RE.sub("", body).strip()
             msgs.append({
                 "text": body,
                 "senderType": sender,
                 "createdAt": _iso_to_ms(r.get("created_at")),
-                "images": [_ozon_proxy_url(u) for u in imgs if u],
+                "attachments": typed_attachments,
+                "images": [item["url"] for item in typed_attachments if item["type"] == "image"],
             })
         return {"messages": msgs, "partial": False}
 
@@ -953,10 +1092,9 @@ def get_ozon_chat_messages(chat_id: str, db: Session = Depends(get_db)):
         """), {"cid": chat_id}).mappings().first()
     msgs = []
     if chat and chat.get("last_message"):
-        st = str(chat.get("last_sender") or "").lower()
         msgs.append({
             "text": chat["last_message"],
-            "senderType": "seller" if st == "seller" else "client",
+            "senderType": _ozon_ui_sender_type(chat.get("last_sender")),
             "createdAt": _iso_to_ms(chat.get("updated_at") or chat.get("waiting_since")),
             "images": [],
         })
@@ -966,18 +1104,31 @@ def get_ozon_chat_messages(chat_id: str, db: Session = Depends(get_db)):
 @router.get("/chat-messages/ym/{chat_id}")
 def get_ym_chat_messages(chat_id: str, db: Session = Depends(get_db)):
     """Лента чата Яндекс Маркета."""
-    with db.bind.connect() as conn:
-        n = conn.execute(text(
-            "SELECT count(*) FROM ym_chat_messages WHERE chat_id = :cid"
-        ), {"cid": chat_id}).scalar() or 0
-    if n == 0:
-        try:
-            from .. import ym_chat_sync
-            with db.bind.connect() as conn:
+    # При открытии подтягиваем history (дедуп local-/bot-, артикул DIRECT).
+    # Не чаще раза в 20 сек на чат.
+    try:
+        from .. import ym_chat_sync
+        with db.bind.connect() as conn:
+            stale = conn.execute(text("""
+                SELECT 1 FROM ym_chats
+                WHERE chat_id = :cid
+                  AND (
+                    updated_at IS NULL
+                    OR updated_at < now() - interval '20 seconds'
+                    OR NOT EXISTS (
+                      SELECT 1 FROM ym_chat_messages m WHERE m.chat_id = :cid
+                    )
+                  )
+                LIMIT 1
+            """), {"cid": chat_id}).scalar()
+            if stale:
                 ym_chat_sync._sync_history(conn, chat_id)
+                conn.execute(text("""
+                    UPDATE ym_chats SET updated_at = now() WHERE chat_id = :cid
+                """), {"cid": chat_id})
                 conn.commit()
-        except Exception as e:
-            logger.warning("[ym messages] live history %s: %s", chat_id, e)
+    except Exception as e:
+        logger.warning("[ym messages] live history %s: %s", chat_id, e)
 
     with db.bind.connect() as conn:
         try:
@@ -1002,13 +1153,7 @@ def get_ym_chat_messages(chat_id: str, db: Session = Depends(get_db)):
     if rows:
         msgs = []
         for r in rows:
-            st = str(r.get("sender_type") or "").lower()
-            if st == "seller":
-                sender = "seller"
-            elif st == "system":
-                sender = "system"
-            else:
-                sender = "client"
+            sender = _ym_ui_sender_type(r.get("sender_type"))
             imgs = []
             raw = r.get("attachments") or ""
             if raw:
@@ -1028,10 +1173,9 @@ def get_ym_chat_messages(chat_id: str, db: Session = Depends(get_db)):
         """), {"cid": chat_id}).mappings().first()
     msgs = []
     if chat and chat.get("last_message"):
-        st = str(chat.get("last_sender") or "").lower()
         msgs.append({
             "text": chat["last_message"],
-            "senderType": "seller" if st == "seller" else "client",
+            "senderType": _ym_ui_sender_type(chat.get("last_sender")),
             "createdAt": _iso_to_ms(chat.get("updated_at") or chat.get("waiting_since")),
             "images": [],
         })
@@ -1047,7 +1191,9 @@ CLAIM_STATUS_MAP = {
     "2": "Одобрено",
     "3": "Отказ",
     "Отклонено": "Отказ",
-    "Закрыта": "Закрыта",
+    "Закрыта": "Нет в API WB",
+    "Отменена": "Отменена",
+    "Отменено": "Отменена",
 }
 _RU_MONTHS = ["января","февраля","марта","апреля","мая","июня",
                "июля","августа","сентября","октября","ноября","декабря"]
@@ -1075,8 +1221,11 @@ def _decode_claim(row: dict) -> dict:
     label = CLAIM_STATUS_MAP.get(st, st) or st
     # Архивная заявка без финального статуса — не вводим в заблуждение «На рассмотрении»
     if label in ("На рассмотрении", "0", "0.0", "Открыта") and row.get("is_archive"):
-        label = "Закрыта"
+        label = "Нет в API WB"
+    if st == "Закрыта":
+        label = "Нет в API WB"
     row["status_label"] = label
+    row["status_raw"] = st  # исходное значение в БД (Закрыта / Отменена / …)
     return row
 
 
@@ -1087,9 +1236,12 @@ def review_card(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Полная карточка отзыва: сам отзыв + наш ответ + связанные чаты, возвраты, контакты/переотправки."""
+    """Карточка отзыва + связка с чатом/возвратом ЭТОГО клиента (по заказу), не по товару."""
     def _iso(v):
         return v.isoformat() if hasattr(v, "isoformat") else (str(v) if v is not None else None)
+
+    linked_chat = None
+    linked_return = None
 
     with db.bind.connect() as conn:
         # ── Сам отзыв ──
@@ -1097,7 +1249,9 @@ def review_card(
             r = conn.execute(text(
                 "SELECT id::text AS id, supplier_article AS sku, nm_id::text AS nm_id, "
                 "valuation AS rating, text AS body, pros, cons, photos AS photos_raw, "
-                "answer_text, state, created_date AS created_at FROM wb_feedbacks WHERE id::text=:i"
+                "answer_text, state, created_date AS created_at, "
+                "last_order_shk_id, last_order_created_at "
+                "FROM wb_feedbacks WHERE id::text=:i"
             ), {"i": item_id}).mappings().first()
         elif mp == "ym":
             r = conn.execute(text(
@@ -1118,6 +1272,8 @@ def review_card(
         if not r:
             raise HTTPException(status_code=404, detail="Отзыв не найден")
         review = dict(r)
+        shk = review.pop("last_order_shk_id", None)
+        order_dt = review.pop("last_order_created_at", None)
         review["created_at"] = _iso(review.get("created_at"))
         raw = review.pop("photos_raw", None) or ""
         review["photos"] = [u for u in str(raw).split() if u.startswith("http")]
@@ -1127,6 +1283,10 @@ def review_card(
         review["product_photo"] = conn.execute(text(
             "SELECT photo_url FROM product_photos WHERE supplier_article=:a LIMIT 1"
         ), {"a": sku}).scalar()
+        if not review["product_photo"] and nm and mp == "wb":
+            review["product_photo"] = conn.execute(text(
+                "SELECT photo_url FROM wb_product_photos WHERE nm_id::text=:nm LIMIT 1"
+            ), {"nm": nm}).scalar()
 
         # ── Кто и когда ответил ──
         log = conn.execute(text(
@@ -1139,55 +1299,96 @@ def review_card(
             if not review.get("answer_text"):
                 review["answer_text"] = log["answer_text"]
 
-        chats, returns, reshipments = [], [], []
-        if mp == "wb" and nm:
-            chats = [dict(x) for x in conn.execute(text(
-                "SELECT chat_id, client_name, good_name, last_message, last_ts, needs_answer "
-                "FROM wb_chats WHERE nm_id::text=:nm ORDER BY last_ts DESC NULLS LAST LIMIT 10"
-            ), {"nm": nm}).mappings().all()]
+        # ── WB: чат и возврат именно этого заказа (не «по nm_id») ──
+        if mp == "wb":
+            rid = None
+            if shk is not None or order_dt is not None:
+                ord_row = conn.execute(text("""
+                    SELECT srid FROM wb_orders
+                    WHERE (:shk IS NOT NULL AND shk_id = :shk)
+                       OR (
+                         :odt IS NOT NULL
+                         AND dt = :odt + INTERVAL '3 hours'
+                         AND supplier_article = :sku
+                       )
+                    ORDER BY CASE WHEN :shk IS NOT NULL AND shk_id = :shk THEN 0 ELSE 1 END
+                    LIMIT 1
+                """), {"shk": shk, "odt": order_dt, "sku": sku}).mappings().first()
+                rid = (ord_row or {}).get("srid") if ord_row else None
 
-        if mp == "wb" and (sku or nm):
-            rows = conn.execute(text(
-                "SELECT srid, claim_type, status, claim_date, user_comment, is_archive "
-                "FROM wb_claims WHERE supplier_article=:a OR nm_id::text=:nm "
-                "ORDER BY claim_date DESC NULLS LAST LIMIT 10"
-            ), {"a": sku, "nm": nm}).mappings().all()
-            for x in rows:
-                d = _decode_claim(dict(x))
-                d["claim_date"] = _iso(d.get("claim_date"))
-                returns.append(d)
+            if rid:
+                chat = conn.execute(text("""
+                    SELECT chat_id, client_name, needs_answer, last_message, last_ts
+                    FROM wb_chats
+                    WHERE order_rid = :r
+                       OR EXISTS (
+                         SELECT 1 FROM wb_chat_messages m
+                         WHERE m.chat_id = wb_chats.chat_id
+                           AND m.attachments->'goodCard'->>'rid' = :r
+                       )
+                    ORDER BY last_ts DESC NULLS LAST
+                    LIMIT 1
+                """), {"r": rid}).mappings().first()
+                if chat:
+                    linked_chat = dict(chat)
+                    if hasattr(linked_chat.get("last_ts"), "isoformat"):
+                        linked_chat["last_ts"] = linked_chat["last_ts"].isoformat()
 
-        if mp == "wb" and nm:
-            rows = conn.execute(text(
-                "SELECT id, customer_name, customer_phone, customer_email, order_number, status, "
-                "salebot_messenger, salebot_client_id, wb_chat_id, created_at "
-                "FROM reshipment_requests WHERE wb_nm_id::text=:nm ORDER BY created_at DESC LIMIT 10"
-            ), {"nm": nm}).mappings().all()
-            for x in rows:
-                d = dict(x)
-                d["created_at"] = _iso(d.get("created_at"))
-                reshipments.append(d)
+                cr = conn.execute(text("""
+                    SELECT claim_id::text, srid, claim_type, status, is_archive,
+                           user_comment, claim_date
+                    FROM wb_claims WHERE srid = :r LIMIT 1
+                """), {"r": rid}).mappings().first()
+                if cr:
+                    linked_return = _decode_claim(dict(cr))
+                    linked_return["claim_date"] = _iso(linked_return.get("claim_date"))
+                    linked_return["claim_date_ru"] = _ru_date(cr.get("claim_date"))
 
-    return {"review": review, "chats": chats, "returns": returns, "reshipments": reshipments}
+    return {
+        "review": review,
+        "linked_chat": linked_chat,
+        "linked_return": linked_return,
+        "chats": [],
+        "returns": [],
+        "reshipments": [],
+    }
 
 
 def _normalize_claim_photos(raw) -> list:
+    """Разбирает строку фото из БД в список URL для UI.
+
+    Форматы:
+      - https://cdn/...
+      - //cdn/...
+      - /static/wb_claims/x.jpg|/https://cdn/...  → берём превью (до |)
+      - /static/ym_returns/x.jpg
+    """
     if not raw:
         return []
     if isinstance(raw, list):
-        return [str(u) for u in raw if u]
-    s = str(raw).strip()
-    if not s:
-        return []
-    # В БД фото через пробел; URL могут быть без схемы
+        items = [str(u) for u in raw if u]
+    else:
+        s = str(raw).strip()
+        if not s:
+            return []
+        items = s.split()
+
     out = []
-    for u in s.split():
-        u = u.strip()
+    for u in items:
+        u = (u or "").strip()
+        if not u:
+            continue
+        # превью|оригинал → для показа превью
+        if "|" in u:
+            u = u.split("|", 1)[0].strip()
         if not u:
             continue
         if u.startswith("//"):
             u = "https:" + u
-        out.append(u)
+        if u.startswith("http") or u.startswith("/static/") or u.startswith("/uploads/"):
+            out.append(u)
+        elif u.startswith("/"):
+            out.append(u)
     return out
 
 
@@ -1201,23 +1402,114 @@ def _claim_row_to_item(row: dict) -> dict:
     return d
 
 
-@router.get("/claims")
-def list_claims(
-    active: bool = True,
-    status: str = "",
-    claim_type: str = Query("", alias="type"),
-    q: str = Query("", description="Поиск: артикул / srid / claim_id / комментарий"),
-    page: int = 1,
-    per_page: int = 25,
-    db: Session = Depends(get_db),
-):
-    """Список wb_claims с фильтрами: active, status, type, q."""
+def _normalize_mp(mp: str) -> str:
+    m = (mp or "wb").strip().lower()
+    if m in ("wb", "ym", "ozon"):
+        return m
+    return "wb"
+
+
+def _ym_row_to_item(row: dict) -> dict:
+    from .. import ym_returns_api
+
+    d = dict(row)
+    status_code = str(d.get("status") or "")
+    status_label = ym_returns_api.status_ru(status_code, d.get("status_ru"))
+    reason = ym_returns_api.reason_label(d.get("reason_type"), d.get("subreason_type"))
+    photos = _normalize_claim_photos(d.get("photos"))
+    # Локальные фото ЯМ лежат как /static/...
+    photos = [
+        (u if u.startswith("http") or u.startswith("/") else f"/{u.lstrip('/')}")
+        for u in photos
+    ]
+    claim_date = d.get("created_at")
+    if hasattr(claim_date, "isoformat"):
+        claim_date = claim_date.isoformat()
+    return {
+        "mp": "ym",
+        "claim_id": str(d.get("return_id") or ""),
+        "srid": str(d.get("order_id") or ""),
+        "order_id": d.get("order_id"),
+        "supplier_article": d.get("supplier_article"),
+        "nm_id": None,
+        "claim_type": d.get("reason_type") or "return",
+        "claim_type_label": reason,
+        "status": status_code or status_label,
+        "status_label": status_label,
+        "status_ex": d.get("subreason_type") or "",
+        "user_comment": (d.get("return_comment") or "").strip(),
+        "is_archive": not ym_returns_api.is_active_status(status_code),
+        "claim_date": claim_date,
+        "order_date": None,
+        "photos": photos,
+        "product_photo": d.get("product_photo"),
+        "correction": d.get("correction"),
+        "audit_status": d.get("audit_status"),
+    }
+
+
+def _ozon_row_to_item(row: dict) -> dict:
+    from .. import ozon_returns_api
+
+    d = dict(row)
+    status_label = (d.get("status_ru") or d.get("status_sys") or "—").strip() or "—"
+    reason = (d.get("return_reason") or "").strip() or "—"
+    rtype = d.get("return_type")
+    type_label = ozon_returns_api.type_label(rtype)
+    claim_date = d.get("return_date") or d.get("status_changed_at")
+    if hasattr(claim_date, "isoformat"):
+        claim_date = claim_date.isoformat()
+    status_changed = d.get("status_changed_at")
+    if hasattr(status_changed, "isoformat"):
+        status_changed = status_changed.isoformat()
+    is_arch = not ozon_returns_api.is_active_row(d.get("is_opened"), d.get("status_sys"))
+    schema = (d.get("schema_code") or "Fbo").upper()
+    return {
+        "mp": "ozon",
+        "claim_id": str(d.get("return_id") or ""),
+        "srid": str(d.get("posting_number") or d.get("order_number") or ""),
+        "posting_number": d.get("posting_number"),
+        "order_number": d.get("order_number"),
+        "supplier_article": d.get("supplier_article"),
+        "nm_id": d.get("ozon_sku"),
+        "product_name": d.get("product_name"),
+        "claim_type": rtype or "return",
+        "claim_type_label": f"{type_label}: {reason}" if reason != "—" else type_label,
+        "return_reason": reason,
+        "return_type": rtype,
+        "return_type_label": type_label,
+        "schema_code": schema,
+        "status": d.get("status_sys") or status_label,
+        "status_label": status_label,
+        "status_ex": d.get("product_name") or "",
+        "user_comment": reason,
+        "is_archive": is_arch,
+        "claim_date": claim_date,
+        "status_changed_at": status_changed,
+        "order_date": None,
+        "photos": [],
+        "product_photo": d.get("product_photo"),
+        "barcode": d.get("barcode"),
+        "place_name": d.get("place_name"),
+        "target_place_name": d.get("target_place_name"),
+        "price": d.get("price"),
+        "compensation_status": d.get("compensation_status"),
+        "ozon_tab": ozon_returns_api.tab_for_status(d.get("status_sys")),
+        "needs_cabinet_decision": str(d.get("status_sys") or "") == "OnSellerApproval",
+        "correction": d.get("correction"),
+        "audit_status": d.get("audit_status"),
+        "no_photos_note": "Фото и комментарий покупателя Seller API Ozon не отдаёт — смотрите в ЛК",
+        "cabinet_url": ozon_returns_api.cabinet_url(d.get("return_id")),
+    }
+
+
+def _list_wb_claims(db: Session, *, active: bool, status: str, claim_type: str,
+                    q: str, page: int, per_page: int) -> dict:
     offset = (page - 1) * per_page
     filters, params = ["1=1"], {}
     filters.append("c.is_archive = :arch")
     params["arch"] = not active
     if status:
-        # Поддержка и кодов, и русских статусов из БД
         st = status.strip()
         status_aliases = {
             "0": ["На рассмотрении", "0", "0.0", "Открыта"],
@@ -1228,6 +1520,9 @@ def list_claims(
             "Отказ": ["Отказ", "Отклонено", "1", "1.0", "3"],
             "Одобрено": ["Одобрено", "2", "2.0"],
             "Закрыта": ["Закрыта"],
+            "Нет в API WB": ["Закрыта"],
+            "Отменена": ["Отменена", "Отменено"],
+            "Отменено": ["Отменена", "Отменено"],
             "Отклонено": ["Отказ", "Отклонено", "1", "1.0"],
         }
         aliases = status_aliases.get(st, [st])
@@ -1270,18 +1565,190 @@ def list_claims(
             LIMIT :lim OFFSET :off
         """), {**params, "lim": per_page, "off": offset}).mappings().all()
     items = [_claim_row_to_item(dict(r)) for r in rows]
-    return {"items": items, "total": total, "page": page,
-            "total_pages": max(1, -(-total // per_page))}
+    for it in items:
+        it["mp"] = "wb"
+    return {"items": items, "total": total or 0, "page": page,
+            "total_pages": max(1, -(-(total or 0) // per_page)), "mp": "wb"}
+
+
+def _list_ym_claims(db: Session, *, active: bool, status: str, q: str,
+                    page: int, per_page: int) -> dict:
+    from .. import ym_returns_api
+
+    offset = (page - 1) * per_page
+    filters, params = ["1=1"], {}
+    active_list = sorted(ym_returns_api.ACTIVE_STATUSES)
+    placeholders = ", ".join(f":as{i}" for i in range(len(active_list)))
+    for i, s in enumerate(active_list):
+        params[f"as{i}"] = s
+    if active:
+        filters.append(f"c.status IN ({placeholders})")
+    else:
+        filters.append(f"c.status NOT IN ({placeholders})")
+
+    if status:
+        st = status.strip()
+        # Фильтр по русскому ярлыку или коду
+        if st in ("На рассмотрении", "Одобрено", "Отказ", "Отменено"):
+            codes = [k for k, v in ym_returns_api.STATUS_RU.items() if v == st]
+            if codes:
+                ph = []
+                for i, c in enumerate(codes):
+                    key = f"st{i}"
+                    ph.append(f":{key}")
+                    params[key] = c
+                filters.append(f"c.status IN ({', '.join(ph)})")
+            else:
+                filters.append("c.status_ru = :st_ru")
+                params["st_ru"] = st
+        else:
+            filters.append("(c.status = :st OR c.status_ru = :st)")
+            params["st"] = st
+
+    q = (q or "").strip()
+    if q:
+        params["q"] = f"%{q}%"
+        params["q_exact"] = q
+        filters.append("""(
+            coalesce(c.supplier_article,'') ILIKE :q
+            OR c.return_id::text ILIKE :q
+            OR c.order_id::text ILIKE :q
+            OR coalesce(c.return_comment,'') ILIKE :q
+        )""")
+    where = " AND ".join(filters)
+    with db.bind.connect() as conn:
+        total = conn.execute(
+            text(f"SELECT COUNT(*) FROM ym_returns c WHERE {where}"), params
+        ).scalar()
+        rows = conn.execute(text(f"""
+            SELECT c.return_id, c.order_id, c.supplier_article, c.return_type,
+                   c.status, c.status_ru, c.created_at, c.return_comment,
+                   c.photos, c.reason_type, c.subreason_type,
+                   c.correction, c.audit_status,
+                   pp.photo_url AS product_photo
+            FROM ym_returns c
+            LEFT JOIN product_photos pp ON pp.supplier_article = c.supplier_article
+            WHERE {where}
+            ORDER BY c.created_at DESC NULLS LAST
+            LIMIT :lim OFFSET :off
+        """), {**params, "lim": per_page, "off": offset}).mappings().all()
+    items = [_ym_row_to_item(dict(r)) for r in rows]
+    return {"items": items, "total": total or 0, "page": page,
+            "total_pages": max(1, -(-(total or 0) // per_page)), "mp": "ym"}
+
+
+def _list_ozon_claims(db: Session, *, active: bool, status: str, q: str,
+                      page: int, per_page: int, tab: str = "",
+                      claim_type: str = "") -> dict:
+    from .. import ozon_returns_api
+
+    ozon_returns_api.ensure_schema(db.bind)
+    offset = (page - 1) * per_page
+    filters, params = ["1=1"], {}
+
+    tab = (tab or "").strip().lower()
+    if tab in ozon_returns_api.TAB_STATUSES:
+        statuses = sorted(ozon_returns_api.TAB_STATUSES[tab])
+        ph = ", ".join(f":os{i}" for i in range(len(statuses)))
+        for i, s in enumerate(statuses):
+            params[f"os{i}"] = s
+        filters.append(f"c.status_sys IN ({ph})")
+    elif tab != "all":
+        active_sys = sorted(ozon_returns_api.ACTIVE_SYS)
+        ph = ", ".join(f":os{i}" for i in range(len(active_sys)))
+        for i, s in enumerate(active_sys):
+            params[f"os{i}"] = s
+        if active:
+            filters.append(f"(c.is_opened IS TRUE OR c.status_sys IN ({ph}))")
+        else:
+            filters.append(f"(COALESCE(c.is_opened, FALSE) IS FALSE AND c.status_sys NOT IN ({ph}))")
+
+    if status:
+        st = status.strip()
+        filters.append("(c.status_ru = :st OR c.status_sys = :st)")
+        params["st"] = st
+
+    if claim_type:
+        filters.append("c.return_type = :rtype")
+        params["rtype"] = claim_type
+
+    q = (q or "").strip()
+    if q:
+        params["q"] = f"%{q}%"
+        filters.append("""(
+            coalesce(c.supplier_article,'') ILIKE :q
+            OR c.return_id::text ILIKE :q
+            OR coalesce(c.posting_number,'') ILIKE :q
+            OR coalesce(c.order_number,'') ILIKE :q
+            OR coalesce(c.return_reason,'') ILIKE :q
+            OR coalesce(c.product_name,'') ILIKE :q
+            OR coalesce(c.barcode,'') ILIKE :q
+            OR coalesce(c.target_place_name,'') ILIKE :q
+        )""")
+    where = " AND ".join(filters)
+    # Очередь согласования — старые сверху (ближе к дедлайну в ЛК)
+    order_sql = (
+        "ORDER BY COALESCE(c.status_changed_at, c.return_date) ASC NULLS LAST"
+        if tab == "approval"
+        else "ORDER BY COALESCE(c.status_changed_at, c.return_date) DESC NULLS LAST"
+    )
+    with db.bind.connect() as conn:
+        total = conn.execute(
+            text(f"SELECT COUNT(*) FROM ozon_returns c WHERE {where}"), params
+        ).scalar()
+        rows = conn.execute(text(f"""
+            SELECT c.return_id, c.order_id, c.order_number, c.posting_number,
+                   c.supplier_article, c.product_name, c.ozon_sku,
+                   c.return_reason, c.status_sys, c.status_ru, c.is_opened,
+                   c.return_date, c.correction, c.audit_status,
+                   c.return_type, c.schema_code, c.barcode, c.place_name,
+                   c.target_place_name, c.price, c.status_changed_at,
+                   c.source_id, c.compensation_status,
+                   pp.photo_url AS product_photo
+            FROM ozon_returns c
+            LEFT JOIN product_photos pp ON pp.supplier_article = c.supplier_article
+            WHERE {where}
+            {order_sql}
+            LIMIT :lim OFFSET :off
+        """), {**params, "lim": per_page, "off": offset}).mappings().all()
+    items = [_ozon_row_to_item(dict(r)) for r in rows]
+    return {"items": items, "total": total or 0, "page": page,
+            "total_pages": max(1, -(-(total or 0) // per_page)), "mp": "ozon"}
+
+
+@router.get("/claims")
+def list_claims(
+    mp: str = Query("wb", description="Площадка: wb | ym | ozon"),
+    active: bool = True,
+    status: str = "",
+    claim_type: str = Query("", alias="type"),
+    tab: str = Query("", description="Ozon: transit|approval|received|resolved|utilization|all"),
+    q: str = Query("", description="Поиск: артикул / заказ / id / комментарий"),
+    page: int = 1,
+    per_page: int = 25,
+    db: Session = Depends(get_db),
+):
+    """Список возвратов площадки с фильтрами: active, status, type, q, tab."""
+    m = _normalize_mp(mp)
+    if m == "ym":
+        return _list_ym_claims(db, active=active, status=status, q=q, page=page, per_page=per_page)
+    if m == "ozon":
+        return _list_ozon_claims(
+            db, active=active, status=status, q=q, page=page, per_page=per_page,
+            tab=tab, claim_type=claim_type,
+        )
+    return _list_wb_claims(
+        db, active=active, status=status, claim_type=claim_type, q=q, page=page, per_page=per_page,
+    )
 
 
 class ClaimDecisionPayload(BaseModel):
     action: str
     comment: str = ""
+    reason: str = ""  # YM: decisionReasonType при отказе
 
 
-@router.get("/claims/{claim_id}")
-def get_claim_detail(claim_id: str, db: Session = Depends(get_db)):
-    """Карточка претензии + живые actions с WB + связанный чат."""
+def _detail_wb(db: Session, claim_id: str) -> dict:
     from .. import wb_claims_api
 
     with db.bind.connect() as conn:
@@ -1300,8 +1767,8 @@ def get_claim_detail(claim_id: str, db: Session = Depends(get_db)):
         if not row:
             raise HTTPException(status_code=404, detail="Претензия не найдена")
         item = _claim_row_to_item(dict(row))
+        item["mp"] = "wb"
 
-        # Связанный чат по srid / order_rid
         chat = None
         srid = item.get("srid") or ""
         if srid:
@@ -1328,7 +1795,6 @@ def get_claim_detail(claim_id: str, db: Session = Depends(get_db)):
     item["actions"] = wb_claims_api.map_actions(raw_actions, status=live_status or item.get("status"))
     item["actions_raw"] = raw_actions
     if live:
-        # Подтянуть свежий статус с WB, если есть
         from ..wb_mini_sync import _map_claim_status, _status_ex_label
         wb_comment = str(live.get("wb_comment") or live.get("wbComment") or "")
         st_ex_raw = live.get("status_description") or live.get("status_ex") or ""
@@ -1338,79 +1804,443 @@ def get_claim_detail(claim_id: str, db: Session = Depends(get_db)):
         item = _decode_claim(item)
         if wb_comment and not item.get("wb_comment"):
             item["wb_comment"] = wb_comment
-        # Пересчитать кнопки уже по финальному статусу
         item["actions"] = wb_claims_api.map_actions(raw_actions, status=item.get("status"))
 
     item["chat"] = chat
     item["can_decide"] = bool(item.get("actions")) and any(a.get("primary") for a in item["actions"])
     item["can_change_decision"] = any(a.get("is_change") for a in (item.get("actions") or []))
+    item["decision_note"] = ""
+    item["cabinet_url"] = "https://seller.wildberries.ru/suppliers-returns"
     return item
+
+
+def _detail_ym(db: Session, claim_id: str) -> dict:
+    from .. import ym_returns_api
+
+    with db.bind.connect() as conn:
+        row = conn.execute(text("""
+            SELECT c.return_id, c.order_id, c.supplier_article, c.return_type,
+                   c.status, c.status_ru, c.created_at, c.return_comment,
+                   c.photos, c.reason_type, c.subreason_type,
+                   c.correction, c.audit_status,
+                   pp.photo_url AS product_photo
+            FROM ym_returns c
+            LEFT JOIN product_photos pp ON pp.supplier_article = c.supplier_article
+            WHERE c.return_id::text = :cid
+            LIMIT 1
+        """), {"cid": claim_id}).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Возврат ЯМ не найден")
+        item = _ym_row_to_item(dict(row))
+
+        chat = None
+        oid = str(item.get("order_id") or "")
+        rid = str(item.get("claim_id") or "")
+        if oid or rid:
+            chat = conn.execute(text("""
+                SELECT chat_id, customer_name AS client_name, needs_answer,
+                       updated_at AS last_ts
+                FROM ym_chats
+                WHERE (:rid <> '' AND return_id::text = :rid)
+                   OR (:oid <> '' AND order_id::text = :oid)
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+            """), {"rid": rid, "oid": oid}).mappings().first()
+            if chat:
+                chat = dict(chat)
+                if hasattr(chat.get("last_ts"), "isoformat"):
+                    chat["last_ts"] = chat["last_ts"].isoformat()
+
+    available = ym_returns_api.fetch_available_decisions(claim_id)
+    item["actions"] = ym_returns_api.map_actions(available)
+    item["actions_raw"] = available
+    item["chat"] = chat
+    item["can_decide"] = bool(item.get("actions")) and any(a.get("primary") for a in item["actions"])
+    item["can_change_decision"] = False
+    item["decision_note"] = "" if item["can_decide"] else (
+        "Сейчас ЯМ не отдаёт доступные действия по этому возврату."
+        if not ym_returns_api.is_active_status(item.get("status"))
+        else "Ждём доступные действия от ЯМ (иногда появляется с задержкой)."
+    )
+    item["cabinet_url"] = "https://partner.market.yandex.ru/"
+    return item
+
+
+def _detail_ozon(db: Session, claim_id: str) -> dict:
+    from .. import ozon_returns_api
+
+    ozon_returns_api.ensure_schema(db.bind)
+    with db.bind.connect() as conn:
+        row = conn.execute(text("""
+            SELECT c.return_id, c.order_id, c.order_number, c.posting_number,
+                   c.supplier_article, c.product_name, c.ozon_sku,
+                   c.return_reason, c.status_sys, c.status_ru, c.is_opened,
+                   c.return_date, c.correction, c.audit_status,
+                   c.return_type, c.schema_code, c.barcode, c.place_name,
+                   c.target_place_name, c.price, c.status_changed_at,
+                   c.source_id, c.compensation_status,
+                   pp.photo_url AS product_photo
+            FROM ozon_returns c
+            LEFT JOIN product_photos pp ON pp.supplier_article = c.supplier_article
+            WHERE c.return_id::text = :cid
+            LIMIT 1
+        """), {"cid": claim_id}).mappings().first()
+
+    posting = (row or {}).get("posting_number") if row else None
+    live_raw = ozon_returns_api.fetch_return_live(claim_id, posting_number=posting)
+    if live_raw:
+        parsed = ozon_returns_api.parse_api_item(live_raw)
+        try:
+            ozon_returns_api.upsert_parsed(db, parsed)
+        except Exception:
+            logger.exception("[Ozon Returns] upsert live failed claim=%s", claim_id)
+        with db.bind.connect() as conn:
+            row = conn.execute(text("""
+                SELECT c.return_id, c.order_id, c.order_number, c.posting_number,
+                       c.supplier_article, c.product_name, c.ozon_sku,
+                       c.return_reason, c.status_sys, c.status_ru, c.is_opened,
+                       c.return_date, c.correction, c.audit_status,
+                       c.return_type, c.schema_code, c.barcode, c.place_name,
+                       c.target_place_name, c.price, c.status_changed_at,
+                       c.source_id, c.compensation_status,
+                       pp.photo_url AS product_photo
+                FROM ozon_returns c
+                LEFT JOIN product_photos pp ON pp.supplier_article = c.supplier_article
+                WHERE c.return_id::text = :cid
+                LIMIT 1
+            """), {"cid": claim_id}).mappings().first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Возврат Ozon не найден")
+
+    item = _ozon_row_to_item(dict(row))
+    chat = None
+    posting = str(item.get("posting_number") or "")
+    order_n = str(item.get("order_number") or "")
+    with db.bind.connect() as conn:
+        if posting or order_n:
+            chat = conn.execute(text("""
+                SELECT chat_id, NULL::text AS client_name, needs_answer,
+                       updated_at AS last_ts
+                FROM ozon_chats
+                WHERE (:p <> '' AND order_number = :p)
+                   OR (:o <> '' AND order_number = :o)
+                   OR (:p <> '' AND order_number = split_part(:p, '-', 1) || '-' || split_part(:p, '-', 2))
+                   OR (:o <> '' AND order_number LIKE :o || '-%')
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+            """), {"p": posting, "o": order_n}).mappings().first()
+            if chat:
+                chat = dict(chat)
+                if hasattr(chat.get("last_ts"), "isoformat"):
+                    chat["last_ts"] = chat["last_ts"].isoformat()
+
+    cap = ozon_returns_api.decision_capability(
+        claim_id, status_sys=dict(row).get("status_sys")
+    )
+    item["actions"] = cap.get("actions") or []
+    item["chat"] = chat
+    item["can_decide"] = bool(cap.get("can_decide"))
+    item["can_change_decision"] = False
+    item["decision_note"] = cap.get("decision_note") or ""
+    item["needs_cabinet_decision"] = bool(
+        cap.get("needs_cabinet") or item.get("needs_cabinet_decision")
+    )
+    item["rfbs"] = bool(cap.get("rfbs"))
+    item["cabinet_url"] = ozon_returns_api.cabinet_url(claim_id)
+    item["api_limits_note"] = (
+        "В ЛК Ozon есть комментарий, фото покупателя, история и «Открыть спор». "
+        "Seller API этого не отдаёт — откройте полную карточку в кабинете."
+    )
+    return item
+
+
+@router.get("/claims/{claim_id}")
+def get_claim_detail(
+    claim_id: str,
+    mp: str = Query("wb", description="Площадка: wb | ym | ozon"),
+    db: Session = Depends(get_db),
+):
+    """Карточка возврата + доступные действия площадки + связанный чат."""
+    m = _normalize_mp(mp)
+    if m == "ym":
+        return _detail_ym(db, claim_id)
+    if m == "ozon":
+        return _detail_ozon(db, claim_id)
+    return _detail_wb(db, claim_id)
+
+
+@router.post("/claims/{claim_id}/open-chat")
+def open_claim_chat(
+    claim_id: str,
+    mp: str = Query("wb", description="Площадка: wb | ym | ozon"),
+    db: Session = Depends(get_db),
+):
+    """Открыть / создать чат с покупателем по возврату.
+
+    - ЯМ: POST …/chats/new {type:RETURN|ORDER, id}
+    - Ozon: POST /v1/chat/start {posting_number} (Premium+)
+    - WB: публичный API не умеет создавать чат (покупатель начинает сам).
+      Кнопка «Чат с покупателем» в ЛК — веб-кабинет. Мы ищем уже
+      существующий чат по srid заказа и открываем его в CX.
+    """
+    m = _normalize_mp(mp)
+
+    if m == "wb":
+        detail = _detail_wb(db, claim_id)
+        chat = detail.get("chat") or {}
+        cid = chat.get("chat_id")
+        if cid:
+            return {"ok": True, "mp": "wb", "chat_id": cid, "created": False}
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "В WB через API нельзя начать чат с покупателем — чат открывает только покупатель. "
+                "Кнопка «Чат с покупателем» в ЛК продавца работает в веб-кабинете. "
+                "Если покупатель уже писал — чат появится здесь после синхронизации (привязка по srid заказа)."
+            ),
+        )
+
+    if m == "ym":
+        detail = _detail_ym(db, claim_id)
+        existing = (detail.get("chat") or {}).get("chat_id")
+        if existing:
+            return {"ok": True, "mp": "ym", "chat_id": str(existing), "created": False}
+
+        return_id = detail.get("claim_id") or claim_id
+        order_id = detail.get("order_id")
+        last_err = None
+        chat_id = None
+        created = False
+        for ctype, ctx_id in (("RETURN", return_id), ("ORDER", order_id)):
+            if not ctx_id:
+                continue
+            try:
+                result = ym_client.create_chat(context_type=ctype, context_id=ctx_id)
+                chat_id = str(result.get("chatId") or result.get("chat_id") or "").strip()
+                if chat_id:
+                    created = True
+                    break
+            except Exception as e:
+                last_err = str(e)
+                logger.warning("[YM] create chat %s/%s: %s", ctype, ctx_id, e)
+
+        if not chat_id:
+            raise HTTPException(
+                status_code=502,
+                detail=last_err or "Не удалось создать чат в ЯМ по этому возврату/заказу",
+            )
+
+        with db.bind.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO ym_chats (chat_id, status, context_type, order_id, return_id,
+                                     needs_answer, created_at, updated_at)
+                VALUES (:cid, 'WAITING_FOR_PARTNER', 'RETURN', :oid, :rid,
+                        false, NOW(), NOW())
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    order_id  = COALESCE(EXCLUDED.order_id, ym_chats.order_id),
+                    return_id = COALESCE(EXCLUDED.return_id, ym_chats.return_id),
+                    updated_at = NOW()
+            """), {
+                "cid": chat_id,
+                "oid": str(order_id) if order_id else None,
+                "rid": str(return_id) if return_id else None,
+            })
+            conn.commit()
+        return {"ok": True, "mp": "ym", "chat_id": chat_id, "created": created}
+
+    # ozon
+    detail = _detail_ozon(db, claim_id)
+    existing = (detail.get("chat") or {}).get("chat_id")
+    if existing:
+        return {"ok": True, "mp": "ozon", "chat_id": str(existing), "created": False}
+
+    posting = (detail.get("posting_number") or detail.get("order_number") or "").strip()
+    if not posting:
+        raise HTTPException(
+            status_code=400,
+            detail="У возврата Ozon нет posting_number — нельзя создать чат",
+        )
+    try:
+        result = ozon_client.start_chat(posting)
+    except Exception as e:
+        logger.warning("[Ozon] start chat posting=%s: %s", posting, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ozon не создал чат: {e}. Нужен Premium Plus и валидное отправление.",
+        ) from e
+
+    chat_id = str(result.get("chat_id") or result.get("chatId") or "").strip()
+    if not chat_id:
+        raise HTTPException(status_code=502, detail="Ozon вернул пустой chat_id")
+
+    with db.bind.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO ozon_chats (chat_id, chat_status, chat_type, order_number,
+                                   needs_answer, created_at, updated_at)
+            VALUES (:cid, 'OPENED', 'Buyer_Seller', :ord, false, NOW(), NOW())
+            ON CONFLICT (chat_id) DO UPDATE SET
+                order_number = COALESCE(NULLIF(EXCLUDED.order_number, ''), ozon_chats.order_number),
+                updated_at = NOW()
+        """), {"cid": chat_id, "ord": posting})
+        conn.commit()
+    return {"ok": True, "mp": "ozon", "chat_id": chat_id, "created": True}
 
 
 @router.post("/claims/{claim_id}/decision")
 def decide_claim(
     claim_id: str,
     payload: ClaimDecisionPayload,
+    mp: str = Query("wb", description="Площадка: wb | ym | ozon"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Одобрить / отказать по претензии WB (из чата или очереди возвратов)."""
-    from .. import wb_claims_api
+    """Одобрить / отказать по возврату (WB / ЯМ / Ozon rFBS)."""
+    from .. import wb_claims_api, ym_returns_api, ozon_returns_api
 
     action = (payload.action or "").strip()
     if not action:
         raise HTTPException(status_code=400, detail="Не указано действие")
-    result = wb_claims_api.decide_claim(
-        db, claim_id, action, payload.comment or ""
-    )
+    m = _normalize_mp(mp)
+    who = current_user.get("username") or current_user.get("sub") or "?"
+
+    if m == "ym":
+        result = ym_returns_api.decide_return(
+            db, claim_id, action, payload.comment or "", payload.reason or "",
+        )
+        if not result.get("ok"):
+            code = int(result.get("status_code") or 502)
+            if code < 400 or code > 599:
+                code = 502
+            raise HTTPException(status_code=code, detail=result.get("error") or "Ошибка ЯМ")
+        logger.info("[YM Returns] decision claim=%s action=%s by=%s", claim_id, action, who)
+        return result
+
+    if m == "ozon":
+        result = ozon_returns_api.decide_return(
+            db, claim_id, action, payload.comment or "",
+        )
+        if not result.get("ok"):
+            code = int(result.get("status_code") or 502)
+            if code < 400 or code > 599:
+                code = 502
+            raise HTTPException(status_code=code, detail=result.get("error") or "Ошибка Ozon")
+        logger.info("[Ozon Returns] decision claim=%s action=%s by=%s", claim_id, action, who)
+        return result
+
+    result = wb_claims_api.decide_claim(db, claim_id, action, payload.comment or "")
     if not result.get("ok"):
         code = int(result.get("status_code") or 502)
         if code < 400 or code > 599:
             code = 502
         raise HTTPException(status_code=code, detail=result.get("error") or "Ошибка WB")
 
-    logger.info(
-        "[WB Claims] decision claim=%s action=%s by=%s",
-        claim_id, action, current_user.get("username") or current_user.get("sub") or "?",
-    )
+    logger.info("[WB Claims] decision claim=%s action=%s by=%s", claim_id, action, who)
     return result
+
+
+_RESHIP_STATUS_RU = {
+    "new": "Новая",
+    "matched": "Сопоставлена",
+    "approved": "На отправку",
+    "packed": "Собран",
+    "shipped": "Отправлен",
+    "in_transit": "В пути",
+    "ready_for_pickup": "Готов к выдаче",
+    "delivered": "Получен",
+    "rejected": "Отклонён",
+    "returned": "Вернулся",
+}
+
+
+def _find_reshipment_for_chat(conn, chat_id: str, *, mp: str = "wb") -> dict | None:
+    """Заявка на доотправку, привязанная к этому чату (wb_chat_id / ym_chat_id)."""
+    cid = (chat_id or "").strip()
+    if not cid:
+        return None
+    mp = (mp or "wb").lower()
+    try:
+        if mp == "ym":
+            row = conn.execute(text("""
+                SELECT id, status, cdek_number, track_number, delivery_method,
+                       client_pvz_address, customer_name, created_at, updated_at,
+                       matched_srid, marketplace
+                FROM reshipment_requests
+                WHERE ym_chat_id = :cid
+                ORDER BY id DESC LIMIT 1
+            """), {"cid": cid}).mappings().first()
+        else:
+            # WB: в БД может быть `1:uuid` или голый uuid
+            bare = cid.split(":", 1)[-1] if ":" in cid else cid
+            prefixed = cid if ":" in cid else f"1:{cid}"
+            row = conn.execute(text("""
+                SELECT id, status, cdek_number, track_number, delivery_method,
+                       client_pvz_address, customer_name, created_at, updated_at,
+                       matched_srid, marketplace
+                FROM reshipment_requests
+                WHERE wb_chat_id = :cid
+                   OR wb_chat_id = :bare
+                   OR wb_chat_id = :prefixed
+                   OR wb_chat_id LIKE :suf
+                ORDER BY id DESC LIMIT 1
+            """), {
+                "cid": cid, "bare": bare, "prefixed": prefixed, "suf": f"%:{bare}",
+            }).mappings().first()
+        if not row:
+            return None
+        d = dict(row)
+        st = (d.get("status") or "").strip()
+        return {
+            "id": d["id"],
+            "status": st,
+            "status_label": _RESHIP_STATUS_RU.get(st, st or "—"),
+            "created_date": _ru_date(d.get("created_at")),
+            "track_number": d.get("track_number") or d.get("cdek_number") or "",
+            "delivery_method": d.get("delivery_method") or "",
+            "pvz": d.get("client_pvz_address") or "",
+            "customer_name": d.get("customer_name") or "",
+            "matched_srid": d.get("matched_srid") or "",
+            "marketplace": (d.get("marketplace") or mp or "wb").lower(),
+        }
+    except Exception:
+        return None
 
 
 @router.get("/chat-context/wb/{chat_id}")
 def get_wb_chat_context(chat_id: str, db: Session = Depends(get_db)):
     """Конкретный отзыв/претензия клиента (по rid заказа) + все обращения по товару."""
     with db.bind.connect() as conn:
+        resolved = _resolve_wb_chat_id(conn, chat_id) or chat_id
         chat = conn.execute(text(
-            "SELECT nm_id FROM wb_chats WHERE chat_id = :cid"
-        ), {"cid": chat_id}).mappings().first()
-        if not chat or not chat["nm_id"]:
+            "SELECT nm_id, order_rid FROM wb_chats WHERE chat_id = :cid"
+        ), {"cid": resolved}).mappings().first()
+        if not chat:
             return {"specific": {}, "reviews": [], "questions": [], "claims": []}
-        nm_str = str(int(chat["nm_id"]))
+        nm_raw = chat.get("nm_id")
+        nm_str = str(int(nm_raw)) if nm_raw is not None else None
 
-        # ── Rid заказа из первого сообщения с goodCard ───────────────────────
-        rid_row = conn.execute(text("""
-            SELECT attachments->'goodCard'->>'rid' AS rid
-            FROM wb_chat_messages
-            WHERE chat_id = :cid
-              AND (attachments->'goodCard'->>'rid') IS NOT NULL
-              AND (attachments->'goodCard'->>'rid') <> ''
-            LIMIT 1
-        """), {"cid": chat_id}).mappings().first()
-        rid = rid_row["rid"] if rid_row else None
-
-        # Также пробуем wb_chat_pending (для чатов через модуль переотправки)
+        # Rid: order_rid (из списка чатов) → goodCard в сообщениях → pending
+        rid = (chat.get("order_rid") or "").strip() or None
+        if not rid:
+            rid_row = conn.execute(text("""
+                SELECT attachments->'goodCard'->>'rid' AS rid
+                FROM wb_chat_messages
+                WHERE chat_id = :cid
+                  AND (attachments->'goodCard'->>'rid') IS NOT NULL
+                  AND (attachments->'goodCard'->>'rid') <> ''
+                ORDER BY add_ts ASC NULLS LAST
+                LIMIT 1
+            """), {"cid": resolved}).mappings().first()
+            rid = rid_row["rid"] if rid_row else None
         if not rid:
             p = conn.execute(text(
                 "SELECT rid FROM wb_chat_pending WHERE chat_id = :cid AND rid IS NOT NULL LIMIT 1"
-            ), {"cid": chat_id}).mappings().first()
+            ), {"cid": resolved}).mappings().first()
             rid = p["rid"] if p else None
 
-        # ── Конкретная претензия и отзыв этого клиента по его заказу ─────────
         specific_claim  = None
         specific_review = None
         if rid:
-            # Архивные «На рассмотрении» старше окна WB — сразу «Закрыта» в БД
-            # (без live-запроса к Returns API: он тормозит воркеры и валит сайт).
             conn.execute(text("""
                 UPDATE wb_claims
                 SET status = 'Закрыта',
@@ -1437,47 +2267,66 @@ def get_wb_chat_context(chat_id: str, db: Session = Depends(get_db)):
                 c["claim_date"] = _ru_date(c.get("claim_date"))
                 specific_claim = c
 
+            # Как в reshipment: shk_id ИЛИ дата+артикул
             rv = conn.execute(text("""
                 SELECT f.id::text, f.valuation AS rating, f.state,
                        f.text, f.pros, f.cons, f.answer_text AS answer, f.created_date
                 FROM wb_feedbacks f
-                JOIN wb_orders o ON o.shk_id = f.last_order_shk_id
-                WHERE o.srid = :rid LIMIT 1
+                JOIN wb_orders o ON (
+                    o.shk_id = f.last_order_shk_id
+                    OR (
+                      f.last_order_created_at IS NOT NULL
+                      AND o.dt = f.last_order_created_at + INTERVAL '3 hours'
+                      AND o.supplier_article = f.supplier_article
+                    )
+                )
+                WHERE o.srid = :rid
+                ORDER BY f.created_date DESC NULLS LAST
+                LIMIT 1
             """), {"rid": rid}).mappings().first()
             if rv:
                 r = dict(rv)
                 r["created_date"] = _ru_date(r.get("created_date"))
                 specific_review = r
 
-        # ── Все отзывы по товару (последние 5) ────────────────────────────────
-        reviews = conn.execute(text("""
-            SELECT id::text, valuation AS rating, state,
-                   text, pros,
-                   to_char(created_date, 'DD.MM.YY') AS created_date
-            FROM wb_feedbacks WHERE nm_id = :nm
-            ORDER BY created_date DESC LIMIT 5
-        """), {"nm": nm_str}).mappings().all()
+        specific_reshipment = _find_reshipment_for_chat(conn, resolved, mp="wb")
+        if not specific_reshipment and resolved != chat_id:
+            specific_reshipment = _find_reshipment_for_chat(conn, chat_id, mp="wb")
 
-        questions = conn.execute(text("""
-            SELECT q.id::text, q.text AS body, q.state,
-                   to_char(q.created_date, 'DD.MM.YY') AS created_date
-            FROM wb_questions q
-            WHERE q.supplier_article IN (
-                SELECT DISTINCT f.supplier_article FROM wb_feedbacks f
-                WHERE f.nm_id = :nm AND f.supplier_article IS NOT NULL
-            ) ORDER BY q.created_date DESC LIMIT 3
-        """), {"nm": nm_str}).mappings().all()
+        reviews, questions, claims = [], [], []
+        if nm_str:
+            reviews = conn.execute(text("""
+                SELECT id::text, valuation AS rating, state,
+                       text, pros,
+                       to_char(created_date, 'DD.MM.YY') AS created_date
+                FROM wb_feedbacks WHERE nm_id::text = :nm
+                ORDER BY created_date DESC NULLS LAST LIMIT 5
+            """), {"nm": nm_str}).mappings().all()
 
-        claims = conn.execute(text("""
-            SELECT claim_id::text, claim_type, user_comment AS body,
-                   status, is_archive,
-                   to_char(claim_date, 'DD.MM.YY') AS claim_date
-            FROM wb_claims WHERE nm_id = :nm
-            ORDER BY claim_date DESC LIMIT 5
-        """), {"nm": nm_str}).mappings().all()
+            questions = conn.execute(text("""
+                SELECT q.id::text, q.text AS body, q.state,
+                       to_char(q.created_date, 'DD.MM.YY') AS created_date
+                FROM wb_questions q
+                WHERE q.supplier_article IN (
+                    SELECT DISTINCT f.supplier_article FROM wb_feedbacks f
+                    WHERE f.nm_id::text = :nm AND f.supplier_article IS NOT NULL
+                ) ORDER BY q.created_date DESC NULLS LAST LIMIT 3
+            """), {"nm": nm_str}).mappings().all()
+
+            claims = conn.execute(text("""
+                SELECT claim_id::text, claim_type, user_comment AS body,
+                       status, is_archive,
+                       to_char(claim_date, 'DD.MM.YY') AS claim_date
+                FROM wb_claims WHERE nm_id::text = :nm
+                ORDER BY claim_date DESC NULLS LAST LIMIT 5
+            """), {"nm": nm_str}).mappings().all()
 
     return {
-        "specific": {"claim": specific_claim, "review": specific_review},
+        "specific": {
+            "claim": specific_claim,
+            "review": specific_review,
+            "reshipment": specific_reshipment,
+        },
         "reviews":  [dict(r) for r in reviews],
         "questions":[dict(r) for r in questions],
         "claims":   [_decode_claim(dict(c)) for c in claims],
@@ -1486,16 +2335,21 @@ def get_wb_chat_context(chat_id: str, db: Session = Depends(get_db)):
 
 def _ozon_return_as_claim(row: dict) -> dict:
     """Привести строку ozon_returns к форме specific.claim для UI чата."""
+    from .. import ozon_returns_api
+
     d = dict(row)
     reason = (d.get("return_reason") or "").strip() or "—"
     status = (d.get("status_ru") or d.get("status_sys") or "").strip() or "—"
+    is_arch = not ozon_returns_api.is_active_row(d.get("is_opened"), d.get("status_sys"))
     return {
+        "mp": "ozon",
         "claim_id": str(d.get("return_id") or d.get("posting_number") or d.get("id") or ""),
         "claim_type": "return",
         "claim_type_label": "Возврат Ozon",
         "body": reason,
         "status": status,
         "status_label": status,
+        "is_archive": is_arch,
         "claim_date": _ru_date(d.get("return_date")),
         "supplier_article": d.get("supplier_article"),
         "posting_number": d.get("posting_number"),
@@ -1505,16 +2359,21 @@ def _ozon_return_as_claim(row: dict) -> dict:
 
 def _ym_return_as_claim(row: dict) -> dict:
     """Привести строку ym_returns к форме specific.claim для UI чата."""
+    from .. import ym_returns_api
+
     d = dict(row)
     body = (d.get("return_comment") or d.get("reason_type") or "").strip() or "—"
-    status = (d.get("status_ru") or d.get("status") or "").strip() or "—"
+    status_code = str(d.get("status") or "")
+    status = ym_returns_api.status_ru(status_code, d.get("status_ru"))
     return {
+        "mp": "ym",
         "claim_id": str(d.get("return_id") or d.get("id") or ""),
         "claim_type": "return",
         "claim_type_label": "Возврат ЯМ",
         "body": body,
-        "status": status,
+        "status": status_code or status,
         "status_label": status,
+        "is_archive": not ym_returns_api.is_active_status(status_code),
         "claim_date": _ru_date(d.get("created_at")),
         "supplier_article": d.get("supplier_article"),
         "order_id": d.get("order_id"),
@@ -1523,7 +2382,7 @@ def _ym_return_as_claim(row: dict) -> dict:
 
 @router.get("/chat-context/ozon/{chat_id}")
 def get_ozon_chat_context(chat_id: str, db: Session = Depends(get_db)):
-    """Возврат по заказу/SKU чата Ozon + последние возвраты по тому же артикулу."""
+    """Возврат только по заказу этого чата (не по SKU — иначе чужие возвраты)."""
     with db.bind.connect() as conn:
         chat = conn.execute(text("""
             SELECT order_number, context_sku, context_article
@@ -1533,56 +2392,48 @@ def get_ozon_chat_context(chat_id: str, db: Session = Depends(get_db)):
             return {"specific": {}, "reviews": [], "questions": [], "claims": []}
 
         order_number = (chat.get("order_number") or "").strip() or None
-        sku = chat.get("context_sku")
-        article = (chat.get("context_article") or "").strip() or None
 
         specific_claim = None
-        if order_number or sku is not None:
+        claims = []
+        # Без номера заказа в чате — не угадываем возврат по артикулу/SKU
+        if order_number:
             cr = conn.execute(text("""
                 SELECT return_id, posting_number, order_number, ozon_sku,
                        supplier_article, return_reason, status_ru, status_sys,
-                       return_date, id
+                       return_date, is_opened, id
                 FROM ozon_returns
-                WHERE (
-                    (:ord IS NOT NULL AND (
-                        posting_number = :ord
-                        OR order_number = :ord
-                        OR posting_number LIKE :ord || '-%'
-                    ))
-                    OR (:sku IS NOT NULL AND ozon_sku = :sku)
-                )
+                WHERE posting_number = :ord
+                   OR order_number = :ord
+                   OR posting_number LIKE :ord || '-%'
+                   OR order_number LIKE :ord || '-%'
                 ORDER BY
                     CASE
-                      WHEN :ord IS NOT NULL AND (
-                        posting_number = :ord OR order_number = :ord
-                      ) THEN 0
-                      WHEN :ord IS NOT NULL AND posting_number LIKE :ord || '-%' THEN 1
+                      WHEN posting_number = :ord OR order_number = :ord THEN 0
+                      WHEN posting_number LIKE :ord || '-%' OR order_number LIKE :ord || '-%' THEN 1
                       ELSE 2
                     END,
                     return_date DESC NULLS LAST
                 LIMIT 1
-            """), {"ord": order_number, "sku": sku}).mappings().first()
+            """), {"ord": order_number}).mappings().first()
             if cr:
                 specific_claim = _ozon_return_as_claim(dict(cr))
 
-        claims = []
-        if article or sku is not None:
             rows = conn.execute(text("""
                 SELECT return_id, posting_number, order_number, ozon_sku,
                        supplier_article, return_reason, status_ru, status_sys,
-                       return_date, id
+                       return_date, is_opened, id
                 FROM ozon_returns
-                WHERE (
-                    (:art IS NOT NULL AND supplier_article = :art)
-                    OR (:sku IS NOT NULL AND ozon_sku = :sku)
-                )
+                WHERE posting_number = :ord
+                   OR order_number = :ord
+                   OR posting_number LIKE :ord || '-%'
+                   OR order_number LIKE :ord || '-%'
                 ORDER BY return_date DESC NULLS LAST
                 LIMIT 5
-            """), {"art": article, "sku": sku}).mappings().all()
+            """), {"ord": order_number}).mappings().all()
             claims = [_ozon_return_as_claim(dict(r)) for r in rows]
 
     return {
-        "specific": {"claim": specific_claim, "review": None},
+        "specific": {"claim": specific_claim, "review": None, "reshipment": None},
         "reviews": [],
         "questions": [],
         "claims": claims,
@@ -1591,7 +2442,7 @@ def get_ozon_chat_context(chat_id: str, db: Session = Depends(get_db)):
 
 @router.get("/chat-context/ym/{chat_id}")
 def get_ym_chat_context(chat_id: str, db: Session = Depends(get_db)):
-    """Возврат по return_id/order_id чата ЯМ + последние по заказу/артикулу."""
+    """Возврат только по return_id/order_id этого чата (не по артикулу)."""
     with db.bind.connect() as conn:
         chat = conn.execute(text("""
             SELECT return_id, order_id, context_type, customer_name
@@ -1603,31 +2454,8 @@ def get_ym_chat_context(chat_id: str, db: Session = Depends(get_db)):
         return_id = (str(chat.get("return_id") or "").strip() or None)
         order_id = (str(chat.get("order_id") or "").strip() or None)
 
-        article = None
-        if order_id:
-            ar = conn.execute(text("""
-                SELECT supplier_article FROM ym_orders
-                WHERE order_id::text = :oid
-                  AND NULLIF(TRIM(supplier_article), '') IS NOT NULL
-                LIMIT 1
-            """), {"oid": order_id}).mappings().first()
-            if ar:
-                article = ar["supplier_article"]
-        if not article and (return_id or order_id):
-            ar = conn.execute(text("""
-                SELECT supplier_article FROM ym_returns
-                WHERE (
-                    (:rid IS NOT NULL AND return_id::text = :rid)
-                    OR (:oid IS NOT NULL AND order_id::text = :oid)
-                )
-                AND NULLIF(TRIM(supplier_article), '') IS NOT NULL
-                ORDER BY created_at DESC NULLS LAST
-                LIMIT 1
-            """), {"rid": return_id, "oid": order_id}).mappings().first()
-            if ar:
-                article = ar["supplier_article"]
-
         specific_claim = None
+        claims = []
         if return_id or order_id:
             cr = conn.execute(text("""
                 SELECT return_id, order_id, supplier_article, return_comment,
@@ -1645,8 +2473,6 @@ def get_ym_chat_context(chat_id: str, db: Session = Depends(get_db)):
             if cr:
                 specific_claim = _ym_return_as_claim(dict(cr))
 
-        claims = []
-        if return_id or order_id or article:
             rows = conn.execute(text("""
                 SELECT return_id, order_id, supplier_article, return_comment,
                        reason_type, status_ru, status, created_at, id
@@ -1654,24 +2480,145 @@ def get_ym_chat_context(chat_id: str, db: Session = Depends(get_db)):
                 WHERE (
                     (:rid IS NOT NULL AND return_id::text = :rid)
                     OR (:oid IS NOT NULL AND order_id::text = :oid)
-                    OR (:art IS NOT NULL AND supplier_article = :art)
                 )
                 ORDER BY created_at DESC NULLS LAST
                 LIMIT 5
-            """), {"rid": return_id, "oid": order_id, "art": article}).mappings().all()
+            """), {"rid": return_id, "oid": order_id}).mappings().all()
             claims = [_ym_return_as_claim(dict(r)) for r in rows]
 
+        specific_reshipment = _find_reshipment_for_chat(conn, chat_id, mp="ym")
+
     return {
-        "specific": {"claim": specific_claim, "review": None},
+        "specific": {
+            "claim": specific_claim,
+            "review": None,
+            "reshipment": specific_reshipment,
+        },
         "reviews": [],
         "questions": [],
         "claims": claims,
     }
 
 
+def _wb_cdn_photo_url(nm_id: int) -> str:
+    """Публичный CDN WB (без Content API) — запасной вариант превью."""
+    nm = int(nm_id)
+    vol = nm // 100000
+    part = nm // 1000
+    if vol <= 143:
+        host = "01"
+    elif vol <= 287:
+        host = "02"
+    elif vol <= 431:
+        host = "03"
+    elif vol <= 575:
+        host = "04"
+    elif vol <= 719:
+        host = "05"
+    elif vol <= 1007:
+        host = "06"
+    elif vol <= 1061:
+        host = "07"
+    elif vol <= 1115:
+        host = "08"
+    elif vol <= 1169:
+        host = "09"
+    elif vol <= 1313:
+        host = "10"
+    elif vol <= 1601:
+        host = "11"
+    elif vol <= 1655:
+        host = "12"
+    elif vol <= 1919:
+        host = "13"
+    elif vol <= 2045:
+        host = "14"
+    elif vol <= 2189:
+        host = "15"
+    elif vol <= 2405:
+        host = "16"
+    elif vol <= 2621:
+        host = "17"
+    elif vol <= 2837:
+        host = "18"
+    elif vol <= 3053:
+        host = "19"
+    elif vol <= 3269:
+        host = "20"
+    elif vol <= 3485:
+        host = "21"
+    elif vol <= 3701:
+        host = "22"
+    elif vol <= 3917:
+        host = "23"
+    elif vol <= 4133:
+        host = "24"
+    elif vol <= 4349:
+        host = "25"
+    elif vol <= 4565:
+        host = "26"
+    elif vol <= 4877:
+        host = "27"
+    elif vol <= 5189:
+        host = "28"
+    elif vol <= 5501:
+        host = "29"
+    else:
+        host = "30"
+    return f"https://basket-{host}.wbbasket.ru/vol{vol}/part{part}/{nm}/images/c246x328/1.webp"
+
+
+def _fetch_and_cache_nm_photo(db: Session, nm_id: int) -> str | None:
+    """Догрузить одно фото в кэш (Content API textSearch → иначе CDN)."""
+    url = None
+    key = wb_client.content_key()
+    if key:
+        try:
+            r = requests.post(
+                f"{wb_client.CONTENT_BASE}/content/v2/get/cards/list",
+                json={
+                    "settings": {
+                        "cursor": {"limit": 100},
+                        "filter": {"textSearch": str(nm_id), "withPhoto": 1},
+                    }
+                },
+                headers=wb_client.auth_headers(key),
+                timeout=20,
+            )
+            if r.ok:
+                for card in (r.json().get("data") or {}).get("cards") or []:
+                    if int(card.get("nmID") or 0) != int(nm_id):
+                        continue
+                    photos = card.get("photos") or []
+                    if photos:
+                        url = (
+                            photos[0].get("tm")
+                            or photos[0].get("small")
+                            or photos[0].get("big")
+                            or ""
+                        )
+                    break
+        except Exception as e:
+            logger.warning("[Photo] fetch nm=%s: %s", nm_id, e)
+    if not url:
+        url = _wb_cdn_photo_url(nm_id)
+    try:
+        with db.bind.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO wb_product_photos (nm_id, photo_url, updated_at)
+                VALUES (:nm, :url, now())
+                ON CONFLICT (nm_id) DO UPDATE
+                SET photo_url = EXCLUDED.photo_url, updated_at = now()
+            """), {"nm": nm_id, "url": url})
+            conn.commit()
+    except Exception as e:
+        logger.warning("[Photo] cache nm=%s: %s", nm_id, e)
+    return url
+
+
 @router.get("/wb-photo/{nm_id}")
 def wb_product_photo(nm_id: str, db: Session = Depends(get_db)):
-    """Фото товара WB — редирект на CDN URL из кэша Content API."""
+    """Фото товара WB — редирект на CDN URL из кэша (с догрузкой при промахе)."""
     try:
         nm = int(nm_id)
     except ValueError:
@@ -1683,6 +2630,9 @@ def wb_product_photo(nm_id: str, db: Session = Depends(get_db)):
         ).first()
     if row and row[0]:
         return RedirectResponse(row[0], status_code=302)
+    url = _fetch_and_cache_nm_photo(db, nm)
+    if url:
+        return RedirectResponse(url, status_code=302)
     raise HTTPException(status_code=404, detail="photo not cached yet")
 
 
@@ -1846,6 +2796,225 @@ class AnswerPayload(BaseModel):
 
 class ChatMessagePayload(BaseModel):
     text: str
+
+
+_CHAT_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+_CHAT_ATTACHMENT_MAX_TOTAL_BYTES = 30 * 1024 * 1024
+_CHAT_ATTACHMENT_MAX_COUNT = 6
+_CHAT_ATTACHMENT_TYPES = {
+    "image/jpeg": {".jpg", ".jpeg"},
+    "image/png": {".png"},
+    "application/pdf": {".pdf"},
+}
+
+
+def _detected_chat_attachment_type(content: bytes) -> str | None:
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content[:1024].lstrip().startswith(b"%PDF-"):
+        return "application/pdf"
+    return None
+
+
+async def _validate_chat_attachments(files: list[UploadFile]) -> list[dict]:
+    """Проверить magic/ext/лимиты; declared MIME может отсутствовать."""
+    if len(files or []) > _CHAT_ATTACHMENT_MAX_COUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Можно прикрепить не больше {_CHAT_ATTACHMENT_MAX_COUNT} файлов",
+        )
+    result = []
+    total_bytes = 0
+    for upload in files or []:
+        raw_name = (upload.filename or "").replace("\\", "/")
+        filename = PurePath(raw_name).name
+        if not filename:
+            raise HTTPException(status_code=400, detail="У файла отсутствует имя")
+
+        content = await upload.read(_CHAT_ATTACHMENT_MAX_BYTES + 1)
+        if not content:
+            raise HTTPException(status_code=400, detail=f"Файл «{filename}» пустой")
+        if len(content) > _CHAT_ATTACHMENT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Файл «{filename}» больше 5 МиБ",
+            )
+        total_bytes += len(content)
+        if total_bytes > _CHAT_ATTACHMENT_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="Общий размер файлов больше 30 МиБ")
+
+        detected_type = _detected_chat_attachment_type(content)
+        declared_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
+        if declared_type == "image/jpg":
+            declared_type = "image/jpeg"
+        if detected_type not in _CHAT_ATTACHMENT_TYPES:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Файл «{filename}»: разрешены только JPEG, PNG и PDF",
+            )
+        if declared_type and declared_type not in _CHAT_ATTACHMENT_TYPES:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Файл «{filename}»: недопустимый тип {declared_type}",
+            )
+        if declared_type and declared_type != detected_type:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Файл «{filename}»: содержимое не соответствует типу файла",
+            )
+
+        suffix = PurePath(filename).suffix.lower()
+        if suffix not in _CHAT_ATTACHMENT_TYPES[detected_type]:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Файл «{filename}»: расширение не соответствует содержимому",
+            )
+        result.append({"name": filename, "content": content, "content_type": detected_type})
+    return result
+
+
+def _new_chat_send_progress(message: str, attachments: list[dict]) -> dict:
+    return {
+        "status": "pending",
+        "text": {
+            "state": "pending" if message else "not_requested",
+        },
+        "files": [
+            {"index": index, "name": item["name"], "state": "pending"}
+            for index, item in enumerate(attachments)
+        ],
+        "warnings": [],
+        "persistence": "confirmed",
+    }
+
+
+def _marketplace_failure_state(exc: Exception) -> str:
+    # Timeout/connection loss can happen after the marketplace accepted a request.
+    return "unknown" if isinstance(exc, (requests.Timeout, requests.ConnectionError)) else "failed"
+
+
+def _stop_chat_send_progress(progress: dict, failed_step: dict, exc: Exception) -> dict:
+    state = _marketplace_failure_state(exc)
+    failed_step["state"] = state
+    failed_step["error"] = str(exc)[:300]
+    for step in [progress["text"], *progress["files"]]:
+        if step["state"] == "pending":
+            step["state"] = "not_attempted"
+    confirmed = progress["text"]["state"] == "confirmed" or any(
+        step["state"] == "confirmed" for step in progress["files"]
+    )
+    progress["status"] = "uncertain" if state == "unknown" else ("partial" if confirmed else "failed")
+    if state == "unknown":
+        progress["warnings"].append(
+            "Маркетплейс мог принять последний шаг до таймаута. Не повторяйте его до сверки истории чата."
+        )
+    return progress
+
+
+def _persist_confirmed_chat_step(
+    db: Session,
+    *,
+    mp: str,
+    chat_id: str,
+    username: str,
+    kind: str,
+    value: str,
+) -> None:
+    """Persist audit/queue state only; never create synthetic history rows."""
+    preview = value if kind == "text" else f"Вложение: {value}"
+    table = "ozon_chats" if mp == "ozon" else "wb_chats"
+    with db.bind.connect() as conn:
+        if mp == "ozon":
+            conn.execute(text(f"""
+                UPDATE {table} SET needs_answer = false, last_sender = 'seller',
+                    last_message = :preview, unread_count = 0, waiting_since = NULL,
+                    updated_at = now()
+                WHERE chat_id = :cid
+            """), {"cid": chat_id, "preview": preview[:500]})
+        else:
+            conn.execute(text(f"""
+                UPDATE {table} SET needs_answer = false, last_sender = 'seller',
+                    last_message = :preview, last_ts = :ts, updated_at = now()
+                WHERE chat_id = :cid
+            """), {"cid": chat_id, "preview": preview[:1000], "ts": int(time.time() * 1000)})
+        conn.execute(text("""
+            INSERT INTO cx_response_log (item_type, item_id, mp, answered_by, answer_text)
+            VALUES ('chat', :iid, :mp, :user, :answer)
+        """), {
+            "iid": chat_id,
+            "mp": mp,
+            "user": username,
+            "answer": value if kind == "text" else f"[Вложение] {value}",
+        })
+        conn.commit()
+
+
+async def _persist_or_stop_progress(
+    progress: dict,
+    step: dict,
+    persist_step,
+    kind: str,
+    value: str,
+) -> bool:
+    try:
+        await run_in_threadpool(persist_step, kind, value)
+        return True
+    except Exception as exc:
+        progress["persistence"] = "failed"
+        progress["status"] = "partial"
+        progress["warnings"].append(
+            "Шаг подтверждён маркетплейсом, но не записан локально. Нужна сверка истории перед повтором."
+        )
+        step["persistence_error"] = str(exc)[:300]
+        for pending in [progress["text"], *progress["files"]]:
+            if pending["state"] == "pending":
+                pending["state"] = "not_attempted"
+        return False
+
+
+async def _run_ozon_chat_send_steps(
+    chat_id: str,
+    message: str,
+    attachments: list[dict],
+    persist_step,
+) -> dict:
+    """Execute non-atomic Ozon calls with explicit, retry-safe progress."""
+    from .. import ozon_chat_sync
+
+    progress = _new_chat_send_progress(message, attachments)
+    text_step = progress["text"]
+    if message:
+        try:
+            await run_in_threadpool(ozon_chat_sync.send_message, chat_id, message)
+        except Exception as exc:
+            return _stop_chat_send_progress(progress, text_step, exc)
+        text_step["state"] = "confirmed"
+        if not await _persist_or_stop_progress(progress, text_step, persist_step, "text", message):
+            return progress
+
+    for index, attachment in enumerate(attachments):
+        file_step = progress["files"][index]
+        encoded = base64.b64encode(attachment["content"]).decode("ascii")
+        try:
+            await run_in_threadpool(
+                ozon_client.send_chat_file,
+                chat_id,
+                attachment["name"],
+                encoded,
+                timeout=20,
+            )
+        except Exception as exc:
+            return _stop_chat_send_progress(progress, file_step, exc)
+        file_step["state"] = "confirmed"
+        if not await _persist_or_stop_progress(
+            progress, file_step, persist_step, "file", attachment["name"]
+        ):
+            return progress
+
+    progress["status"] = "complete"
+    return progress
 
 
 @router.post("/wb/feedbacks/{feedback_id}/answer")
@@ -2081,6 +3250,36 @@ def send_ozon_chat_message(
     return {"status": "ok"}
 
 
+@router.post("/ozon/chats/{chat_id}/message-with-files")
+async def send_ozon_chat_message_with_files(
+    chat_id: str,
+    text_value: str = Form("", alias="text"),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    txt = (text_value or "").strip()
+    attachments = await _validate_chat_attachments(files)
+    if not txt and not attachments:
+        raise HTTPException(status_code=400, detail="Добавьте текст или файл")
+    if not _oz_key() or not _oz_cid():
+        raise HTTPException(status_code=503, detail="OZON_API_KEY / OZON_CLIENT_ID не настроены")
+
+    def persist_step(kind: str, value: str) -> None:
+        _persist_confirmed_chat_step(
+            db,
+            mp="ozon",
+            chat_id=chat_id,
+            username=current_user["username"],
+            kind=kind,
+            value=value,
+        )
+
+    progress = await _run_ozon_chat_send_steps(chat_id, txt, attachments, persist_step)
+    status_code = 200 if progress["status"] == "complete" else 207
+    return JSONResponse(status_code=status_code, content=progress)
+
+
 @router.post("/ym/chats/{chat_id}/message")
 def send_ym_chat_message(
     chat_id: str,
@@ -2127,22 +3326,27 @@ def send_ym_chat_message(
     return {"status": "ok"}
 
 
+@router.post("/ym/chats/{chat_id}/message-with-files")
+async def send_ym_chat_message_with_files(
+    chat_id: str,
+    text_value: str = Form("", alias="text"),
+    files: list[UploadFile] = File(default=[]),
+):
+    # Multipart-параметры объявлены, чтобы клиент всегда получал явный ответ
+    # нашего API, а не 422 FastAPI. У ЯМ уже есть официальный метод
+    # POST /v2/businesses/{businessId}/chats/file/send, но текущий ym_client его
+    # не реализует; включение ЯМ вынесено из scope этой фазы.
+    _ = (chat_id, text_value, files)
+    raise HTTPException(
+        status_code=501,
+        detail="На Яндекс Маркете вложения пока недоступны",
+    )
+
+
 # ── Ответ в чат WB ───────────────────────────────────────────────────────────
 
-@router.post("/wb/chats/{chat_id}/message")
-def send_wb_chat_message(
-    chat_id: str,
-    payload: ChatMessagePayload,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    txt = payload.text.strip()
-    if not txt:
-        raise HTTPException(status_code=400, detail="Текст сообщения не может быть пустым")
-    if not _wb_key():
-        raise HTTPException(status_code=503, detail="WB_API_KEY не настроен")
-
-    # 1) Кэш в wb_chats  2) pending / заявка  3) свежий replySign из WB API
+def _resolve_wb_reply_sign(chat_id: str, db: Session) -> str:
+    """Найти актуальный replySign тем же каскадом, что использует текстовый ответ."""
     reply_sign = ""
     with db.bind.connect() as conn:
         row = conn.execute(text(
@@ -2166,8 +3370,7 @@ def send_wb_chat_message(
             if row and row[0]:
                 reply_sign = (row[0] or "").strip()
 
-    # Кэш часто пустой: синк событий не пишет reply_sign. Берём из списка чатов WB.
-    # Старые/короткие подписи WB отклоняет — предпочитаем свежую (формат version:uuid:sig).
+    # Кэш часто пустой: получаем свежую подпись из списка чатов WB.
     try:
         from .. import wb_chat as _wbc
         fresh = _wbc.resolve_reply_sign(chat_id)
@@ -2175,6 +3378,22 @@ def send_wb_chat_message(
             reply_sign = fresh
     except Exception:
         pass
+    return reply_sign
+
+@router.post("/wb/chats/{chat_id}/message")
+def send_wb_chat_message(
+    chat_id: str,
+    payload: ChatMessagePayload,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    txt = payload.text.strip()
+    if not txt:
+        raise HTTPException(status_code=400, detail="Текст сообщения не может быть пустым")
+    if not _wb_key():
+        raise HTTPException(status_code=503, detail="WB_API_KEY не настроен")
+
+    reply_sign = _resolve_wb_reply_sign(chat_id, db)
 
     if not reply_sign:
         raise HTTPException(
@@ -2229,6 +3448,85 @@ def send_wb_chat_message(
         conn.commit()
 
     return {"status": "ok"}
+
+
+@router.post("/wb/chats/{chat_id}/message-with-files")
+async def send_wb_chat_message_with_files(
+    chat_id: str,
+    text_value: str = Form("", alias="text"),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    txt = (text_value or "").strip()
+    attachments = await _validate_chat_attachments(files)
+    if not txt and not attachments:
+        raise HTTPException(status_code=400, detail="Добавьте текст или файл")
+    if not _wb_key():
+        raise HTTPException(status_code=503, detail="WB_API_KEY не настроен")
+
+    reply_sign = await run_in_threadpool(_resolve_wb_reply_sign, chat_id, db)
+    if not reply_sign:
+        raise HTTPException(
+            status_code=404,
+            detail="Не удалось получить ключ чата у Wildberries. Обновите список чатов и попробуйте снова.",
+        )
+
+    progress = _new_chat_send_progress(txt, attachments)
+    try:
+        await run_in_threadpool(
+            wb_client.send_chat_message,
+            reply_sign,
+            txt,
+            attachments=[
+                (item["name"], item["content"], item["content_type"])
+                for item in attachments
+            ],
+            timeout=20,
+        )
+    except Exception as exc:
+        state = _marketplace_failure_state(exc)
+        for step in [progress["text"], *progress["files"]]:
+            if step["state"] == "pending":
+                step["state"] = state
+                step["error"] = str(exc)[:300]
+        progress["status"] = "uncertain" if state == "unknown" else "failed"
+        if state == "unknown":
+            progress["warnings"].append(
+                "Wildberries мог принять multipart до таймаута. Не повторяйте его до сверки истории чата."
+            )
+        return JSONResponse(status_code=207, content=progress)
+
+    for step in [progress["text"], *progress["files"]]:
+        if step["state"] == "pending":
+            step["state"] = "confirmed"
+
+    def persist_step(kind: str, value: str) -> None:
+        _persist_confirmed_chat_step(
+            db,
+            mp="wb",
+            chat_id=chat_id,
+            username=current_user["username"],
+            kind=kind,
+            value=value,
+        )
+
+    if txt and not await _persist_or_stop_progress(
+        progress, progress["text"], persist_step, "text", txt
+    ):
+        return JSONResponse(status_code=207, content=progress)
+    for index, attachment in enumerate(attachments):
+        if not await _persist_or_stop_progress(
+            progress,
+            progress["files"][index],
+            persist_step,
+            "file",
+            attachment["name"],
+        ):
+            return JSONResponse(status_code=207, content=progress)
+
+    progress["status"] = "complete"
+    return JSONResponse(status_code=200, content=progress)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

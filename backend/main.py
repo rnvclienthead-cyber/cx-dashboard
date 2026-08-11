@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from contextlib import asynccontextmanager
 from .database import get_db, engine
-from .routers import claims, ai, system, production, ppm, ratings, auth, finances, voc, dashboard, ym, reshipment, roles, returns, events, cx_control, faq, cx_responses, kb, reshipment_skus, chat_playbook, chat_triage, chat_bot as chat_bot_router, nonreturnable_cats
+from .routers import claims, ai, system, production, ppm, ratings, auth, finances, voc, dashboard, ym, reshipment, roles, returns, events, cx_control, faq, cx_responses, kb, reshipment_skus, chat_playbook, chat_triage, chat_bot as chat_bot_router, nonreturnable_cats, question_playbook
 from . import chat_bot
 from . import wb_chat, wb_mini_sync, cx_alert, wb_chat_sync, ozon_chat_sync, ozon_photo_sync, ym_chat_sync
+from .upload_guard import ChatAttachmentContentLengthMiddleware
 
 
 @asynccontextmanager
@@ -47,6 +48,15 @@ async def lifespan(app: FastAPI):
                 ADD COLUMN IF NOT EXISTS wb_reply_sign  TEXT,
                 ADD COLUMN IF NOT EXISTS wb_nm_id       BIGINT,
                 ADD COLUMN IF NOT EXISTS wb_client_id   VARCHAR(100)
+        """))
+        # Яндекс Маркет: привязка чата к заявке доотправки (аналог wb_chat_id)
+        conn.execute(text("""
+            ALTER TABLE reshipment_requests
+                ADD COLUMN IF NOT EXISTS ym_chat_id TEXT
+        """))
+        conn.execute(text("""
+            ALTER TABLE reshipment_chat_tokens
+                ADD COLUMN IF NOT EXISTS mp VARCHAR(10)
         """))
         # Сравнение СДЭК/Яндекс при подаче заявки: ближайший ПВЗ + цена по каждой ТК.
         # client_pvz_code/address/city + cdek_cost — уже существующие поля СДЭК (как раньше).
@@ -238,6 +248,9 @@ async def lifespan(app: FastAPI):
         conn.execute(text(
             "ALTER TABLE ym_chats ADD COLUMN IF NOT EXISTS cabinet_chat_id TEXT"
         ))
+        conn.execute(text(
+            "ALTER TABLE ym_chats ADD COLUMN IF NOT EXISTS context_article TEXT"
+        ))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_ym_chat_messages_chat
             ON ym_chat_messages (chat_id, created_at)
@@ -333,8 +346,12 @@ async def lifespan(app: FastAPI):
 
     # Плейбук автоответов в чатах: темы, варианты текстов, режимы
     chat_playbook.init_playbook_tables(engine)
+    # Плейбук вопросов — копия чатового, дальше может расходиться
+    question_playbook.init_question_playbook_tables(engine)
     # Движок бота: состояние диалога + журнал (shadow)
     chat_bot.init_bot_tables(engine)
+    # Менеджер КС: доступ к возвратам/чатам/отзывам/вопросам
+    roles.ensure_cs_manager_permissions(engine)
     # Антидубль уведомлений клиенту по статусам доотправки
     from . import reshipment_notify
     reshipment_notify.init_notify_table(engine)
@@ -399,6 +416,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Ранний отказ до multipart-парсера. Не заменяет client_max_body_size в nginx.
+app.add_middleware(ChatAttachmentContentLengthMiddleware)
+
 # Настройка CORS для стабильного общения фронтенда и бэкенда
 app.add_middleware(
     CORSMiddleware,
@@ -434,8 +454,10 @@ app.include_router(kb.router)
 app.include_router(reshipment_skus.router)
 app.include_router(nonreturnable_cats.router)
 app.include_router(chat_playbook.router)
+app.include_router(question_playbook.router)
 app.include_router(chat_triage.router)
 app.include_router(chat_bot_router.router)
+app.include_router(chat_bot_router.bot_api_router)
 app.mount("/uploads", StaticFiles(directory=os.getenv("CX_UPLOAD_BASE_DIR", "/root/cx-dashboard/uploads")), name="uploads")
 
 async def _cdek_number_filler(get_db_func):
@@ -683,6 +705,9 @@ async def _yandex_status_updater(get_db_func):
                               WHEN :ns IN ('shipped','in_transit','ready_for_pickup','delivered')
                                AND shipped_at IS NULL THEN NOW()
                               ELSE shipped_at END,
+                            returned_at = CASE
+                              WHEN :ns = 'returned' THEN COALESCE(returned_at, NOW())
+                              ELSE returned_at END,
                             confirmed_at = CASE WHEN :ns IN ('delivered','returned') THEN COALESCE(confirmed_at, NOW()) ELSE confirmed_at END,
                             confirmation_token = COALESCE(confirmation_token, :tok),
                             yandex_sharing_url = COALESCE(NULLIF(:sharing_url, ''), yandex_sharing_url)

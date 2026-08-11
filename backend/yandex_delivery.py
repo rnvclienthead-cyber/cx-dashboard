@@ -19,7 +19,7 @@ YD_BASE    = "https://b2b.taxi.yandex.net/b2b/cargo/integration/v2"
 FROM_FULLNAME = os.getenv("YD_FROM_FULLNAME", "Казань, улица Техническая, 23Б")
 FROM_COORDS   = [float(x) for x in os.getenv("YD_FROM_COORDS", "49.1064,55.7961").split(",")]
 FROM_NAME     = os.getenv("YD_FROM_NAME", "Видовито")
-FROM_PHONE    = os.getenv("YD_FROM_PHONE", "+79172249575")
+FROM_PHONE    = os.getenv("YD_FROM_PHONE", "+79172226822")
 
 
 def is_enabled() -> bool:

@@ -70,58 +70,44 @@
           <p class="text-sm text-green-900 whitespace-pre-wrap">{{ r.answer_text }}</p>
         </div>
 
-        <!-- Связанные чаты -->
-        <div v-if="data.chats.length">
-          <p class="text-xs font-medium text-gray-500 mb-2">Чаты по этому товару ({{ data.chats.length }})</p>
-          <div class="space-y-1.5">
-            <router-link v-for="c in data.chats" :key="c.chat_id" :to="{ path: '/chats', query: { chat: c.chat_id, mp: 'wb' } }"
-              class="flex items-center justify-between gap-2 px-3 py-2 bg-gray-50 hover:bg-violet-50 rounded-lg border border-gray-100 transition-colors">
-              <div class="min-w-0">
-                <span class="text-sm text-gray-700 font-medium">{{ c.client_name || 'Клиент' }}</span>
-                <p class="text-xs text-gray-400 truncate">{{ c.last_message }}</p>
-              </div>
-              <span v-if="c.needs_answer" class="shrink-0 text-xs bg-violet-100 text-violet-700 rounded-full px-2 py-0.5">ждёт</span>
-            </router-link>
-          </div>
+        <!-- Связка с этим клиентом (по заказу), не «по товару» -->
+        <div v-if="linkedChat || linkedReturn" class="space-y-2 pt-1 border-t border-gray-100">
+          <p class="text-xs font-medium text-gray-500">Связано с этим заказом</p>
+          <button
+            v-if="linkedChat"
+            type="button"
+            @click="goToChat"
+            class="w-full flex items-center justify-between gap-2 text-sm font-medium px-3 py-2.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-900 hover:bg-violet-100 text-left"
+          >
+            <span>
+              Чат{{ linkedChat.client_name ? `: ${linkedChat.client_name}` : '' }}
+              <span v-if="linkedChat.needs_answer" class="text-violet-600 font-normal"> · ждёт ответа</span>
+            </span>
+            <span class="shrink-0">→</span>
+          </button>
+          <button
+            v-if="linkedReturn"
+            type="button"
+            @click="goToReturn"
+            class="w-full flex items-center justify-between gap-2 text-sm font-medium px-3 py-2.5 rounded-lg border border-orange-200 bg-orange-50 text-orange-900 hover:bg-orange-100 text-left"
+          >
+            <span>
+              Возврат{{ linkedReturn.claim_date_ru ? ` от ${linkedReturn.claim_date_ru}` : '' }}
+              <span v-if="linkedReturn.status_label" class="font-normal text-orange-700"> · {{ linkedReturn.status_label }}</span>
+            </span>
+            <span class="shrink-0">→</span>
+          </button>
         </div>
-
-        <!-- Связанные возвраты -->
-        <div v-if="data.returns.length">
-          <p class="text-xs font-medium text-gray-500 mb-2">Возвраты по этому товару ({{ data.returns.length }})</p>
-          <div class="space-y-1.5">
-            <router-link v-for="rt in data.returns" :key="rt.srid" :to="{ path: '/returns', query: { srid: rt.srid } }"
-              class="flex items-center justify-between gap-2 px-3 py-2 bg-gray-50 hover:bg-emerald-50 rounded-lg border border-gray-100 transition-colors">
-              <div class="min-w-0">
-                <span class="text-sm text-gray-700">{{ rt.claim_type_label }}</span>
-                <p v-if="rt.user_comment" class="text-xs text-gray-400 truncate">{{ rt.user_comment }}</p>
-              </div>
-              <span class="shrink-0 text-xs text-gray-500">{{ rt.status_label }}</span>
-            </router-link>
-          </div>
-        </div>
-
-        <!-- Контакты / переотправки -->
-        <div v-if="data.reshipments.length">
-          <p class="text-xs font-medium text-gray-500 mb-2">Переотправки и контакты ({{ data.reshipments.length }})</p>
-          <div class="space-y-2">
-            <div v-for="rs in data.reshipments" :key="rs.id" class="px-3 py-2.5 bg-blue-50/60 rounded-lg border border-blue-100">
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-sm font-medium text-gray-800">{{ rs.customer_name || 'Без имени' }}</span>
-                <span class="text-xs text-gray-500">{{ rs.status }}</span>
-              </div>
-              <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-600 mt-1">
-                <span v-if="rs.customer_phone">📞 {{ rs.customer_phone }}</span>
-                <span v-if="rs.customer_email">✉ {{ rs.customer_email }}</span>
-                <span v-if="rs.order_number">Заказ: {{ rs.order_number }}</span>
-                <span v-if="rs.salebot_messenger" class="text-blue-600">{{ rs.salebot_messenger }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <p v-if="!data.chats.length && !data.returns.length && !data.reshipments.length" class="text-xs text-gray-400 text-center py-2">
-          Связанных чатов, возвратов и переотправок не найдено.
+        <p v-else-if="!loading && data && mp === 'wb'" class="text-xs text-gray-400">
+          Чат или возврат по этому заказу не найдены (покупатель мог не писать).
         </p>
+
+        <button
+          v-if="showGoToReviews"
+          type="button"
+          @click="goToReviews"
+          class="w-full text-sm font-medium px-3 py-2.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100 text-left"
+        >Открыть в разделе «Отзывы» →</button>
       </div>
     </div>
 
@@ -138,16 +124,25 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { apiFetch } from '../api'
 
-const props = defineProps({ mp: String, reviewId: [String, Number] })
-defineEmits(['close'])
+const props = defineProps({
+  mp: String,
+  reviewId: [String, Number],
+  /** true = открыто из чата: показать переход в раздел отзывов */
+  showGoToReviews: { type: Boolean, default: false },
+})
+const emit = defineEmits(['close'])
+const router = useRouter()
 
 const loading = ref(true)
 const data = ref(null)
 const lb = ref({ show: false, i: 0 })
 const mp = computed(() => props.mp)
 const r = computed(() => data.value?.review || {})
+const linkedChat = computed(() => data.value?.linked_chat || null)
+const linkedReturn = computed(() => data.value?.linked_return || null)
 
 const mpCls = { wb: 'bg-purple-100 text-purple-700', ym: 'bg-yellow-100 text-yellow-700', ozon: 'bg-blue-100 text-blue-700' }
 
@@ -156,6 +151,27 @@ function fmtDateTime(s) {
   const d = new Date(s)
   return d.toLocaleDateString('ru', { day: '2-digit', month: '2-digit', year: '2-digit' }) +
     ' ' + d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
+}
+
+function goToReviews() {
+  emit('close')
+  router.push({ path: '/reviews', query: { review: `${props.mp}:${props.reviewId}` } })
+}
+
+function goToChat() {
+  const id = linkedChat.value?.chat_id
+  if (!id) return
+  emit('close')
+  router.push({ path: '/chats', query: { chat: id, mp: props.mp || 'wb' } })
+}
+
+function goToReturn() {
+  const claimId = linkedReturn.value?.claim_id
+  if (!claimId) return
+  emit('close')
+  const q = { claim: claimId, mp: props.mp || 'wb' }
+  if (linkedReturn.value?.is_archive) q.tab = 'archive'
+  router.push({ path: '/returns', query: q })
 }
 
 async function load() {

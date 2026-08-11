@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 
 # Директория для хранения фото возвратов ЯМ (nginx раздаёт /static/)
 YM_PHOTO_DIR = "/root/cx-dashboard/static/ym_returns"
+YM_PHOTO_RETENTION_DAYS = int(os.getenv("YM_PHOTO_RETENTION_DAYS", "90"))
 
 # Только возвраты начиная с этой даты
 YM_RETURNS_FROM = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -55,12 +56,18 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 # Маппинг refundStatus ЯМ → читаемый статус
 YM_REFUND_STATUS_MAP = {
     "WAITING_FOR_DECISION":  "На рассмотрении",
+    "PREMODERATION_DECISION_WAITING": "На рассмотрении",
+    "PREMODERATION_SELECT_DELIVERY": "На рассмотрении",
+    "PREMODERATION_DISPUTE": "На рассмотрении",
+    "STARTED_BY_USER":       "На рассмотрении",
     "REFUND_IN_PROGRESS":    "Одобрено",
     "REFUNDED":              "Одобрено",
     "WAITING_FOR_RETURN":    "На рассмотрении",
     "RETURNED":              "На рассмотрении",
     "NOT_RETURNED":          "Отказ",
     "FAILED":                "Отказ",
+    "REJECTED":              "Отказ",
+    "CANCELLED":             "Отменено",
 }
 
 
@@ -91,6 +98,27 @@ def _log_db(action, status, details=""):
             )
     except Exception:
         pass
+
+
+def cleanup_old_ym_photos(days=None):
+    """Удаляет локальные фото возвратов ЯМ старше N дней."""
+    days = YM_PHOTO_RETENTION_DAYS if days is None else days
+    if days <= 0 or not os.path.isdir(YM_PHOTO_DIR):
+        return 0
+    cutoff = time.time() - days * 86400
+    removed = 0
+    for name in os.listdir(YM_PHOTO_DIR):
+        path = os.path.join(YM_PHOTO_DIR, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except Exception:
+            pass
+    if removed:
+        log.info(f"Удалено старых фото ЯМ: {removed} (>{days} дн.)")
+        _log_db("ym_photo_cleanup", "success", f"Удалено {removed} файлов старше {days} дн.")
+    return removed
 
 
 def _parse_ym_date(s):
@@ -1356,7 +1384,10 @@ if __name__ == "__main__":
         run(sync_assortment)
         run(sync_prices)
         run(generate_finance_reports)
-        run(sync_supplies)
+        # sync_supplies отключён: таблица/эвристика поставок ЯМ неактуальны,
+        # в API нет связки возврат→поставка. Не трогаем ym_supplies.
+        run(cleanup_old_ym_photos)
+
     elif task == "ratings":
         run(sync_business_rating_report)
     elif task == "reports":

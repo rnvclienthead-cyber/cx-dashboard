@@ -63,6 +63,20 @@ def fetch_chat_history(chat_id: str, *, limit: int = 50, timeout: int = 25) -> d
     return post("/v3/chat/history", {"chat_id": chat_id, "limit": limit}, timeout=timeout)
 
 
+def start_chat(posting_number: str, *, timeout: int = 25) -> dict:
+    """POST /v1/chat/start — создать чат с покупателем по номеру отправления.
+
+    Требует Premium Plus. Если чат уже есть — обычно возвращает существующий chat_id.
+    """
+    if not client_id() or not api_key():
+        raise RuntimeError("OZON_CLIENT_ID / OZON_API_KEY не заданы")
+    pn = (posting_number or "").strip()
+    if not pn:
+        raise ValueError("posting_number пустой")
+    data = post("/v1/chat/start", {"posting_number": pn}, timeout=timeout)
+    return data.get("result") or data
+
+
 def send_chat_message(chat_id: str, text: str, *, timeout: int = 20) -> None:
     """Отправка текста покупателю через Seller Chat API."""
     if not client_id() or not api_key():
@@ -71,6 +85,27 @@ def send_chat_message(chat_id: str, text: str, *, timeout: int = 20) -> None:
     if not txt:
         raise ValueError("пустой текст")
     post("/v1/chat/send/message", {"chat_id": chat_id, "text": txt[:1000]}, timeout=timeout)
+
+
+def send_chat_file(
+    chat_id: str,
+    name: str,
+    base64_content: str,
+    *,
+    timeout: int = 20,
+) -> None:
+    """Отправить файл в чат через ``POST /v1/chat/send/file``."""
+    if not client_id() or not api_key():
+        raise RuntimeError("OZON_CLIENT_ID / OZON_API_KEY не заданы")
+    filename = (name or "").strip()
+    encoded = (base64_content or "").strip()
+    if not filename or not encoded:
+        raise ValueError("имя и содержимое файла обязательны")
+    post(
+        "/v1/chat/send/file",
+        {"chat_id": chat_id, "name": filename, "base64_content": encoded},
+        timeout=timeout,
+    )
 
 
 def download_chat_file(url: str, *, timeout: int = 30) -> requests.Response:

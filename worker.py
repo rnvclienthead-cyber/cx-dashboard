@@ -60,32 +60,76 @@ if S3_ACCESS_KEY and S3_SECRET_KEY:
         region_name='ru-central1'
     )
 
+# --- ЛОКАЛЬНОЕ ХРАНИЛИЩЕ ФОТО WB (как у ЯМ) ---
+# Раньше: сжатие → Яндекс Object Storage, в БД писали "s3|cdn", а фронт брал .pop() = CDN.
+# Теперь: сжатие → /static/wb_claims/, фронт показывает локальный путь. S3 — опциональный бэкап.
+WB_PHOTO_DIR = os.getenv("WB_PHOTO_DIR", "/root/cx-dashboard/static/wb_claims").strip()
+WB_PHOTO_RETENTION_DAYS = int(os.getenv("WB_PHOTO_RETENTION_DAYS", "90"))
+
 def safe_str(val):
     if val is None or str(val).lower() in ['nan', 'none', 'null', '']: return None
     return str(val).strip()
 
+def cleanup_old_claim_photos(days=None):
+    """Удаляет локальные фото претензий старше N дней (по mtime файла)."""
+    days = days if days is not None else WB_PHOTO_RETENTION_DAYS
+    if days <= 0 or not os.path.isdir(WB_PHOTO_DIR):
+        return 0
+    cutoff = time.time() - days * 86400
+    removed = 0
+    for name in os.listdir(WB_PHOTO_DIR):
+        path = os.path.join(WB_PHOTO_DIR, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except Exception:
+            pass
+    if removed:
+        print(f"🧹 Удалено старых фото WB: {removed} (>{days} дн.)")
+        log_to_system("Фото WB cleanup", "SUCCESS", f"Удалено {removed} файлов старше {days} дн.")
+    return removed
+
 def create_and_upload_thumbnail(wb_image_url):
-    if not wb_image_url or not wb_image_url.startswith('http'): return wb_image_url
-    if not S3_ACCESS_KEY or not S3_SECRET_KEY:
+    """Скачивает фото WB, сжимает, кладёт на диск сервера. Опционально дублирует в S3."""
+    if not wb_image_url or not wb_image_url.startswith('http'):
         return wb_image_url
 
     try:
-        response = requests.get(wb_image_url, timeout=15)
+        response = requests.get(wb_image_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         response.raise_for_status()
-        
+
         image = Image.open(io.BytesIO(response.content))
-        if image.mode in ("RGBA", "P"): image = image.convert("RGB")
-            
+        if image.mode in ("RGBA", "P"):
+            image = image.convert("RGB")
+
         image.thumbnail((1000, 1000))
         buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", optimize=True, quality=90)
-        buffer.seek(0)
-        
-        file_name = f"previews/{uuid.uuid4().hex}.jpg"
-        s3_client.upload_fileobj(buffer, BUCKET_NAME, file_name, ExtraArgs={'ContentType': 'image/jpeg'})
-        
-        s3_url = f"https://{BUCKET_NAME}.storage.yandexcloud.net/{file_name}"
-        return f"{s3_url}|{wb_image_url}"
+        image.save(buffer, format="JPEG", optimize=True, quality=85)
+        raw = buffer.getvalue()
+
+        os.makedirs(WB_PHOTO_DIR, exist_ok=True)
+        file_id = uuid.uuid4().hex
+        filename = f"{file_id}.jpg"
+        local_path = os.path.join(WB_PHOTO_DIR, filename)
+        with open(local_path, "wb") as f:
+            f.write(raw)
+
+        local_url = f"/static/wb_claims/{filename}"
+
+        # Опциональный бэкап в Object Storage (не обязателен для показа)
+        if s3_client and S3_ACCESS_KEY and S3_SECRET_KEY:
+            try:
+                s3_key = f"previews/{file_id}.jpg"
+                s3_client.upload_fileobj(
+                    io.BytesIO(raw), BUCKET_NAME, s3_key,
+                    ExtraArgs={'ContentType': 'image/jpeg'},
+                )
+            except Exception as e:
+                print(f"  S3 upload skip: {e}")
+
+        # превью|оригинал — фронт берёт первое
+        return f"{local_url}|{wb_image_url}"
     except Exception as e:
         print(f" Ошибка обработки фото {wb_image_url}: {e}")
         return wb_image_url
@@ -1343,6 +1387,7 @@ if __name__ == "__main__":
         run(fetch_and_save_logistics, "https://statistics-api.wildberries.ru/api/v1/supplier/sales", "SALE")
         run(fetch_and_save_orders, "https://statistics-api.wildberries.ru/api/v1/supplier/orders")
         run(sync_wb_report_detail)
+        run(cleanup_old_claim_photos)
         log_to_system("Воркер WB (daily)", "SUCCESS", "Дневная синхронизация выполнена")
         print("🏁 WB daily завершён")
         run_ai_tagger_wb()

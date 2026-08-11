@@ -129,37 +129,8 @@ def get_production_claims(
         #   • photos         — пробел-разделённые URL статичных фото (/static/ym_returns/…)
         if platform in ("ym", "all"):
             with db.bind.connect() as conn:
-                # ── Эвристический матч возврат → инвойс ──────────────────────────
-                # Алгоритм: берём поставку с тем же SKU на тот же склад,
-                # дата которой < даты заказа → берём самую последнюю такую.
-                # Форматы supply_id в wb_invoices:
-                #   "30725002"     = marketplaceRequestId
-                #   "ВРЦ-8299161"  = ВРЦ- + request_id (VDC-родительская)
-                # parent_request_id покрывает VDC-дочерние через родителя.
-                try:
-                    inv_rows = conn.execute(text("""
-                        SELECT DISTINCT ON (r.return_id)
-                            r.return_id,
-                            COALESCE(inv.invoice_num, 'ЯМ') AS invoice_num
-                        FROM ym_returns r
-                        JOIN ym_orders  o  ON o.order_id = r.order_id
-                                          AND o.supplier_article = r.supplier_article
-                        JOIN ym_supply_items si ON si.offer_id = r.supplier_article
-                        JOIN ym_supplies     s  ON s.request_id = si.request_id
-                                               AND s.requested_date < o.created_at
-                        LEFT JOIN wb_invoices inv ON (
-                            inv.supply_id = s.marketplace_request_id
-                            OR inv.supply_id = 'ВРЦ-' || s.request_id::text
-                            OR (s.parent_request_id IS NOT NULL
-                                AND inv.supply_id = 'ВРЦ-' || s.parent_request_id::text)
-                        ) AND inv.marketplace = 'ym'
-                        WHERE r.supplier_article IS NOT NULL
-                          AND r.supplier_article != ''
-                        ORDER BY r.return_id, s.requested_date DESC
-                    """)).mappings().all()
-                    ym_invoice_map = {row["return_id"]: row["invoice_num"] for row in inv_rows}
-                except Exception:
-                    ym_invoice_map = {}
+                # Связка через поставки ЯМ отключена.
+                ym_invoice_map = {}
                 ym_rows = conn.execute(text("""
                     SELECT
                         return_id, order_id, supplier_article,

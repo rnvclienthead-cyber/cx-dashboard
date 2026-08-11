@@ -1,0 +1,35 @@
+# Memory Index
+
+- [📥 Инбокс Рустама](inbox-rustam.md) — свободные заметки/замечания; читать в начале сессии, разносить по проектам
+- [Cursor авг 2026 — сводка сессий](project-cursor-session-2026-08.md) — ⚠️ свежий handoff: PPM all, Ozon sticky, wave1 в проде, wave2A отменена (токены), полный бэклог
+- [Мост с Obsidian](project-obsidian-bridge.md) — память подключена в хранилище Видовито через symlink «Мозг Claude»
+- [Заметки Рустама (идеи+встречи)](reference-rustam-notes.md) — где лежат личные заметки в Видовито и как их использовать при планировании
+- [Роадмап продукта](project-product-roadmap.md) — открытые задачи и прогресс глазами Рустама; снимок 2026-06-29, источник — заметка идей
+- [Рустам](user-rustam.md) — не разработчик, делегирует всё ИИ; кратко, без жаргона, сам деплоить
+- [Деплой cx-dashboard](feedback-always-deploy.md) — ⚠️ ФРОНТ → `/var/www/cx-dashboard/`; деплоить сразу; сборка ТОЛЬКО локально, не на сервере
+- [Документация системы = DocsView.vue](project-docs-page.md) — ⚠️ страница `/docs` захардкожена во Vue, НЕ читает docs/*.md; обновлять компонент + build + деплой
+- [Источник правды фронта](project-frontend-source-of-truth.md) — ⚠️ перед деплоем сверять UI-строки бандла; НЕ восстанавливать src из серверного бэкапа
+- [Инфраструктура](project-cx-dashboard-infra.md) — VPS 72.56.240.22/cxvo.ru, systemd cx-backend, bcrypt==3.2.2 не обновлять; ⚠️ 2026-07-03 OOM-крашлуп (лимит поднят, причина не найдена) + инцидент фронт-без-бэка
+- [Supabase не используется](feedback-no-supabase.md) — ⚠️ только локальная БД cx_dashboard; psql через SSH как postgres
+- [PPM модуль](project-ppm-status.md) — акты PDF, ABC/XYZ, WB+ЯМ; баги WeasyPrint/Pydantic/latin-1; ✅ 2026-08 «Все МП» + отсечка до апреля
+- [Интеграция ЯМ](project-ym-integration.md) — ym_* таблицы, воркер (hourly/daily/reports, не nightly!), API-квирки (paging не pager!), PPM ЯМ
+- [СДЭК интеграция](project-cdek-integration.md) — тариф 483, модуль cdek.py, bulk-подтверждение склада; CDEK_FROM_PVZ_CODE нужно заполнить
+- [WB Chat интеграция](project-wb-chat-integration.md) — медиафайлы (downloadID+public_router), контекст клиента по rid→claim/review, UI как WB ЛК
+- [Раздел обращений клиентов](project-cx-responses-structure.md) — ✅ 4 страницы: /reviews /questions /chats /returns; бэкенд GET /claims; ⚠️ 2026-07-10 отзывы переделаны в таблицу «как MPStats»
+- [База знаний «Конструктор»](project-kb-constructor.md) — ✅ 2026-07-10 логика Рустама из Google-таблицы
+- [Фото товаров](project-product-photos.md) — OZON v3 API → product_photos; thumbnail в Reviews/Questions/Returns
+- [OZON интеграция](project-ozon-integration.md) — FBO-only; ⚠️ отзывы API 403 без подписки; ✅ вкладка «На согласовании» + sticky cron
+- [Часовой пояс сервера](project-server-timezone.md) — сервер UTC, время клиенту всегда МСК (UTC+3)
+- [Редизайн UI](project-ui-redesign.md) — Warm Minimal на паузе
+- [QR-сканер склада](project-qr-scanner-status.md) — на паузе; нужен WB Marketplace scope
+- [FAQ модуль](project-faq-module.md) — /faq, FAQView.vue
+- [Salebot (TG+MAX)](project-salebot-integration.md) — стартовое условие box = «По наличию ключевых слов»
+- [Модуль переотправки](project-reshipment-module.md) — экономика отправки, СДЭК/Яндекс, уведомления
+- [Контроль КС](project-cx-control-module.md) — /cx-control SLA
+- [Привязка поставки/инвойса к возвратам](project-claims-invoice-linkage.md)
+- [Системный монитор → TG](project-system-monitor.md)
+- [Яндекс Доставка (переотправка)](project-yandex-delivery-integration.md)
+- [Проверить рейтинги ВБ за 04.07](project-wb-ratings-lag-check.md)
+- [Бэклог WB-чатов](project-wb-chat-backlog.md)
+- [ИИ-бот автоответов в чатах](project-chat-autoreply-bot.md) — ✅ бот+плейбук в проде; wave1 2026-08; wave2A на паузе
+- [Diff бэкенда перед деплоем](feedback-backend-diff-before-deploy.md) — ⚠️ не заливать reshipment.py целиком без миграций

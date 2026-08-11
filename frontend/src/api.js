@@ -21,19 +21,25 @@ export const apiFetch = async (url, options = {}) => {
     localStorage.removeItem('role')
     localStorage.removeItem('username')
     router.push('/login')
-    throw new Error('Сессия истекла. Пожалуйста, войдите снова.')
+    const error = new Error('Сессия истекла. Пожалуйста, войдите снова.')
+    error.status = 401
+    throw error
   }
 
   // 2. УМНАЯ ЗАЩИТА: Если бэкенд ответил любой другой ошибкой (400, 403, 500)
   if (!response.ok) {
     let errorMessage = 'Ошибка сервера'
+    let errorData = null
     try {
-      const errData = await response.json()
-      errorMessage = errData.detail || errorMessage
+      errorData = await response.json()
+      errorMessage = errorData.detail || errorMessage
     } catch (e) {
       // Если сервер вернул не JSON (например, упал Nginx)
     }
-    throw new Error(errorMessage) // Вызываем ошибку, чтобы сработал блок catch в компонентах
+    const error = new Error(errorMessage)
+    error.status = response.status
+    error.data = errorData
+    throw error // Вызываем ошибку, чтобы сработал блок catch в компонентах
   }
 
   return response

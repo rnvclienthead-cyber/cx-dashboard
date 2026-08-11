@@ -93,6 +93,28 @@ def fetch_chat_history(chat_id: int | str, *, biz: str | None = None, key: str |
     return data.get("result") or data
 
 
+def create_chat(*, context_type: str, context_id: int | str,
+                 biz: str | None = None, key: str | None = None, timeout: int = 25) -> dict:
+    """POST /v2/businesses/{id}/chats/new — создать чат по заказу (ORDER) или возврату (RETURN).
+
+    Если чат с таким контекстом уже есть — API вернёт существующий chatId.
+    """
+    biz = biz or business_id()
+    ctype = (context_type or "").strip().upper()
+    if ctype not in ("ORDER", "RETURN"):
+        raise ValueError("context_type должен быть ORDER или RETURN")
+    try:
+        cid = int(context_id)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"context_id должен быть числом: {context_id!r}") from e
+    data = post(
+        f"/v2/businesses/{biz}/chats/new",
+        {"context": {"type": ctype, "id": cid}},
+        key=key, timeout=timeout,
+    )
+    return data.get("result") or data
+
+
 def send_chat_message(chat_id: str, text: str, *, biz: str | None = None, key: str | None = None, timeout: int = 25) -> None:
     """Отправка текста. Требует scope communication у YM_API_KEY."""
     biz = biz or business_id()

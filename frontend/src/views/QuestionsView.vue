@@ -15,7 +15,7 @@
             </div>
             <div>
               <h1 class="text-sm font-medium text-gray-900 leading-tight">Вопросы</h1>
-              <p class="text-xs text-gray-400 leading-tight mt-0.5">Wildberries · ЯМаркет</p>
+              <p class="text-xs text-gray-400 leading-tight mt-0.5">WB · ЯМ — ответ публикуется на карточке товара</p>
             </div>
           </div>
 
@@ -30,7 +30,7 @@
 
         <!-- Строка 2: вкладки секций -->
         <div class="flex -mb-px">
-          <button v-for="s in sections" :key="s.key"
+          <button v-for="s in visibleSections" :key="s.key"
             @click="switchSection(s.key)"
             :class="['px-4 py-2.5 text-sm font-medium border-b-2 transition-all',
               activeSection === s.key
@@ -132,42 +132,90 @@
             <p class="text-xs font-medium text-amber-700">Черновик автоответа ожидает подтверждения</p>
             <p class="text-sm text-gray-700 whitespace-pre-wrap bg-white border border-amber-200 rounded-lg px-3 py-2">{{ item.pending_draft }}</p>
             <div class="flex gap-2">
-              <button @click="confirmMod(item)"
+              <button @click="confirmMod(item)" :title="publishHelp(item)"
+                :aria-describedby="`question-moderation-publish-help-${item.mp}-${item.id}`"
                 class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors font-medium">
-                Подтвердить и отправить
+                {{ moderationPublishLabel(item) }}
               </button>
               <button @click="rejectMod(item)"
                 class="px-3 py-1.5 bg-white hover:bg-gray-50 text-gray-600 border border-gray-200 text-sm rounded-lg transition-colors font-medium">
                 Отклонить
               </button>
             </div>
+            <p :id="`question-moderation-publish-help-${item.mp}-${item.id}`"
+              class="text-[11px] text-amber-800 leading-snug">
+              {{ publishHelp(item) }}
+            </p>
           </div>
 
           <!-- Форма ответа -->
           <div v-else class="border-t border-gray-100 px-4 py-3 bg-gray-50/40">
-            <div v-if="relevantTemplates(item).length" class="mb-2 flex flex-wrap gap-1.5">
-              <button v-for="t in relevantTemplates(item)" :key="t.id"
-                @click="item._reply = t.body"
-                class="px-2.5 py-1 bg-white hover:bg-sky-50 text-gray-600 hover:text-sky-700 border border-gray-200 hover:border-sky-200 rounded-full text-xs font-medium transition-colors">
+            <!-- Автоподбор как в чатах -->
+            <div v-if="item._suggest?.reply_text"
+              class="mb-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+              <div class="flex items-start justify-between gap-2">
+                <p class="font-medium">
+                  Подобран шаблон
+                  <span v-if="item._suggest.theme_name" class="font-normal opacity-80">
+                    · {{ item._suggest.theme_name }}
+                  </span>
+                  <span v-if="item._suggest.confidence != null" class="font-normal opacity-70">
+                    · {{ Math.round((item._suggest.confidence || 0) * 100) }}%
+                  </span>
+                  <span v-if="item._suggest.need_human" class="ml-1 text-rose-600">· лучше проверить</span>
+                </p>
+                <button type="button" @click="generateSuggest(item)" :disabled="item._suggestGenerating"
+                  class="shrink-0 text-[11px] font-medium px-2 py-1 rounded-md bg-white border border-sky-200 text-sky-700 hover:bg-sky-100 disabled:opacity-50">
+                  {{ item._suggestGenerating ? '…' : 'Сгенерировать' }}
+                </button>
+              </div>
+            </div>
+            <div v-else-if="item._suggestLoading" class="mb-2 text-[10px] text-gray-400">Подбираем шаблон…</div>
+            <div v-else-if="item._suggestMiss"
+              class="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 flex items-center justify-between gap-2">
+              <span>{{ item._suggestMiss.reason || 'Нет подходящего шаблона' }}</span>
+              <button v-if="item._suggestMiss.can_generate !== false"
+                type="button" @click="generateSuggest(item)" :disabled="item._suggestGenerating"
+                class="shrink-0 text-[11px] font-medium px-2 py-1 rounded-md bg-white border border-amber-200 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                {{ item._suggestGenerating ? '…' : 'Сгенерировать ответ' }}
+              </button>
+            </div>
+
+            <div v-if="chipsFor(item).length" class="mb-2 flex flex-wrap gap-1.5">
+              <button v-for="t in chipsFor(item)" :key="t.id"
+                type="button"
+                @click="applyChip(item, t)"
+                :class="[
+                  'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                  isChipActive(item, t)
+                    ? 'bg-sky-600 text-white border-sky-600'
+                    : 'bg-white hover:bg-sky-50 text-gray-600 hover:text-sky-700 border-gray-200 hover:border-sky-200'
+                ]">
                 {{ t.title }}
               </button>
             </div>
             <textarea
               v-model="item._reply"
               placeholder="Написать ответ…"
-              rows="2"
-              class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
+              :rows="replyRows(item._reply)"
+              class="w-full min-h-[6.5rem] border border-gray-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
             ></textarea>
             <div class="flex justify-end mt-2">
               <button @click="sendReply(item)"
                 :disabled="!item._reply?.trim()"
+                :title="publishHelp(item)"
+                :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
                 :class="['px-4 py-2 rounded-lg text-sm font-medium transition-all',
                   item._reply?.trim()
                     ? 'bg-sky-600 hover:bg-sky-700 text-white'
                     : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
-                Опубликовать ответ
+                {{ publishActionLabel(item) }}
               </button>
             </div>
+            <p :id="`question-publish-help-${item.mp}-${item.id}`"
+              class="mt-2 text-[11px] text-gray-600 leading-snug">
+              {{ publishHelp(item) }}
+            </p>
           </div>
         </div>
       </div>
@@ -195,54 +243,63 @@
       </div>
     </div>
 
-    <!-- ══ ШАБЛОНЫ ══════════════════════════════════════════════════════════ -->
+    <!-- ══ ШАБЛОНЫ (плейбук вопросов) ═══════════════════════════════════════ -->
     <div v-if="activeSection === 'templates'" class="max-w-4xl mx-auto px-4 py-4">
-      <div class="flex justify-between items-center mb-4">
-        <h2 class="font-semibold text-gray-800">Шаблоны ответов</h2>
-        <button @click="openTplForm()" class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">
-          + Создать шаблон
-        </button>
+      <div class="flex flex-wrap justify-between items-start gap-3 mb-4">
+        <div>
+          <h2 class="font-semibold text-gray-800">Плейбук вопросов</h2>
+          <p class="text-xs text-gray-400 mt-0.5 max-w-xl">
+            Копия шаблонов из чатов. Правки здесь влияют только на вопросы — чатовый плейбук не меняется.
+          </p>
+        </div>
+        <div class="flex flex-wrap gap-2" v-if="canEditQuestionTemplates">
+          <button @click="syncPlaybookFromChats" :disabled="pbSyncing"
+            class="px-3 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50">
+            {{ pbSyncing ? '…' : 'Подтянуть недостающие из чатов' }}
+          </button>
+          <button @click="openVariantForm()" class="px-3 py-2 bg-sky-600 text-white rounded-lg text-sm font-medium hover:bg-sky-700">
+            + Вариант
+          </button>
+        </div>
+        <p v-else class="text-[11px] text-gray-400 self-center">Только просмотр</p>
       </div>
 
-      <div v-if="tplFormOpen" class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-4">
-        <h3 class="font-semibold text-gray-800 mb-4">{{ editTpl.id ? 'Редактировать' : 'Новый шаблон' }}</h3>
+      <div v-if="tplFormOpen && canEditQuestionTemplates" class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-4">
+        <h3 class="font-semibold text-gray-800 mb-4">{{ editVariant.id ? 'Редактировать вариант' : 'Новый вариант' }}</h3>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="md:col-span-2">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Название</label>
-            <input v-model="editTpl.title" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Тема</label>
+            <select v-model="editVariant.theme_key" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
+              <option v-for="th in pbThemes" :key="th.theme_key" :value="th.theme_key">{{ th.name }}</option>
+            </select>
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Площадка</label>
-            <select v-model="editTpl.mp" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
-              <option value="all">Все</option>
+            <select v-model="editVariant.mp" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
+              <option value="">Все / WB</option>
               <option value="wb">WB</option>
               <option value="ym">ЯМ</option>
             </select>
           </div>
-          <div class="md:col-span-2">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Текст шаблона</label>
-            <textarea v-model="editTpl.body" rows="5"
-              class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-400"></textarea>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Ветка (ключ)</label>
+            <input v-model="editVariant.branch_key" placeholder="пусто = основная"
+              class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Подпись ветки</label>
+            <input v-model="editVariant.branch_label"
+              class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400" />
           </div>
           <div class="md:col-span-2">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Стоп-слова (по одному на строку)</label>
-            <textarea v-model="editTpl.stop_words" rows="2" placeholder="брак&#10;возврат"
-              class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-400"></textarea>
-          </div>
-          <div class="md:col-span-2 flex flex-wrap gap-6">
-            <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-              <input type="checkbox" v-model="editTpl.auto_reply" class="w-4 h-4 rounded accent-indigo-600" />
-              Автоответ
-            </label>
-            <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-              <input type="checkbox" v-model="editTpl.requires_confirmation" class="w-4 h-4 rounded accent-amber-500" />
-              Требует подтверждения
-            </label>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Текст ответа</label>
+            <textarea v-model="editVariant.body" rows="6"
+              class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm resize-y focus:outline-none focus:ring-2 focus:ring-sky-400"></textarea>
           </div>
         </div>
         <div class="flex gap-2 mt-4">
-          <button @click="saveTpl" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
-            {{ editTpl.id ? 'Сохранить' : 'Создать' }}
+          <button @click="saveVariant" class="px-4 py-2 bg-sky-600 text-white rounded-lg text-sm font-medium hover:bg-sky-700">
+            {{ editVariant.id ? 'Сохранить' : 'Создать' }}
           </button>
           <button @click="tplFormOpen = false" class="px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium hover:bg-gray-50">
             Отмена
@@ -250,28 +307,71 @@
         </div>
       </div>
 
-      <div v-if="tplLoading" class="flex justify-center py-10">
-        <div class="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+      <div v-if="pbLoading" class="flex justify-center py-10">
+        <div class="w-8 h-8 border-4 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
       </div>
-      <div v-else-if="templates.length === 0" class="text-center py-16 text-gray-400">Шаблоны не добавлены</div>
-      <div v-else class="space-y-2">
-        <div v-for="t in templates" :key="t.id"
-          class="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3">
-          <div class="flex items-start justify-between gap-3">
-            <div class="flex-1 min-w-0">
-              <div class="flex flex-wrap items-center gap-2 mb-1">
-                <span class="font-medium text-gray-800 text-sm">{{ t.title }}</span>
-                <span :class="['px-2 py-0.5 rounded text-xs font-bold uppercase', mpBadgeCls[t.mp] || 'bg-gray-100 text-gray-500']">{{ t.mp }}</span>
-                <span v-if="t.auto_reply" class="text-xs bg-green-50 text-green-700 border border-green-200 rounded px-1.5">авто</span>
-                <span v-if="t.requires_confirmation" class="text-xs bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5">подтверждение</span>
+      <div v-else-if="pbThemes.length === 0" class="text-center py-16 text-gray-400">
+        Плейбук пуст.
+        <button @click="syncPlaybookFromChats" class="ml-1 text-sky-600 hover:underline">Скопировать из чатов</button>
+      </div>
+      <div v-else class="space-y-3">
+        <div v-for="th in pbThemes" :key="th.theme_key"
+          class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <button type="button" @click="toggleTheme(th.theme_key)"
+            class="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-medium text-gray-800 text-sm">{{ th.name }}</span>
+                <span class="text-[10px] uppercase tracking-wide text-gray-400">{{ th.theme_key }}</span>
+                <span class="text-xs text-gray-400">{{ (th.variants || []).length }} вар.</span>
               </div>
-              <p class="text-sm text-gray-500 line-clamp-2">{{ t.body }}</p>
             </div>
-            <div class="flex gap-2 shrink-0">
-              <button @click="openTplForm(t)" class="text-xs text-indigo-600 hover:underline">Ред.</button>
-              <button @click="deleteTpl(t.id)" class="text-xs text-red-500 hover:underline">Удалить</button>
+            <span class="text-gray-400 text-sm">{{ expandedThemes[th.theme_key] ? '▾' : '▸' }}</span>
+          </button>
+          <div v-if="expandedThemes[th.theme_key]" class="border-t border-gray-100 divide-y divide-gray-50">
+            <div v-for="v in th.variants" :key="v.id" class="px-4 py-3">
+              <div class="flex items-start justify-between gap-3 mb-1.5">
+                <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                  <span v-if="v.branch_label || v.branch_key" class="px-1.5 py-0.5 rounded bg-gray-100">
+                    {{ v.branch_label || v.branch_key || 'основной' }}
+                  </span>
+                  <span v-else class="px-1.5 py-0.5 rounded bg-gray-100">основной</span>
+                  <span v-if="v.mp" class="uppercase font-medium">{{ v.mp }}</span>
+                </div>
+                <div v-if="canEditQuestionTemplates" class="flex gap-2 shrink-0">
+                  <button @click="openVariantForm(v)" class="text-xs text-sky-600 hover:underline">Ред.</button>
+                  <button @click="deleteVariant(v.id)" class="text-xs text-red-500 hover:underline">Удалить</button>
+                </div>
+              </div>
+              <p class="text-sm text-gray-600 whitespace-pre-wrap leading-relaxed">{{ v.body }}</p>
             </div>
+            <div v-if="!(th.variants || []).length" class="px-4 py-3 text-sm text-gray-400">Нет вариантов</div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ АВТООТВЕТЫ ═══════════════════════════════════════════════════════ -->
+    <div v-if="activeSection === 'settings' && !isCsManager" class="max-w-3xl mx-auto px-4 py-6 space-y-4">
+      <div class="bg-white border border-gray-200 rounded-xl p-5">
+        <h2 class="font-semibold text-gray-800 mb-1">Автоответы на вопросы</h2>
+        <p class="text-sm text-gray-500 leading-relaxed mb-4">
+          В очереди шаблон подбирается классификатором по плейбуку вопросов (вкладка «Шаблоны»).
+          Автоотправка без проверки пока готовится — сейчас тексты подставляются в поле ответа.
+        </p>
+        <ul class="text-sm text-gray-600 space-y-2 list-disc pl-5">
+          <li>WB / ЯМ: ответ всегда публичный на карточке товара.</li>
+          <li>Личный ответ = чат с покупателем (не API вопросов).</li>
+          <li>Ozon в очереди вопросов пока нет (только отзывы/чаты).</li>
+          <li>Плейбук вопросов — отдельная копия чатового; можно править независимо.</li>
+        </ul>
+        <div class="mt-4 flex flex-wrap gap-3 text-xs">
+          <span class="px-2.5 py-1 rounded-full bg-sky-50 text-sky-700 border border-sky-200">
+            Тем: {{ pbThemes.length }}
+          </span>
+          <span class="px-2.5 py-1 rounded-full bg-slate-50 text-slate-600 border border-slate-200">
+            Вариантов: {{ pbVariantCount }}
+          </span>
         </div>
       </div>
     </div>
@@ -290,13 +390,18 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+import { usePermissionsStore } from '../stores/permissions'
 import { useToast } from '../composables/useToast'
-import { useCxTemplates } from '../composables/useCxTemplates'
 import { useCxQueueActions } from '../composables/useCxQueueActions'
 import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls } from '../utils/cx'
 
 const platformStore = usePlatformStore()
+const permissionsStore = usePermissionsStore()
 const currentMp = computed(() => platformStore.platform || 'all')
+const canEditQuestionTemplates = computed(() =>
+  ['admin', 'moderator'].includes(permissionsStore.role)
+)
+const isCsManager = computed(() => permissionsStore.role === 'cs_manager')
 
 const { toast, showToast } = useToast()
 
@@ -304,7 +409,13 @@ const { toast, showToast } = useToast()
 const sections = [
   { key: 'queue',     label: 'Очередь'  },
   { key: 'templates', label: 'Шаблоны'  },
+  { key: 'settings',  label: 'Автоответы' },
 ]
+const visibleSections = computed(() =>
+  isCsManager.value
+    ? sections.filter(s => s.key !== 'settings')
+    : sections
+)
 const activeSection = ref('queue')
 
 function switchSection(key) {
@@ -312,6 +423,7 @@ function switchSection(key) {
 }
 
 watch(currentMp, () => {
+  loadPlaybookTemplates()
   if (activeSection.value === 'queue') loadQueue()
 })
 
@@ -347,14 +459,288 @@ async function loadQueue() {
   try {
     const res = await apiFetch(`${BASE}/queue?mp=${currentMp.value}`)
     const data = await res.json()
-    queueItems.value = (data.items || []).map(i => ({ ...i, _reply: '' }))
+    queueItems.value = (data.items || []).map(i => ({
+      ...i,
+      _reply: '',
+      _suggest: null,
+      _suggestMiss: null,
+      _suggestLoading: false,
+      _suggestGenerating: false,
+    }))
     counts.value = data.counts || {}
+    // Автоподбор для первой страницы
+    suggestForPage()
   } catch {
     showToast('Ошибка загрузки очереди', 'error')
   } finally {
     queueLoading.value = false
   }
 }
+
+const BOT = '/api/v1/chat-bot'
+const QPB = '/api/v1/question-playbook'
+const PB  = '/api/v1/chat-playbook'
+const playbookTemplates = ref([])
+const pbThemes = ref([])
+const pbLoading = ref(false)
+const pbSyncing = ref(false)
+const tplFormOpen = ref(false)
+const editVariant = ref({})
+const expandedThemes = ref({})
+const replySignature = ref('')
+
+const pbVariantCount = computed(() =>
+  pbThemes.value.reduce((n, th) => n + ((th.variants || []).length), 0)
+)
+
+function replyRows(text) {
+  const lines = String(text || '').split('\n').length
+  const approx = Math.ceil(String(text || '').length / 72)
+  return Math.min(14, Math.max(4, Math.max(lines, approx) + 1))
+}
+
+function publishActionLabel(item) {
+  return item.mp === 'wb' ? 'Опубликовать на карточке' : 'Опубликовать ответ'
+}
+
+function moderationPublishLabel(item) {
+  return `Подтвердить и ${publishActionLabel(item).toLowerCase()}`
+}
+
+function publishHelp(item) {
+  return item.mp === 'wb'
+    ? 'Ответ будет виден всем покупателям в Q&A на карточке товара.'
+    : 'Ответ публикуется на карточке товара.'
+}
+
+function normalizeBody(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim()
+}
+
+function withSignature(body) {
+  const text = String(body || '').trim()
+  const sig = (replySignature.value || '').trim()
+  if (!text || !sig) return text
+  if (text.includes(sig) || /команда\s+видовито/i.test(text)) return text
+  return `${text}\n\n${sig}`
+}
+
+function isChipActive(item, t) {
+  const reply = normalizeBody(item._reply)
+  if (!reply) return false
+  const body = normalizeBody(t.body)
+  return reply.includes(body.slice(0, Math.min(60, body.length))) || body.includes(reply.slice(0, 60))
+}
+
+function applyChip(item, t) {
+  item._reply = withSignature(t.body || '')
+  item._chipId = t.id
+}
+
+async function loadSignature() {
+  try {
+    const r = await apiFetch(PB)
+    const d = await r.json()
+    const row = (d.settings || []).find(s => s.key === 'signature')
+    replySignature.value = (row?.value || '').trim()
+  } catch {
+    replySignature.value = ''
+  }
+}
+
+function chipsFor(item) {
+  const fromPb = (playbookTemplates.value || []).filter(t =>
+    t.mp === 'all' || !t.mp || t.mp === item.mp
+  )
+  const theme = item._suggest?.theme
+  const ordered = [...fromPb].sort((a, b) => {
+    if (theme && a.theme_key === theme) return -1
+    if (theme && b.theme_key === theme) return 1
+    return 0
+  })
+  const seen = new Set()
+  return ordered.filter(t => {
+    const k = t.id || t.title
+    if (seen.has(k)) return false
+    seen.add(k)
+    return true
+  }).slice(0, 12)
+}
+
+async function loadPlaybookTemplates() {
+  try {
+    const mp = currentMp.value === 'all' ? 'all' : currentMp.value
+    const r = await apiFetch(`${BOT}/question-templates?mp=${mp}`)
+    const d = await r.json()
+    playbookTemplates.value = d.templates || []
+  } catch {
+    playbookTemplates.value = []
+  }
+}
+
+async function loadQuestionPlaybook() {
+  pbLoading.value = true
+  try {
+    const r = await apiFetch(QPB)
+    const d = await r.json()
+    pbThemes.value = d.themes || []
+    if (!Object.keys(expandedThemes.value).length && pbThemes.value[0]) {
+      expandedThemes.value = { [pbThemes.value[0].theme_key]: true }
+    }
+  } catch {
+    pbThemes.value = []
+    showToast('Не удалось загрузить плейбук вопросов', 'error')
+  } finally {
+    pbLoading.value = false
+  }
+}
+
+function toggleTheme(key) {
+  expandedThemes.value = {
+    ...expandedThemes.value,
+    [key]: !expandedThemes.value[key],
+  }
+}
+
+function openVariantForm(v = null) {
+  if (v) {
+    editVariant.value = { ...v }
+  } else {
+    editVariant.value = {
+      theme_key: pbThemes.value[0]?.theme_key || 'nekomplekt',
+      branch_key: '',
+      branch_label: '',
+      body: '',
+      mp: '',
+      active: true,
+    }
+  }
+  tplFormOpen.value = true
+}
+
+async function saveVariant() {
+  const v = editVariant.value
+  if (!v.body?.trim()) {
+    showToast('Введите текст шаблона', 'error')
+    return
+  }
+  try {
+    if (v.id) {
+      await apiFetch(`${QPB}/variants/${v.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          body: v.body,
+          branch_label: v.branch_label || '',
+          mp: v.mp || '',
+          theme_key: v.theme_key,
+          active: v.active !== false,
+        }),
+      })
+    } else {
+      await apiFetch(`${QPB}/variants`, {
+        method: 'POST',
+        body: JSON.stringify({
+          theme_key: v.theme_key,
+          branch_key: v.branch_key || '',
+          branch_label: v.branch_label || '',
+          body: v.body,
+          mp: v.mp || '',
+          active: true,
+        }),
+      })
+    }
+    tplFormOpen.value = false
+    await Promise.all([loadQuestionPlaybook(), loadPlaybookTemplates()])
+    showToast('Шаблон сохранён', 'ok')
+  } catch {
+    showToast('Ошибка сохранения', 'error')
+  }
+}
+
+async function deleteVariant(id) {
+  if (!confirm('Удалить вариант?')) return
+  try {
+    await apiFetch(`${QPB}/variants/${id}`, { method: 'DELETE' })
+    await Promise.all([loadQuestionPlaybook(), loadPlaybookTemplates()])
+    showToast('Удалено', 'ok')
+  } catch {
+    showToast('Ошибка удаления', 'error')
+  }
+}
+
+async function syncPlaybookFromChats() {
+  pbSyncing.value = true
+  try {
+    const r = await apiFetch(`${QPB}/sync-from-chats`, { method: 'POST' })
+    const d = await r.json()
+    await Promise.all([loadQuestionPlaybook(), loadPlaybookTemplates()])
+    showToast(
+      `Добавлено: тем ${d.added_themes || 0}, вариантов ${d.added_variants || 0}`,
+      'ok',
+    )
+  } catch {
+    showToast('Не удалось синхронизировать', 'error')
+  } finally {
+    pbSyncing.value = false
+  }
+}
+
+async function suggestOne(item, { forceAi = false } = {}) {
+  const text = (item.body || '').trim()
+  if (!text) return
+  if (forceAi) item._suggestGenerating = true
+  else item._suggestLoading = true
+  try {
+    const r = await apiFetch(`${BOT}/suggest-question`, {
+      method: 'POST',
+      body: JSON.stringify({
+        text,
+        mp: item.mp || 'wb',
+        article: item.sku || '',
+        nm_id: item.nm_id ? Number(item.nm_id) : null,
+        force_ai: forceAi,
+      }),
+    })
+    const d = await r.json()
+    if (d?.reply_text) {
+      item._suggest = d
+      item._suggestMiss = null
+      if (!item._reply?.trim() || forceAi) item._reply = String(d.reply_text).replace(/^\s+/, '')
+    } else {
+      item._suggest = null
+      item._suggestMiss = {
+        reason: d?.reason || 'Нет подходящего шаблона',
+        can_generate: d?.can_generate !== false,
+      }
+    }
+  } catch {
+    item._suggestMiss = { reason: 'Ошибка подбора шаблона', can_generate: true }
+  } finally {
+    item._suggestLoading = false
+    item._suggestGenerating = false
+  }
+}
+
+function suggestForPage() {
+  const list = pagedItems.value || []
+  const chunk = list.slice(0, 8)
+  chunk.forEach(item => {
+    if (item._suggest || item._suggestMiss || item._suggestLoading) return
+    suggestOne(item)
+  })
+}
+
+function generateSuggest(item) {
+  return suggestOne(item, { forceAi: true })
+}
+
+watch([currentPage, perPage], () => {
+  suggestForPage()
+})
+
+watch(activeSection, (s) => {
+  if (s === 'templates' && !pbThemes.value.length) loadQuestionPlaybook()
+})
 
 // ── Отправка / модерация / dismiss (общая логика — см. composables/useCxQueueActions) ──
 function replyEndpoint(item) {
@@ -369,15 +755,9 @@ function replyEndpoint(item) {
 const { sendReply: _sendReply, confirmMod, rejectMod, dismissItem } = useCxQueueActions(queueItems, showToast)
 function sendReply(item) { return _sendReply(item, replyEndpoint) }
 
-// ── Шаблоны (общая логика — см. composables/useCxTemplates) ─────────────────
-const {
-  templates, tplLoading, tplFormOpen, editTpl,
-  loadTemplates, openTplForm, saveTpl, deleteTpl, relevantTemplates,
-} = useCxTemplates('question', showToast)
-
 // ── Init ───────────────────────────────────────────────────────────────────
 onMounted(async () => {
-  await Promise.all([loadQueue(), loadTemplates()])
+  await Promise.all([loadQueue(), loadPlaybookTemplates(), loadQuestionPlaybook(), loadSignature()])
 })
 </script>
 

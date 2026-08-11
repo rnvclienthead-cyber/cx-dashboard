@@ -9,7 +9,8 @@
         <h2 class="font-semibold text-gray-800">Шаблоны ответов</h2>
         <p class="text-xs text-gray-500 mt-0.5">
           Ответ собирается по формуле <b>Приветствие + Эмпатия + Решение + Энергия + Прощание</b>.
-          Структура вшита; можно править текст вариантов и включать/выключать их.
+          <template v-if="readOnly"> Только просмотр.</template>
+          <template v-else> Структура вшита; можно править текст вариантов и включать/выключать их.</template>
         </p>
       </div>
 
@@ -46,11 +47,12 @@
               <div class="flex items-center justify-between mb-2">
                 <span class="text-xs font-medium text-gray-500">Вариант {{ i + 1 }}</span>
                 <div class="flex items-center gap-3">
-                  <label class="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                  <label v-if="!readOnly" class="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
                     <input type="checkbox" v-model="v.active" @change="saveVariant(v)" class="w-3.5 h-3.5 rounded accent-emerald-600" />
                     активен
                   </label>
-                  <button @click="saveVariant(v)" :disabled="!v._dirty"
+                  <span v-else class="text-xs text-gray-400">{{ v.active ? 'активен' : 'выкл' }}</span>
+                  <button v-if="!readOnly" @click="saveVariant(v)" :disabled="!v._dirty"
                     :class="['text-xs font-medium', v._dirty ? 'text-indigo-600 hover:underline' : 'text-gray-300']">
                     Сохранить
                   </button>
@@ -58,10 +60,13 @@
               </div>
               <div class="space-y-1.5">
                 <textarea v-model="v.empathy" @input="v._dirty = true" rows="2" placeholder="Эмпатия"
+                  :readonly="readOnly"
                   class="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs resize-y focus:outline-none focus:ring-1 focus:ring-green-400"></textarea>
                 <textarea v-model="v.solution" @input="v._dirty = true" rows="2" placeholder="Решение"
+                  :readonly="readOnly"
                   class="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs resize-y focus:outline-none focus:ring-1 focus:ring-blue-400"></textarea>
                 <textarea v-model="v.energy" @input="v._dirty = true" rows="2" placeholder="Энергия"
+                  :readonly="readOnly"
                   class="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs resize-y focus:outline-none focus:ring-1 focus:ring-rose-400"></textarea>
               </div>
             </div>
@@ -77,7 +82,8 @@
           <div class="space-y-2">
             <div v-for="p in block.items" :key="p.id" class="flex items-start gap-2">
               <span class="text-xs text-gray-400 mt-2 shrink-0">{{ p.variant_no }}</span>
-              <textarea v-model="p.text" @blur="savePhrase(p)" rows="2"
+              <textarea v-model="p.text" @blur="!readOnly && savePhrase(p)" rows="2"
+                :readonly="readOnly"
                 class="flex-1 border border-gray-200 rounded-lg px-2 py-1.5 text-xs resize-y focus:outline-none focus:ring-1 focus:ring-indigo-400"></textarea>
             </div>
           </div>
@@ -95,6 +101,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { apiFetch } from '../api'
+
+const props = defineProps({
+  readOnly: { type: Boolean, default: false },
+})
 
 const loading = ref(true)
 const groups  = ref([])

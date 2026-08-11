@@ -346,9 +346,7 @@ def calculate_cost_by_city_code(city_code: int, tariff_code: Optional[int] = Non
         "packages":      packages,
     }
     try:
-        r = _req.post(f"{CDEK_BASE}/calculator/tariff", json=payload, headers=_h(), timeout=10)
-        if r.status_code == 403:
-            r = _req.post(f"{CDEK_BASE}/calculator/tariff", json=payload, headers=_get_fresh_h(), timeout=10)
+        r = _api_post(f"{CDEK_BASE}/calculator/tariff", json=payload, timeout=10)
         if r.status_code == 200:
             d = r.json() or {}
             total = float(d.get("total_sum") or d.get("delivery_sum") or 0)
@@ -359,14 +357,13 @@ def calculate_cost_by_city_code(city_code: int, tariff_code: Optional[int] = Non
 
     # Fallback: любой доступный склад-склад
     try:
-        r = _req.post(
+        r = _api_post(
             f"{CDEK_BASE}/calculator/tarifflist",
             json={
                 "from_location": {"code": FROM_CITY_CODE},
                 "to_location":   {"code": city_code},
                 "packages":      packages,
             },
-            headers=_h(),
             timeout=15,
         )
         if r.status_code != 200:
@@ -392,10 +389,12 @@ def _pvz_to_city_code(pvz_code: str) -> int:
     """Получить city_code для ПВЗ (нужен калькулятору стоимости)."""
     if pvz_code in _pvz_city_cache:
         return _pvz_city_cache[pvz_code]
-    # Получаем список офисов с таким кодом, берём почтовый индекс, ищем город
-    r = _req.get(f"{CDEK_BASE}/deliverypoints", params={"code": pvz_code}, headers=_h(), timeout=10)
-    r.raise_for_status()
-    points = r.json() or []
+    # _api_get автоматически обновляет токен при 403
+    points = _api_get(
+        f"{CDEK_BASE}/deliverypoints",
+        params={"code": pvz_code},
+        timeout=10,
+    ).json() or []
     if points:
         loc = points[0].get("location", {})
         city_code = loc.get("city_code") or loc.get("code")
@@ -413,8 +412,7 @@ def get_tariff_options(to_pvz_code: str) -> list[dict]:
         "to_location":   {"code": to_city_code},
         "packages": [{"weight": PACKAGE_WEIGHT, "length": PACKAGE_LENGTH, "width": PACKAGE_WIDTH, "height": PACKAGE_HEIGHT}],
     }
-    r = _req.post(f"{CDEK_BASE}/calculator/tarifflist", json=payload, headers=_h(), timeout=15)
-    r.raise_for_status()
+    r = _api_post(f"{CDEK_BASE}/calculator/tarifflist", json=payload, timeout=15)
     tariffs = r.json().get("tariff_codes", [])
     # Только тарифы склад-склад (delivery_point = ПВЗ, а не постамат/дверь)
     valid = [
@@ -439,6 +437,18 @@ def get_tariff_options(to_pvz_code: str) -> list[dict]:
     return result
 
 
+def calculate_cost_for_pvz(to_pvz_code: str, tariff_code: Optional[int] = None) -> float:
+    """Стоимость доставки до конкретного ПВЗ (по city_code точки), не по названию села клиента.
+
+    Важно: calculate_cost_by_city('Звягинки') даёт цену «до деревни» (~1000₽),
+    а заказ создаётся в ПВЗ Орла ORL4 (~390₽). Для одобрения/пересчёта всегда
+    считаем по коду ПВЗ.
+    """
+    if not to_pvz_code:
+        return 0.0
+    return calculate_cost_by_city_code(_pvz_to_city_code(to_pvz_code), tariff_code=tariff_code)
+
+
 def calculate_cost(to_pvz_code: str) -> float:
     """Возвращает стоимость доставки (руб.) до ПВЗ клиента. Тариф 483: склад→склад."""
     to_city_code = _pvz_to_city_code(to_pvz_code)
@@ -453,8 +463,7 @@ def calculate_cost(to_pvz_code: str) -> float:
             "height": PACKAGE_HEIGHT,
         }],
     }
-    r = _req.post(f"{CDEK_BASE}/calculator/tariff", json=payload, headers=_h(), timeout=10)
-    r.raise_for_status()
+    r = _api_post(f"{CDEK_BASE}/calculator/tariff", json=payload, timeout=10)
     data = r.json()
     return float(data.get("delivery_sum") or data.get("total_sum") or 0)
 
@@ -510,8 +519,8 @@ def create_order(
             }],
         }],
     }
-    r = _req.post(f"{CDEK_BASE}/orders", json=payload, headers=_h(), timeout=15)
-    r.raise_for_status()
+    r = _api_post(f"{CDEK_BASE}/orders", json=payload, timeout=15)
+
     data = r.json()
     entity = data.get("entity") or {}
     return {
@@ -524,8 +533,7 @@ def create_order(
 # ── Получить заказ по UUID (для получения cdek_number) ────────────────────────
 
 def get_order_by_uuid(uuid: str) -> dict:
-    r = _req.get(f"{CDEK_BASE}/orders/{uuid}", headers=_h(), timeout=10)
-    r.raise_for_status()
+    r = _api_get(f"{CDEK_BASE}/orders/{uuid}", params={}, timeout=10)
     data = r.json()
     entity = data.get("entity") or {}
     detail = entity.get("delivery_detail") or {}
@@ -544,13 +552,7 @@ def get_order_by_uuid(uuid: str) -> dict:
 
 def register_webhook(url: str) -> dict:
     """Регистрирует webhook для статусов заказа."""
-    r = _req.post(
-        f"{CDEK_BASE}/webhooks",
-        json={"url": url, "type": "ORDER_STATUS"},
-        headers=_h(),
-        timeout=10,
-    )
-    r.raise_for_status()
+    r = _api_post(f"{CDEK_BASE}/webhooks", json={"url": url, "type": "ORDER_STATUS"}, timeout=10)
     return r.json()
 
 

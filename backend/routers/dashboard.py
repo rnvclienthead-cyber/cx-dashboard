@@ -23,6 +23,302 @@ def _prev_month(dt: datetime) -> datetime:
     return dt.replace(year=year, month=month, day=min(dt.day, last_day))
 
 
+_PROBLEM_CATEGORIES = {
+    1: "Некомплект: Фурнитура",
+    2: "Некомплект: Несущие детали",
+    3: "Состояние упаковки",
+    4: "Производственный дефект",
+    5: "Механические повреждения",
+    6: "Инструкция и сборка",
+    7: "Хлипкость / Устойчивость",
+    8: "Пересорт / Ошибка склада",
+    9: "Качество материалов",
+    10: "Габариты и Размер",
+    11: "Несоответствие описанию",
+    12: "Субъективное 'Не подошло'",
+    13: "Следы использования / Б/У",
+}
+
+_WB_NOT_PLAIN_REFUSAL = """(
+    LOWER(TRIM(COALESCE(status::text, ''))) != 'отказ'
+    OR COALESCE(status_ex, '') ILIKE '%доотправк%'
+    OR EXISTS (
+        SELECT 1 FROM reshipment_requests r
+        WHERE r.matched_srid IS NOT NULL AND TRIM(r.matched_srid) <> ''
+          AND LOWER(TRIM(r.matched_srid)) = LOWER(TRIM(wb_claims.srid))
+    )
+)"""
+
+
+def _score_problem_sku(defects: int, orders: int, cost, rating) -> dict:
+    """Частота на 1000 заказов + индекс проблемы 0–100 + зона."""
+    rate = round(defects / orders * 1000, 1) if orders and orders > 0 else None
+
+    if rate is None:
+        f_norm = min(100.0, defects / 30 * 100)  # без заказов опираемся на объём
+    else:
+        f_norm = min(100.0, rate / 40 * 100)
+
+    v_norm = min(100.0, defects / 30 * 100)
+
+    if cost is not None and cost > 0:
+        money_norm = min(100.0, (defects * float(cost)) / 50000 * 100)
+    else:
+        money_norm = v_norm
+
+    if rating is None:
+        r_norm = 25.0
+    elif rating >= 4.7:
+        r_norm = 0.0
+    else:
+        r_norm = max(0.0, (4.7 - float(rating)) / 3.7 * 100)
+
+    index = int(round(0.40 * f_norm + 0.25 * v_norm + 0.25 * money_norm + 0.10 * r_norm))
+    index = max(0, min(100, index))
+    if index < 30:
+        zone = "low"
+    elif index <= 60:
+        zone = "mid"
+    else:
+        zone = "high"
+
+    return {
+        "rate_per_1000": rate,
+        "problem_index": index,
+        "problem_zone": zone,
+    }
+
+
+def _enrich_skus(conn, params: dict, platform: str, sku_list: list) -> dict:
+    """Рейтинг / заказы / себестоимость для списка артикулов."""
+    enrich = {s: {"rating": None, "orders": 0, "cost": None} for s in sku_list}
+    if not sku_list:
+        return enrich
+
+    sku_params = {f"sku_{i}": s for i, s in enumerate(sku_list)}
+    sku_in = ", ".join(f":sku_{i}" for i in range(len(sku_list)))
+
+    try:
+        cogs_rows = conn.execute(text(f"""
+            SELECT DISTINCT ON (TRIM(supplier_article))
+                TRIM(supplier_article) AS sku, cost_value
+            FROM wb_cogs
+            WHERE cost_value > 0
+              AND TRIM(supplier_article) IN ({sku_in})
+            ORDER BY TRIM(supplier_article), id DESC
+        """), sku_params).mappings().all()
+        for r in cogs_rows:
+            enrich[r["sku"]]["cost"] = round(float(r["cost_value"] or 0), 1)
+    except Exception:
+        pass
+
+    if platform in ("wb", "all"):
+        try:
+            rating_rows = conn.execute(text(f"""
+                SELECT TRIM(supplier_article) AS sku, average_rating
+                FROM wb_ratings_totals
+                WHERE TRIM(supplier_article) IN ({sku_in})
+            """), sku_params).mappings().all()
+            for r in rating_rows:
+                if r["average_rating"] is not None:
+                    enrich[r["sku"]]["rating"] = round(float(r["average_rating"]), 2)
+        except Exception:
+            pass
+
+        try:
+            order_rows = conn.execute(text(f"""
+                SELECT TRIM(supplier_article) AS sku, COUNT(*) AS cnt
+                FROM wb_orders
+                WHERE dt >= :start AND dt <= :end AND cancel_dt IS NULL
+                  AND TRIM(supplier_article) IN ({sku_in})
+                GROUP BY TRIM(supplier_article)
+            """), {**params, **sku_params}).mappings().all()
+            for r in order_rows:
+                enrich[r["sku"]]["orders"] = enrich[r["sku"]].get("orders", 0) + int(r["cnt"] or 0)
+        except Exception:
+            pass
+
+    if platform in ("ym", "all"):
+        try:
+            ym_rating_rows = conn.execute(text(f"""
+                SELECT TRIM(supplier_article) AS sku,
+                       ROUND(AVG(valuation)::numeric, 2) AS average_rating
+                FROM ym_feedbacks
+                WHERE valuation IS NOT NULL
+                  AND TRIM(supplier_article) IN ({sku_in})
+                GROUP BY TRIM(supplier_article)
+            """), sku_params).mappings().all()
+            for r in ym_rating_rows:
+                if enrich[r["sku"]]["rating"] is None and r["average_rating"] is not None:
+                    enrich[r["sku"]]["rating"] = float(r["average_rating"])
+        except Exception:
+            pass
+
+        try:
+            ym_order_rows = conn.execute(text(f"""
+                SELECT TRIM(supplier_article) AS sku, COUNT(*) AS cnt
+                FROM ym_orders
+                WHERE created_at >= :start AND created_at <= :end
+                  AND status NOT IN ('CANCELLED', 'RETURNED')
+                  AND TRIM(supplier_article) IN ({sku_in})
+                GROUP BY TRIM(supplier_article)
+            """), {**params, **sku_params}).mappings().all()
+            for r in ym_order_rows:
+                enrich[r["sku"]]["orders"] = enrich[r["sku"]].get("orders", 0) + int(r["cnt"] or 0)
+        except Exception:
+            pass
+
+    return enrich
+
+
+_CAT_ANY_FILTER = (
+    "(cat_1 OR cat_2 OR cat_3 OR cat_4 OR cat_5 OR cat_6 OR cat_7 "
+    "OR cat_8 OR cat_9 OR cat_10 OR cat_11 OR cat_12 OR cat_13)"
+)
+
+
+def _build_top_sku_by_problem(conn, params: dict, platform: str) -> tuple[list, list]:
+    """
+    Возвращает (by_type, overall):
+    - by_type: топ-5 SKU по каждому типу (без индекса)
+    - overall: топ SKU по всем проблемам сразу с частотой и индексом
+
+    Ускорение: обогащаем (рейтинг/заказы/COGS) только кандидатов топа,
+    а не все артикулы с проблемами — иначе дашборд отвечает ~20с и фильтр периода «зависает».
+    """
+    cat_counts: dict[int, dict[str, int]] = {i: {} for i in range(1, 14)}
+    overall_counts: dict[str, int] = {}
+
+    cat_sum_exprs = ",\n".join(
+        f"SUM(CASE WHEN cat_{i} THEN 1 ELSE 0 END) AS c{i}" for i in range(1, 14)
+    )
+    overall_expr = f"COUNT(*) FILTER (WHERE {_CAT_ANY_FILTER}) AS overall_defects"
+
+    if platform in ("wb", "all"):
+        rows = conn.execute(text(f"""
+            SELECT TRIM(supplier_article) AS sku,
+                   {overall_expr},
+                   {cat_sum_exprs}
+            FROM wb_claims
+            WHERE created_dt >= :start AND created_dt <= :end
+              AND {_WB_NOT_PLAIN_REFUSAL}
+              AND supplier_article IS NOT NULL
+              AND TRIM(supplier_article) NOT IN ('', 'Без артикула')
+            GROUP BY TRIM(supplier_article)
+        """), params).mappings().all()
+        for row in rows:
+            sku = row["sku"]
+            ov = int(row["overall_defects"] or 0)
+            if ov > 0:
+                overall_counts[sku] = overall_counts.get(sku, 0) + ov
+            for i in range(1, 14):
+                cnt = int(row[f"c{i}"] or 0)
+                if cnt > 0:
+                    cat_counts[i][sku] = cat_counts[i].get(sku, 0) + cnt
+
+    if platform in ("ym", "all"):
+        rows = conn.execute(text(f"""
+            SELECT TRIM(supplier_article) AS sku,
+                   {overall_expr},
+                   {cat_sum_exprs}
+            FROM ym_returns
+            WHERE created_at >= :start AND created_at <= :end
+              AND supplier_article IS NOT NULL
+              AND TRIM(supplier_article) NOT IN ('', 'Без артикула')
+            GROUP BY TRIM(supplier_article)
+        """), params).mappings().all()
+        for row in rows:
+            sku = row["sku"]
+            ov = int(row["overall_defects"] or 0)
+            if ov > 0:
+                overall_counts[sku] = overall_counts.get(sku, 0) + ov
+            for i in range(1, 14):
+                cnt = int(row[f"c{i}"] or 0)
+                if cnt > 0:
+                    cat_counts[i][sku] = cat_counts[i].get(sku, 0) + cnt
+
+    if not overall_counts and not any(cat_counts.values()):
+        return [], []
+
+    # Кандидаты для обогащения: топ-5 по каждому типу + топ-50 по всем проблемам
+    enrich_skus: set[str] = set()
+    by_type_ranked: dict[int, list] = {}
+    for cat_id in range(1, 14):
+        sku_map = cat_counts[cat_id]
+        if not sku_map:
+            continue
+        ranked = sorted(sku_map.items(), key=lambda x: (-x[1], x[0]))[:5]
+        by_type_ranked[cat_id] = ranked
+        for sku, _ in ranked:
+            enrich_skus.add(sku)
+
+    overall_candidates = sorted(overall_counts.items(), key=lambda x: (-x[1], x[0]))[:50]
+    for sku, _ in overall_candidates:
+        enrich_skus.add(sku)
+
+    enrich = _enrich_skus(conn, params, platform, sorted(enrich_skus))
+
+    # --- По типам: топ-5 по числу проблем, без индекса ---
+    by_type = []
+    for cat_id, name in _PROBLEM_CATEGORIES.items():
+        sku_map = cat_counts[cat_id]
+        total = sum(sku_map.values())
+        if total == 0:
+            continue
+        ranked = by_type_ranked.get(cat_id) or []
+        skus = []
+        for sku, cnt in ranked:
+            e = enrich.get(sku, {})
+            skus.append({
+                "sku": sku,
+                "defects": cnt,
+                "share_pct": round(cnt / total * 100, 1) if total else 0,
+                "rating": e.get("rating"),
+                "orders": e.get("orders") or 0,
+                "cost": e.get("cost"),
+            })
+        by_type.append({
+            "cat_id": cat_id,
+            "cat_name": name,
+            "total": total,
+            "skus": skus,
+        })
+
+    # --- Сводка по всем проблемам: частота + индекс ---
+    top_cat_by_sku: dict[str, tuple[int, str, int]] = {}
+    for cat_id, name in _PROBLEM_CATEGORIES.items():
+        for sku, cnt in cat_counts[cat_id].items():
+            if sku not in enrich_skus:
+                continue
+            prev = top_cat_by_sku.get(sku)
+            if prev is None or cnt > prev[2]:
+                top_cat_by_sku[sku] = (cat_id, name, cnt)
+
+    overall_total = sum(overall_counts.values())
+    overall = []
+    for sku, cnt in overall_candidates:
+        e = enrich.get(sku, {})
+        orders = e.get("orders") or 0
+        cost = e.get("cost")
+        rating = e.get("rating")
+        metrics = _score_problem_sku(cnt, orders, cost, rating)
+        lead = top_cat_by_sku.get(sku)
+        overall.append({
+            "sku": sku,
+            "defects": cnt,
+            "share_pct": round(cnt / overall_total * 100, 1) if overall_total else 0,
+            "rating": rating,
+            "orders": orders,
+            "cost": cost,
+            "top_cat_id": lead[0] if lead else None,
+            "top_cat_name": lead[1] if lead else None,
+            **metrics,
+        })
+
+    overall.sort(key=lambda x: (-x["problem_index"], -x["defects"], x["sku"]))
+    return by_type, overall[:20]
+
+
 _WB_CLAIMS_SQL = text("""
     WITH log_costs AS (
         SELECT
@@ -375,7 +671,6 @@ def get_executive_summary(
             "avg_benefit_vs_v1": 0,
             "avg_benefit_vs_v2": 0,
             "avg_return_delivery": 372,
-            "prev_month": None,
         }
         # Формула фактической стоимости доставки (у Яндекс-заявок cdek_cost — лишь оценка-кандидат):
         # delivery_method='yandex' → shipping_cost (подтверждённая) или yandex_cost (оценка)
@@ -388,30 +683,49 @@ def get_executive_summary(
         """
         try:
             with db.bind.connect() as conn:
+                # Воронка доотправок — строго в выбранном периоде дашборда
                 row = conn.execute(text(f"""
                     SELECT
-                        COUNT(*) AS sent,
-                        (SELECT COUNT(*) FROM reshipment_requests) AS form_submitted,
-                        (SELECT COUNT(*) FROM reshipment_requests WHERE status NOT IN ('new', 'rejected')) AS approved,
-                        (SELECT COUNT(*) FROM reshipment_requests WHERE status NOT IN ('new', 'rejected')
-                            AND (delivery_method = 'cdek' OR delivery_method IS NULL)) AS approved_wb,
-                        (SELECT COALESCE(SUM(COALESCE(cdek_cost, 0)), 0) FROM reshipment_requests
-                            WHERE status NOT IN ('new', 'rejected')
-                            AND (delivery_method = 'cdek' OR delivery_method IS NULL)) AS approved_wb_cost,
-                        (SELECT COUNT(*) FROM reshipment_requests WHERE status NOT IN ('new', 'rejected')
-                            AND delivery_method = 'yandex') AS approved_yandex,
-                        (SELECT COALESCE(SUM(COALESCE(shipping_cost, yandex_cost, 0)), 0) FROM reshipment_requests
-                            WHERE status NOT IN ('new', 'rejected')
-                            AND delivery_method = 'yandex') AS approved_yandex_cost,
+                        (SELECT COUNT(*) FROM wb_chat_pending
+                            WHERE created_at >= :start AND created_at <= :end) AS sent,
                         (SELECT COUNT(*) FROM reshipment_requests
-                            WHERE status IN ('packed', 'ready_for_pickup', 'in_transit', 'shipped', 'delivered', 'returned')) AS shipped,
-                        (SELECT COUNT(*) FROM reshipment_requests WHERE status = 'delivered') AS delivered,
+                            WHERE created_at >= :start AND created_at <= :end) AS form_submitted,
+                        (SELECT COUNT(*) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')) AS approved,
+                        (SELECT COUNT(*) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')
+                              AND (delivery_method = 'cdek' OR delivery_method IS NULL)) AS approved_wb,
+                        (SELECT COALESCE(SUM(COALESCE(cdek_cost, 0)), 0) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')
+                              AND (delivery_method = 'cdek' OR delivery_method IS NULL)) AS approved_wb_cost,
+                        (SELECT COUNT(*) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')
+                              AND delivery_method = 'yandex') AS approved_yandex,
+                        (SELECT COALESCE(SUM(COALESCE(shipping_cost, yandex_cost, 0)), 0) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')
+                              AND delivery_method = 'yandex') AS approved_yandex_cost,
+                        (SELECT COUNT(*) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status IN ('packed', 'ready_for_pickup', 'in_transit', 'shipped', 'delivered', 'returned')) AS shipped,
+                        (SELECT COUNT(*) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status = 'delivered') AS delivered,
                         (SELECT COALESCE(SUM({_delivery_cost_expr}), 0)
-                            FROM reshipment_requests WHERE status NOT IN ('new', 'rejected')) AS total_cost,
-                        (SELECT COUNT(DISTINCT request_id) FROM wb_feedback_snapshots
-                            WHERE snapshot_type = 'after' AND request_id IS NOT NULL) AS reviews_left
-                    FROM wb_chat_pending
-                """)).fetchone()
+                            FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')) AS total_cost,
+                        (SELECT COUNT(DISTINCT s.request_id)
+                            FROM wb_feedback_snapshots s
+                            JOIN reshipment_requests r ON r.id = s.request_id
+                            WHERE s.snapshot_type = 'after'
+                              AND s.request_id IS NOT NULL
+                              AND r.created_at >= :start AND r.created_at <= :end) AS reviews_left
+                """), params).fetchone()
                 if row:
                     reshipment_funnel.update({
                         "sent":                int(row[0] or 0),
@@ -434,7 +748,7 @@ def get_executive_summary(
                 """)).fetchone()
                 avg_ret_global = float(avg_ret_row[0] or 372.0)
 
-                def _eco_query(month_filter=""):
+                def _eco_query(date_filter=""):
                     """Агрегатная экономика по одобренным заявкам с фильтром по дате."""
                     return conn.execute(text(f"""
                         WITH approved AS (
@@ -442,7 +756,7 @@ def get_executive_summary(
                                    {_delivery_cost_expr} AS delivery_cost
                             FROM reshipment_requests r
                             WHERE r.status NOT IN ('new', 'rejected')
-                            {month_filter}
+                            {date_filter}
                         ),
                         sale_data AS (
                             SELECT DISTINCT ON (a.id) a.id,
@@ -519,7 +833,7 @@ def get_executive_summary(
                             COALESCE(SUM(delivery_cost), 0)                      AS total_delivery_cost,
                             COALESCE(SUM(cog + acq_return + rebill + penalty), 0) AS loss_if_return_v1
                         FROM per_req
-                    """)).fetchone()
+                    """), params).fetchone()
 
                 def _parse_eco(row, avg_ret):
                     if not row:
@@ -554,57 +868,12 @@ def get_executive_summary(
                         "avg_return_delivery":   round(avg_ret),
                     }
 
-                eco_all  = _parse_eco(_eco_query(), avg_ret_global)
-                eco_prev = _parse_eco(
-                    _eco_query("AND DATE_TRUNC('month', r.created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')"),
+                eco_period = _parse_eco(
+                    _eco_query("AND r.created_at >= :start AND r.created_at <= :end"),
                     avg_ret_global
                 )
-                if eco_all:
-                    reshipment_economics.update(eco_all)
-                if eco_prev:
-                    reshipment_economics["prev_month"] = eco_prev
-
-                # Все возвраты прошлого месяца из финотчёта WB (независимо от модуля доотправок)
-                try:
-                    pmr_row = conn.execute(text("""
-                        WITH prev_ret AS (
-                            SELECT srid, acquiring_fee, retail_amount
-                            FROM wb_report_detail
-                            WHERE doc_type_name = 'Возврат'
-                            AND DATE_TRUNC('month', rr_dt) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-                        ),
-                        prev_logistic AS (
-                            SELECT COALESCE(SUM(delivery_rub), 0) AS total_del
-                            FROM wb_report_detail
-                            WHERE srid LIKE 'mp.%.r' AND doc_type_name = '' AND delivery_rub > 0
-                            AND DATE_TRUNC('month', rr_dt) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-                        )
-                        SELECT
-                            COUNT(r.srid)               AS returns_count,
-                            ROUND(SUM(r.acquiring_fee)) AS total_acquiring,
-                            ROUND(SUM(r.retail_amount)) AS total_retail,
-                            pl.total_del                AS ret_logistics_from_report
-                        FROM prev_ret r
-                        CROSS JOIN prev_logistic pl
-                        GROUP BY pl.total_del
-                    """)).fetchone()
-                    if pmr_row:
-                        ret_cnt = int(pmr_row[0] or 0)
-                        acq     = round(float(pmr_row[1] or 0))
-                        retail  = round(float(pmr_row[2] or 0))
-                        ret_log_report = round(float(pmr_row[3] or 0))
-                        ret_log_est = round(avg_ret_global * ret_cnt)
-                        reshipment_economics["prev_month_all_returns"] = {
-                            "returns_count":            ret_cnt,
-                            "total_acquiring":          acq,
-                            "total_retail_reversed":    retail,
-                            "ret_logistics_from_report": ret_log_report,
-                            "ret_logistics_estimated":  ret_log_est,
-                            "total_loss_estimated":     acq + ret_log_est,
-                            "avg_return_delivery":      round(avg_ret_global),
-                        }
-                except Exception:
-                    pass
+                if eco_period:
+                    reshipment_economics.update(eco_period)
         except Exception:
             pass
 
@@ -649,12 +918,22 @@ def get_executive_summary(
         except Exception:
             pass
 
+        top_sku_by_problem = []
+        sku_problem_index = []
+        try:
+            with db.bind.connect() as conn:
+                top_sku_by_problem, sku_problem_index = _build_top_sku_by_problem(conn, params, platform)
+        except Exception as e:
+            print(f"Ошибка top_sku_by_problem: {e}")
+
         return {
             "status": "success",
             "prev_period_label": prev_label,
             "reshipment_funnel": reshipment_funnel,
             "reshipment_economics": reshipment_economics,
             "ppm_realization": ppm_realization,
+            "top_sku_by_problem": top_sku_by_problem,
+            "sku_problem_index": sku_problem_index,
             "metrics": {
                 "total_loss":           round(total_loss),
                 "total_loss_delta":     _delta_pct(total_loss, prev_total_loss),
