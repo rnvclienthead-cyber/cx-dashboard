@@ -74,3 +74,10 @@ test('Yandex paperclip uses native disabled and adjacent explanation', () => {
   assert.match(source, /:disabled="!chatAttachmentsAvailable \|\| chatSending"/)
   assert.match(source, /На Яндекс Маркете вложения в этой версии пока недоступны/)
 })
+
+test('product card is on-demand and never substitutes a marketplace match', () => {
+  const source = readFileSync(new URL('../src/views/ChatsView.vue', import.meta.url), 'utf8')
+  assert.match(source, /Характеристики из ЯМ/)
+  assert.match(source, /product-card\?article=/)
+  assert.match(source, /соответствия в Яндекс Маркете нет/)
+})

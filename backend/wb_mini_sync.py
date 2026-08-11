@@ -1015,7 +1015,13 @@ def sync_reshipment_review_snapshots(db) -> int:
 
     captured = 0
     for row in rows:
-        need_before = not row["has_before"] and not row["shipped_at"]
+        # После доставки исходный отзыв уже нельзя фиксировать как "before":
+        # при отсутствии shipped_at он мог бы попасть одновременно в before и after.
+        need_before = (
+            not row["has_before"]
+            and not row["shipped_at"]
+            and row["status"] != "delivered"
+        )
         need_after  = not row["has_after"]  and row["status"] == "delivered"
         if not need_before and not need_after:
             continue
@@ -1058,9 +1064,18 @@ def sync_reshipment_review_snapshots(db) -> int:
                     )
                     WHERE o.srid = :srid
                       AND f.created_date > :delivered_at - INTERVAL '3 hours'
+                      -- Тот же отзыв, который уже был до отправки, не является
+                      -- результатом отработки заявки.
+                      AND f.id <> COALESCE((
+                          SELECT s.feedback_id
+                          FROM wb_feedback_snapshots s
+                          WHERE s.request_id = :rid AND s.snapshot_type = 'before'
+                          ORDER BY s.captured_at ASC
+                          LIMIT 1
+                      ), '')
                     ORDER BY f.created_date DESC
                     LIMIT 1
-                """), {"srid": row["matched_srid"], "delivered_at": row["delivered_at"]}).mappings().first()
+                """), {"srid": row["matched_srid"], "delivered_at": row["delivered_at"], "rid": row["id"]}).mappings().first()
 
                 if feedback_after:
                     db.execute(text("""
@@ -1311,7 +1326,7 @@ def send_review_requests(db) -> int:
     Step 1 → 2: напоминание через 24ч после первого
     Step 2 → 3: финальное через 72ч после напоминания
     Step 3: завершено, не трогаем
-    Если появился after-снепшот — цепочка прекращается (step=3).
+    Цепочка прекращается, только если after-снепшот показывает рост оценки.
     """
     try:
         rows = db.execute(text("""
@@ -1330,7 +1345,15 @@ def send_review_requests(db) -> int:
                     LIMIT 1) AS had_review_before,
                    (SELECT 1 FROM wb_feedback_snapshots s
                     WHERE s.request_id = r.id
-                      AND s.snapshot_type = 'after' LIMIT 1) AS has_review_after
+                      AND s.snapshot_type = 'after' LIMIT 1) AS has_review_after,
+                   (SELECT s.valuation FROM wb_feedback_snapshots s
+                    WHERE s.request_id = r.id
+                      AND s.snapshot_type IN ('before', 'on_approve')
+                    ORDER BY s.captured_at ASC LIMIT 1) AS review_before_rating,
+                   (SELECT s.valuation FROM wb_feedback_snapshots s
+                    WHERE s.request_id = r.id
+                      AND s.snapshot_type = 'after'
+                    ORDER BY s.captured_at DESC LIMIT 1) AS review_after_rating
             FROM reshipment_requests r
             WHERE r.status = 'delivered'
               AND r.review_step < 3
@@ -1349,7 +1372,14 @@ def send_review_requests(db) -> int:
         req_id = row["id"]
         step = row["review_step"] or 0
 
-        if row["has_review_after"]:
+        # Завершаем цепочку только если оценка действительно выросла. Сам факт
+        # after-снимка недостаточен: WB может вернуть тот же исходный отзыв.
+        if (
+            row["has_review_after"]
+            and row["review_before_rating"] is not None
+            and row["review_after_rating"] is not None
+            and row["review_after_rating"] > row["review_before_rating"]
+        ):
             db.execute(text(
                 "UPDATE reshipment_requests SET review_step = 3 WHERE id = :id"
             ), {"id": req_id})

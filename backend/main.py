@@ -9,7 +9,7 @@ from sqlalchemy import text
 from contextlib import asynccontextmanager
 from .database import get_db, engine
 from .routers import claims, ai, system, production, ppm, ratings, auth, finances, voc, dashboard, ym, reshipment, roles, returns, events, cx_control, faq, cx_responses, kb, reshipment_skus, chat_playbook, chat_triage, chat_bot as chat_bot_router, nonreturnable_cats, question_playbook
-from . import chat_bot
+from . import chat_bot, ym_product_card
 from . import wb_chat, wb_mini_sync, cx_alert, wb_chat_sync, ozon_chat_sync, ozon_photo_sync, ym_chat_sync
 from .upload_guard import ChatAttachmentContentLengthMiddleware
 
@@ -405,6 +405,8 @@ async def lifespan(app: FastAPI):
     question_playbook.init_question_playbook_tables(engine)
     # Движок бота: состояние диалога + журнал (shadow)
     chat_bot.init_bot_tables(engine)
+    # Точечный кэш характеристик из карточек Яндекс Маркета для чатов.
+    ym_product_card.init_product_card_cache(engine)
     # Менеджер КС: доступ к возвратам/чатам/отзывам/вопросам
     roles.ensure_cs_manager_permissions(engine)
     # Антидубль уведомлений клиенту по статусам доотправки

@@ -304,6 +304,51 @@
               </button>
             </div>
 
+            <!-- Карточка товара всегда берётся точечно из ЯМ по артикулу чата. -->
+            <div v-if="productCardArticle" class="mt-2">
+              <button type="button" @click="toggleProductCard"
+                :aria-expanded="productCardOpen"
+                class="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 transition-colors hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-300">
+                <span>Характеристики из ЯМ</span>
+                <svg :class="['h-3.5 w-3.5 transition-transform', productCardOpen ? 'rotate-180' : '']"
+                  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+              <div v-if="productCardOpen" class="mt-1.5 rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2.5 text-xs text-slate-700">
+                <p v-if="productCardLoading" class="text-gray-400">Проверяем карточку Яндекс Маркета…</p>
+                <template v-else-if="productCard?.status === 'ok'">
+                  <div class="flex items-start justify-between gap-3">
+                    <p class="font-semibold text-slate-900">{{ productCard.product.name || productCard.product.offer_id }}</p>
+                    <span class="shrink-0 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">Яндекс Маркет</span>
+                  </div>
+                  <p v-if="productDimensionsLine(productCard.product.dimensions)" class="mt-1.5">
+                    Габариты упаковки: <span class="font-medium">{{ productDimensionsLine(productCard.product.dimensions) }} см</span>
+                  </p>
+                  <p v-if="productCard.product.dimensions?.weight != null" class="mt-1">
+                    Вес: <span class="font-medium">{{ productCard.product.dimensions.weight }} кг</span>
+                  </p>
+                  <dl v-if="productCard.product.params?.length" class="mt-2 grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                    <template v-for="param in productCard.product.params" :key="`${param.name}:${param.value}`">
+                      <dt class="text-slate-500">{{ param.name }}</dt>
+                      <dd class="font-medium break-words">{{ param.value }}</dd>
+                    </template>
+                  </dl>
+                  <div v-if="productCard.product.manuals?.length" class="mt-2 flex flex-wrap gap-2">
+                    <a v-for="manual in productCard.product.manuals" :key="manual.url" :href="manual.url" target="_blank" rel="noopener"
+                      class="font-semibold text-amber-800 underline underline-offset-2 hover:text-amber-950">
+                      {{ manual.name }} ↗
+                    </a>
+                  </div>
+                  <p v-if="productCard.cached" class="mt-2 text-[10px] text-slate-400">Проверено в ЯМ ранее сегодня</p>
+                </template>
+                <p v-else-if="productCard?.status === 'not_found'" class="text-slate-500">
+                  По этому артикулу соответствия в Яндекс Маркете нет.
+                </p>
+                <p v-else class="text-slate-500">Карточка Яндекс Маркета сейчас недоступна. Попробуйте позже.</p>
+              </div>
+            </div>
+
             <!-- Контекст клиента -->
             <div v-if="chatContextLoading" class="mt-2 text-xs text-gray-400">Загружаем…</div>
             <template v-else-if="chatContext">
@@ -2433,8 +2478,41 @@ const chatTemplatesLoading = ref(false)
 const chatTemplatesExpanded = ref(false)
 const chatTemplateGreeting = ref('Здравствуйте!')
 const chatTemplateSignature = ref('')
+const productCardOpen = ref(false)
+const productCardLoading = ref(false)
+const productCard = ref(null)
 let chatPollTimer = null
 let chatSelectionRequest = 0
+
+const productCardArticle = computed(() => {
+  // В WB queue сейчас приходит название товара, а не supplier article: не
+  // отправляем название в API и не пытаемся подобрать «похожую» карточку.
+  if (!['ym', 'ozon'].includes(chatMp(chatItem.value))) return ''
+  const article = String(chatItem.value?.sku || '').trim()
+  // DIRECT / RETURN / ORDER — служебные ярлыки чата ЯМ, не артикулы товара.
+  return ['DIRECT', 'RETURN', 'ORDER'].includes(article.toUpperCase()) ? '' : article
+})
+
+function productDimensionsLine(dimensions) {
+  if (!dimensions || dimensions.length == null || dimensions.width == null || dimensions.height == null) return ''
+  return `${dimensions.length} × ${dimensions.width} × ${dimensions.height}`
+}
+
+async function toggleProductCard() {
+  productCardOpen.value = !productCardOpen.value
+  if (!productCardOpen.value || productCard.value || productCardLoading.value || !productCardArticle.value) return
+  const selectedId = chatItem.value?.id
+  productCardLoading.value = true
+  try {
+    const r = await apiFetch(`/api/v1/chat-bot/product-card?article=${encodeURIComponent(productCardArticle.value)}`)
+    const data = await r.json()
+    if (chatItem.value?.id === selectedId) productCard.value = data
+  } catch {
+    if (chatItem.value?.id === selectedId) productCard.value = { status: 'unavailable' }
+  } finally {
+    if (chatItem.value?.id === selectedId) productCardLoading.value = false
+  }
+}
 
 const chatAttachmentsAvailable = computed(() => chatAttachmentsSupported(chatMp(chatItem.value)))
 const chatCanSend = computed(() => canSendChatContent(
@@ -2765,6 +2843,9 @@ async function selectChat(item) {
   chatSuggestGenerating.value = false
   chatTemplatesLoading.value = false
   chatTemplatesExpanded.value = false
+  productCardOpen.value = false
+  productCardLoading.value = false
+  productCard.value = null
   chatLoading.value = true
   loadChatContext(item, requestId)
   const mp = chatMp(item)

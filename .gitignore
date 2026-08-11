@@ -14,3 +14,14 @@ __pycache__/
 **/.DS_Store
 *.rtf
 local_uploads/
+
+# локальные рабочие артефакты и временные выгрузки
+/output/
+/tmp/
+/tmp_ym_movement/
+/tmp_*.py
+/label_*.png
+/label_*.pdf
+/scripts/_tmp_*.env
+/scripts/_tmp_*.py
+/ym_2fa_code.txt

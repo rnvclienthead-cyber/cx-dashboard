@@ -12,10 +12,21 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .auth import get_current_user
 from .. import chat_bot
+from .. import ym_product_card
 from . import chat_playbook
 
 router = APIRouter(prefix="/api/v1/chat-bot", tags=["chat-bot"])
 bot_api_router = APIRouter(prefix="/api/v1/bot", tags=["chat-bot"])
+
+
+@router.get("/product-card")
+def product_card(
+    article: str = Query(..., min_length=1, max_length=255, description="Артикул продавца из чата"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Точечная карточка товара из ЯМ. Не подбирает похожие товары."""
+    return ym_product_card.get_product_card(db, article)
 
 
 @router.get("/status")
