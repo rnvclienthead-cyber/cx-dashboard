@@ -168,14 +168,32 @@ def get_nearest_pickup(
     показываются — окончательный выбор делает КС на этапе одобрения заявки.
     """
     try:
-        from ..pickup_resolver import get_both_candidates
+        from ..pickup_resolver import get_both_candidates, resolve_address
+        normalized = None
+        if lat is None or lon is None:
+            normalized = resolve_address(address or city)
+            if normalized:
+                city = normalized["city"]
+                address = normalized["address"]
+                lat = normalized["lat"]
+                lon = normalized["lon"]
         candidates = get_both_candidates(city=city, address=address or city, lat=lat, lon=lon)
         cdek_c, yd_c = candidates.get("cdek"), candidates.get("yandex")
         if not cdek_c and not yd_c:
             return {"status": "not_found", "data": None}
         # Для превью клиенту достаточно любого найденного адреса — без деталей точки/цены
         pick = cdek_c or yd_c
-        return {"status": "success", "data": {"pvz_address": pick["pvz_address"]}}
+        return {
+            "status": "success",
+            "data": {
+                "pvz_address": pick["pvz_address"],
+                "address": (normalized or {}).get("address") or address or city,
+                "city": (normalized or {}).get("city") or city,
+                "lat": (normalized or {}).get("lat", lat),
+                "lon": (normalized or {}).get("lon", lon),
+                "address_imprecise": (normalized or {}).get("address_imprecise", False),
+            },
+        }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ошибка подбора пункта выдачи: {e}")
 

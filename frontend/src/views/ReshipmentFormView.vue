@@ -87,15 +87,11 @@ const form = reactive({
   personal_data_consent: false,
 })
 
-// ── Автоподбор пункта выдачи по адресу клиента (Dadata) ─────────────────────
-const DADATA_KEY = import.meta.env.VITE_DADATA_KEY || ''
-
+// ── Автоподбор пункта выдачи по адресу клиента ─────────────────────────────
 const addressQuery      = ref('')
 const pickupLoading     = ref(false)
 const pickupError       = ref('')
 const resolvedPickup    = ref(null)
-const dadataSuggestions = ref([])
-const dadataLoading     = ref(false)
 const addressImprecise  = ref(false)  // true если выбран только город без улицы
 let addressDebounce = null
 let addressRequestId = 0
@@ -104,7 +100,6 @@ const clearPickup = () => {
   resolvedPickup.value    = null
   pickupError.value       = ''
   addressImprecise.value  = false
-  dadataSuggestions.value = []
   form.client_pvz_address = ''
   form.client_pvz_city    = ''
   form.client_lat         = null
@@ -115,81 +110,13 @@ const onAddressInput = () => {
   addressRequestId += 1
   clearPickup()
   delete errors.pvz
+  clearTimeout(addressDebounce)
   const q = addressQuery.value.trim()
   if (q.length < 3) return
-  clearTimeout(addressDebounce)
   const requestId = addressRequestId
   addressDebounce = setTimeout(() => resolveTypedAddress(requestId), 500)
 }
 
-const fetchDadataSuggestions = async () => {
-  const query = addressQuery.value.trim()
-  if (query.length < 3 || !DADATA_KEY) return []
-  dadataLoading.value = true
-  try {
-    const res = await fetch('https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Token ${DADATA_KEY}`,
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify({ query, count: 6, language: 'ru' }),
-    })
-    const data = await res.json()
-    dadataSuggestions.value = data.suggestions || []
-    return dadataSuggestions.value
-  } catch {
-    dadataSuggestions.value = []
-    return []
-  } finally {
-    dadataLoading.value = false
-  }
-}
-
-const selectDadataAddress = async (suggestion) => {
-  addressQuery.value = suggestion.value
-  dadataSuggestions.value = []
-
-  const d = suggestion.data
-  const city = d.city || d.settlement || d.area_with_type || d.region || suggestion.value.split(',')[0].trim()
-  const lat = d.geo_lat ? parseFloat(d.geo_lat) : null
-  const lon = d.geo_lon ? parseFloat(d.geo_lon) : null
-
-  // Проверяем точность: Dadata granularity "house"/"flat" = точно, всё остальное = только город/улица
-  const granularity = d.granularity || ''
-  addressImprecise.value = !d.street && !d.house && granularity !== 'flat'
-
-  form.client_pvz_address = suggestion.value
-  form.client_pvz_city    = city
-  form.client_lat         = lat
-  form.client_lon         = lon
-
-  pickupLoading.value = true
-  pickupError.value   = ''
-  try {
-    const params = new URLSearchParams({ city, address: suggestion.value })
-    if (lat) params.set('lat', lat)
-    if (lon) params.set('lon', lon)
-    const res = await fetch(`${API_BASE}/api/v1/reshipment/nearest-pickup?${params}`)
-    const data = await res.json()
-    if (data.status === 'success' && data.data) {
-      resolvedPickup.value = data.data
-      delete errors.pvz
-      return true
-    } else {
-      pickupError.value = 'Не нашли пункт выдачи рядом с этим адресом — уточните или выберите другой'
-      return false
-    }
-  } catch {
-    pickupError.value = 'Ошибка проверки адреса. Попробуйте ещё раз.'
-    return false
-  } finally {
-    pickupLoading.value = false
-  }
-}
-
-// Ручной клик по подсказке не обязателен: берём лучший вариант DaData сами.
 const resolveTypedAddress = async (requestId = addressRequestId) => {
   if (resolvedPickup.value) return true
 
@@ -199,15 +126,37 @@ const resolveTypedAddress = async (requestId = addressRequestId) => {
     return false
   }
 
-  const suggestions = await fetchDadataSuggestions()
-  if (requestId !== addressRequestId) return false
-  const best = suggestions[0]
-  if (!best) {
-    pickupError.value = 'Не удалось распознать адрес. Укажите город и улицу'
-    return false
-  }
+  pickupLoading.value = true
+  pickupError.value = ''
+  try {
+    // DaData-ключ хранится на backend, а не в production-бандле браузера.
+    const params = new URLSearchParams({ city: query, address: query })
+    const res = await fetch(`${API_BASE}/api/v1/reshipment/nearest-pickup?${params}`)
+    const data = await res.json()
+    if (requestId !== addressRequestId) return false
+    if (data.status !== 'success' || !data.data) {
+      pickupError.value = 'Не нашли пункт выдачи рядом. Уточните город и улицу'
+      return false
+    }
 
-  return selectDadataAddress(best)
+    const normalized = data.data
+    addressQuery.value = normalized.address || query
+    form.client_pvz_address = normalized.address || query
+    form.client_pvz_city = normalized.city || query
+    form.client_lat = normalized.lat ?? null
+    form.client_lon = normalized.lon ?? null
+    addressImprecise.value = Boolean(normalized.address_imprecise)
+    resolvedPickup.value = normalized
+    delete errors.pvz
+    return true
+  } catch {
+    if (requestId === addressRequestId) {
+      pickupError.value = 'Не удалось проверить адрес. Попробуйте ещё раз'
+    }
+    return false
+  } finally {
+    if (requestId === addressRequestId) pickupLoading.value = false
+  }
 }
 
 const PROBLEM_TYPES = ['Некомплект', 'Брак', 'Нужна другая деталь']
@@ -720,8 +669,8 @@ const submit = async () => {
                   class="form-input w-full px-4 py-3 rounded-2xl border text-sm outline-none transition-colors"
                   :style="errors.pvz ? 'border-color:#FCA5A5; background:#FEF2F2;' : 'border-color:#E5E7EB;'" />
 
-                <!-- Индикатор загрузки Dadata -->
-                <div v-if="dadataLoading" class="absolute right-3 top-1/2 -translate-y-1/2">
+                <!-- Индикатор автоподбора -->
+                <div v-if="pickupLoading" class="absolute right-3 top-1/2 -translate-y-1/2">
                   <svg class="w-4 h-4 animate-spin" style="color:#9CA3AF;" viewBox="0 0 24 24" fill="none">
                     <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="60" stroke-dashoffset="20"/>
                   </svg>
@@ -738,7 +687,7 @@ const submit = async () => {
               </div>
 
               <!-- Ошибка -->
-              <p v-if="pickupError" class="text-xs mt-2" style="color:#9CA3AF;">
+              <p v-if="pickupError" class="text-xs mt-2" style="color:#DC2626;" role="alert" aria-live="polite">
                 {{ pickupError }}
               </p>
 

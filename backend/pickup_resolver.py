@@ -5,6 +5,7 @@
 Дальше КС сам согласовывает на этапе одобрения заявки, какой вариант выгоднее.
 """
 import logging
+import os
 import re
 from typing import Optional
 
@@ -27,14 +28,16 @@ def distance_km(
         return None
 
 
-def geocode_address(address: str) -> Optional[tuple]:
-    """Геокод адреса: сначала DaData (как в форме), иначе Nominatim.
-    Возвращает (lat, lon) или None."""
+def resolve_address(address: str) -> Optional[dict]:
+    """Нормализует адрес на сервере: сначала DaData, затем Nominatim.
+
+    Ключ DaData намеренно не передаётся в browser bundle: production-форма
+    должна одинаково работать при чистой сборке из Git.
+    """
     q = (address or "").strip()
     if len(q) < 3:
         return None
 
-    import os
     import requests
     try:
         from dotenv import load_dotenv
@@ -57,11 +60,24 @@ def geocode_address(address: str) -> Optional[tuple]:
             if resp.status_code == 200:
                 suggestions = (resp.json() or {}).get("suggestions") or []
                 if suggestions:
-                    data = suggestions[0].get("data") or {}
+                    suggestion = suggestions[0]
+                    data = suggestion.get("data") or {}
                     lat = data.get("geo_lat")
                     lon = data.get("geo_lon")
                     if lat is not None and lon is not None:
-                        return float(lat), float(lon)
+                        city = (
+                            data.get("city") or data.get("settlement")
+                            or data.get("area_with_type") or data.get("region") or q
+                        )
+                        granularity = data.get("granularity") or ""
+                        return {
+                            "address": suggestion.get("value") or q,
+                            "city": city,
+                            "lat": float(lat),
+                            "lon": float(lon),
+                            "address_imprecise": not data.get("street") and not data.get("house")
+                                and granularity != "flat",
+                        }
         except Exception as e:
             logger.warning("geocode DaData failed for %r: %s", q[:80], e)
 
@@ -72,7 +88,10 @@ def geocode_address(address: str) -> Optional[tuple]:
         try:
             resp = requests.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={"q": attempt, "format": "json", "limit": 1, "countrycodes": "ru"},
+                params={
+                    "q": attempt, "format": "json", "limit": 1,
+                    "countrycodes": "ru", "addressdetails": 1,
+                },
                 headers={"User-Agent": "cx-dashboard-reshipment/1.0 (vidovito)"},
                 timeout=8,
             )
@@ -80,10 +99,32 @@ def geocode_address(address: str) -> Optional[tuple]:
                 continue
             data = resp.json() or []
             if data:
-                return float(data[0]["lat"]), float(data[0]["lon"])
+                item = data[0]
+                details = item.get("address") or {}
+                city = (
+                    details.get("city") or details.get("town") or details.get("village")
+                    or details.get("municipality") or attempt
+                )
+                return {
+                    "address": item.get("display_name") or q,
+                    "city": city,
+                    "lat": float(item["lat"]),
+                    "lon": float(item["lon"]),
+                    "address_imprecise": not any(
+                        details.get(key) for key in ("road", "pedestrian", "house_number")
+                    ),
+                }
         except Exception as e:
             logger.warning("geocode Nominatim failed for %r: %s", attempt[:80], e)
     return None
+
+
+def geocode_address(address: str) -> Optional[tuple]:
+    """Возвращает (lat, lon) или None для старых вызовов."""
+    resolved = resolve_address(address)
+    if not resolved:
+        return None
+    return resolved["lat"], resolved["lon"]
 
 # Административные суффиксы/префиксы, которые мешают CDEK найти город
 _ADMIN = re.compile(
