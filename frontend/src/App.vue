@@ -6,7 +6,7 @@ import {
   Database, Bot, ClipboardCheck, BrainCircuit, ScrollText, MessageSquare,
   LineChart, AlertTriangle, Star, ShieldAlert, BadgeDollarSign, LayoutGrid,
   ChevronLeft, ChevronRight, Menu, PackageCheck, LogOut, KeyRound, X, Eye, EyeOff,
-  BookOpen, HelpCircle, BarChart3, Gauge, MessagesSquare, PackageX
+  BookOpen, HelpCircle, BarChart3, Gauge, MessagesSquare, PackageX, MessageSquareQuote
 } from 'lucide-vue-next'
 import { usePlatformStore } from './stores/platform'
 import { usePermissionsStore } from './stores/permissions'
@@ -301,10 +301,10 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           <span v-if="!isCollapsed">Главный дашборд</span>
         </RouterLink>
 
-        <div v-if="!isCollapsed && permissionsStore.can('sync')" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-2 px-2">
+        <div v-if="!isCollapsed && ['sync', 'ai_tagging', 'moderation', 'ai_training'].some(permissionsStore.can)" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-2 px-2">
           Технический блок
         </div>
-        <div v-else-if="isCollapsed && permissionsStore.can('sync')" class="border-t border-slate-100 my-2"></div>
+        <div v-else-if="isCollapsed && ['sync', 'ai_tagging', 'moderation', 'ai_training'].some(permissionsStore.can)" class="border-t border-slate-100 my-2"></div>
 
         <RouterLink
           v-if="permissionsStore.can('sync')"
@@ -362,10 +362,10 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           <span v-if="!isCollapsed">Обучение ИИ</span>
         </RouterLink>
 
-        <div v-if="!isCollapsed && permissionsStore.can('production')" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
+        <div v-if="!isCollapsed && ['production', 'ppm', 'voc', 'ratings', 'finances', 'pnl', 'cx_control'].some(permissionsStore.can)" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
           Операционный блок
         </div>
-        <div v-else-if="isCollapsed && permissionsStore.can('production')" class="border-t border-slate-100 my-2"></div>
+        <div v-else-if="isCollapsed && ['production', 'ppm', 'voc', 'ratings', 'finances', 'pnl', 'cx_control'].some(permissionsStore.can)" class="border-t border-slate-100 my-2"></div>
 
         <RouterLink
           v-if="permissionsStore.can('production')"
@@ -465,10 +465,10 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           <span v-if="!isCollapsed">Контроль отдела</span>
         </RouterLink>
 
-        <div v-if="!isCollapsed && permissionsStore.can('reshipment')" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
-          Функциональный блок
+        <div v-if="!isCollapsed && ['cx_responses', 'quality_questions', 'reshipment', 'faq'].some(permissionsStore.can)" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
+          Клиентский сервис
         </div>
-        <div v-else-if="isCollapsed && permissionsStore.can('reshipment')" class="border-t border-slate-100 my-2"></div>
+        <div v-else-if="isCollapsed && ['cx_responses', 'quality_questions', 'reshipment', 'faq'].some(permissionsStore.can)" class="border-t border-slate-100 my-2"></div>
 
         <template v-if="permissionsStore.isAdmin || permissionsStore.can('cx_responses')">
           <RouterLink
@@ -531,7 +531,7 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           active-class="bg-violet-50 text-violet-700 font-semibold"
           :title="isCollapsed ? 'Уточнения по вопросам' : ''"
         >
-          <HelpCircle class="w-4 h-4 flex-shrink-0" />
+          <MessageSquareQuote class="w-4 h-4 flex-shrink-0" />
           <span v-if="!isCollapsed">Уточнения по вопросам</span>
         </RouterLink>
 
@@ -575,13 +575,13 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           <span v-if="!isCollapsed">База знаний FAQ</span>
         </RouterLink>
 
-        <div v-if="!isCollapsed && (permissionsStore.can('admin_panel') || permissionsStore.can('logs'))" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
+        <div v-if="!isCollapsed && (permissionsStore.isAdmin || permissionsStore.can('logs') || permissionsStore.can('docs'))" class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 mt-8 px-2">
           Административный блок
         </div>
-        <div v-else-if="isCollapsed && (permissionsStore.can('admin_panel') || permissionsStore.can('logs'))" class="border-t border-slate-100 my-2"></div>
+        <div v-else-if="isCollapsed && (permissionsStore.isAdmin || permissionsStore.can('logs') || permissionsStore.can('docs'))" class="border-t border-slate-100 my-2"></div>
 
         <RouterLink
-          v-if="permissionsStore.can('admin_panel')"
+          v-if="permissionsStore.isAdmin"
           to="/admin"
           :class="[
             'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
@@ -609,7 +609,7 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
         </RouterLink>
 
         <RouterLink
-          v-if="permissionsStore.isAdmin"
+          v-if="permissionsStore.can('docs')"
           to="/docs"
           :class="[
             'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',

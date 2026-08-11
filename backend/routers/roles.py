@@ -8,33 +8,42 @@ from .auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/admin/roles", tags=["Roles / Роли"])
 
-# Список всех доступных модулей системы
+# Единый каталог разделов. Его использует панель ролей, поэтому названия и
+# порядок должны совпадать с сайдбаром.
 MODULES = [
-    {"key": "dashboard",    "label": "Главный дашборд"},
-    {"key": "sync",         "label": "Статус автоматизации"},
-    {"key": "ai_tagging",   "label": "ИИ Тегирование"},
-    {"key": "moderation",   "label": "Модерация тегов"},
-    {"key": "ai_training",  "label": "Обучение ИИ"},
-    {"key": "logs",         "label": "Журнал событий"},
-    {"key": "production",   "label": "Карта проблем"},
-    {"key": "ppm",          "label": "PPM и Акты"},
-    {"key": "voc",          "label": "Отзывы и аналитика"},
-    {"key": "cx_control",   "label": "Контроль отдела"},
-    {"key": "cx_responses", "label": "КС: возвраты, чаты, отзывы, вопросы"},
-    {"key": "quality_questions", "label": "Качество: уточнения по вопросам"},
-    {"key": "ratings",      "label": "Рейтинг товаров"},
-    {"key": "finances",     "label": "Финансовые потери"},
-    {"key": "pnl",          "label": "P&L по артикулу"},
-    {"key": "reshipment",   "label": "Отправка деталей"},
-    {"key": "faq",          "label": "База знаний FAQ"},
-    {"key": "registry",     "label": "Реестр"},
-    {"key": "admin_panel",  "label": "Панель управления"},
+    {"key": "dashboard", "label": "Главный дашборд", "group": "Аналитика", "description": "Общие показатели компании"},
+
+    {"key": "sync", "label": "Статус автоматизации", "group": "Технический блок", "description": "Синхронизации и состояние источников"},
+    {"key": "ai_tagging", "label": "ИИ Тегирование", "group": "Технический блок", "description": "Автоматическая разметка обращений"},
+    {"key": "moderation", "label": "Модерация тегов", "group": "Технический блок", "description": "Проверка разметки ИИ"},
+    {"key": "ai_training", "label": "Обучение ИИ", "group": "Технический блок", "description": "Примеры и правила для ИИ"},
+
+    {"key": "production", "label": "Карта проблем", "group": "Операционный блок", "description": "Проблемы по товарам и производству"},
+    {"key": "ppm", "label": "PPM, акты и реестр", "group": "Операционный блок", "description": "PPM, претензионные акты и их реестр"},
+    {"key": "voc", "label": "Отзывы и аналитика", "group": "Операционный блок", "description": "Голос клиента и аналитика отзывов"},
+    {"key": "ratings", "label": "Рейтинг товаров", "group": "Операционный блок", "description": "Динамика рейтингов товаров"},
+    {"key": "finances", "label": "Финансовые потери", "group": "Операционный блок", "description": "Потери по возвратам и рекламациям"},
+    {"key": "pnl", "label": "P&L по артикулу", "group": "Операционный блок", "description": "Экономика по отдельному артикулу"},
+    {"key": "cx_control", "label": "Контроль отдела", "group": "Операционный блок", "description": "Нагрузка, SLA и активность сотрудников", "assignable": False},
+
+    {"key": "cx_responses", "label": "Обращения клиентов", "group": "Клиентский сервис", "description": "Возвраты, чаты, отзывы и вопросы"},
+    {"key": "quality_questions", "label": "Уточнения по вопросам", "group": "Клиентский сервис", "description": "Очередь экспертов качества для подготовки ответа"},
+    {"key": "reshipment", "label": "Отправка деталей", "group": "Клиентский сервис", "description": "Заявки на доотправку деталей"},
+    {"key": "faq", "label": "База знаний FAQ", "group": "Клиентский сервис", "description": "Инструкции и готовые ответы"},
+
+    {"key": "logs", "label": "Журнал событий", "group": "Администрирование", "description": "Технические события системы"},
+    {"key": "docs", "label": "Документация системы", "group": "Администрирование", "description": "Описание разделов и процессов"},
+    {"key": "admin_panel", "label": "Панель управления", "group": "Администрирование", "description": "Пользователи, роли и системные настройки", "assignable": False},
 ]
+
+ASSIGNABLE_MODULE_KEYS = {
+    module["key"] for module in MODULES if module.get("assignable", True)
+}
 
 MARKETPLACES = ["all", "wb", "ym", "ozon"]
 
 # Роли КС по умолчанию должны видеть рабочий стол обращений
-_CS_DEFAULT_MODULES = ("cx_responses", "reshipment", "faq", "cx_control")
+_CS_DEFAULT_MODULES = ("cx_responses", "reshipment", "faq")
 
 
 def ensure_cs_manager_permissions(engine) -> None:
@@ -115,7 +124,7 @@ def set_permissions(role_name: str, payload: PermissionSet, db: Session = Depend
     for perm in payload.permissions:
         module = perm.get("module", "")
         marketplace = perm.get("marketplace", "all")
-        if module and marketplace in MARKETPLACES:
+        if module in ASSIGNABLE_MODULE_KEYS and marketplace in MARKETPLACES:
             db.execute(text("""
                 INSERT INTO role_permissions (role_name, module, marketplace)
                 VALUES (:rn, :mod, :mp)

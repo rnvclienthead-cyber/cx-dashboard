@@ -33,6 +33,23 @@ const roleOptions = computed(() =>
   dbRoles.value.map(r => ({ id: r.name, name: r.display_name }))
 )
 
+const moduleByKey = computed(() =>
+  Object.fromEntries(modules.value.map(module => [module.key, module]))
+)
+
+const moduleGroups = computed(() => {
+  const groups = []
+  for (const module of modules.value) {
+    let group = groups.find(item => item.name === module.group)
+    if (!group) {
+      group = { name: module.group || 'Другие разделы', modules: [] }
+      groups.push(group)
+    }
+    group.modules.push(module)
+  }
+  return groups
+})
+
 // ── Загрузка ─────────────────────────────────────────────────────────────────
 const loadData = async () => {
   isLoading.value = true
@@ -115,7 +132,10 @@ const removeInvite = async (email) => {
 const openRole = (role) => {
   // Создаём локальную копию прав для редактирования
   const permsMap = {}
-  for (const p of role.permissions || []) permsMap[p.module] = p.marketplace
+  for (const p of role.permissions || []) {
+    const module = moduleByKey.value[p.module]
+    if (module?.assignable !== false) permsMap[p.module] = p.marketplace
+  }
   editingRole.value = { ...role, permsMap }
 }
 
@@ -432,7 +452,7 @@ onMounted(loadData)
                 <div class="hidden md:flex flex-wrap gap-1 max-w-xs justify-end">
                   <span v-for="p in (role.permissions || []).slice(0, 4)" :key="p.module"
                     class="text-[10px] px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded">
-                    {{ p.module }}
+                    {{ moduleByKey[p.module]?.label || p.module }}
                     <span v-if="p.marketplace !== 'all'" :class="['font-bold', mpColor[p.marketplace]?.replace('bg-','text-').replace(' text-','')]">·{{ p.marketplace }}</span>
                   </span>
                   <span v-if="(role.permissions || []).length > 4" class="text-[10px] text-slate-400">+{{ role.permissions.length - 4 }}</span>
@@ -443,38 +463,54 @@ onMounted(loadData)
 
             <!-- Редактор прав -->
             <div v-if="editingRole?.name === role.name" class="border-t border-slate-100 p-5">
-              <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Настройка доступов</p>
+              <div class="mb-5">
+                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Настройка доступов</p>
+                <p class="text-xs text-slate-400 mt-1">Включите нужные разделы. «Все» открывает данные всех маркетплейсов.</p>
+              </div>
 
-              <div class="space-y-2">
-                <div v-for="mod in modules" :key="mod.key"
-                  class="flex items-center gap-3 py-2 px-3 rounded-xl hover:bg-slate-50 transition-colors">
+              <div class="space-y-5">
+                <section v-for="group in moduleGroups" :key="group.name">
+                  <h3 class="px-3 mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">{{ group.name }}</h3>
+                  <div class="space-y-1">
+                    <div v-for="mod in group.modules" :key="mod.key"
+                      class="flex flex-col md:flex-row md:items-center gap-2 md:gap-3 py-2.5 px-3 rounded-xl hover:bg-slate-50 transition-colors">
 
-                  <!-- Toggle -->
-                  <button type="button" @click="toggleModule(mod.key)"
-                    :class="['relative flex-shrink-0 w-10 h-5 rounded-full transition-colors',
-                      hasModule(mod.key) ? 'bg-emerald-500' : 'bg-slate-200']">
-                    <span :class="['absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform',
-                      hasModule(mod.key) ? 'translate-x-5' : 'translate-x-0.5']"></span>
-                  </button>
+                      <!-- Toggle -->
+                      <button type="button" @click="toggleModule(mod.key)"
+                        :disabled="mod.assignable === false"
+                        :aria-label="`${hasModule(mod.key) ? 'Закрыть' : 'Открыть'} раздел ${mod.label}`"
+                        :aria-pressed="hasModule(mod.key)"
+                        :class="['relative flex-shrink-0 w-10 h-5 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2',
+                          mod.assignable === false ? 'bg-slate-100 cursor-not-allowed' : hasModule(mod.key) ? 'bg-emerald-500' : 'bg-slate-200']">
+                        <span :class="['absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform',
+                          hasModule(mod.key) ? 'translate-x-5' : 'translate-x-0.5']"></span>
+                      </button>
 
-                  <!-- Название модуля -->
-                  <span :class="['text-sm flex-1', hasModule(mod.key) ? 'text-slate-800 font-medium' : 'text-slate-400']">
-                    {{ mod.label }}
-                  </span>
+                      <!-- Название модуля -->
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                          <span :class="['text-sm', hasModule(mod.key) ? 'text-slate-800 font-semibold' : 'text-slate-500']">{{ mod.label }}</span>
+                          <span v-if="mod.assignable === false" class="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">Только администратор</span>
+                        </div>
+                        <p class="text-xs text-slate-400 mt-0.5">{{ mod.description }}</p>
+                      </div>
 
-                  <!-- Маркетплейс (только если модуль включён) -->
-                  <div v-if="hasModule(mod.key)" class="flex gap-1">
-                    <button v-for="mp in marketplaces" :key="mp"
-                      type="button" @click="setMarketplace(mod.key, mp)"
-                      :class="['px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors',
-                        editingRole.permsMap[mod.key] === mp
-                          ? (mp === 'all' ? 'bg-slate-700 text-white' : mp === 'wb' ? 'bg-purple-600 text-white' : mp === 'ym' ? 'bg-yellow-500 text-white' : 'bg-blue-600 text-white')
-                          : 'bg-slate-100 text-slate-500 hover:bg-slate-200']">
-                      {{ mpLabel[mp] }}
-                    </button>
+                      <!-- Маркетплейс (только если модуль включён) -->
+                      <div v-if="hasModule(mod.key)" class="flex flex-wrap gap-1 md:justify-end">
+                        <button v-for="mp in marketplaces" :key="mp"
+                          type="button" @click="setMarketplace(mod.key, mp)"
+                          :aria-label="`${mod.label}: ${mpLabel[mp]}`"
+                          :class="['px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-1',
+                            editingRole.permsMap[mod.key] === mp
+                              ? (mp === 'all' ? 'bg-slate-700 text-white' : mp === 'wb' ? 'bg-purple-600 text-white' : mp === 'ym' ? 'bg-yellow-500 text-white' : 'bg-blue-600 text-white')
+                              : 'bg-slate-100 text-slate-500 hover:bg-slate-200']">
+                          {{ mpLabel[mp] }}
+                        </button>
+                      </div>
+                      <div v-else-if="mod.assignable !== false" class="hidden md:block w-40"></div>
+                    </div>
                   </div>
-                  <div v-else class="w-28"></div>
-                </div>
+                </section>
               </div>
 
               <div class="flex items-center gap-3 mt-4 pt-4 border-t border-slate-100">
