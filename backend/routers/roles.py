@@ -21,6 +21,7 @@ MODULES = [
     {"key": "voc",          "label": "Отзывы и аналитика"},
     {"key": "cx_control",   "label": "Контроль отдела"},
     {"key": "cx_responses", "label": "КС: возвраты, чаты, отзывы, вопросы"},
+    {"key": "quality_questions", "label": "Качество: уточнения по вопросам"},
     {"key": "ratings",      "label": "Рейтинг товаров"},
     {"key": "finances",     "label": "Финансовые потери"},
     {"key": "pnl",          "label": "P&L по артикулу"},

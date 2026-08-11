@@ -53,6 +53,7 @@ export const MODULE_ROUTES = [
   { module: 'cx_responses', path: '/questions' },
   { module: 'cx_responses', path: '/chats' },
   { module: 'cx_responses', path: '/returns' },
+  { module: 'quality_questions', path: '/questions/quality' },
 ]
 
 const router = createRouter({
@@ -87,6 +88,7 @@ const router = createRouter({
     { path: '/faq',                       name: 'faq',               component: FAQView,                meta: { requiresAuth: true } },
     { path: '/reviews',                  name: 'reviews',           component: ReviewsView,            meta: { requiresAuth: true } },
     { path: '/questions',                name: 'questions',         component: QuestionsView,          meta: { requiresAuth: true } },
+    { path: '/questions/quality',        name: 'quality-questions', component: QuestionsView,          meta: { requiresAuth: true } },
     { path: '/chats',                    name: 'chats',             component: ChatsView,              meta: { requiresAuth: true } },
     { path: '/returns',                  name: 'returns',           component: ReturnsView,            meta: { requiresAuth: true } },
     { path: '/return/scan',              name: 'return-scan',       component: ReturnScanView,         meta: { public: true } },
@@ -112,6 +114,11 @@ router.beforeEach(async (to, from, next) => {
   if (to.meta.requiresAuth) {
     // Проверяем, есть ли у пользователя доступ к запрошенному модулю
     const moduleRoute = MODULE_ROUTES.find(r => r.path === to.path)
+    // Старая ссылка /questions у сотрудника качества ведёт в его очередь.
+    // У пользователей с обоими правами этот маршрут остаётся рабочим столом КС.
+    if (to.path === '/questions' && !permStore.can('cx_responses') && permStore.can('quality_questions')) {
+      return next('/questions/quality')
+    }
     if (moduleRoute && !permStore.can(moduleRoute.module)) {
       // Ищем первый доступный модуль для редиректа
       const first = MODULE_ROUTES.find(r => permStore.can(r.module))

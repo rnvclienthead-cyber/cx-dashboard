@@ -132,6 +132,32 @@ router = APIRouter(
     dependencies=[Depends(_cs_access)],
 )
 
+
+def _qa_questions_access(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Доступ к очереди QA определяется назначенным модульным правом."""
+    role = current_user.get("role", "")
+    # Как и в остальных защищённых разделах, admin имеет полный доступ без
+    # отдельной записи в role_permissions.
+    if role == "admin":
+        return current_user
+    row = db.execute(
+        text("SELECT 1 FROM role_permissions WHERE role_name = :r AND module = 'quality_questions'"),
+        {"r": role},
+    ).first()
+    if not row:
+        raise HTTPException(status_code=403, detail="Очередь уточнений доступна только отделу качества")
+    return current_user
+
+
+quality_questions_router = APIRouter(
+    prefix="/api/v1/quality-questions",
+    tags=["Quality question clarifications"],
+    dependencies=[Depends(_qa_questions_access)],
+)
+
 # Роутер без авторизации — только для отдачи медиафайлов WB в браузер
 # (браузер не может отправить Bearer в <img src>)
 public_router = APIRouter(
@@ -521,6 +547,7 @@ def init_unified_queue_view(engine) -> None:
 def get_queue(
     db: Session = Depends(get_db),
     mp: str = Query("all"),
+    current_user: dict = Depends(get_current_user),
 ):
     """Сводная очередь обращений — все площадки, сортировка по давности."""
     # Значение mp всегда через параметр (:mp) — в SQL-текст попадает только
@@ -624,10 +651,233 @@ def get_queue(
                 item["pending_draft"]    = pm["draft_text"]
                 item["pending_template"] = pm.get("template_title") or ""
 
+        # Уточнение видно только менеджеру, который его запросил. Это не
+        # черновик маркетплейса: текст QA можно лишь подставить в поле ответа.
+        with db.bind.connect() as conn:
+            clarifications = conn.execute(text("""
+                SELECT DISTINCT ON (mp, question_id)
+                    id, mp, question_id, note, status, proposed_text,
+                    requested_at, answered_at
+                FROM cx_question_clarifications
+                WHERE requested_by = :user
+                ORDER BY mp, question_id, requested_at DESC
+            """), {"user": current_user["username"]}).mappings().all()
+        clarification_map = {
+            (row["mp"], str(row["question_id"])): dict(row)
+            for row in clarifications
+        }
+        for item in items:
+            if item.get("item_type") != "question":
+                continue
+            clarification = clarification_map.get((item["mp"], str(item["id"])))
+            if not clarification:
+                continue
+            for field in ("requested_at", "answered_at"):
+                value = clarification.get(field)
+                if value and hasattr(value, "isoformat"):
+                    clarification[field] = value.isoformat()
+            item["clarification"] = clarification
+
     counts_d = dict(counts) if counts else {}
     return {
         "items":  items,
         "counts": counts_d,
+    }
+
+
+# ── Уточнения у отдела качества по вопросам ──────────────────────────────────
+
+class ClarificationRequestPayload(BaseModel):
+    note: str = ""
+
+
+class ClarificationAnswerPayload(BaseModel):
+    text: str
+
+
+def _cancel_obsolete_question_clarifications(conn) -> None:
+    """Закрывает pending-уточнения, когда исходный вопрос уже не открыт.
+
+    Такое происходит, если на него ответили в кабинете площадки или другой
+    сотрудник. cancelled снимает частичный уникальный ключ pending и оставляет
+    след в истории, вместо того чтобы незаметно «зависать» в очереди QA.
+    """
+    conn.execute(text(f"""
+        UPDATE cx_question_clarifications c
+        SET status = 'cancelled'
+        WHERE c.status = 'pending'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM {UNIFIED_QUEUE_VIEW} q
+              WHERE q.mp = c.mp
+                AND q.item_type = 'question'
+                AND q.id = c.question_id
+          )
+    """))
+
+
+@router.post("/questions/{mp}/{question_id}/clarification")
+def request_question_clarification(
+    mp: str,
+    question_id: str,
+    payload: ClarificationRequestPayload,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Поставить открытый вопрос WB/ЯМ в общую очередь отдела качества."""
+    if current_user.get("role") != "cs_manager":
+        raise HTTPException(status_code=403, detail="Уточнение может запросить только менеджер КС")
+    if mp not in ("wb", "ym"):
+        raise HTTPException(status_code=400, detail="Поддерживаются только вопросы WB и ЯМ")
+    note = (payload.note or "").strip()
+    if len(note) > 2000:
+        raise HTTPException(status_code=400, detail="Комментарий не должен быть длиннее 2000 символов")
+
+    with db.bind.connect() as conn:
+        exists = conn.execute(text(f"""
+            SELECT 1 FROM {UNIFIED_QUEUE_VIEW}
+            WHERE mp = :mp AND item_type = 'question' AND id = :id
+            LIMIT 1
+        """), {"mp": mp, "id": str(question_id)}).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Открытый вопрос не найден")
+        try:
+            row = conn.execute(text("""
+                INSERT INTO cx_question_clarifications
+                    (mp, question_id, requested_by, note)
+                VALUES (:mp, :question_id, :requested_by, :note)
+                RETURNING id, requested_at
+            """), {
+                "mp": mp,
+                "question_id": str(question_id),
+                "requested_by": current_user["username"],
+                "note": note,
+            }).mappings().first()
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            # Частичный уникальный индекс не даёт продублировать живой запрос.
+            if "uq_cx_question_clarifications_pending" in str(exc):
+                raise HTTPException(status_code=409, detail="Этот вопрос уже ожидает ответ отдела качества")
+            raise
+
+    return {
+        "status": "pending",
+        "id": row["id"],
+        "requested_at": row["requested_at"].isoformat() if row["requested_at"] else None,
+    }
+
+
+@quality_questions_router.get("/queue")
+def get_quality_question_queue(
+    db: Session = Depends(get_db),
+    mp: str = Query("all"),
+):
+    """Общая очередь QA: только активные уточнения, без кнопок отправки в МП."""
+    if mp not in ("all", "wb", "ym"):
+        raise HTTPException(status_code=400, detail="mp: all, wb или ym")
+    params = {} if mp == "all" else {"mp": mp}
+    mp_filter = "" if mp == "all" else "AND c.mp = :mp"
+    with db.bind.connect() as conn:
+        _cancel_obsolete_question_clarifications(conn)
+        rows = conn.execute(text(f"""
+            SELECT
+                q.*, c.id AS clarification_id, c.note AS clarification_note,
+                c.requested_by AS clarification_requested_by,
+                c.requested_at AS clarification_requested_at
+            FROM cx_question_clarifications c
+            JOIN {UNIFIED_QUEUE_VIEW} q
+              ON q.mp = c.mp AND q.item_type = 'question' AND q.id = c.question_id
+            WHERE c.status = 'pending' {mp_filter}
+            ORDER BY c.requested_at ASC
+        """), params).mappings().all()
+        conn.commit()
+
+    items = []
+    for row in rows:
+        item = dict(row)
+        if item.get("created_at") and hasattr(item["created_at"], "isoformat"):
+            item["created_at"] = item["created_at"].isoformat()
+        if item.get("clarification_requested_at") and hasattr(item["clarification_requested_at"], "isoformat"):
+            item["clarification_requested_at"] = item["clarification_requested_at"].isoformat()
+        raw = item.pop("photos_raw", None) or ""
+        item["photos"] = [url for url in raw.split() if url.startswith("http")]
+        items.append(item)
+    return {"items": items, "counts": {"questions": len(items)}}
+
+
+@quality_questions_router.post("/{clarification_id}/answer")
+def answer_question_clarification(
+    clarification_id: int,
+    payload: ClarificationAnswerPayload,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Сохранить предложение QA. В API WB/ЯМ этот метод принципиально не ходит."""
+    proposed_text = payload.text.strip()
+    if not proposed_text:
+        raise HTTPException(status_code=400, detail="Введите предлагаемый ответ")
+    if len(proposed_text) > 5000:
+        raise HTTPException(status_code=400, detail="Ответ не должен быть длиннее 5000 символов")
+
+    with db.bind.connect() as conn:
+        # Одним запросом проверяем, что вопрос всё ещё находится в живой
+        # очереди. Если его уже закрыли в кабинете МП, отменяем уточнение,
+        # чтобы QA не передал менеджеру устаревший текст.
+        row = conn.execute(text(f"""
+            WITH target AS (
+                SELECT c.id, c.mp, c.question_id, c.requested_by,
+                       EXISTS (
+                           SELECT 1
+                           FROM {UNIFIED_QUEUE_VIEW} q
+                           WHERE q.mp = c.mp
+                             AND q.item_type = 'question'
+                             AND q.id = c.question_id
+                       ) AS is_active
+                FROM cx_question_clarifications c
+                WHERE c.id = :id AND c.status = 'pending'
+                FOR UPDATE
+            ), answered AS (
+                UPDATE cx_question_clarifications c
+                SET status = 'answered', proposed_text = :text,
+                    answered_by = :user, answered_at = now()
+                FROM target t
+                WHERE c.id = t.id AND t.is_active
+                RETURNING c.mp, c.question_id, c.requested_by, c.answered_at
+            ), cancelled AS (
+                UPDATE cx_question_clarifications c
+                SET status = 'cancelled'
+                FROM target t
+                WHERE c.id = t.id AND NOT t.is_active
+                RETURNING c.id
+            )
+            SELECT 'answered' AS outcome, mp, question_id, requested_by, answered_at
+            FROM answered
+            UNION ALL
+            SELECT 'cancelled' AS outcome, NULL::varchar, NULL::text, NULL::varchar, NULL::timestamp
+            FROM cancelled
+        """), {
+            "id": clarification_id,
+            "text": proposed_text,
+            "user": current_user["username"],
+        }).mappings().first()
+        if not row:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="Запрос не найден или уже обработан")
+        if row["outcome"] == "cancelled":
+            conn.commit()
+            raise HTTPException(
+                status_code=409,
+                detail="Исходный вопрос уже закрыт; уточнение отменено",
+            )
+        conn.commit()
+
+    return {
+        "status": "answered",
+        "mp": row["mp"],
+        "question_id": row["question_id"],
+        "requested_by": row["requested_by"],
+        "answered_at": row["answered_at"].isoformat() if row["answered_at"] else None,
     }
 
 

@@ -470,7 +470,7 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
         </div>
         <div v-else-if="isCollapsed && permissionsStore.can('reshipment')" class="border-t border-slate-100 my-2"></div>
 
-        <template v-if="permissionsStore.can('cx_responses')">
+        <template v-if="permissionsStore.isAdmin || permissionsStore.can('cx_responses')">
           <RouterLink
             to="/returns"
             :class="[
@@ -520,6 +520,20 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
             <span v-if="!isCollapsed">Вопросы</span>
           </RouterLink>
         </template>
+
+        <RouterLink
+          v-if="permissionsStore.isAdmin || permissionsStore.can('quality_questions')"
+          to="/questions/quality"
+          :class="[
+            'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',
+            isCollapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+          ]"
+          active-class="bg-violet-50 text-violet-700 font-semibold"
+          :title="isCollapsed ? 'Уточнения по вопросам' : ''"
+        >
+          <HelpCircle class="w-4 h-4 flex-shrink-0" />
+          <span v-if="!isCollapsed">Уточнения по вопросам</span>
+        </RouterLink>
 
         <RouterLink
           v-if="permissionsStore.can('reshipment')"

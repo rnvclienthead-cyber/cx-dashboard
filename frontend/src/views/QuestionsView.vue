@@ -15,7 +15,7 @@
             </div>
             <div>
               <h1 class="text-sm font-medium text-gray-900 leading-tight">Вопросы</h1>
-              <p class="text-xs text-gray-400 leading-tight mt-0.5">WB · ЯМ — ответ публикуется на карточке товара</p>
+              <p class="text-xs text-gray-400 leading-tight mt-0.5">{{ questionsSubtitle }}</p>
             </div>
           </div>
 
@@ -127,8 +127,65 @@
             </div>
           </div>
 
+          <!-- Общая очередь QA: только предложение текста, без отправки в МП -->
+          <div v-if="hasQualityQuestionsAccess" class="border-t border-violet-200 bg-violet-50/60 px-4 py-3 space-y-2">
+            <p class="text-xs font-medium text-violet-800">
+              Уточнение от {{ item.clarification_requested_by }}
+            </p>
+            <p v-if="item.clarification_note" class="text-xs text-gray-600 whitespace-pre-wrap">
+              {{ item.clarification_note }}
+            </p>
+            <textarea
+              v-model="item._qaReply"
+              placeholder="Предложите ответ для менеджера КС…"
+              :rows="replyRows(item._qaReply)"
+              class="w-full min-h-[6.5rem] border border-violet-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent bg-white"
+            ></textarea>
+            <div class="flex items-center justify-between gap-3">
+              <p class="text-[11px] text-violet-800 leading-snug">Текст вернётся менеджеру КС. На WB/ЯМ он не отправляется.</p>
+              <button @click="sendQaAnswer(item)" :disabled="!item._qaReply?.trim() || item._qaSaving"
+                :class="['shrink-0 min-h-10 px-4 py-2 rounded-lg text-sm font-medium transition-all',
+                  item._qaReply?.trim() && !item._qaSaving
+                    ? 'bg-violet-600 hover:bg-violet-700 text-white'
+                    : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
+                {{ item._qaSaving ? 'Сохраняем…' : 'Передать менеджеру' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Статус уточнения видит только менеджер, который его запросил -->
+          <div v-else-if="isCsManager && item.clarification && !item._clarificationConsumed"
+            :class="['border-t px-4 py-3 space-y-2',
+              item.clarification.status === 'answered' ? 'border-emerald-200 bg-emerald-50/70' : 'border-violet-200 bg-violet-50/60']">
+            <p :class="['text-xs font-medium', item.clarification.status === 'answered' ? 'text-emerald-800' : 'text-violet-800']">
+              {{ item.clarification.status === 'answered' ? 'Качество подготовило ответ' : 'Вопрос передан в отдел качества' }}
+            </p>
+            <p v-if="item.clarification.note" class="text-xs text-gray-600 whitespace-pre-wrap">{{ item.clarification.note }}</p>
+            <template v-if="item.clarification.status === 'answered'">
+              <p class="text-sm text-gray-700 whitespace-pre-wrap bg-white border border-emerald-200 rounded-lg px-3 py-2">{{ item.clarification.proposed_text }}</p>
+              <button @click="applyClarification(item)"
+                class="min-h-10 px-3 py-1.5 bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-200 text-sm rounded-lg transition-colors font-medium">
+                Вставить в ответ
+              </button>
+            </template>
+            <p v-else class="text-[11px] text-violet-800">Ответ будет доступен здесь; покупателю ничего не отправляется.</p>
+          </div>
+          <div v-else-if="isCsManager && item._clarificationOpen" class="border-t border-violet-200 bg-violet-50/60 px-4 py-3 space-y-2">
+            <textarea v-model="item._clarificationNote" maxlength="2000"
+              placeholder="Что нужно уточнить у качества? (необязательно)"
+              rows="2"
+              class="w-full border border-violet-200 rounded-lg px-3 py-2 text-sm resize-y focus:outline-none focus:ring-2 focus:ring-violet-400 bg-white"></textarea>
+            <div class="flex justify-end gap-2">
+              <button @click="item._clarificationOpen = false" class="px-3 py-1.5 text-sm text-gray-600">Отмена</button>
+              <button @click="requestClarification(item)" :disabled="item._clarificationSaving"
+                class="min-h-10 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-sm rounded-lg font-medium disabled:opacity-50">
+                {{ item._clarificationSaving ? 'Отправляем…' : 'Передать качеству' }}
+              </button>
+            </div>
+          </div>
+
           <!-- Модерация черновика -->
-          <div v-if="item.pending_mod_id" class="border-t border-amber-200 bg-amber-50/70 px-4 py-3 space-y-2">
+          <div v-else-if="item.pending_mod_id" class="border-t border-amber-200 bg-amber-50/70 px-4 py-3 space-y-2">
             <p class="text-xs font-medium text-amber-700">Черновик автоответа ожидает подтверждения</p>
             <p class="text-sm text-gray-700 whitespace-pre-wrap bg-white border border-amber-200 rounded-lg px-3 py-2">{{ item.pending_draft }}</p>
             <div class="flex flex-wrap gap-2">
@@ -207,6 +264,10 @@
               class="w-full min-h-[6.5rem] border border-gray-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
             ></textarea>
             <div class="mt-2 flex flex-wrap justify-end gap-2">
+              <button v-if="isCsManager" @click="item._clarificationOpen = true"
+                class="min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border border-violet-200 bg-white hover:bg-violet-50 text-violet-700">
+                Уточнить у качества
+              </button>
               <button v-if="isWbQuestion(item)" @click="sendReply(item, 'private')"
                 :disabled="!item._reply?.trim()"
                 title="Ответ увидит только автор вопроса"
@@ -404,6 +465,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
 import { usePermissionsStore } from '../stores/permissions'
@@ -413,11 +475,22 @@ import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls } from 
 
 const platformStore = usePlatformStore()
 const permissionsStore = usePermissionsStore()
+const route = useRoute()
 const currentMp = computed(() => platformStore.platform || 'all')
 const canEditQuestionTemplates = computed(() =>
   ['admin', 'moderator'].includes(permissionsStore.role)
 )
 const isCsManager = computed(() => permissionsStore.role === 'cs_manager')
+// Один и тот же компонент обслуживает два разных рабочих стола. Наличие
+// обоих прав не должно подменять обычные вопросы очередью качества.
+const hasQualityQuestionsAccess = computed(() =>
+  route.path === '/questions/quality' &&
+  (permissionsStore.isAdmin || permissionsStore.can('quality_questions'))
+)
+const questionsSubtitle = computed(() => hasQualityQuestionsAccess.value
+  ? 'Общая очередь уточнений от менеджеров КС'
+  : 'WB · ЯМ — ответ публикуется на карточке товара'
+)
 
 const { toast, showToast } = useToast()
 
@@ -428,7 +501,9 @@ const sections = [
   { key: 'settings',  label: 'Автоответы' },
 ]
 const visibleSections = computed(() =>
-  isCsManager.value
+  hasQualityQuestionsAccess.value
+    ? sections.filter(s => s.key === 'queue')
+    : isCsManager.value
     ? sections.filter(s => s.key !== 'settings')
     : sections
 )
@@ -439,7 +514,7 @@ function switchSection(key) {
 }
 
 watch(currentMp, () => {
-  loadPlaybookTemplates()
+  if (!hasQualityQuestionsAccess.value) loadPlaybookTemplates()
   if (activeSection.value === 'queue') loadQueue()
 })
 
@@ -473,7 +548,8 @@ async function loadQueue() {
   queueLoading.value = true
   currentPage.value  = 1
   try {
-    const res = await apiFetch(`${BASE}/queue?mp=${currentMp.value}`)
+    const queueBase = hasQualityQuestionsAccess.value ? '/api/v1/quality-questions' : BASE
+    const res = await apiFetch(`${queueBase}/queue?mp=${currentMp.value}`)
     const data = await res.json()
     queueItems.value = (data.items || []).map(i => ({
       ...i,
@@ -482,10 +558,16 @@ async function loadQueue() {
       _suggestMiss: null,
       _suggestLoading: false,
       _suggestGenerating: false,
+      _clarificationOpen: false,
+      _clarificationSaving: false,
+      _clarificationNote: '',
+      _clarificationConsumed: false,
+      _qaReply: '',
+      _qaSaving: false,
     }))
     counts.value = data.counts || {}
     // Автоподбор для первой страницы
-    suggestForPage()
+    if (!hasQualityQuestionsAccess.value) suggestForPage()
   } catch {
     showToast('Ошибка загрузки очереди', 'error')
   } finally {
@@ -761,12 +843,61 @@ function generateSuggest(item) {
 }
 
 watch([currentPage, perPage], () => {
-  suggestForPage()
+  if (!hasQualityQuestionsAccess.value) suggestForPage()
 })
 
 watch(activeSection, (s) => {
-  if (s === 'templates' && !pbThemes.value.length) loadQuestionPlaybook()
+  if (!hasQualityQuestionsAccess.value && s === 'templates' && !pbThemes.value.length) loadQuestionPlaybook()
 })
+
+async function requestClarification(item) {
+  item._clarificationSaving = true
+  try {
+    const r = await apiFetch(`${BASE}/questions/${encodeURIComponent(item.mp)}/${encodeURIComponent(String(item.id))}/clarification`, {
+      method: 'POST',
+      body: JSON.stringify({ note: item._clarificationNote || '' }),
+    })
+    const d = await r.json()
+    item.clarification = {
+      id: d.id,
+      mp: item.mp,
+      question_id: String(item.id),
+      note: item._clarificationNote || '',
+      status: 'pending',
+      proposed_text: null,
+      requested_at: d.requested_at,
+    }
+    item._clarificationOpen = false
+    showToast('Передано в отдел качества', 'ok')
+  } catch (e) {
+    showToast('Не удалось передать: ' + (e?.message || ''), 'error')
+  } finally {
+    item._clarificationSaving = false
+  }
+}
+
+function applyClarification(item) {
+  item._reply = item.clarification?.proposed_text || ''
+  item._clarificationConsumed = true
+  showToast('Текст вставлен в ответ — проверьте и отправьте вручную', 'ok')
+}
+
+async function sendQaAnswer(item) {
+  item._qaSaving = true
+  try {
+    await apiFetch(`/api/v1/quality-questions/${item.clarification_id}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ text: item._qaReply }),
+    })
+    queueItems.value = queueItems.value.filter(i => i !== item)
+    counts.value = { ...counts.value, questions: Math.max(0, (counts.value.questions || 1) - 1) }
+    showToast('Ответ передан менеджеру КС', 'ok')
+  } catch (e) {
+    showToast('Не удалось сохранить: ' + (e?.message || ''), 'error')
+  } finally {
+    item._qaSaving = false
+  }
+}
 
 // ── Отправка / модерация / dismiss (общая логика — см. composables/useCxQueueActions) ──
 function replyEndpoint(item, visibility = 'public') {
@@ -788,6 +919,10 @@ function confirmMod(item, visibility = 'public') {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 onMounted(async () => {
+  if (hasQualityQuestionsAccess.value) {
+    await loadQueue()
+    return
+  }
   await Promise.all([loadQueue(), loadPlaybookTemplates(), loadQuestionPlaybook(), loadSignature()])
 })
 </script>

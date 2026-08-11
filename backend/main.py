@@ -315,6 +315,61 @@ async def lifespan(app: FastAPI):
                 UNIQUE (item_type, item_id, mp)
             )
         """))
+        # Уточнения по вопросам покупателей: КС ставит вопрос в общую очередь
+        # качества, QA готовит текст, а отправляет его в маркетплейс только КС.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_question_clarifications (
+                id            SERIAL PRIMARY KEY,
+                mp            VARCHAR(10)  NOT NULL CHECK (mp IN ('wb', 'ym')),
+                question_id   TEXT         NOT NULL,
+                requested_by  VARCHAR(255) NOT NULL,
+                note          TEXT         NOT NULL DEFAULT '',
+                status        VARCHAR(20)  NOT NULL DEFAULT 'pending'
+                              CONSTRAINT cx_question_clarifications_status_check
+                              CHECK (status IN ('pending', 'answered', 'cancelled')),
+                proposed_text TEXT,
+                answered_by   VARCHAR(255),
+                requested_at  TIMESTAMP    NOT NULL DEFAULT NOW(),
+                answered_at   TIMESTAMP
+            )
+        """))
+        # Миграция ранней версии: отменённое уточнение освобождает pending-key
+        # и остаётся в истории, если покупателю уже ответили вне этой очереди.
+        # Каталог проверяется до изменения: на каждом старте приложения
+        # существующее корректное ограничение не пересоздаётся.
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conrelid = 'cx_question_clarifications'::regclass
+                      AND conname = 'cx_question_clarifications_status_check'
+                      AND pg_get_constraintdef(oid) NOT LIKE '%cancelled%'
+                ) THEN
+                    ALTER TABLE cx_question_clarifications
+                    DROP CONSTRAINT cx_question_clarifications_status_check;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conrelid = 'cx_question_clarifications'::regclass
+                      AND conname = 'cx_question_clarifications_status_check'
+                ) THEN
+                    ALTER TABLE cx_question_clarifications
+                    ADD CONSTRAINT cx_question_clarifications_status_check
+                    CHECK (status IN ('pending', 'answered', 'cancelled'));
+                END IF;
+            END $$
+        """))
+        # Нельзя отправить один и тот же живой вопрос в QA дважды, но после
+        # готового или отменённого уточнения КС может запросить повторное.
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_cx_question_clarifications_pending
+            ON cx_question_clarifications (mp, question_id)
+            WHERE status = 'pending'
+        """))
         # Вручную закрытые обращения (без отправки ответа)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_dismissed_items (
@@ -450,6 +505,7 @@ app.include_router(cx_control.router)
 app.include_router(faq.router)
 app.include_router(cx_responses.public_router)
 app.include_router(cx_responses.router)
+app.include_router(cx_responses.quality_questions_router)
 app.include_router(kb.router)
 app.include_router(reshipment_skus.router)
 app.include_router(nonreturnable_cats.router)
