@@ -157,12 +157,15 @@
             </div>
           </div>
 
-          <!-- Статус уточнения видит только менеджер, который его запросил -->
-          <div v-else-if="isCsManager && item.clarification && !item._clarificationConsumed"
+          <!-- Менеджер видит своё уточнение, администратор — все уточнения -->
+          <div v-else-if="canRequestClarification && item.clarification && !item._clarificationConsumed"
             :class="['border-t px-4 py-3 space-y-2',
               item.clarification.status === 'answered' ? 'border-emerald-200 bg-emerald-50/70' : 'border-violet-200 bg-violet-50/60']">
             <p :class="['text-xs font-medium', item.clarification.status === 'answered' ? 'text-emerald-800' : 'text-violet-800']">
               {{ item.clarification.status === 'answered' ? 'Качество подготовило ответ' : 'Вопрос передан в отдел качества' }}
+            </p>
+            <p v-if="permissionsStore.isAdmin && item.clarification.requested_by" class="text-[11px] text-gray-500">
+              Запросил: {{ item.clarification.requested_by }}
             </p>
             <p v-if="item.clarification.note" class="text-xs text-gray-600 whitespace-pre-wrap">{{ item.clarification.note }}</p>
             <template v-if="item.clarification.status === 'answered'">
@@ -174,7 +177,7 @@
             </template>
             <p v-else class="text-[11px] text-violet-800">Ответ будет доступен здесь; покупателю ничего не отправляется.</p>
           </div>
-          <div v-else-if="isCsManager && item._clarificationOpen" class="border-t border-violet-200 bg-violet-50/60 px-4 py-3 space-y-2">
+          <div v-else-if="canRequestClarification && item._clarificationOpen" class="border-t border-violet-200 bg-violet-50/60 px-4 py-3 space-y-2">
             <textarea v-model="item._clarificationNote" maxlength="2000"
               placeholder="Что нужно уточнить у качества? (необязательно)"
               rows="2"
@@ -268,7 +271,7 @@
               class="w-full min-h-[6.5rem] border border-gray-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
             ></textarea>
             <div class="mt-2 flex flex-wrap justify-end gap-2">
-              <button v-if="isCsManager" @click="item._clarificationOpen = true"
+              <button v-if="canRequestClarification && item.clarification?.status !== 'pending'" @click="item._clarificationOpen = true"
                 class="min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border border-violet-200 bg-white hover:bg-violet-50 text-violet-700">
                 Уточнить у качества
               </button>
@@ -486,6 +489,9 @@ const canEditQuestionTemplates = computed(() =>
   ['admin', 'moderator'].includes(permissionsStore.role)
 )
 const isCsManager = computed(() => permissionsStore.role === 'cs_manager')
+const canRequestClarification = computed(() =>
+  permissionsStore.isAdmin || isCsManager.value
+)
 // Один и тот же компонент обслуживает два разных рабочих стола. Наличие
 // обоих прав не должно подменять обычные вопросы очередью качества.
 const hasQualityQuestionsAccess = computed(() =>
@@ -923,6 +929,17 @@ function confirmMod(item, visibility = 'public') {
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
+// /questions и /questions/quality используют один Vue-компонент. При переходе
+// между ними компонент не размонтируется, поэтому очередь нужно перегрузить.
+watch(hasQualityQuestionsAccess, async (qualityMode) => {
+  activeSection.value = 'queue'
+  if (qualityMode) {
+    await loadQueue()
+    return
+  }
+  await Promise.all([loadQueue(), loadPlaybookTemplates(), loadQuestionPlaybook(), loadSignature()])
+})
+
 onMounted(async () => {
   if (hasQualityQuestionsAccess.value) {
     await loadQueue()

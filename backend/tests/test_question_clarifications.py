@@ -52,10 +52,19 @@ class _Connection:
 
 
 class _Db:
-    def __init__(self):
-        self.connection = _Connection()
+    def __init__(self, connection=None):
+        self.connection = connection or _Connection()
         self.bind = Mock()
         self.bind.connect.return_value = self.connection
+
+
+class _RequestConnection(_Connection):
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.statements.append((sql, params or {}))
+        if "INSERT INTO cx_question_clarifications" in sql:
+            return _Result({"id": 17, "requested_at": datetime(2026, 8, 11, 11, 0)})
+        return _Result((1,))
 
 
 class _PermissionDb:
@@ -109,13 +118,26 @@ class QuestionClarificationTests(unittest.TestCase):
             source,
         )
 
-    def test_only_cs_manager_can_request_clarification(self):
+    def test_only_cs_manager_or_admin_can_request_clarification(self):
         with self.assertRaises(HTTPException) as caught:
             cx_responses.request_question_clarification(
                 "wb", "question-1", cx_responses.ClarificationRequestPayload(),
                 _Db(), {"username": "qa@example.test", "role": "qa_manager"},
             )
         self.assertEqual(caught.exception.status_code, 403)
+
+        connection = _RequestConnection()
+        result = cx_responses.request_question_clarification(
+            "wb", "question-1", cx_responses.ClarificationRequestPayload(note="Проверьте инструкцию"),
+            _Db(connection), {"username": "admin@example.test", "role": "admin"},
+        )
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(connection.commits, 1)
+        insert_params = next(
+            params for sql, params in connection.statements
+            if "INSERT INTO cx_question_clarifications" in sql
+        )
+        self.assertEqual(insert_params["requested_by"], "admin@example.test")
 
     def test_qa_answer_only_updates_local_clarification(self):
         db = _Db()

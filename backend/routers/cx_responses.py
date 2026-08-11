@@ -651,17 +651,20 @@ def get_queue(
                 item["pending_draft"]    = pm["draft_text"]
                 item["pending_template"] = pm.get("template_title") or ""
 
-        # Уточнение видно только менеджеру, который его запросил. Это не
+        # Менеджер видит только свои уточнения, администратор — все. Это не
         # черновик маркетплейса: текст QA можно лишь подставить в поле ответа.
         with db.bind.connect() as conn:
             clarifications = conn.execute(text("""
                 SELECT DISTINCT ON (mp, question_id)
                     id, mp, question_id, note, status, proposed_text,
-                    requested_at, answered_at
+                    requested_by, requested_at, answered_at
                 FROM cx_question_clarifications
-                WHERE requested_by = :user
+                WHERE (:is_admin = TRUE OR requested_by = :user)
                 ORDER BY mp, question_id, requested_at DESC
-            """), {"user": current_user["username"]}).mappings().all()
+            """), {
+                "user": current_user["username"],
+                "is_admin": current_user.get("role") == "admin",
+            }).mappings().all()
         clarification_map = {
             (row["mp"], str(row["question_id"])): dict(row)
             for row in clarifications
@@ -725,8 +728,8 @@ def request_question_clarification(
     current_user: dict = Depends(get_current_user),
 ):
     """Поставить открытый вопрос WB/ЯМ в общую очередь отдела качества."""
-    if current_user.get("role") != "cs_manager":
-        raise HTTPException(status_code=403, detail="Уточнение может запросить только менеджер КС")
+    if current_user.get("role") not in ("cs_manager", "admin"):
+        raise HTTPException(status_code=403, detail="Уточнение может запросить менеджер КС или администратор")
     if mp not in ("wb", "ym"):
         raise HTTPException(status_code=400, detail="Поддерживаются только вопросы WB и ЯМ")
     note = (payload.note or "").strip()
