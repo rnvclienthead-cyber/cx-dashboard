@@ -96,16 +96,15 @@ const pickupError       = ref('')
 const resolvedPickup    = ref(null)
 const dadataSuggestions = ref([])
 const dadataLoading     = ref(false)
-const showSuggestions   = ref(false)
 const addressImprecise  = ref(false)  // true если выбран только город без улицы
 let addressDebounce = null
+let addressRequestId = 0
 
 const clearPickup = () => {
   resolvedPickup.value    = null
   pickupError.value       = ''
   addressImprecise.value  = false
   dadataSuggestions.value = []
-  showSuggestions.value   = false
   form.client_pvz_address = ''
   form.client_pvz_city    = ''
   form.client_lat         = null
@@ -113,16 +112,19 @@ const clearPickup = () => {
 }
 
 const onAddressInput = () => {
+  addressRequestId += 1
   clearPickup()
+  delete errors.pvz
   const q = addressQuery.value.trim()
   if (q.length < 3) return
   clearTimeout(addressDebounce)
-  addressDebounce = setTimeout(fetchDadataSuggestions, 300)
+  const requestId = addressRequestId
+  addressDebounce = setTimeout(() => resolveTypedAddress(requestId), 500)
 }
 
 const fetchDadataSuggestions = async () => {
   const query = addressQuery.value.trim()
-  if (query.length < 3 || !DADATA_KEY) return
+  if (query.length < 3 || !DADATA_KEY) return []
   dadataLoading.value = true
   try {
     const res = await fetch('https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address', {
@@ -136,21 +138,17 @@ const fetchDadataSuggestions = async () => {
     })
     const data = await res.json()
     dadataSuggestions.value = data.suggestions || []
-    showSuggestions.value = dadataSuggestions.value.length > 0
+    return dadataSuggestions.value
   } catch {
     dadataSuggestions.value = []
+    return []
   } finally {
     dadataLoading.value = false
   }
 }
 
-const hideSuggestionsDelayed = () => {
-  setTimeout(() => { showSuggestions.value = false }, 200)
-}
-
 const selectDadataAddress = async (suggestion) => {
   addressQuery.value = suggestion.value
-  showSuggestions.value = false
   dadataSuggestions.value = []
 
   const d = suggestion.data
@@ -177,14 +175,39 @@ const selectDadataAddress = async (suggestion) => {
     const data = await res.json()
     if (data.status === 'success' && data.data) {
       resolvedPickup.value = data.data
+      delete errors.pvz
+      return true
     } else {
       pickupError.value = 'Не нашли пункт выдачи рядом с этим адресом — уточните или выберите другой'
+      return false
     }
   } catch {
     pickupError.value = 'Ошибка проверки адреса. Попробуйте ещё раз.'
+    return false
   } finally {
     pickupLoading.value = false
   }
+}
+
+// Ручной клик по подсказке не обязателен: берём лучший вариант DaData сами.
+const resolveTypedAddress = async (requestId = addressRequestId) => {
+  if (resolvedPickup.value) return true
+
+  const query = addressQuery.value.trim()
+  if (query.length < 3) {
+    pickupError.value = 'Укажите город и улицу доставки'
+    return false
+  }
+
+  const suggestions = await fetchDadataSuggestions()
+  if (requestId !== addressRequestId) return false
+  const best = suggestions[0]
+  if (!best) {
+    pickupError.value = 'Не удалось распознать адрес. Укажите город и улицу'
+    return false
+  }
+
+  return selectDadataAddress(best)
 }
 
 const PROBLEM_TYPES = ['Некомплект', 'Брак', 'Нужна другая деталь']
@@ -260,6 +283,12 @@ const validate = () => {
 }
 
 const submit = async () => {
+  if (!resolvedPickup.value && addressQuery.value.trim()) {
+    state.value = 'loading'
+    await resolveTypedAddress()
+    state.value = 'form'
+  }
+
   if (!validate()) {
     await nextTick()
     const el = document.querySelector('[style*="EF4444"]')
@@ -681,12 +710,11 @@ const submit = async () => {
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
 
-              <p class="text-xs mb-3" style="color:#9CA3AF;">Укажите улицу и номер дома — так ПВЗ подберётся точнее</p>
+              <p class="text-xs mb-3" style="color:#9CA3AF;">Введите город и улицу — адрес уточним и ПВЗ подберём автоматически.</p>
 
-              <!-- Ввод адреса с Dadata autocomplete -->
+              <!-- Адрес нормализуется и ПВЗ подбирается автоматически -->
               <div class="relative">
-                <input v-model="addressQuery" @input="onAddressInput" @blur="hideSuggestionsDelayed"
-                  @focus="dadataSuggestions.length && (showSuggestions = true)"
+                <input v-model="addressQuery" @input="onAddressInput"
                   type="text" autocomplete="off"
                   placeholder="Например: Москва, Тверская улица, 7"
                   class="form-input w-full px-4 py-3 rounded-2xl border text-sm outline-none transition-colors"
@@ -699,21 +727,6 @@ const submit = async () => {
                   </svg>
                 </div>
 
-                <!-- Список подсказок Dadata -->
-                <div v-if="showSuggestions && dadataSuggestions.length"
-                  class="absolute z-50 left-0 right-0 top-full mt-1 rounded-2xl overflow-hidden shadow-lg"
-                  style="background:#fff; border:1.5px solid #E5E7EB;">
-                  <button
-                    v-for="(s, i) in dadataSuggestions" :key="i"
-                    type="button"
-                    @mousedown.prevent="selectDadataAddress(s)"
-                    class="w-full text-left px-4 py-3 text-sm transition-colors border-b last:border-b-0"
-                    style="border-color:#F3F4F6; color:#1E2235;"
-                    onmouseover="this.style.background='#FFF8D6'" onmouseout="this.style.background=''"
-                  >
-                    {{ s.value }}
-                  </button>
-                </div>
               </div>
 
               <!-- Загрузка nearest-pickup -->
@@ -809,7 +822,7 @@ const submit = async () => {
                 : 'background:#E5E7EB; color:#9CA3AF; border-radius:50px; opacity:1; cursor:not-allowed;'">
               <Loader2 v-if="state === 'loading'" class="w-5 h-5 animate-spin" />
               <PackageCheck v-else class="w-5 h-5" />
-              {{ state === 'loading' ? 'Отправляем...' : 'Отправить заявку' }}
+              {{ state === 'loading' ? (pickupLoading ? 'Проверяем адрес...' : 'Отправляем...') : 'Отправить заявку' }}
             </button>
 
           </form>
