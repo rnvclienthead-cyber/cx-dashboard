@@ -809,6 +809,25 @@ def get_quality_question_queue(
     return {"items": items, "counts": {"questions": len(items)}}
 
 
+@quality_questions_router.get("/count")
+def get_quality_question_count(db: Session = Depends(get_db)):
+    """Количество активных уточнений для счётчика в сайдбаре."""
+    with db.bind.connect() as conn:
+        count = conn.execute(text(f"""
+            SELECT COUNT(*)
+            FROM cx_question_clarifications c
+            WHERE c.status = 'pending'
+              AND EXISTS (
+                  SELECT 1
+                  FROM {UNIFIED_QUEUE_VIEW} q
+                  WHERE q.mp = c.mp
+                    AND q.item_type = 'question'
+                    AND q.id = c.question_id
+              )
+        """)).scalar()
+    return {"count": int(count or 0)}
+
+
 @quality_questions_router.post("/{clarification_id}/answer")
 def answer_question_clarification(
     clarification_id: int,

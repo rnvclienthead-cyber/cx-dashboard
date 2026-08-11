@@ -270,31 +270,34 @@
               :rows="replyRows(item._reply)"
               class="w-full min-h-[6.5rem] border border-gray-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
             ></textarea>
-            <div class="mt-2 flex flex-wrap justify-end gap-2">
+            <div class="mt-2 flex flex-col sm:flex-row sm:items-center gap-2">
               <button v-if="canRequestClarification && item.clarification?.status !== 'pending'" @click="item._clarificationOpen = true"
-                class="min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border border-violet-200 bg-white hover:bg-violet-50 text-violet-700">
+                title="Необязательное действие: покупателю ничего не отправляется"
+                class="self-start min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border border-violet-200 bg-white hover:bg-violet-50 text-violet-700">
                 Уточнить у качества
               </button>
-              <button v-if="isWbQuestion(item)" @click="sendReply(item, 'private')"
-                :disabled="!item._reply?.trim()"
-                title="Ответ увидит только автор вопроса"
-                :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
-                :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border',
-                  item._reply?.trim()
-                    ? 'bg-white hover:bg-gray-50 text-gray-700 border-gray-300'
-                    : 'bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed']">
-                Ответить автору
-              </button>
-              <button @click="sendReply(item, 'public')"
-                :disabled="!item._reply?.trim()"
-                :title="publicAnswerHelp(item)"
-                :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
-                :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all',
-                  item._reply?.trim()
-                    ? 'bg-sky-600 hover:bg-sky-700 text-white'
-                    : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
-                {{ publicAnswerLabel(item) }}
-              </button>
+              <div class="flex flex-wrap gap-2 sm:ml-auto sm:justify-end">
+                <button v-if="isWbQuestion(item)" @click="sendReply(item, 'private')"
+                  :disabled="!item._reply?.trim()"
+                  title="Ответ увидит только автор вопроса"
+                  :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
+                  :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border',
+                    item._reply?.trim()
+                      ? 'bg-white hover:bg-gray-50 text-gray-700 border-gray-300'
+                      : 'bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed']">
+                  Ответить автору
+                </button>
+                <button @click="sendReply(item, 'public')"
+                  :disabled="!item._reply?.trim()"
+                  :title="publicAnswerHelp(item)"
+                  :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
+                  :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all',
+                    item._reply?.trim()
+                      ? 'bg-sky-600 hover:bg-sky-700 text-white'
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
+                  {{ publicAnswerLabel(item) }}
+                </button>
+              </div>
             </div>
             <p :id="`question-publish-help-${item.mp}-${item.id}`"
               class="mt-2 text-[11px] text-gray-600 leading-snug">
@@ -879,6 +882,7 @@ async function requestClarification(item) {
       requested_at: d.requested_at,
     }
     item._clarificationOpen = false
+    window.dispatchEvent(new Event('quality-questions-updated'))
     showToast('Передано в отдел качества', 'ok')
   } catch (e) {
     showToast('Не удалось передать: ' + (e?.message || ''), 'error')
@@ -902,6 +906,7 @@ async function sendQaAnswer(item) {
     })
     queueItems.value = queueItems.value.filter(i => i !== item)
     counts.value = { ...counts.value, questions: Math.max(0, (counts.value.questions || 1) - 1) }
+    window.dispatchEvent(new Event('quality-questions-updated'))
     showToast('Ответ передан менеджеру КС', 'ok')
   } catch (e) {
     showToast('Не удалось сохранить: ' + (e?.message || ''), 'error')

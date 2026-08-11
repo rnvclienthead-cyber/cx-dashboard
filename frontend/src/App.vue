@@ -61,6 +61,8 @@ function pingActivity () {
 
 const newReshipmentCount = ref(0)
 let reshipmentTimer = null
+const qualityQuestionCount = ref(0)
+let qualityQuestionTimer = null
 
 /** Для КС — очередь «новые»; для склада — «на отправку»; иначе тоже новые. */
 function reshipmentBadgeStatus () {
@@ -80,6 +82,18 @@ async function fetchReshipmentBadge () {
   } catch { /* silent */ }
 }
 
+async function fetchQualityQuestionBadge () {
+  if (!canViewQualityQuestions.value) {
+    qualityQuestionCount.value = 0
+    return
+  }
+  try {
+    const res = await apiFetch('/api/v1/quality-questions/count')
+    const data = await res.json()
+    qualityQuestionCount.value = parseInt(data?.count ?? 0, 10)
+  } catch { /* silent */ }
+}
+
 watch(() => permissionsStore.loaded, (loaded) => {
   if (loaded && permissionsStore.can('reshipment')) {
     fetchReshipmentBadge()
@@ -92,16 +106,31 @@ watch(() => permissionsStore.role, () => {
   if (permissionsStore.loaded && permissionsStore.can('reshipment')) fetchReshipmentBadge()
 })
 
+watch([() => permissionsStore.loaded, canViewQualityQuestions], ([loaded, canView]) => {
+  if (!loaded) return
+  if (!canView) {
+    qualityQuestionCount.value = 0
+    if (qualityQuestionTimer) clearInterval(qualityQuestionTimer)
+    qualityQuestionTimer = null
+    return
+  }
+  fetchQualityQuestionBadge()
+  if (!qualityQuestionTimer) qualityQuestionTimer = setInterval(fetchQualityQuestionBadge, 60000)
+}, { immediate: true })
+
 onMounted(() => {
   const saved = localStorage.getItem('sidebar_collapsed')
   if (saved !== null) isCollapsed.value = saved === 'true'
   pingActivity()
   activityTimer = setInterval(pingActivity, 60000)
+  window.addEventListener('quality-questions-updated', fetchQualityQuestionBadge)
 })
 
 onUnmounted(() => {
   clearInterval(activityTimer)
   if (reshipmentTimer) clearInterval(reshipmentTimer)
+  if (qualityQuestionTimer) clearInterval(qualityQuestionTimer)
+  window.removeEventListener('quality-questions-updated', fetchQualityQuestionBadge)
 })
 
 watch(() => route.path, pingActivity)
@@ -536,8 +565,20 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
           active-class="bg-violet-50 text-violet-700 font-semibold"
           :title="isCollapsed ? 'Уточнения по вопросам' : ''"
         >
-          <ClipboardPenLine class="w-4 h-4 flex-shrink-0" />
-          <span v-if="!isCollapsed">Уточнения по вопросам</span>
+          <span class="relative flex-shrink-0">
+            <ClipboardPenLine class="w-4 h-4" />
+            <span
+              v-if="isCollapsed && qualityQuestionCount > 0"
+              class="absolute -top-1.5 -right-1.5 flex items-center justify-center rounded-full bg-red-500 text-white font-bold leading-none"
+              style="min-width:14px;height:14px;font-size:9px;padding:0 2px"
+            >{{ qualityQuestionCount }}</span>
+          </span>
+          <span v-if="!isCollapsed" class="flex-1">Уточнения по вопросам</span>
+          <span
+            v-if="!isCollapsed && qualityQuestionCount > 0"
+            class="flex items-center justify-center rounded-full bg-red-500 text-white font-bold leading-none"
+            style="min-width:18px;height:18px;font-size:10px;padding:0 4px"
+          >{{ qualityQuestionCount }}</span>
         </RouterLink>
 
         <RouterLink

@@ -21,6 +21,9 @@ class _Result:
     def all(self):
         return []
 
+    def scalar(self):
+        return self.row
+
 
 class _Connection:
     def __init__(self):
@@ -107,6 +110,16 @@ class QuestionClarificationTests(unittest.TestCase):
         self.assertIn("set status = 'cancelled'", sql)
         self.assertIn("where c.status = 'pending'", sql)
         self.assertIn("not exists", sql)
+        self.assertIn(cx_responses.UNIFIED_QUEUE_VIEW, sql)
+
+    def test_quality_question_count_includes_only_active_pending_sources(self):
+        db = _Db()
+        db.connection.execute = Mock(return_value=_Result(4))
+
+        self.assertEqual(cx_responses.get_quality_question_count(db), {"count": 4})
+        sql = db.connection.execute.call_args.args[0].text.lower()
+        self.assertIn("c.status = 'pending'", sql)
+        self.assertIn("exists", sql)
         self.assertIn(cx_responses.UNIFIED_QUEUE_VIEW, sql)
 
     def test_status_constraint_migration_is_catalog_guarded(self):
