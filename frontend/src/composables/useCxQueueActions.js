@@ -34,9 +34,10 @@ export function useCxQueueActions(queueItems, showToast) {
     }
   }
 
-  async function confirmMod(item) {
+  async function confirmMod(item, visibility = '') {
     try {
-      await apiFetch(`${CX_BASE}/moderation/${item.pending_mod_id}/confirm`, { method: 'POST' })
+      const suffix = visibility ? `?visibility=${encodeURIComponent(visibility)}` : ''
+      await apiFetch(`${CX_BASE}/moderation/${item.pending_mod_id}/confirm${suffix}`, { method: 'POST' })
       showToast('Ответ отправлен', 'ok')
       queueItems.value = queueItems.value.filter(i => i !== item)
     } catch (e) {

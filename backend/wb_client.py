@@ -167,10 +167,18 @@ def list_questions(
     return (r.json() or {}).get("data", {}).get("questions") or []
 
 
-def answer_question(question_id: str, text: str, *, key: str | None = None, timeout: int = 20) -> requests.Response:
-    """PATCH /api/v1/questions — ответ автору вопроса (= кнопка «Отправить автору» в ЛК).
+def answer_question(
+    question_id: str,
+    text: str,
+    *,
+    public: bool = True,
+    key: str | None = None,
+    timeout: int = 20,
+) -> requests.Response:
+    """PATCH /api/v1/questions: публичный ответ или ответ только автору.
 
-    Тело по доке WB: id + answer.text + state=wbRu (публикация ответа).
+    ``wbRu`` публикует вопрос и ответ на карточке. ``none`` с текстом
+    отправляет ответ автору, но не показывает вопрос и ответ остальным.
     """
     txt = (text or "").strip()
     if not txt:
@@ -181,7 +189,7 @@ def answer_question(question_id: str, text: str, *, key: str | None = None, time
         json={
             "id": question_id,
             "answer": {"text": txt},
-            "state": "wbRu",
+            "state": "wbRu" if public else "none",
         },
         timeout=timeout,
     )

@@ -131,10 +131,16 @@
           <div v-if="item.pending_mod_id" class="border-t border-amber-200 bg-amber-50/70 px-4 py-3 space-y-2">
             <p class="text-xs font-medium text-amber-700">Черновик автоответа ожидает подтверждения</p>
             <p class="text-sm text-gray-700 whitespace-pre-wrap bg-white border border-amber-200 rounded-lg px-3 py-2">{{ item.pending_draft }}</p>
-            <div class="flex gap-2">
-              <button @click="confirmMod(item)" :title="publishHelp(item)"
+            <div class="flex flex-wrap gap-2">
+              <button v-if="isWbQuestion(item)" @click="confirmMod(item, 'private')"
+                title="Ответ увидит только автор вопроса"
                 :aria-describedby="`question-moderation-publish-help-${item.mp}-${item.id}`"
-                class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors font-medium">
+                class="min-h-11 px-3 py-1.5 bg-white hover:bg-gray-50 text-gray-700 border border-gray-200 text-sm rounded-lg transition-colors font-medium">
+                Подтвердить и ответить автору
+              </button>
+              <button @click="confirmMod(item, 'public')" :title="publicAnswerHelp(item)"
+                :aria-describedby="`question-moderation-publish-help-${item.mp}-${item.id}`"
+                class="min-h-11 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors font-medium">
                 {{ moderationPublishLabel(item) }}
               </button>
               <button @click="rejectMod(item)"
@@ -144,7 +150,7 @@
             </div>
             <p :id="`question-moderation-publish-help-${item.mp}-${item.id}`"
               class="text-[11px] text-amber-800 leading-snug">
-              {{ publishHelp(item) }}
+              {{ questionReplyHelp(item) }}
             </p>
           </div>
 
@@ -200,21 +206,31 @@
               :rows="replyRows(item._reply)"
               class="w-full min-h-[6.5rem] border border-gray-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
             ></textarea>
-            <div class="flex justify-end mt-2">
-              <button @click="sendReply(item)"
+            <div class="mt-2 flex flex-wrap justify-end gap-2">
+              <button v-if="isWbQuestion(item)" @click="sendReply(item, 'private')"
                 :disabled="!item._reply?.trim()"
-                :title="publishHelp(item)"
+                title="Ответ увидит только автор вопроса"
                 :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
-                :class="['px-4 py-2 rounded-lg text-sm font-medium transition-all',
+                :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border',
+                  item._reply?.trim()
+                    ? 'bg-white hover:bg-gray-50 text-gray-700 border-gray-300'
+                    : 'bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed']">
+                Ответить автору
+              </button>
+              <button @click="sendReply(item, 'public')"
+                :disabled="!item._reply?.trim()"
+                :title="publicAnswerHelp(item)"
+                :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
+                :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all',
                   item._reply?.trim()
                     ? 'bg-sky-600 hover:bg-sky-700 text-white'
                     : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
-                {{ publishActionLabel(item) }}
+                {{ publicAnswerLabel(item) }}
               </button>
             </div>
             <p :id="`question-publish-help-${item.mp}-${item.id}`"
               class="mt-2 text-[11px] text-gray-600 leading-snug">
-              {{ publishHelp(item) }}
+              {{ questionReplyHelp(item) }}
             </p>
           </div>
         </div>
@@ -360,8 +376,8 @@
           Автоотправка без проверки пока готовится — сейчас тексты подставляются в поле ответа.
         </p>
         <ul class="text-sm text-gray-600 space-y-2 list-disc pl-5">
-          <li>WB / ЯМ: ответ всегда публичный на карточке товара.</li>
-          <li>Личный ответ = чат с покупателем (не API вопросов).</li>
+          <li>WB: можно опубликовать ответ на карточке или отправить его только автору вопроса.</li>
+          <li>ЯМ: ответ публикуется на карточке товара.</li>
           <li>Ozon в очереди вопросов пока нет (только отзывы/чаты).</li>
           <li>Плейбук вопросов — отдельная копия чатового; можно править независимо.</li>
         </ul>
@@ -499,18 +515,28 @@ function replyRows(text) {
   return Math.min(14, Math.max(4, Math.max(lines, approx) + 1))
 }
 
-function publishActionLabel(item) {
-  return item.mp === 'wb' ? 'Опубликовать на карточке' : 'Опубликовать ответ'
+function isWbQuestion(item) {
+  return item.mp === 'wb' && item.item_type === 'question'
+}
+
+function publicAnswerLabel(item) {
+  return isWbQuestion(item) ? 'Опубликовать на карточке' : 'Опубликовать ответ'
 }
 
 function moderationPublishLabel(item) {
-  return `Подтвердить и ${publishActionLabel(item).toLowerCase()}`
+  return `Подтвердить и ${publicAnswerLabel(item).toLowerCase()}`
 }
 
-function publishHelp(item) {
-  return item.mp === 'wb'
-    ? 'Ответ будет виден всем покупателям в Q&A на карточке товара.'
+function publicAnswerHelp(item) {
+  return isWbQuestion(item)
+    ? 'Ответ будет виден всем покупателям в разделе «Вопросы» на карточке товара.'
     : 'Ответ публикуется на карточке товара.'
+}
+
+function questionReplyHelp(item) {
+  return isWbQuestion(item)
+    ? '«Опубликовать» увидят все покупатели на карточке. «Ответить автору» увидит только автор вопроса.'
+    : publicAnswerHelp(item)
 }
 
 function normalizeBody(s) {
@@ -743,17 +769,22 @@ watch(activeSection, (s) => {
 })
 
 // ── Отправка / модерация / dismiss (общая логика — см. composables/useCxQueueActions) ──
-function replyEndpoint(item) {
+function replyEndpoint(item, visibility = 'public') {
   const id = encodeURIComponent(String(item.id))
   const map = {
-    'wb:question': `/wb/questions/${id}/answer`,
+    'wb:question': `/wb/questions/${id}/answer?visibility=${visibility === 'private' ? 'private' : 'public'}`,
     'ym:question': `/ym/questions/${id}/answer`,
   }
   return map[`${item.mp}:${item.item_type}`] || null
 }
 
-const { sendReply: _sendReply, confirmMod, rejectMod, dismissItem } = useCxQueueActions(queueItems, showToast)
-function sendReply(item) { return _sendReply(item, replyEndpoint) }
+const { sendReply: _sendReply, confirmMod: _confirmMod, rejectMod, dismissItem } = useCxQueueActions(queueItems, showToast)
+function sendReply(item, visibility = 'public') {
+  return _sendReply(item, entry => replyEndpoint(entry, visibility))
+}
+function confirmMod(item, visibility = 'public') {
+  return _confirmMod(item, isWbQuestion(item) ? visibility : '')
+}
 
 // ── Init ───────────────────────────────────────────────────────────────────
 onMounted(async () => {

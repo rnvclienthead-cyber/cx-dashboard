@@ -3059,17 +3059,20 @@ def answer_wb_feedback(
 def answer_wb_question(
     question_id: str,
     payload: AnswerPayload,
+    visibility: str = Query("public", description="public | private"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     txt = payload.text.strip()
     if not txt:
         raise HTTPException(status_code=400, detail="Текст ответа не может быть пустым")
+    if visibility not in ("public", "private"):
+        raise HTTPException(status_code=400, detail="visibility: public или private")
     if not _wb_key():
         raise HTTPException(status_code=503, detail="WB_API_KEY не настроен")
 
     try:
-        wb_client.answer_question(question_id, txt, timeout=20)
+        wb_client.answer_question(question_id, txt, public=visibility == "public", timeout=20)
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"WB API {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
@@ -3085,7 +3088,7 @@ def answer_wb_question(
         ), {"iid": question_id, "user": current_user["username"], "ans": txt})
         conn.commit()
 
-    return {"status": "ok"}
+    return {"status": "ok", "visibility": visibility}
 
 
 # ── Ответ на отзыв ЯМ ────────────────────────────────────────────────────────
@@ -3663,6 +3666,7 @@ def delete_template(tpl_id: int, db: Session = Depends(get_db)):
 @router.post("/moderation/{mod_id}/confirm")
 def confirm_moderation(
     mod_id: int,
+    visibility: str = Query("public", description="public | private для вопроса WB"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -3675,6 +3679,8 @@ def confirm_moderation(
         raise HTTPException(status_code=404, detail="Черновик не найден")
 
     mp, itype, item_id, txt = row["mp"], row["item_type"], row["item_id"], row["draft_text"]
+    if visibility not in ("public", "private"):
+        raise HTTPException(status_code=400, detail="visibility: public или private")
 
     # Отправляем через соответствующий API
     try:
@@ -3686,7 +3692,7 @@ def confirm_moderation(
                 conn.commit()
 
         elif mp == "wb" and itype == "question":
-            wb_client.answer_question(item_id, txt, timeout=20)
+            wb_client.answer_question(item_id, txt, public=visibility == "public", timeout=20)
             with db.bind.connect() as conn:
                 conn.execute(text("UPDATE wb_questions SET state='answered',answer_text=:a WHERE id=:i"),
                              {"a": txt, "i": item_id})
