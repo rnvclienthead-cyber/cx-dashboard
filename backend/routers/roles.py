@@ -44,22 +44,28 @@ MARKETPLACES = ["all", "wb", "ym", "ozon"]
 
 # Роли КС по умолчанию должны видеть рабочий стол обращений
 _CS_DEFAULT_MODULES = ("cx_responses", "reshipment", "faq")
+_QA_DEFAULT_MODULES = ("quality_questions",)
 
 
 def ensure_cs_manager_permissions(engine) -> None:
-    """Гарантирует cs_manager доступ к КС-разделам (отзывы/вопросы/чаты/возвраты)."""
+    """Гарантирует системным ролям их обязательные рабочие разделы."""
     with engine.connect() as conn:
-        exists = conn.execute(text(
-            "SELECT 1 FROM roles WHERE name = 'cs_manager' LIMIT 1"
-        )).scalar()
-        if not exists:
-            return
-        for mod in _CS_DEFAULT_MODULES:
-            conn.execute(text("""
-                INSERT INTO role_permissions (role_name, module, marketplace)
-                VALUES ('cs_manager', :m, 'all')
-                ON CONFLICT (role_name, module) DO NOTHING
-            """), {"m": mod})
+        defaults = {
+            "cs_manager": _CS_DEFAULT_MODULES,
+            "qa_manager": _QA_DEFAULT_MODULES,
+        }
+        for role_name, modules in defaults.items():
+            exists = conn.execute(text(
+                "SELECT 1 FROM roles WHERE name = :role LIMIT 1"
+            ), {"role": role_name}).scalar()
+            if not exists:
+                continue
+            for mod in modules:
+                conn.execute(text("""
+                    INSERT INTO role_permissions (role_name, module, marketplace)
+                    VALUES (:role, :module, 'all')
+                    ON CONFLICT (role_name, module) DO NOTHING
+                """), {"role": role_name, "module": mod})
         conn.commit()
 
 

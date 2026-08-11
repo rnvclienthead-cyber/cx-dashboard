@@ -13,6 +13,11 @@ import { usePermissionsStore } from './stores/permissions'
 
 const platformStore    = usePlatformStore()
 const permissionsStore = usePermissionsStore()
+const canViewQualityQuestions = computed(() =>
+  permissionsStore.isAdmin ||
+  permissionsStore.role === 'qa_manager' ||
+  permissionsStore.can('quality_questions')
+)
 
 const isCollapsed  = ref(false)
 const isMobileOpen = ref(false)
@@ -522,7 +527,7 @@ const platformImgSrc = { wb: '/icons/wb.png', ym: '/icons/ym.png', ozon: '/icons
         </template>
 
         <RouterLink
-          v-if="permissionsStore.isAdmin || permissionsStore.can('quality_questions')"
+          v-if="canViewQualityQuestions"
           to="/questions/quality"
           :class="[
             'flex items-center rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors',

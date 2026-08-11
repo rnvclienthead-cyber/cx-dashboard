@@ -121,7 +121,9 @@ router.beforeEach(async (to, from, next) => {
     if (to.path === '/questions' && !permStore.can('cx_responses') && permStore.can('quality_questions')) {
       return next('/questions/quality')
     }
-    if (moduleRoute && !permStore.can(moduleRoute.module)) {
+    const qualityRoleFallback =
+      to.path === '/questions/quality' && permStore.role === 'qa_manager'
+    if (moduleRoute && !permStore.can(moduleRoute.module) && !qualityRoleFallback) {
       // Ищем первый доступный модуль для редиректа
       const first = MODULE_ROUTES.find(r => permStore.can(r.module))
       if (first) return next(first.path)
