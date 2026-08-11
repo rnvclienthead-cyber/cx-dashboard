@@ -506,15 +506,19 @@
             <div v-else-if="chatSuggestMiss"
               class="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 flex items-center justify-between gap-3">
               <div class="min-w-0">
-                <p class="text-xs font-semibold text-amber-900">Ответ не подобран</p>
+                <p class="text-xs font-semibold text-amber-900">
+                  {{ chatSuggestMiss.need_human ? 'Нужен менеджер' : 'Ответ не подобран' }}
+                </p>
                 <p class="text-[10px] text-amber-800/80 mt-0.5 leading-snug">
-                  {{ chatSuggestMiss.reason || 'Нет подходящего шаблона для этого сообщения.' }}
+                  {{ chatSuggestMiss.reason || (chatSuggestMiss.need_human
+                    ? 'Автоответ отключён: возьмите чат в работу вручную.'
+                    : 'Нет подходящего шаблона для этого сообщения.') }}
                 </p>
               </div>
-              <button v-if="chatSuggestMiss.can_generate !== false"
+              <button v-if="!chatSuggestMiss.need_human && chatSuggestMiss.can_generate !== false"
                 @click="generateSuggestAi" :disabled="chatSuggestGenerating"
                 class="shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-60">
-                {{ chatSuggestGenerating ? 'Генерируем…' : 'Сгенерировать ответ' }}
+                {{ chatSuggestGenerating ? 'Генерируем…' : 'Сгенерировать черновик' }}
               </button>
             </div>
             <div v-if="chatTemplatesLoading || visibleChatTemplates.length" class="relative mb-2">
@@ -2639,6 +2643,7 @@ async function loadSuggest(chatId, mp = 'wb', requestId = chatSelectionRequest) 
         can_generate: d.can_generate !== false,
         theme: d.theme,
         theme_name: d.theme_name,
+        need_human: d.need_human === true,
       }
     } else {
       chatSuggestMiss.value = {

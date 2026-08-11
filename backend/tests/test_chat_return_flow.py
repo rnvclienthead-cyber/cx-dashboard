@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+from datetime import datetime
+from unittest.mock import Mock, patch
 
 from backend import chat_bot
 
@@ -52,6 +53,66 @@ class ReturnFlowTests(unittest.TestCase):
             chat_bot._next_stage(theme, "handoff_to_manager", "awaiting_return_reason"),
             "handoff",
         )
+
+    def test_client_reply_after_sent_auto_is_detected_from_sent_log_only(self):
+        db = Mock()
+        db.execute.return_value.fetchone.return_value = (1_000,)
+
+        self.assertTrue(chat_bot._client_replied_after_sent_auto(db, "chat-1", 1_001, "wb"))
+        self.assertFalse(chat_bot._client_replied_after_sent_auto(db, "chat-1", 1_000, "wb"))
+        sql = str(db.execute.call_args.args[0])
+        self.assertIn("sent = true", sql)
+        self.assertIn("zone = 'auto'", sql)
+
+    def test_reply_after_auto_handoffs_without_second_auto_answer(self):
+        db = Mock()
+        db.execute.return_value.fetchone.return_value = None
+        state = {
+            "stage": "awaiting_return_reason",
+            "last_theme": "vozvrat",
+            "last_bot_at": datetime(2024, 1, 1),
+            "last_greeted_date": None,
+        }
+        chat = {
+            "chat_id": "chat-1",
+            "last_message": "Не подошёл размер",
+            "last_ts": 1_735_689_600_000,
+            "nm_id": 1,
+            "client_name": "Покупатель",
+        }
+        def mp_setting(_db, key, _mp, default=""):
+            return "" if key == "bot_test_chat_ids" else default
+
+        with (
+            patch.object(chat_bot.chat_playbook, "get_setting_mp", side_effect=mp_setting),
+            patch.object(chat_bot.chat_playbook, "get_setting", return_value=""),
+            patch.object(chat_bot, "_has_human_seller_reply", return_value=False),
+            patch.object(chat_bot, "_has_seller_reply", return_value=False),
+            patch.object(chat_bot, "_best_client_text", return_value="Не подошёл размер"),
+            patch.object(chat_bot, "_bot_state", return_value=state),
+            patch.object(chat_bot, "_client_replied_after_sent_auto", return_value=True),
+            patch.object(chat_bot, "_get_article", return_value="Сушилка"),
+            patch.object(chat_bot, "_get_reshipment", return_value=None),
+            patch.object(chat_bot, "_last_seller_ts", return_value=None),
+            patch.object(chat_bot, "_needs_greeting", return_value=False),
+            patch.object(chat_bot, "_notify_manager") as notify,
+            patch.object(chat_bot, "_set_state") as set_state,
+            patch.object(chat_bot, "_log") as log,
+            patch.object(chat_bot, "classify") as classify,
+            patch.object(chat_bot, "assemble_reply") as assemble,
+            patch.object(chat_bot, "_send_to_client") as send,
+        ):
+            result = chat_bot.process_one(db, chat, shadow=False, mp="wb")
+
+        self.assertEqual(result["zone"], "human")
+        self.assertFalse(result["sent"])
+        self.assertIn("передано менеджеру", result["reason"])
+        classify.assert_not_called()
+        assemble.assert_not_called()
+        send.assert_not_called()
+        notify.assert_called_once()
+        self.assertEqual(set_state.call_args.kwargs["stage"], "handoff")
+        self.assertEqual(log.call_args.kwargs["action"], "handoff_to_manager")
 
     def test_wb_nonreturnable_category_stays_separate(self):
         with (

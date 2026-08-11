@@ -382,6 +382,13 @@ def init_bot_tables(engine):
             ))
         except Exception:
             pass
+        # Fast handoff check after a sent auto-reply.  Do not put COALESCE(mp,
+        # 'wb') in the predicate: old WB rows with mp=NULL must stay covered.
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_chat_bot_log_sent_auto_lookup
+            ON cx_chat_bot_log (chat_id, mp, created_at DESC, id DESC)
+            WHERE sent = true AND zone = 'auto'
+        """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_bot_suggest_cache (
                 chat_id         TEXT PRIMARY KEY,
@@ -754,6 +761,45 @@ def _bot_state(db: Session, chat_id: str) -> dict:
     db.commit()
     return {"chat_id": chat_id, "stage": "new", "last_theme": None,
             "last_greeted_date": None, "last_bot_at": None, "closing_asked_at": None}
+
+
+_POST_AUTO_REPLY_HANDOFF_REASON = (
+    "клиент ответил на автоответ → передано менеджеру; "
+    "повторный автоответ отключён"
+)
+
+
+def _client_replied_after_sent_auto(
+    db: Session, chat_id: str, client_last_ts, mp: str = "wb"
+) -> bool:
+    """Есть ли новое сообщение клиента после реально отправленного автоответа.
+
+    ``last_bot_at`` здесь не подходит: он обновляется и в shadow/draft-сценариях.
+    Берём только запись журнала с ``sent=true`` и зоной ``auto``.
+    """
+    try:
+        client_ms = int(client_last_ts or 0)
+    except (TypeError, ValueError):
+        return False
+    if client_ms <= 0:
+        return False
+
+    row = db.execute(text("""
+        SELECT EXTRACT(EPOCH FROM created_at)::bigint * 1000
+        FROM cx_chat_bot_log
+        WHERE chat_id = :cid
+          AND COALESCE(mp, 'wb') = :mp
+          AND sent = true
+          AND zone = 'auto'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    """), {"cid": chat_id, "mp": (mp or "wb").lower()}).fetchone()
+    if not row or row[0] is None:
+        return False
+    try:
+        return client_ms > int(row[0])
+    except (TypeError, ValueError):
+        return False
 
 
 def _set_state(db: Session, chat_id: str, **fields):
@@ -1528,6 +1574,8 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
 
 
 def _next_stage(theme: str, action: str, current: str) -> str:
+    if action == "handoff_to_manager":
+        return "handoff"
     if theme == "utochnenie" or action == "ask_menu":
         return "awaiting_menu"
     if theme == "vozvrat" and action == "ask_reason":
@@ -1544,8 +1592,6 @@ def _next_stage(theme: str, action: str, current: str) -> str:
         return "closing"
     if theme == "status_zayavki":
         return current or "in_work"
-    if theme == "vozvrat" and action == "handoff_to_manager":
-        return "handoff"
     if theme in ("otkaz_dootpravki", "dengi"):
         return "handoff"
     # После выбора из меню — сбрасываем awaiting_menu
@@ -1954,29 +2000,40 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
     if reship and reship.get("wb_nm_id") and not article:
         article = _get_article(db, reship.get("wb_nm_id"))
 
-    history = _history(db, chat_id, mp=mp)
     stage = state.get("stage") or "new"
-
-    theme, conf, need_human, reason = classify(
-        db, msg, stage, history, article,
-        nm_id=chat.get("nm_id") if mp == "wb" else None,
-        mp=mp,
-    )
-    source_theme = theme
-    theme, reason = _remap_theme_for_mp(theme, mp, reason, client_msg=msg)
-
-    # Не долбим меню, пока клиент шлёт фото/приветствие без выбора
-    if "ждём выбор" in (reason or ""):
-        return None
-
-    zone = chat_playbook.get_zone(db, theme)
-    if need_human:
+    replied_after_auto = _client_replied_after_sent_auto(db, chat_id, last_ts, mp)
+    if replied_after_auto:
+        # Второе сообщение после реально отправленного ответа всегда берёт человек.
+        # В частности, это сохраняет поток возврата: причина -> менеджер.
+        theme = state.get("last_theme") or "dengi"
+        source_theme = theme
+        conf = 1.0
+        need_human = True
+        reason = _POST_AUTO_REPLY_HANDOFF_REASON
         zone = "human"
+        branch = ""
+    else:
+        history = _history(db, chat_id, mp=mp)
+        theme, conf, need_human, reason = classify(
+            db, msg, stage, history, article,
+            nm_id=chat.get("nm_id") if mp == "wb" else None,
+            mp=mp,
+        )
+        source_theme = theme
+        theme, reason = _remap_theme_for_mp(theme, mp, reason, client_msg=msg)
 
-    branch = _resolve_branch(
-        db, theme, article, reship, msg,
-        mp=mp, stage=stage, last_theme=state.get("last_theme") or "",
-    )
+        # Не долбим меню, пока клиент шлёт фото/приветствие без выбора
+        if "ждём выбор" in (reason or ""):
+            return None
+
+        zone = chat_playbook.get_zone(db, theme)
+        if need_human:
+            zone = "human"
+
+        branch = _resolve_branch(
+            db, theme, article, reship, msg,
+            mp=mp, stage=stage, last_theme=state.get("last_theme") or "",
+        )
     last_seller_ts = _last_seller_ts(db, chat_id, mp=mp)
     need_greet = _needs_greeting(state, last_seller_ts)
 
@@ -2158,6 +2215,27 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
             "skip": True, "can_generate": False, "from_cache": False,
         }
 
+    state = _bot_state(db, chat_id)
+    if _client_replied_after_sent_auto(db, chat_id, last_ts, mp):
+        # Не показываем новый шаблон после автоответа: чат уже ждёт человека.
+        return {
+            "ok": True,
+            "chat_id": chat_id,
+            "mp": mp,
+            "theme": state.get("last_theme") or "",
+            "theme_name": "",
+            "confidence": 1.0,
+            "zone": "human",
+            "branch_key": "",
+            "action": "handoff_to_manager",
+            "reply_text": "",
+            "need_human": True,
+            "reason": _POST_AUTO_REPLY_HANDOFF_REASON,
+            "skip": False,
+            "can_generate": False,
+            "from_cache": False,
+        }
+
     # Кэш: тот же last_ts клиента → не дергаем Яндекс снова
     if use_cache and not force_ai:
         cached = db.execute(text("""
@@ -2171,7 +2249,6 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
             payload["ok"] = True
             return payload
 
-    state = _bot_state(db, chat_id)
     # Артикул: у Ozon/ЯМ уже в good_name; у WB — через nm_id
     article = (chat.get("good_name") or "").strip() if mp in ("ozon", "ym") else ""
     if not article:
