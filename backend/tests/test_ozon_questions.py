@@ -88,7 +88,11 @@ class OzonQuestionTests(unittest.TestCase):
     def test_answer_route_publishes_and_updates_local_queue(self):
         connection = _Connection({"sku": 123456, "status": "VIEWED"})
         db = _Db(connection)
-        with patch.object(cx_responses.ozon_client, "answer_question") as answer:
+        with (
+            patch.object(cx_responses, "_oz_key", return_value="test-key"),
+            patch.object(cx_responses, "_oz_cid", return_value="test-client"),
+            patch.object(cx_responses.ozon_client, "answer_question") as answer,
+        ):
             result = cx_responses.answer_ozon_question(
                 "q-1",
                 cx_responses.AnswerPayload(text="Полезный ответ"),
@@ -107,6 +111,8 @@ class OzonQuestionTests(unittest.TestCase):
     def test_answer_route_rejects_closed_question_without_api_call(self):
         db = _Db(_Connection({"sku": 123456, "status": "PROCESSED"}))
         with (
+            patch.object(cx_responses, "_oz_key", return_value="test-key"),
+            patch.object(cx_responses, "_oz_cid", return_value="test-client"),
             patch.object(cx_responses.ozon_client, "answer_question") as answer,
             self.assertRaises(HTTPException) as caught,
         ):
