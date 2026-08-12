@@ -1313,26 +1313,28 @@ onUnmounted(() => {
         </div>
 
         <div v-if="canManageYandexActs" class="mb-3 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 p-3">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <p class="text-[10px] font-bold uppercase tracking-wider text-amber-700">Акт Яндекс</p>
-              <p class="text-xs text-slate-700 mt-1">Без акта: <strong>{{ yandexActPending }}</strong></p>
-              <p class="text-[10px] mt-1 text-slate-500">
-                Шаблон акта приведён к бланку передачи Яндекс Доставки. Скачивается как PDF.
-              </p>
-            </div>
-            <div class="flex items-center gap-1.5 flex-shrink-0">
-              <button @click="openYandexActsRegistry"
-                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/80 hover:bg-white text-slate-600 text-xs font-semibold border border-amber-200 transition-colors">
-                <History class="w-3.5 h-3.5" />
-                <span>Реестр актов Яндекс</span>
-              </button>
-              <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
-                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-xs font-semibold transition-colors">
-                <Loader2 v-if="yandexActGenerating" class="w-3.5 h-3.5 animate-spin" />
-                <FileDown v-else class="w-3.5 h-3.5" />
-                <span>Сформировать акт</span>
-              </button>
+          <div class="flex flex-col gap-2">
+            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+              <div class="min-w-0">
+                <p class="text-[10px] font-bold uppercase tracking-wider text-amber-700">Акт Яндекс</p>
+                <p class="text-sm font-semibold text-slate-800 mt-1">Без акта: {{ yandexActPending }}</p>
+                <p class="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                  Бланк Яндекс Доставки. После формирования PDF скачивается автоматически.
+                </p>
+              </div>
+              <div class="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-end w-full sm:w-auto">
+                <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
+                  class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-xs font-semibold transition-colors min-h-[40px] whitespace-nowrap">
+                  <Loader2 v-if="yandexActGenerating" class="w-3.5 h-3.5 animate-spin" />
+                  <FileDown v-else class="w-3.5 h-3.5" />
+                  <span>Сформировать акт</span>
+                </button>
+                <button @click="openYandexActsRegistry"
+                  class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-white/90 hover:bg-white text-slate-600 text-xs font-semibold border border-amber-200 transition-colors min-h-[40px] whitespace-nowrap">
+                  <History class="w-3.5 h-3.5" />
+                  <span>Реестр актов Яндекс</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
