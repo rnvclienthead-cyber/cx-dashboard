@@ -1312,30 +1312,21 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div v-if="canManageYandexActs" class="mb-3 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 p-3">
-          <div class="flex flex-col gap-2">
-            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-              <div class="min-w-0">
-                <p class="text-[10px] font-bold uppercase tracking-wider text-amber-700">Акт Яндекс</p>
-                <p class="text-sm font-semibold text-slate-800 mt-1">Без акта: {{ yandexActPending }}</p>
-                <p class="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                  Бланк Яндекс Доставки. После формирования PDF скачивается автоматически.
-                </p>
-              </div>
-              <div class="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-end w-full sm:w-auto">
-                <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
-                  class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-xs font-semibold transition-colors min-h-[40px] whitespace-nowrap">
-                  <Loader2 v-if="yandexActGenerating" class="w-3.5 h-3.5 animate-spin" />
-                  <FileDown v-else class="w-3.5 h-3.5" />
-                  <span>Сформировать акт</span>
-                </button>
-                <button @click="openYandexActsRegistry"
-                  class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-white/90 hover:bg-white text-slate-600 text-xs font-semibold border border-amber-200 transition-colors min-h-[40px] whitespace-nowrap">
-                  <History class="w-3.5 h-3.5" />
-                  <span>Реестр актов Яндекс</span>
-                </button>
-              </div>
-            </div>
+        <div v-if="canManageYandexActs"
+          class="mb-3 rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-2 shadow-[0_10px_30px_-24px_rgba(217,119,6,0.5)]">
+          <div class="flex flex-col xl:flex-row gap-2">
+            <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
+              :title="yandexActPending ? `Без акта: ${yandexActPending}` : 'Нет заявок без акта'"
+              class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-amber-600 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-amber-500 min-h-[46px]">
+              <Loader2 v-if="yandexActGenerating" class="w-4 h-4 animate-spin" />
+              <FileDown v-else class="w-4 h-4" />
+              <span>Сформировать акт</span>
+            </button>
+            <button @click="openYandexActsRegistry"
+              class="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:shadow-md min-h-[46px]">
+              <History class="w-4 h-4" />
+              <span>Реестр актов Яндекс</span>
+            </button>
           </div>
         </div>
 
