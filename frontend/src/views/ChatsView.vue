@@ -1131,17 +1131,6 @@
                   <p v-if="themeDisplayNote(t)" :class="['text-[11px] rounded-lg px-2.5 py-1.5 mt-2 leading-snug', mpUi.note]">
                     {{ themeDisplayNote(t) }}
                   </p>
-                  <div v-if="t.theme_key === 'nevozvratny' && pbMp === 'wb'"
-                    class="mt-2 rounded-lg border border-purple-200 bg-purple-50 px-2.5 py-2 text-[11px] leading-snug text-purple-800">
-                    <p class="font-medium">Автоправило WB по невозвратности</p>
-                    <p class="mt-1">
-                      Сейчас правило применяется к категориям:
-                      <span class="font-medium">{{ nonreturnableCatsLabel }}</span>.
-                    </p>
-                    <p class="mt-1 text-purple-700/80">
-                      Для Ozon и Яндекс Маркета эта тема не используется.
-                    </p>
-                  </div>
                 </div>
                 <div v-if="canEditChatTemplates" class="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5 shrink-0">
                   <button v-for="z in [['auto','Авто'],['draft','Согласование'],['human','Менеджер']]" :key="z[0]"
@@ -1750,8 +1739,13 @@ const visiblePbThemes = computed(() => {
   if (pbMp.value === 'ozon' || pbMp.value === 'ym') {
     return list.filter(t => !WB_ONLY_THEME_KEYS.has(t.theme_key))
   }
-  return list
+  return list.filter(t => t.theme_key !== 'nevozvratny')
 })
+
+function hiddenTheme(themeKey) {
+  return (pbThemes.value || []).find(t => t.theme_key === themeKey) || null
+}
+
 function themeDisplayName(t) {
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.name) {
     return OZON_THEME_UI[t.theme_key].name
@@ -1767,6 +1761,13 @@ function themeDisplayWhen(t) {
 function themeDisplayNote(t) {
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.note) {
     return OZON_THEME_UI[t.theme_key].note
+  }
+  if (pbMp.value === 'wb' && t.theme_key === 'vozvrat') {
+    const base = t.note || ''
+    const addon = nonreturnableCats.value.length
+      ? `Для категорий ${nonreturnableCatsLabel.value} система автоматически подставляет текст о невозвратности WB.`
+      : 'Для невозвратных категорий WB система автоматически подставляет отдельный текст.'
+    return base ? `${base} ${addon}` : addon
   }
   // Не показываем WB-заметки на Ozon/ЯМ
   if ((pbMp.value === 'ozon' || pbMp.value === 'ym') && /WB|Wildberries|доотправ/i.test(t.note || '')) {
@@ -2227,6 +2228,19 @@ function groupedVariants(theme) {
     // mp='' — явно общий шаблон: показываем его на любой площадке.
     if (vmp && vmp !== want) continue
     (out[v.branch_key || ''] ||= []).push(v)
+  }
+  if (pbMp.value === 'wb' && theme.theme_key === 'vozvrat') {
+    const nonreturnable = hiddenTheme('nevozvratny')
+    for (const v of (nonreturnable?.variants || [])) {
+      const vmp = (v.mp || '').toLowerCase()
+      if (vmp && vmp !== want) continue
+      const clone = {
+        ...v,
+        branch_key: '__wb_nonreturnable__',
+        branch_label: 'WB · невозвратный товар',
+      }
+      ;(out[clone.branch_key] ||= []).push(clone)
+    }
   }
   return out
 }

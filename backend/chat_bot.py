@@ -2312,6 +2312,8 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
     ), {"k": theme}).fetchone()
     if tr:
         theme_name = tr[0] or ""
+    if theme == "nevozvratny":
+        theme_name = "Хочу вернуть товар · WB невозвратный"
     # Для менеджера понятнее: ветки Playbook 2.0
     if mp in ("ozon", "ym"):
         if theme == "nekomplekt" and branch == "check_tubes":
