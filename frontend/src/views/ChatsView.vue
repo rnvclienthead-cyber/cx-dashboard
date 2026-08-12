@@ -1131,6 +1131,17 @@
                   <p v-if="themeDisplayNote(t)" :class="['text-[11px] rounded-lg px-2.5 py-1.5 mt-2 leading-snug', mpUi.note]">
                     {{ themeDisplayNote(t) }}
                   </p>
+                  <div v-if="t.theme_key === 'nevozvratny' && pbMp === 'wb'"
+                    class="mt-2 rounded-lg border border-purple-200 bg-purple-50 px-2.5 py-2 text-[11px] leading-snug text-purple-800">
+                    <p class="font-medium">Автоправило WB по невозвратности</p>
+                    <p class="mt-1">
+                      Сейчас правило применяется к категориям:
+                      <span class="font-medium">{{ nonreturnableCatsLabel }}</span>.
+                    </p>
+                    <p class="mt-1 text-purple-700/80">
+                      Для Ozon и Яндекс Маркета эта тема не используется.
+                    </p>
+                  </div>
                 </div>
                 <div v-if="canEditChatTemplates" class="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5 shrink-0">
                   <button v-for="z in [['auto','Авто'],['draft','Согласование'],['human','Менеджер']]" :key="z[0]"
@@ -1155,7 +1166,7 @@
             <div class="border-t border-gray-100 bg-gray-50/60 px-5 py-3 space-y-4">
               <p v-if="!Object.keys(groupedVariants(t)).length"
                 class="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5">
-                Нет текста для {{ pbMpLabel }}. Добавьте вариант кнопкой ниже — иначе бот уйдёт в ИИ-черновик или FAQ.
+                {{ emptyVariantHint(t) }}
               </p>
               <div v-for="(vars, bkey) in groupedVariants(t)" :key="bkey">
                 <p v-if="bkey" class="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
@@ -1766,6 +1777,7 @@ function themeDisplayNote(t) {
 const pbSettings = ref([])
 const pbLoading  = ref(false)
 const pbSection  = ref('settings')
+const nonreturnableCats = ref([])
 const pbSections = [
   { id: 'settings', label: 'Настройки' },
   { id: 'templates', label: 'Шаблоны' },
@@ -1782,6 +1794,9 @@ const pbMpLabel = computed(() => {
   if (pbMp.value === 'ym') return 'Яндекс Маркет'
   return 'Wildberries'
 })
+const nonreturnableCatsLabel = computed(() =>
+  nonreturnableCats.value.length ? nonreturnableCats.value.join(', ') : 'не выбраны'
+)
 
 /** Акценты UI под площадку из сайдбара (как в App.vue) */
 const mpUi = computed(() => {
@@ -2035,10 +2050,38 @@ async function loadPlaybook() {
     const d = await r.json()
     pbThemes.value   = d.themes   || []
     pbSettings.value = d.settings || []
+    await loadNonreturnableCats()
     // Журнал бота нужен только админу (вкладка «Проверка»)
     if (canEditChatTemplates.value) await loadBotLog()
   } catch { showToast('Не удалось загрузить автоответы', 'error') }
   finally { pbLoading.value = false }
+}
+
+async function loadNonreturnableCats() {
+  if (pbMp.value !== 'wb') {
+    nonreturnableCats.value = []
+    return
+  }
+  try {
+    const r = await apiFetch('/api/v1/nonreturnable-cats')
+    const d = await r.json()
+    nonreturnableCats.value = (d.items || [])
+      .filter(item => item.enabled)
+      .map(item => String(item.category_1 || '').trim())
+      .filter(Boolean)
+  } catch {
+    nonreturnableCats.value = []
+  }
+}
+
+function emptyVariantHint(theme) {
+  if (theme?.zone === 'human') {
+    return `Для ${pbMpLabel.value} текст не обязателен: эта тема сразу уходит менеджеру.`
+  }
+  if (theme?.zone === 'draft') {
+    return `Нет текста для ${pbMpLabel.value}. Менеджеру придётся писать ответ вручную или опираться на ИИ-черновик.`
+  }
+  return `Нет текста для ${pbMpLabel.value}. Добавьте вариант кнопкой ниже — иначе бот попробует запасной ответ (ИИ/FAQ, если он есть).`
 }
 
 function openPlaybook() {
@@ -2454,6 +2497,7 @@ watch(currentMp, () => {
   loadQueue()
   if (isAdmin.value) loadReviewQueue(true)
   if (tab.value === 'archive') loadArchive()
+  if (tab.value === 'playbook') loadNonreturnableCats()
 })
 
 watch(chatFilter, () => { currentPage.value = 1 })
