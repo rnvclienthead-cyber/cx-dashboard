@@ -97,6 +97,11 @@ def _fmt_ru_date(d) -> str:
     return f"{d.day} {_RU_MONTHS_GEN.get(d.month, '')}"
 
 
+def _require_yandex_act_access(current_user: dict):
+    if current_user.get("role") not in ("admin", "warehouse_manager"):
+        raise HTTPException(status_code=403, detail="Только для администратора и менеджера склада")
+
+
 def _get_yandex_act_stamp_data_uri() -> str:
     if not _ACT_STAMP_PATH:
         return ""
@@ -2644,7 +2649,8 @@ from fastapi.responses import StreamingResponse
 # ── Склад: акты приёма-передачи Яндекс ──────────────────────────────────────
 
 @router.get("/warehouse/yandex-acts")
-def get_yandex_dispatch_acts(db: Session = Depends(get_db)):
+def get_yandex_dispatch_acts(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    _require_yandex_act_access(current_user)
     acts = db.execute(text("""
         SELECT id, act_number, created_at, created_by, requests_count, total_shipping_cost
         FROM yandex_dispatch_acts
@@ -2668,7 +2674,12 @@ def get_yandex_dispatch_acts(db: Session = Depends(get_db)):
 
 
 @router.post("/warehouse/yandex-acts/generate")
-def generate_yandex_dispatch_act(processed_by: Optional[str] = None, db: Session = Depends(get_db)):
+def generate_yandex_dispatch_act(
+    processed_by: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_yandex_act_access(current_user)
     rows = db.execute(text("""
         SELECT id, updated_at, customer_name, customer_phone,
                address_city, client_pvz_city, client_pvz_address,
@@ -2729,7 +2740,9 @@ def download_yandex_dispatch_act(
     act_id: int,
     format: str = Query("pdf", pattern="^(pdf|html)$"),
     db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
+    _require_yandex_act_access(current_user)
     act = db.execute(text("""
         SELECT id, act_number, created_at, created_by, total_shipping_cost, payload
         FROM yandex_dispatch_acts

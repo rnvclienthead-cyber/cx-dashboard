@@ -32,6 +32,7 @@ const isCS           = computed(() => ['cs_manager', 'admin', 'moderator'].inclu
 const isWarehouse    = computed(() => ['warehouse_manager', 'admin', 'moderator'].includes(userRole.value))
 const isAdmin        = computed(() => ['admin', 'moderator'].includes(userRole.value))
 const isWarehouseOnly = computed(() => userRole.value === 'warehouse_manager')
+const canManageYandexActs = computed(() => ['warehouse_manager', 'admin'].includes(userRole.value))
 
 const defaultStatus = computed(() => {
   if (userRole.value === 'cs_manager')        return 'new'
@@ -459,7 +460,7 @@ const yandexActPending    = ref(0)
 const yandexActHasStamp   = ref(false)
 
 const loadYandexActs = async () => {
-  if (!isWarehouse.value) return
+  if (!canManageYandexActs.value) return
   yandexActsLoading.value = true
   try {
     const res = await apiFetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts`)
@@ -743,7 +744,7 @@ const select = async (req) => {
 
 const reload = async () => {
   await load()
-  if (isWarehouse.value) await loadYandexActs()
+  if (canManageYandexActs.value) await loadYandexActs()
   if (selected.value) {
     selected.value = requests.value.find(r => r.id === selected.value.id) || null
   }
@@ -1226,7 +1227,7 @@ onMounted(async () => {
   filterStatus.value = defaultStatus.value
   await load()
   if (isCS.value) loadPromoCode()
-  if (isWarehouse.value) loadYandexActs()
+  if (canManageYandexActs.value) loadYandexActs()
   await openFromQuery()
   window.addEventListener('keydown', onKeydown)
 })
@@ -1289,7 +1290,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div v-if="isWarehouse" class="mb-3 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 p-3">
+        <div v-if="canManageYandexActs" class="mb-3 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 p-3">
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <p class="text-[10px] font-bold uppercase tracking-wider text-amber-700">Акт Яндекс</p>
