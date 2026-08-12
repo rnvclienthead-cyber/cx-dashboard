@@ -293,10 +293,28 @@
                 :class="['shrink-0 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg font-medium transition-colors', mpUi.btn]">
                 {{ marketplaceChatLabel(chatItem) }}
               </a>
+              <button v-if="productCardRequest" type="button" @click="toggleProductCard"
+                :aria-expanded="productCardOpen"
+                :class="[
+                  'shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-lg border bg-white transition-colors',
+                  productCardOpen
+                    ? 'border-amber-300 bg-amber-50 text-amber-700'
+                    : 'border-gray-200 text-gray-500 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700'
+                ]"
+                title="Карточка товара">
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15.5A2.5 2.5 0 0 0 17.5 16H4z" />
+                  <path d="M6.5 3A2.5 2.5 0 0 0 4 5.5V19a2 2 0 0 0 2 2h11.5A2.5 2.5 0 0 0 20 18.5V16" />
+                  <path d="M8 7h8M8 10h8M8 13h5" />
+                </svg>
+              </button>
               <button type="button" @click="copyCxChatLink"
-                class="shrink-0 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-600 hover:border-violet-300 hover:text-violet-700 hover:bg-violet-50 font-medium transition-colors"
+                class="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-violet-300 hover:text-violet-700 hover:bg-violet-50 transition-colors"
                 title="Ссылка для коллеги в CX">
-                Скопировать ссылку
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L10 4" />
+                  <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L14 20" />
+                </svg>
               </button>
               <button @click="dismissChatItem"
                 class="shrink-0 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-600 hover:border-rose-300 hover:text-rose-700 hover:bg-rose-50 font-medium transition-colors">
@@ -304,54 +322,44 @@
               </button>
             </div>
 
-            <div v-if="productCardRequest" class="mt-2 rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2.5">
-              <button type="button" @click="toggleProductCard"
-                :aria-expanded="productCardOpen"
-                class="flex w-full items-center justify-between gap-3 text-left">
+            <div v-if="productCardRequest && productCardOpen" class="mt-2 rounded-xl border border-gray-200 bg-white px-3 py-2.5">
+              <div class="flex items-center justify-between gap-3 border-b border-gray-100 pb-2">
                 <div>
-                  <p class="text-xs font-semibold text-amber-900">Карточка товара из Яндекс Маркета</p>
-                  <p class="mt-0.5 text-[11px] text-amber-800/80">
-                    Размеры, характеристики и инструкции по товару
-                    <span v-if="productCardRequest.article">· арт. {{ productCardRequest.article }}</span>
-                    <span v-else-if="productCardRequest.nmId">· WB nm_id {{ productCardRequest.nmId }}</span>
+                  <p class="text-xs font-semibold text-slate-900">Карточка товара</p>
+                  <p class="mt-0.5 text-[11px] text-slate-500">
+                    <span v-if="productCardRequest.article">арт. {{ productCardRequest.article }}</span>
+                    <span v-else-if="productCardRequest.nmId">WB nm_id {{ productCardRequest.nmId }}</span>
                   </p>
                 </div>
-                <svg :class="['h-4 w-4 shrink-0 text-amber-900 transition-transform', productCardOpen ? 'rotate-180' : '']"
-                  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                  <path d="m6 9 6 6 6-6" />
-                </svg>
-              </button>
-              <div v-if="productCardOpen" class="mt-2 border-t border-amber-200 pt-2 text-xs text-slate-700">
-                <p v-if="productCardLoading" class="text-gray-400">Проверяем карточку Яндекс Маркета…</p>
+                <button type="button" @click="toggleProductCard"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+                  title="Свернуть карточку">
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="m6 15 6-6 6 6" />
+                  </svg>
+                </button>
+              </div>
+              <div class="pt-2 text-xs text-slate-700">
+                <p v-if="productCardLoading" class="text-gray-400">Загружаем карточку товара…</p>
                 <template v-else-if="productCard?.status === 'ok'">
-                  <div class="flex items-start justify-between gap-3">
-                    <p class="font-semibold text-slate-900">{{ productCard.product.name || productCard.product.offer_id }}</p>
-                    <span class="shrink-0 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">Яндекс Маркет</span>
-                  </div>
-                  <p v-if="productDimensionsLine(productCard.product.dimensions)" class="mt-1.5">
+                  <p v-if="productDimensionsLine(productCard.product.dimensions)" class="mt-1">
                     Габариты упаковки: <span class="font-medium">{{ productDimensionsLine(productCard.product.dimensions) }} см</span>
                   </p>
                   <p v-if="productCard.product.dimensions?.weight != null" class="mt-1">
                     Вес: <span class="font-medium">{{ productCard.product.dimensions.weight }} кг</span>
                   </p>
-                  <dl v-if="productCard.product.params?.length" class="mt-2 grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                  <dl v-if="productCard.product.params?.length" class="mt-2 grid gap-x-4 gap-y-1.5 sm:grid-cols-[minmax(140px,200px)_1fr]">
                     <template v-for="param in productCard.product.params" :key="`${param.name}:${param.value}`">
                       <dt class="text-slate-500">{{ param.name }}</dt>
                       <dd class="font-medium break-words">{{ param.value }}</dd>
                     </template>
                   </dl>
-                  <div v-if="productCard.product.manuals?.length" class="mt-2 flex flex-wrap gap-2">
-                    <a v-for="manual in productCard.product.manuals" :key="manual.url" :href="manual.url" target="_blank" rel="noopener"
-                      class="font-semibold text-amber-800 underline underline-offset-2 hover:text-amber-950">
-                      {{ manual.name }} ↗
-                    </a>
-                  </div>
-                  <p v-if="productCard.cached" class="mt-2 text-[10px] text-slate-400">Проверено в ЯМ ранее сегодня</p>
+                  <p v-if="productCard.cached" class="mt-2 text-[10px] text-slate-400">Загружено из локальной базы</p>
                 </template>
                 <p v-else-if="productCard?.status === 'not_found'" class="text-slate-500">
-                  По этому товару соответствия в Яндекс Маркете нет.
+                  Для этого товара карточка пока не найдена.
                 </p>
-                <p v-else class="text-slate-500">Карточка Яндекс Маркета сейчас недоступна. Попробуйте позже.</p>
+                <p v-else class="text-slate-500">Карточка товара сейчас недоступна. Попробуйте позже.</p>
               </div>
             </div>
 

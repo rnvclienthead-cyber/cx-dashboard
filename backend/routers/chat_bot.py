@@ -27,7 +27,7 @@ def product_card(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Точечная карточка товара из ЯМ. Не подбирает похожие товары."""
+    """Точечная карточка товара. Не подбирает похожие товары."""
     mp = (mp or "wb").strip().lower()
     article = (article or "").strip()
     if not article and mp == "wb" and nm_id is not None:

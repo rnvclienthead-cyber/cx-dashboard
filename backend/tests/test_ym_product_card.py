@@ -17,11 +17,8 @@ class YmProductCardTests(unittest.TestCase):
                         "params": [
                             {"name": "Цвет", "value": "чёрный"},
                             {"name": "Материал", "values": ["сталь", "пластик"]},
+                            {"name": "Конструкция", "value": "складная"},
                             {"name": "Пустой", "value": ""},
-                        ],
-                        "manuals": [
-                            {"name": "Инструкция", "url": "https://example.test/manual.pdf"},
-                            {"name": "Небезопасная", "url": "javascript:alert(1)"},
                         ],
                     }},
                 ]
@@ -31,15 +28,14 @@ class YmProductCardTests(unittest.TestCase):
         card = ym_product_card.parse_offer_card(data, "2-СБ-Black")
 
         self.assertEqual(card["status"], "ok")
-        self.assertEqual(card["product"]["name"], "Сушилка")
+        self.assertEqual(card["product"]["offer_id"], "2-СБ-Black")
         self.assertEqual(card["product"]["dimensions"]["weight"], 4.2)
         self.assertEqual(card["product"]["params"], [
             {"name": "Цвет", "value": "чёрный"},
             {"name": "Материал", "value": "сталь, пластик"},
+            {"name": "Конструкция", "value": "складная"},
         ])
-        self.assertEqual(card["product"]["manuals"], [
-            {"name": "Инструкция", "url": "https://example.test/manual.pdf"},
-        ])
+        self.assertNotIn("manuals", card["product"])
 
     def test_missing_exact_offer_is_not_substituted(self):
         card = ym_product_card.parse_offer_card({

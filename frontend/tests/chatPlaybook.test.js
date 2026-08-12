@@ -21,9 +21,11 @@ test('wb nonreturnable logic is embedded into return theme in playbook', () => {
 })
 
 test('product card is visible in chat and supports wb nm_id fallback', () => {
-  assert.match(source, /Карточка товара из Яндекс Маркета/)
-  assert.match(source, /Размеры, характеристики и инструкции по товару/)
+  assert.match(source, /title="Карточка товара"/)
+  assert.match(source, /Загружаем карточку товара…/)
+  assert.match(source, /Загружено из локальной базы/)
   assert.match(source, /const productCardRequest = computed\(\(\) =>/)
   assert.match(source, /if \(mp === 'wb' && Number\.isFinite\(nmId\) && nmId > 0\)/)
   assert.match(source, /params\.set\('nm_id', String\(productCardRequest\.value\.nmId\)\)/)
+  assert.doesNotMatch(source, /Карточка товара из Яндекс Маркета/)
 })

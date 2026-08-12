@@ -1,7 +1,7 @@
-"""Точечная карточка товара из Яндекс Маркета для рабочего места КС.
+"""Точечная карточка товара для рабочего места КС.
 
-Это не синхронизация ассортимента: по одному артикулу запрашиваем только
-официальный offer-mappings API и ненадолго сохраняем уже проверенный ответ.
+По одному артикулу забираем фактические характеристики из API Яндекса
+и сохраняем их в локальной БД, чтобы затем использовать как общую карточку товара.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from . import ym_client
 
 
 CACHE_TTL_SECONDS = 12 * 60 * 60
-MAX_VISIBLE_PARAMS = 8
+MAX_VISIBLE_PARAMS = 32
 
 
 def init_product_card_cache(engine) -> None:
@@ -63,23 +63,8 @@ def _param_value(param: dict) -> str:
     return ""
 
 
-def _manuals(offer: dict) -> list[dict[str, str]]:
-    result: list[dict[str, str]] = []
-    for manual in offer.get("manuals") or []:
-        if not isinstance(manual, dict):
-            continue
-        url = _text(manual.get("url") or manual.get("link"))
-        if not url.startswith(("https://", "http://")):
-            continue
-        result.append({
-            "name": _text(manual.get("name") or manual.get("title")) or "Инструкция",
-            "url": url,
-        })
-    return result[:3]
-
-
 def parse_offer_card(data: dict, article: str) -> dict:
-    """Берёт только поля, которые вернул ЯМ; отсутствующие не придумывает."""
+    """Берёт только поля, которые вернул API; отсутствующие не придумывает."""
     result = data.get("result") if isinstance(data, dict) else None
     source = result if isinstance(result, dict) else data if isinstance(data, dict) else {}
     mappings = source.get("offerMappings") or []
@@ -119,10 +104,8 @@ def parse_offer_card(data: dict, article: str) -> dict:
         "source": "yandex_market",
         "product": {
             "offer_id": _text(offer.get("offerId")),
-            "name": _text(offer.get("name")),
             "dimensions": dimensions,
             "params": params[:MAX_VISIBLE_PARAMS],
-            "manuals": _manuals(offer),
         },
     }
 
