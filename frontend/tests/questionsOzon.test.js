@@ -23,6 +23,8 @@ test('quality clarification copy is marketplace-neutral', () => {
 test('question cards link image and article to marketplace product pages', () => {
   assert.match(source, /function productCardUrl\(item\)/)
   assert.match(source, /https:\/\/www\.wildberries\.ru\/catalog\/\$\{nm\}\/detail\.aspx/)
+  assert.match(source, /question_wb_nm_id: i\.question_wb_nm_id \? Number\(i\.question_wb_nm_id\) : null/)
+  assert.match(source, /item\.nm_id \|\| item\.question_wb_nm_id/)
   assert.match(source, /return String\(item\.question_product_url \|\| ''\)\.trim\(\)/)
   assert.match(source, /https:\/\/market\.yandex\.ru\/product--\/\$\{encodeURIComponent\(sku\)\}/)
   assert.match(source, /item\.product_photo && productCardUrl\(item\)/)

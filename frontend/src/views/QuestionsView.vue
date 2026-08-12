@@ -588,6 +588,7 @@ async function loadQueue() {
     queueItems.value = (data.items || []).map(i => ({
       ...i,
       nm_id: i.nm_id ? Number(i.nm_id) : null,
+      question_wb_nm_id: i.question_wb_nm_id ? Number(i.question_wb_nm_id) : null,
       question_product_url: String(i.question_product_url || '').trim() || null,
       question_market_sku: String(i.question_market_sku || '').trim() || null,
       _reply: '',
@@ -652,7 +653,7 @@ function ymProductUrl(marketSku) {
 
 function productCardUrl(item) {
   if (!item || item.item_type !== 'question') return ''
-  if (item.mp === 'wb') return wbProductUrl(item.nm_id)
+  if (item.mp === 'wb') return wbProductUrl(item.nm_id || item.question_wb_nm_id)
   if (item.mp === 'ozon') return String(item.question_product_url || '').trim()
   if (item.mp === 'ym') return ymProductUrl(item.question_market_sku)
   return ''

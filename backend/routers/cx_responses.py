@@ -588,6 +588,24 @@ def get_queue(
 
         rows = conn.execute(text(f"""
             SELECT q.*,
+                CASE
+                    WHEN q.mp = 'wb' AND q.item_type = 'question' THEN COALESCE(
+                        q.nm_id,
+                        (SELECT wl.nm_id::text
+                         FROM wb_logistics wl
+                         WHERE wl.supplier_article = q.sku
+                           AND wl.nm_id IS NOT NULL
+                         ORDER BY wl.last_change_date DESC NULLS LAST, wl.dt DESC NULLS LAST
+                         LIMIT 1),
+                        (SELECT wf.nm_id::text
+                         FROM wb_feedbacks wf
+                         WHERE wf.supplier_article = q.sku
+                           AND wf.nm_id IS NOT NULL
+                         ORDER BY wf.created_date DESC NULLS LAST
+                         LIMIT 1)
+                    )
+                    ELSE NULL
+                END AS question_wb_nm_id,
                 COALESCE(
                     pp.photo_url,
                     (SELECT wpp.photo_url
@@ -822,6 +840,24 @@ def get_quality_question_queue(
                 q.*, c.id AS clarification_id, c.note AS clarification_note,
                 c.requested_by AS clarification_requested_by,
                 c.requested_at AS clarification_requested_at,
+                CASE
+                    WHEN q.mp = 'wb' AND q.item_type = 'question' THEN COALESCE(
+                        q.nm_id,
+                        (SELECT wl.nm_id::text
+                         FROM wb_logistics wl
+                         WHERE wl.supplier_article = q.sku
+                           AND wl.nm_id IS NOT NULL
+                         ORDER BY wl.last_change_date DESC NULLS LAST, wl.dt DESC NULLS LAST
+                         LIMIT 1),
+                        (SELECT wf.nm_id::text
+                         FROM wb_feedbacks wf
+                         WHERE wf.supplier_article = q.sku
+                           AND wf.nm_id IS NOT NULL
+                         ORDER BY wf.created_date DESC NULLS LAST
+                         LIMIT 1)
+                    )
+                    ELSE NULL
+                END AS question_wb_nm_id,
                 COALESCE(
                     pp.photo_url,
                     (SELECT wpp.photo_url

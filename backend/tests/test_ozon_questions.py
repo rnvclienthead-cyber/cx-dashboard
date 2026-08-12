@@ -132,8 +132,10 @@ class OzonQuestionTests(unittest.TestCase):
 
     def test_question_queue_enriches_marketplace_product_links(self):
         source = (Path(__file__).resolve().parents[1] / "routers" / "cx_responses.py").read_text()
+        self.assertIn("END AS question_wb_nm_id", source)
         self.assertIn("END AS question_product_url", source)
         self.assertIn("END AS question_market_sku", source)
+        self.assertIn("FROM wb_logistics wl", source)
         self.assertIn("LEFT JOIN ozon_questions oq", source)
         self.assertIn("LEFT JOIN ym_assortment ya", source)
         self.assertIn("q.supplier_article, q.nm_id::text", cx_responses._UNIFIED_QUEUE_VIEW_SQL)
