@@ -13,6 +13,7 @@ import { usePermissionsStore } from './stores/permissions'
 
 const platformStore    = usePlatformStore()
 const permissionsStore = usePermissionsStore()
+const route = useRoute()
 const canViewQualityQuestions = computed(() =>
   permissionsStore.isAdmin ||
   permissionsStore.role === 'qa_manager' ||
@@ -24,27 +25,43 @@ const isMobileOpen = ref(false)
 
 // Доступные площадки (из прав текущего пользователя)
 const availablePlatforms = computed(() => permissionsStore.allowedMarketplaces)
+const specificPlatforms = computed(() =>
+  availablePlatforms.value.filter(p => p !== 'all')
+)
+const firstAvailablePlatform = computed(() =>
+  specificPlatforms.value[0] || 'wb'
+)
+const prefersAllPlatform = computed(() => route.path === '/reshipment')
 
 watch(isCollapsed, (val) => {
   localStorage.setItem('sidebar_collapsed', String(val))
 })
 
-// Авто-выбор площадки: одна доступная → она; иначе оставляем «Все»
-watch(() => permissionsStore.loaded, (loaded) => {
-  if (!loaded) return
+function syncPlatformSelection() {
+  if (!permissionsStore.loaded) return
   const available = availablePlatforms.value
-  if (available.length === 1) {
-    platformStore.setPlatform(available[0])
-  } else if (available.includes('all') && !available.includes(platformStore.platform)) {
-    platformStore.setPlatform('all')
+  const current = platformStore.platform
+  if (prefersAllPlatform.value) {
+    if (current !== 'all') platformStore.setPlatform('all')
+    return
   }
-})
+  if (current === 'all' || !specificPlatforms.value.includes(current)) {
+    platformStore.setPlatform(firstAvailablePlatform.value)
+  } else if (!available.includes(current)) {
+    platformStore.setPlatform(firstAvailablePlatform.value)
+  }
+}
+
+watch(
+  [() => permissionsStore.loaded, availablePlatforms, () => route.path],
+  () => syncPlatformSelection(),
+  { immediate: true },
+)
 
 const toggleCollapse = () => { isCollapsed.value = !isCollapsed.value }
 const closeMobile = () => { isMobileOpen.value = false }
 
 // ── Трекинг активности ────────────────────────────────────────────────────────
-const route = useRoute()
 let activityTimer = null
 
 // Переключатель площадки на всех экранах, где >1 МП (в т.ч. Возвраты — WB/ЯМ/Ozon).
