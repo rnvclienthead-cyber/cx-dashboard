@@ -8,10 +8,11 @@ from backend.routers import reshipment
 
 
 class YandexDispatchActsTests(unittest.TestCase):
-    def test_render_act_html_contains_manual_stamp_placeholder(self):
+    def test_render_act_html_matches_handover_template(self):
         payload = [{
             "line_no": 1,
             "request_id": 212,
+            "customer_track_number": "reship-212-deadbeef",
             "track_number": "YANDEX-212",
             "customer_name": "Иван Иванов",
             "customer_phone": "+79990000000",
@@ -22,19 +23,18 @@ class YandexDispatchActsTests(unittest.TestCase):
             "shipping_cost": 390.41,
         }]
 
-        with unittest.mock.patch.object(reshipment, "_ACT_STAMP_PATH", ""):
-            html = reshipment._render_yandex_dispatch_act_html(
-                act_number="YA-20260812-001",
-                created_at=datetime.datetime(2026, 8, 12, 12, 0),
-                payload=payload,
-                total_shipping_cost=390.41,
-                created_by="warehouse",
-            )
+        html = reshipment._render_yandex_dispatch_act_html(
+            act_number="YA-20260812-001",
+            created_at=datetime.datetime(2026, 8, 12, 12, 0),
+            payload=payload,
+            total_shipping_cost=390.41,
+            created_by="warehouse",
+        )
 
-        self.assertIn("Акт приёма-передачи отправлений Яндекс Доставки", html)
-        self.assertIn("YA-20260812-001", html)
-        self.assertIn("Иван Иванов", html)
-        self.assertIn("М.П. (при наличии)", html)
+        self.assertIn("Акт приема-передачи Отправления от 12.08.2026", html)
+        self.assertIn('Заказчик:</strong> ООО "РНВ"', html)
+        self.assertIn("reship-212-deadbeef", html)
+        self.assertIn("Отправления принял (Сортировочный центр):", html)
 
     def test_get_stamp_data_uri_reads_image_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import base64
 import tempfile
+import hashlib
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -49,6 +50,13 @@ _ACT_COMPANY_NAME = os.getenv("RESHIPMENT_ACT_COMPANY_NAME", "ООО «Видо�
 _ACT_SIGNER_NAME = os.getenv("RESHIPMENT_ACT_SIGNER_NAME", "")
 _ACT_SIGNER_ROLE = os.getenv("RESHIPMENT_ACT_SIGNER_ROLE", "Ответственный за передачу")
 _ACT_STAMP_PATH = os.getenv("RESHIPMENT_ACT_STAMP_PATH", "").strip()
+_ACT_CUSTOMER_NAME = os.getenv("RESHIPMENT_ACT_CUSTOMER_NAME", 'ООО "РНВ"')
+_ACT_EXECUTOR_NAME = os.getenv("RESHIPMENT_ACT_EXECUTOR_NAME", "ООО Яндекс.Доставка")
+_ACT_SENDER_NAME = os.getenv("RESHIPMENT_ACT_SENDER_NAME", 'ООО "РНВ"')
+_ACT_PARTNER_NAME = os.getenv("RESHIPMENT_ACT_PARTNER_NAME", 'ООО "Яндекс"')
+_ACT_DECLARED_VALUE = os.getenv("RESHIPMENT_ACT_DECLARED_VALUE", "0.01")
+_ACT_WEIGHT_KG = os.getenv("RESHIPMENT_ACT_WEIGHT_KG", "0.001")
+_ACT_CARGO_PLACES = os.getenv("RESHIPMENT_ACT_CARGO_PLACES", "1")
 
 # ── Публичный роутер (без авторизации) ──────────────────────────────────────
 public_router = APIRouter(prefix="/api/v1/reshipment", tags=["Reshipment / Доотправка"])
@@ -141,9 +149,17 @@ def _next_yandex_act_number(db: Session) -> str:
 def _serialize_yandex_dispatch_rows(rows) -> list[dict]:
     payload = []
     for idx, row in enumerate(rows, 1):
+        token_source = str(
+            row.get("chat_token")
+            or row.get("confirmation_token")
+            or row.get("track_number")
+            or row["id"]
+        )
+        customer_track = f"reship-{row['id']}-{hashlib.sha1(token_source.encode('utf-8')).hexdigest()[:8]}"
         payload.append({
             "line_no": idx,
             "request_id": row["id"],
+            "customer_track_number": customer_track,
             "track_number": row.get("track_number") or "",
             "customer_name": row.get("customer_name") or "",
             "customer_phone": row.get("customer_phone") or "",
@@ -165,109 +181,126 @@ def _render_yandex_dispatch_act_html(
     created_by: str = "",
 ) -> str:
     created_dt = created_at or datetime.datetime.now()
-    created_str = created_dt.strftime("%d.%m.%Y %H:%M")
-    stamp_uri = _get_yandex_act_stamp_data_uri()
+    act_date = created_dt.strftime("%d.%m.%Y")
     rows_html = []
     for row in payload:
-        cost_str = f"{float(row['shipping_cost']):,.2f}".replace(",", " ").replace(".", ",") if row.get("shipping_cost") is not None else "—"
         rows_html.append(f"""
             <tr>
               <td>{row['line_no']}</td>
-              <td>#{row['request_id']}</td>
-              <td>{row['customer_name']}</td>
-              <td>{row['customer_phone'] or '—'}</td>
-              <td>{row['city'] or '—'}</td>
-              <td>{row['pickup_address'] or '—'}</td>
-              <td>{row['items_to_send'] or '—'}</td>
+              <td>{row['customer_track_number']}</td>
               <td>{row['track_number'] or '—'}</td>
-              <td class="num">{cost_str}</td>
+              <td class="num">{_ACT_DECLARED_VALUE}</td>
+              <td class="num">{_ACT_WEIGHT_KG}</td>
+              <td class="num">{_ACT_CARGO_PLACES}</td>
             </tr>
         """.strip())
-    signer_name = _ACT_SIGNER_NAME or "________________"
-    stamp_html = (
-        f'<img class="stamp" src="{stamp_uri}" alt="Печать компании" />'
-        if stamp_uri else
-        '<div class="stamp-placeholder">М.П. (при наличии)</div>'
-    )
+    total_weight = len(payload) * float(_ACT_WEIGHT_KG)
+    total_places = len(payload) * int(_ACT_CARGO_PLACES)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
   <style>
-    @page {{ size: A4 portrait; margin: 14mm 12mm 16mm; }}
-    body {{ font-family: DejaVu Sans, Arial, sans-serif; color: #0f172a; font-size: 11px; line-height: 1.35; }}
-    h1 {{ margin: 0 0 4mm; font-size: 18px; }}
-    .muted {{ color: #475569; }}
-    .meta {{ display: flex; justify-content: space-between; gap: 8mm; margin-bottom: 5mm; }}
-    .meta-box {{ flex: 1; border: 1px solid #cbd5e1; border-radius: 8px; padding: 3mm 4mm; }}
+    @page {{ size: A4 portrait; margin: 16mm 16mm 18mm; }}
+    body {{ font-family: DejaVu Sans, Arial, sans-serif; color: #111; font-size: 11px; line-height: 1.35; }}
+    h1 {{ margin: 0 0 12mm; font-size: 18px; font-weight: 700; }}
+    .party {{ margin-bottom: 9mm; font-size: 11px; }}
+    .lead {{ margin: 0 0 14mm; font-size: 11px; }}
     table {{ width: 100%; border-collapse: collapse; margin-top: 3mm; }}
-    th, td {{ border: 1px solid #cbd5e1; padding: 2.2mm 2.5mm; vertical-align: top; }}
-    th {{ background: #f8fafc; text-align: left; font-size: 10px; }}
+    th, td {{ border: 1px solid #222; padding: 2.6mm 3mm; vertical-align: top; }}
+    th {{ text-align: left; font-size: 10px; font-weight: 700; }}
     .num {{ text-align: right; white-space: nowrap; }}
-    .summary {{ margin-top: 4mm; display: flex; justify-content: space-between; align-items: flex-start; gap: 8mm; }}
-    .summary-box {{ border: 1px solid #cbd5e1; border-radius: 8px; padding: 3mm 4mm; min-width: 68mm; }}
-    .signatures {{ margin-top: 10mm; display: grid; grid-template-columns: 1fr 1fr; gap: 12mm; align-items: end; }}
-    .sign-block {{ min-height: 34mm; position: relative; }}
-    .line {{ border-bottom: 1px solid #334155; height: 18mm; margin-bottom: 2mm; }}
-    .stamp {{ position: absolute; right: 0; bottom: 6mm; width: 30mm; max-height: 30mm; object-fit: contain; opacity: 0.94; }}
-    .stamp-placeholder {{ position: absolute; right: 0; bottom: 9mm; width: 34mm; height: 24mm; border: 1px dashed #94a3b8; border-radius: 10px; color: #64748b; display: flex; align-items: center; justify-content: center; font-size: 10px; text-align: center; padding: 2mm; }}
-    .footnote {{ margin-top: 4mm; font-size: 10px; color: #64748b; }}
+    .post-table {{ margin-top: 10mm; }}
+    .post-table p {{ margin: 10mm 0 0; font-size: 11px; font-weight: 700; }}
+    .page-break {{ page-break-before: always; }}
+    .sign-title {{ margin: 0 0 10mm; font-size: 11px; font-weight: 700; }}
+    .sign-section {{ margin: 0 0 14mm; }}
+    .line-a {{ width: 118mm; border-bottom: 1px solid #111; height: 0; margin-bottom: 8mm; }}
+    .line-b {{ width: 64mm; border-bottom: 1px solid #111; height: 0; display: inline-block; vertical-align: middle; }}
+    .line-c {{ width: 40mm; border-bottom: 1px solid #111; height: 0; display: inline-block; vertical-align: middle; }}
+    .sign-row {{ margin-top: 8mm; white-space: nowrap; }}
+    .trust {{ margin: 8mm 0 0; }}
   </style>
 </head>
 <body>
-  <h1>Акт приёма-передачи отправлений Яндекс Доставки</h1>
-  <div class="muted">Акт № {act_number} от {created_str}</div>
+  <h1>Акт приема-передачи Отправления от {act_date}</h1>
 
-  <div class="meta">
-    <div class="meta-box">
-      <div><strong>Передающая сторона:</strong> {_ACT_COMPANY_NAME}</div>
-      <div><strong>Адрес забора:</strong> Техническая 17Б, Казань</div>
-      <div><strong>Сформировал:</strong> {created_by or 'система CX Dashboard'}</div>
-    </div>
-    <div class="meta-box">
-      <div><strong>Перевозчик:</strong> Яндекс Доставка</div>
-      <div><strong>Кол-во отправлений:</strong> {len(payload)}</div>
-      <div><strong>Сумма доставки:</strong> {f"{total_shipping_cost:,.2f}".replace(",", " ").replace(".", ",")} ₽</div>
-    </div>
+  <div class="party">
+    <div><strong>Заказчик:</strong> {_ACT_CUSTOMER_NAME}</div>
+    <div><strong>Исполнитель:</strong> {_ACT_EXECUTOR_NAME}</div>
+    <div><strong>Отправитель:</strong> {_ACT_SENDER_NAME}</div>
+    <div><strong>Партнер:</strong> {_ACT_PARTNER_NAME}</div>
   </div>
+
+  <p class="lead">
+    Настоящий акт составлен о том, что в указанную выше дату (дата приема Отправления)
+    Отправитель передал, а Партнер принял следующие Отправления, подлежащие передаче
+    получателям Заказчика:
+  </p>
 
   <table>
     <thead>
       <tr>
-        <th style="width:6%">№</th>
-        <th style="width:8%">Заявка</th>
-        <th style="width:15%">Клиент</th>
-        <th style="width:13%">Телефон</th>
-        <th style="width:10%">Город</th>
-        <th style="width:22%">ПВЗ / адрес</th>
-        <th style="width:18%">Что отправить</th>
-        <th style="width:12%">Трек</th>
-        <th style="width:8%">Цена</th>
+        <th style="width:7%">№ п/п</th>
+        <th style="width:28%">№ Отправления в системе заказчика</th>
+        <th style="width:25%">№ Отправления в системе Исполнителя</th>
+        <th style="width:13%">Объявленная ценность</th>
+        <th style="width:11%">Вес, кг</th>
+        <th style="width:16%">Кол-во грузовых мест, шт</th>
       </tr>
     </thead>
     <tbody>
       {"".join(rows_html)}
+      <tr>
+        <td colspan="4" class="num"><strong>ИТОГО</strong></td>
+        <td class="num"><strong>{total_weight:.3f}</strong></td>
+        <td class="num"><strong>{total_places}</strong></td>
+      </tr>
     </tbody>
   </table>
 
-  <div class="summary">
-    <div class="summary-box">
-      <div><strong>Основание:</strong> собранные заявки со статусом «Собрано — ждёт забор курьера».</div>
-      <div class="footnote">Документ сохраняет состав отправлений на момент формирования и доступен для повторного скачивания из системы.</div>
+  <div class="post-table">
+    <p>Передаваемые заказы упакованы в индивидуальные упаковки. Упаковка не нарушена. Замечаний по внешнему виду заказов со стороны Партнера не имеется.</p>
+    <p>По акту передано {total_places} шт. заказов в ненарушенной упаковке. По настоящему акту произведена приемка по количеству грузовых мест</p>
+    <p>Партнером не производилась приемка по количеству и наименованию товаров, входящих в заказ.</p>
+  </div>
+
+  <div class="page-break"></div>
+
+  <p class="sign-title">Приемка была осуществлена по количеству грузовых мест. По акту передано {total_places} шт. грузовых мест</p>
+
+  <div class="sign-section">
+    <p class="sign-title">Отправления передал (Отправитель):</p>
+    <div class="line-a"></div>
+    <div class="sign-row">
+      <span class="line-b"></span>
+      (<span class="line-c"></span>)
+      (подпись)
+      (расшифровка)
     </div>
   </div>
 
-  <div class="signatures">
-    <div class="sign-block">
-      <div class="line"></div>
-      <div><strong>{_ACT_SIGNER_ROLE}</strong></div>
-      <div class="muted">{signer_name}</div>
-      {stamp_html}
+  <div class="sign-section">
+    <p class="sign-title">Отправления принял (Партнер):</p>
+    <div class="line-b" style="width: 76mm;"></div>
+    <div class="trust">(реквизиты доверенности представителя Исполнителя)</div>
+    <div class="sign-row">
+      <span class="line-b"></span>
+      (<span class="line-c"></span>)
+      (подпись)
+      (расшифровка)
     </div>
-    <div class="sign-block">
-      <div class="line"></div>
-      <div><strong>Представитель Яндекс Доставки</strong></div>
-      <div class="muted">Подпись / ФИО</div>
+  </div>
+
+  <div class="sign-section">
+    <p class="sign-title">Отправления принял (Сортировочный центр):</p>
+    <div class="line-b" style="width: 76mm;"></div>
+    <div class="trust">(реквизиты доверенности представителя Исполнителя)</div>
+    <div class="sign-row">
+      <span class="line-b"></span>
+      (<span class="line-c"></span>)
+      (подпись)
+      (расшифровка)
     </div>
   </div>
 </body>
@@ -2684,7 +2717,8 @@ def generate_yandex_dispatch_act(
         SELECT id, updated_at, customer_name, customer_phone,
                address_city, client_pvz_city, client_pvz_address,
                yandex_pvz_name, yandex_pvz_address,
-               items_to_send, track_number, shipping_cost
+               items_to_send, track_number, shipping_cost,
+               chat_token, confirmation_token
         FROM reshipment_requests
         WHERE delivery_method = 'yandex'
           AND status = 'packed'

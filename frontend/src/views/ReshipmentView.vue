@@ -1298,8 +1298,8 @@ onUnmounted(() => {
                 Без акта: <strong>{{ yandexActPending }}</strong>
                 <span v-if="yandexActs[0]" class="text-slate-500"> · последний {{ yandexActs[0].act_number }}</span>
               </p>
-              <p class="text-[10px] mt-1" :class="yandexActHasStamp ? 'text-emerald-700' : 'text-slate-500'">
-                {{ yandexActHasStamp ? 'Печать подставится автоматически' : 'Печать не настроена: в PDF будет место для ручной печати/подписи' }}
+              <p class="text-[10px] mt-1 text-slate-500">
+                Шаблон акта приведён к бланку передачи Яндекс Доставки. Скачивается как PDF.
               </p>
             </div>
             <div class="flex items-center gap-1.5 flex-shrink-0">
