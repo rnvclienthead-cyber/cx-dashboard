@@ -101,6 +101,28 @@ def _is_visible_param(name: str) -> bool:
     return any(key in normalized for key in VISIBLE_PARAM_KEYWORDS)
 
 
+def _normalize_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    product = payload.get("product")
+    if not isinstance(product, dict):
+        return payload
+    params = product.get("params")
+    if isinstance(params, list):
+        filtered = []
+        for param in params:
+            if not isinstance(param, dict):
+                continue
+            name = _text(param.get("name"))
+            value = _text(param.get("value"))
+            if name and value and not _is_hidden_param(name) and _is_visible_param(name):
+                filtered.append({"name": name, "value": value})
+        product["params"] = filtered[:MAX_VISIBLE_PARAMS]
+    product.pop("name", None)
+    product.pop("manuals", None)
+    return payload
+
+
 def parse_offer_card(data: dict, article: str) -> dict:
     """Берёт только поля, которые вернул API; отсутствующие не придумывает."""
     result = data.get("result") if isinstance(data, dict) else None
@@ -163,10 +185,11 @@ def _cached_card(db, article: str) -> dict | None:
             return None
     if not isinstance(payload, dict):
         return None
-    return {**payload, "cached": True}
+    return {**_normalize_payload(payload), "cached": True}
 
 
 def _store_card(db, article: str, payload: dict) -> None:
+    payload = _normalize_payload(payload)
     db.execute(text("""
         INSERT INTO ym_product_card_cache (offer_id, payload, fetched_at, expires_at)
         VALUES (
@@ -203,4 +226,4 @@ def get_product_card(db, article: str) -> dict:
         return {"status": "unavailable", "article": article, "source": "yandex_market"}
     payload = parse_offer_card(data, article)
     _store_card(db, article, payload)
-    return {**payload, "cached": False}
+    return {**_normalize_payload(payload), "cached": False}

@@ -57,6 +57,34 @@ class YmProductCardTests(unittest.TestCase):
         self.assertEqual(card["status"], "unavailable")
         db.commit.assert_not_called()
 
+    def test_cached_payload_is_re_filtered_with_current_rules(self):
+        db = Mock()
+        db.execute.return_value.mappings.return_value.first.return_value = {
+            "payload": {
+                "status": "ok",
+                "article": "2-СБ-Black",
+                "product": {
+                    "name": "Старое имя",
+                    "manuals": [{"name": "Инструкция", "url": "https://example.test"}],
+                    "params": [
+                        {"name": "Бренд", "value": "Видовито"},
+                        {"name": "Материал", "value": "Металл"},
+                        {"name": "Код продавца", "value": "2-СБ-Black"},
+                        {"name": "Цвет товара", "value": "черный"},
+                    ],
+                },
+            }
+        }
+
+        card = ym_product_card.get_product_card(db, "2-СБ-Black")
+
+        self.assertEqual(card["product"]["params"], [
+            {"name": "Материал", "value": "Металл"},
+            {"name": "Цвет товара", "value": "черный"},
+        ])
+        self.assertNotIn("name", card["product"])
+        self.assertNotIn("manuals", card["product"])
+
 
 if __name__ == "__main__":
     unittest.main()
