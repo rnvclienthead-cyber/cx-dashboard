@@ -110,6 +110,11 @@ def _require_yandex_act_access(current_user: dict):
         raise HTTPException(status_code=403, detail="Только для администратора и менеджера склада")
 
 
+def _require_yandex_act_delete_access(current_user: dict):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только администратор может удалять акты")
+
+
 def _get_yandex_act_stamp_data_uri() -> str:
     if not _ACT_STAMP_PATH:
         return ""
@@ -2810,6 +2815,27 @@ def download_yandex_dispatch_act(
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{safe_name}.pdf"'},
     )
+
+
+@router.delete("/warehouse/yandex-acts/{act_id}")
+def delete_yandex_dispatch_act(
+    act_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_yandex_act_delete_access(current_user)
+    act = db.execute(text("SELECT id FROM yandex_dispatch_acts WHERE id = :id"), {"id": act_id}).mappings().first()
+    if not act:
+        raise HTTPException(status_code=404, detail="Акт не найден")
+
+    db.execute(text("""
+        UPDATE reshipment_requests
+        SET yandex_dispatch_act_id = NULL
+        WHERE yandex_dispatch_act_id = :id
+    """), {"id": act_id})
+    db.execute(text("DELETE FROM yandex_dispatch_acts WHERE id = :id"), {"id": act_id})
+    db.commit()
+    return {"status": "success"}
 
 
 # ── Склад: очередь заявок к отправке ────────────────────────────────────────

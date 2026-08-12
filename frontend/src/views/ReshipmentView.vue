@@ -33,6 +33,7 @@ const isWarehouse    = computed(() => ['warehouse_manager', 'admin', 'moderator'
 const isAdmin        = computed(() => ['admin', 'moderator'].includes(userRole.value))
 const isWarehouseOnly = computed(() => userRole.value === 'warehouse_manager')
 const canManageYandexActs = computed(() => ['warehouse_manager', 'admin'].includes(userRole.value))
+const canDeleteYandexActs = computed(() => userRole.value === 'admin')
 
 const defaultStatus = computed(() => {
   if (userRole.value === 'cs_manager')        return 'new'
@@ -458,6 +459,8 @@ const yandexActsLoading   = ref(false)
 const yandexActGenerating = ref(false)
 const yandexActPending    = ref(0)
 const yandexActHasStamp   = ref(false)
+const showYandexActsRegistry = ref(false)
+const yandexActDeletingId = ref(null)
 
 const loadYandexActs = async () => {
   if (!canManageYandexActs.value) return
@@ -507,6 +510,25 @@ const generateYandexAct = async () => {
     alert(e.message)
   } finally {
     yandexActGenerating.value = false
+  }
+}
+
+const openYandexActsRegistry = async () => {
+  showYandexActsRegistry.value = true
+  await loadYandexActs()
+}
+
+const deleteYandexAct = async (actId) => {
+  if (!canDeleteYandexActs.value) return
+  if (!confirm('Удалить акт из системы? Это действие необратимо, а заявки снова станут без акта.')) return
+  yandexActDeletingId.value = actId
+  try {
+    await apiFetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts/${actId}`, { method: 'DELETE' })
+    await Promise.all([loadYandexActs(), load()])
+  } catch (e) {
+    alert(e.message)
+  } finally {
+    yandexActDeletingId.value = null
   }
 }
 
@@ -1294,39 +1316,22 @@ onUnmounted(() => {
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <p class="text-[10px] font-bold uppercase tracking-wider text-amber-700">Акт Яндекс</p>
-              <p class="text-xs text-slate-700 mt-1">
-                Без акта: <strong>{{ yandexActPending }}</strong>
-                <span v-if="yandexActs[0]" class="text-slate-500"> · последний {{ yandexActs[0].act_number }}</span>
-              </p>
+              <p class="text-xs text-slate-700 mt-1">Без акта: <strong>{{ yandexActPending }}</strong></p>
               <p class="text-[10px] mt-1 text-slate-500">
                 Шаблон акта приведён к бланку передачи Яндекс Доставки. Скачивается как PDF.
               </p>
             </div>
             <div class="flex items-center gap-1.5 flex-shrink-0">
-              <button @click="loadYandexActs" :disabled="yandexActsLoading"
-                class="p-1.5 rounded-lg text-slate-400 hover:bg-white/70 hover:text-slate-600 disabled:opacity-50 transition-colors">
-                <RefreshCw :class="['w-4 h-4', yandexActsLoading ? 'animate-spin' : '']" />
+              <button @click="openYandexActsRegistry"
+                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/80 hover:bg-white text-slate-600 text-xs font-semibold border border-amber-200 transition-colors">
+                <History class="w-3.5 h-3.5" />
+                <span>Реестр актов Яндекс</span>
               </button>
               <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
                 class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-xs font-semibold transition-colors">
                 <Loader2 v-if="yandexActGenerating" class="w-3.5 h-3.5 animate-spin" />
                 <FileDown v-else class="w-3.5 h-3.5" />
                 <span>Сформировать акт</span>
-              </button>
-            </div>
-          </div>
-          <div v-if="yandexActs.length" class="mt-2 space-y-1.5">
-            <div v-for="act in yandexActs.slice(0, 3)" :key="act.id"
-              class="flex items-center justify-between gap-2 rounded-lg bg-white/80 border border-white px-2.5 py-2">
-              <div class="min-w-0">
-                <p class="text-[11px] font-semibold text-slate-700 truncate">{{ act.act_number }}</p>
-                <p class="text-[10px] text-slate-500">
-                  {{ fmt(act.created_at) }} · {{ act.requests_count }} шт. · {{ fmtCost(act.total_shipping_cost) }}
-                </p>
-              </div>
-              <button @click="downloadYandexAct(act.id, 'pdf')"
-                class="flex items-center gap-1 text-[11px] font-semibold text-amber-700 hover:text-amber-800 transition-colors">
-                <FileDown class="w-3.5 h-3.5" /> PDF
               </button>
             </div>
           </div>
@@ -2492,6 +2497,76 @@ onUnmounted(() => {
           <button @click="doApprove(true)"
             class="flex-1 px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold rounded-xl transition-colors">
             Всё равно одобрить
+          </button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- Реестр актов Яндекс -->
+  <Teleport to="body">
+    <div v-if="showYandexActsRegistry" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col" style="max-height: 85vh">
+        <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
+          <div>
+            <h3 class="text-sm font-bold text-slate-700 flex items-center gap-2">
+              <History class="w-4 h-4 text-amber-600" /> Реестр актов Яндекс
+            </h3>
+            <p class="text-[11px] text-slate-400 mt-0.5">
+              Всего актов: {{ yandexActs.length }} · без акта сейчас: {{ yandexActPending }}
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button @click="loadYandexActs" :disabled="yandexActsLoading"
+              class="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 transition-colors">
+              <RefreshCw :class="['w-4 h-4', yandexActsLoading ? 'animate-spin' : '']" />
+            </button>
+            <button @click="showYandexActsRegistry = false" class="text-slate-400 hover:text-slate-600">
+              <X class="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto px-5 py-3">
+          <div v-if="yandexActsLoading && !yandexActs.length" class="flex justify-center py-10">
+            <Loader2 class="w-6 h-6 animate-spin text-amber-600" />
+          </div>
+          <div v-else-if="!yandexActs.length" class="text-center py-10 text-sm text-slate-400">
+            Актов пока нет
+          </div>
+          <div v-else class="space-y-2">
+            <div v-for="act in yandexActs" :key="act.id" class="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="text-sm font-semibold text-slate-800">{{ act.act_number }}</p>
+                  <p class="text-[11px] text-slate-500 mt-0.5">
+                    {{ fmt(act.created_at) }} · {{ act.requests_count }} шт. · {{ fmtCost(act.total_shipping_cost) }}
+                  </p>
+                </div>
+                <div class="flex items-center gap-2 flex-shrink-0">
+                  <button @click="downloadYandexAct(act.id, 'pdf')"
+                    class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold border border-slate-200 transition-colors">
+                    <FileDown class="w-3.5 h-3.5" /> PDF
+                  </button>
+                  <button v-if="canDeleteYandexActs" @click="deleteYandexAct(act.id)"
+                    :disabled="yandexActDeletingId === act.id"
+                    class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 text-xs font-semibold border border-rose-200 transition-colors">
+                    <Loader2 v-if="yandexActDeletingId === act.id" class="w-3.5 h-3.5 animate-spin" />
+                    <X v-else class="w-3.5 h-3.5" /> Удалить
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="px-5 py-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center gap-3 shrink-0">
+          <p class="text-[11px] text-slate-400">
+            Удаление акта доступно только администратору.
+          </p>
+          <button @click="showYandexActsRegistry = false"
+            class="px-4 py-2.5 bg-white hover:bg-slate-100 text-slate-700 text-sm font-semibold rounded-xl border border-slate-300 transition-colors">
+            Закрыть
           </button>
         </div>
       </div>
