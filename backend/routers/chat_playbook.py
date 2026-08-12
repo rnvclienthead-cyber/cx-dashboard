@@ -101,8 +101,8 @@ SEED_THEMES = [
      "без запроса детали. Красная зона / человек.",
      "human", "handoff_to_manager",
      "Деньгами управляет WB. Бот не обещает сроки от продавца.", 35),
-    ("zapchasti", "Насадки и запчасти",
-     "«Где купить насадки», «сменные насадки к швабре», «докапить тряпку/насадку».",
+    ("zapchasti", "Сменные насадки",
+     "«Где купить сменные насадки», «сменная тряпка к швабре», «докупить насадку».",
      "auto", "",
      "Только сменные насадки. Заглушки/крепёж — тема krepezh.", 175),
     ("krepezh", "Заглушки и крепёж",
@@ -249,9 +249,8 @@ SEED_VARIANTS = [
      "Обычно зачислением занимается Wildberries и банк, не продавец.", 1),
 
     ("zapchasti", "", "",
-     "Здравствуйте! К сожалению, комплектующие и запчасти отдельно у нас на Wildberries "
-     "сейчас не представлены. Рекомендуем поискать подходящие детали в хозяйственных магазинах "
-     "или на маркетплейсах. Если товар с дефектом — оформите возврат во вкладке «Покупки».", 1),
+     "Здравствуйте! Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: "
+     "https://ozon.ru/t/8MDukTG", 1),
 
     ("krepezh", "", "",
      "Здравствуйте! Заглушки, защёлки и другой мелкий крепёж отдельно мы не продаём. "
@@ -388,20 +387,14 @@ SEED_OZON_VARIANTS = [
      "Пожалуйста! Если что-то ещё понадобится — пишите сюда.", 1),
 
     ("zapchasti", "", "",
-     "Здравствуйте! Для швабры Видовито подходят фирменные сменные насадки — "
-     "они в продаже на Ozon: https://ozon.ru/t/8MDukTG", 1),
-    ("zapchasti", "", "",
      "Здравствуйте! Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: "
-     "https://ozon.ru/t/8MDukTG", 2),
+     "https://ozon.ru/t/8MDukTG", 1),
 
     ("krepezh", "", "",
      "Здравствуйте! Заглушки для сливных отверстий, защёлки и другой мелкий крепёж "
      "отдельно мы не продаём. Их можно поискать в хозяйственном магазине.\n\n"
      "Если детали не было в комплекте или она с браком — оформите возврат в разделе «Заказы»: "
      "товар → «Вернуть» → причина «брак».", 1),
-    ("krepezh", "", "",
-     "Здравствуйте! К сожалению, такие комплектующие (заглушки, крепёж) отдельно в продаже "
-     "не представлены. Рекомендуем хозяйственный магазин либо возврат через «Заказы» → «Вернуть».", 2),
 
     ("utochnenie", "", "",
      "Подскажите, пожалуйста, что вам нужно — ответьте цифрой или коротко своими словами:\n"
@@ -447,6 +440,7 @@ SEED_SETTINGS = [
 
 
 _VARIANT_MP_MIGRATION = "chat_variants_blank_legacy_wb_v1"
+_PARTS_VARIANTS_CLEANUP = "chat_variants_parts_cleanup_v1"
 
 
 def _migrate_legacy_blank_variant_mp(conn) -> int:
@@ -473,6 +467,55 @@ def _migrate_legacy_blank_variant_mp(conn) -> int:
         ON CONFLICT (key) DO NOTHING
     """), {"key": _VARIANT_MP_MIGRATION})
     return result.rowcount or 0
+
+
+def _cleanup_parts_variants(conn) -> int:
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _PARTS_VARIANTS_CLEANUP}).scalar()
+    if applied:
+        return 0
+
+    updated = 0
+    updated += conn.execute(text("""
+        UPDATE cx_chat_themes
+        SET name = 'Сменные насадки',
+            when_text = '«Где купить сменные насадки», «сменная тряпка к швабре», «докупить насадку».',
+            note = 'Только сменные насадки. Заглушки/крепёж — тема krepezh.'
+        WHERE theme_key = 'zapchasti'
+    """)).rowcount or 0
+
+    updated += conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET body = 'Здравствуйте! Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: https://ozon.ru/t/8MDukTG',
+            sort_order = 1
+        WHERE theme_key = 'zapchasti'
+          AND coalesce(branch_key, '') = ''
+          AND coalesce(mp, 'wb') = 'wb'
+    """)).rowcount or 0
+
+    updated += conn.execute(text("""
+        DELETE FROM cx_chat_variants
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                       row_number() OVER (
+                           PARTITION BY theme_key, coalesce(branch_key, ''), coalesce(mp, 'wb')
+                           ORDER BY sort_order, id
+                       ) AS rn
+                FROM cx_chat_variants
+                WHERE theme_key IN ('zapchasti', 'krepezh')
+            ) t
+            WHERE t.rn > 1
+        )
+    """)).rowcount or 0
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _PARTS_VARIANTS_CLEANUP})
+    return updated
 
 
 def init_playbook_tables(engine):
@@ -519,6 +562,7 @@ def init_playbook_tables(engine):
             )
         """))
         _migrate_legacy_blank_variant_mp(conn)
+        _cleanup_parts_variants(conn)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_settings (
                 key        TEXT PRIMARY KEY,
