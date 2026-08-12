@@ -5,6 +5,7 @@ import uuid
 import asyncio
 import logging
 import base64
+import tempfile
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -29,8 +30,19 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-UPLOAD_DIR = Path(os.getenv("CX_UPLOAD_BASE_DIR", "/root/cx-dashboard/uploads")) / "reshipment"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+def _resolve_upload_dir() -> Path:
+    preferred = Path(os.getenv("CX_UPLOAD_BASE_DIR", "/root/cx-dashboard/uploads")) / "reshipment"
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        return preferred
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "cx-dashboard-uploads" / "reshipment"
+        fallback.mkdir(parents=True, exist_ok=True)
+        logger.warning("reshipment uploads fallback to %s", fallback)
+        return fallback
+
+
+UPLOAD_DIR = _resolve_upload_dir()
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 MAX_FILE_SIZE_MB = 15
 _ACT_COMPANY_NAME = os.getenv("RESHIPMENT_ACT_COMPANY_NAME", "ООО «Видовито»")
