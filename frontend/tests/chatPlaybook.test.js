@@ -19,3 +19,11 @@ test('wb nonreturnable logic is embedded into return theme in playbook', () => {
   assert.match(source, /nonreturnableCatsLabel/)
   assert.match(source, /\/api\/v1\/nonreturnable-cats/)
 })
+
+test('product card is visible in chat and supports wb nm_id fallback', () => {
+  assert.match(source, /Карточка товара из Яндекс Маркета/)
+  assert.match(source, /Размеры, характеристики и инструкции по товару/)
+  assert.match(source, /const productCardRequest = computed\(\(\) =>/)
+  assert.match(source, /if \(mp === 'wb' && Number\.isFinite\(nmId\) && nmId > 0\)/)
+  assert.match(source, /params\.set\('nm_id', String\(productCardRequest\.value\.nmId\)\)/)
+})

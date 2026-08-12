@@ -304,18 +304,24 @@
               </button>
             </div>
 
-            <!-- Карточка товара всегда берётся точечно из ЯМ по артикулу чата. -->
-            <div v-if="productCardArticle" class="mt-2">
+            <div v-if="productCardRequest" class="mt-2 rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2.5">
               <button type="button" @click="toggleProductCard"
                 :aria-expanded="productCardOpen"
-                class="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 transition-colors hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-300">
-                <span>Характеристики из ЯМ</span>
-                <svg :class="['h-3.5 w-3.5 transition-transform', productCardOpen ? 'rotate-180' : '']"
+                class="flex w-full items-center justify-between gap-3 text-left">
+                <div>
+                  <p class="text-xs font-semibold text-amber-900">Карточка товара из Яндекс Маркета</p>
+                  <p class="mt-0.5 text-[11px] text-amber-800/80">
+                    Размеры, характеристики и инструкции по товару
+                    <span v-if="productCardRequest.article">· арт. {{ productCardRequest.article }}</span>
+                    <span v-else-if="productCardRequest.nmId">· WB nm_id {{ productCardRequest.nmId }}</span>
+                  </p>
+                </div>
+                <svg :class="['h-4 w-4 shrink-0 text-amber-900 transition-transform', productCardOpen ? 'rotate-180' : '']"
                   viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                   <path d="m6 9 6 6 6-6" />
                 </svg>
               </button>
-              <div v-if="productCardOpen" class="mt-1.5 rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2.5 text-xs text-slate-700">
+              <div v-if="productCardOpen" class="mt-2 border-t border-amber-200 pt-2 text-xs text-slate-700">
                 <p v-if="productCardLoading" class="text-gray-400">Проверяем карточку Яндекс Маркета…</p>
                 <template v-else-if="productCard?.status === 'ok'">
                   <div class="flex items-start justify-between gap-3">
@@ -343,7 +349,7 @@
                   <p v-if="productCard.cached" class="mt-2 text-[10px] text-slate-400">Проверено в ЯМ ранее сегодня</p>
                 </template>
                 <p v-else-if="productCard?.status === 'not_found'" class="text-slate-500">
-                  По этому артикулу соответствия в Яндекс Маркете нет.
+                  По этому товару соответствия в Яндекс Маркете нет.
                 </p>
                 <p v-else class="text-slate-500">Карточка Яндекс Маркета сейчас недоступна. Попробуйте позже.</p>
               </div>
@@ -1734,6 +1740,18 @@ const OZON_THEME_UI = {
     note: 'Не давить «Заказы» — вести в поддержку Ozon. Решение за площадкой.',
   },
 }
+const WB_THEME_UI = {
+  zapchasti: {
+    name: 'Сменные насадки',
+    when: 'Где купить сменные насадки/тряпки к швабре.',
+    note: 'Только сменные насадки. Заглушки, защёлки и мелкий крепёж — отдельная тема ниже.',
+  },
+  krepezh: {
+    name: 'Заглушки и крепёж',
+    when: 'Заглушки, защёлки, пробки, сливные элементы, мелкий крепёж отдельно.',
+    note: 'Это не насадки. Отдельно обычно не продаём.',
+  },
+}
 const visiblePbThemes = computed(() => {
   const list = pbThemes.value || []
   if (pbMp.value === 'ozon' || pbMp.value === 'ym') {
@@ -1747,18 +1765,27 @@ function hiddenTheme(themeKey) {
 }
 
 function themeDisplayName(t) {
+  if (pbMp.value === 'wb' && WB_THEME_UI[t.theme_key]?.name) {
+    return WB_THEME_UI[t.theme_key].name
+  }
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.name) {
     return OZON_THEME_UI[t.theme_key].name
   }
   return t.name
 }
 function themeDisplayWhen(t) {
+  if (pbMp.value === 'wb' && WB_THEME_UI[t.theme_key]?.when) {
+    return WB_THEME_UI[t.theme_key].when
+  }
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.when) {
     return OZON_THEME_UI[t.theme_key].when
   }
   return t.when_text
 }
 function themeDisplayNote(t) {
+  if (pbMp.value === 'wb' && WB_THEME_UI[t.theme_key]?.note) {
+    return WB_THEME_UI[t.theme_key].note
+  }
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.note) {
     return OZON_THEME_UI[t.theme_key].note
   }
@@ -2542,13 +2569,18 @@ const productCard = ref(null)
 let chatPollTimer = null
 let chatSelectionRequest = 0
 
-const productCardArticle = computed(() => {
-  // В WB queue сейчас приходит название товара, а не supplier article: не
-  // отправляем название в API и не пытаемся подобрать «похожую» карточку.
-  if (!['ym', 'ozon'].includes(chatMp(chatItem.value))) return ''
+const productCardRequest = computed(() => {
+  const mp = chatMp(chatItem.value)
   const article = String(chatItem.value?.sku || '').trim()
-  // DIRECT / RETURN / ORDER — служебные ярлыки чата ЯМ, не артикулы товара.
-  return ['DIRECT', 'RETURN', 'ORDER'].includes(article.toUpperCase()) ? '' : article
+  if (['ym', 'ozon'].includes(mp)) {
+    if (!article || ['DIRECT', 'RETURN', 'ORDER'].includes(article.toUpperCase())) return null
+    return { mp, article, nmId: null }
+  }
+  const nmId = Number(chatItem.value?.nm_id || 0)
+  if (mp === 'wb' && Number.isFinite(nmId) && nmId > 0) {
+    return { mp, article: '', nmId }
+  }
+  return null
 })
 
 function productDimensionsLine(dimensions) {
@@ -2558,11 +2590,14 @@ function productDimensionsLine(dimensions) {
 
 async function toggleProductCard() {
   productCardOpen.value = !productCardOpen.value
-  if (!productCardOpen.value || productCard.value || productCardLoading.value || !productCardArticle.value) return
+  if (!productCardOpen.value || productCard.value || productCardLoading.value || !productCardRequest.value) return
   const selectedId = chatItem.value?.id
   productCardLoading.value = true
   try {
-    const r = await apiFetch(`/api/v1/chat-bot/product-card?article=${encodeURIComponent(productCardArticle.value)}`)
+    const params = new URLSearchParams({ mp: productCardRequest.value.mp || 'wb' })
+    if (productCardRequest.value.article) params.set('article', productCardRequest.value.article)
+    if (productCardRequest.value.nmId) params.set('nm_id', String(productCardRequest.value.nmId))
+    const r = await apiFetch(`/api/v1/chat-bot/product-card?${params}`)
     const data = await r.json()
     if (chatItem.value?.id === selectedId) productCard.value = data
   } catch {

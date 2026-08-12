@@ -4,7 +4,7 @@ API бота автоответов: статус, журнал теневых �
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -21,11 +21,33 @@ bot_api_router = APIRouter(prefix="/api/v1/bot", tags=["chat-bot"])
 
 @router.get("/product-card")
 def product_card(
-    article: str = Query(..., min_length=1, max_length=255, description="Артикул продавца из чата"),
+    article: str = Query("", max_length=255, description="Артикул продавца из чата"),
+    nm_id: Optional[int] = Query(None, description="WB nm_id, если артикул в чате недоступен"),
+    mp: str = Query("wb", description="wb | ozon | ym"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Точечная карточка товара из ЯМ. Не подбирает похожие товары."""
+    mp = (mp or "wb").strip().lower()
+    article = (article or "").strip()
+    if not article and mp == "wb" and nm_id is not None:
+        row = db.execute(text("""
+            SELECT supplier_article FROM wb_logistics
+            WHERE nm_id = :nm AND nullif(trim(supplier_article), '') IS NOT NULL
+            ORDER BY last_change_date DESC NULLS LAST, dt DESC NULLS LAST
+            LIMIT 1
+        """), {"nm": int(nm_id)}).fetchone()
+        if not row:
+            row = db.execute(text("""
+                SELECT supplier_article FROM wb_claims
+                WHERE nm_id = :nm AND nullif(trim(supplier_article), '') IS NOT NULL
+                ORDER BY claim_date DESC NULLS LAST, created_dt DESC NULLS LAST
+                LIMIT 1
+            """), {"nm": int(nm_id)}).fetchone()
+        if row and row[0]:
+            article = str(row[0]).strip()
+    if not article:
+        raise HTTPException(status_code=400, detail="article_or_nm_id_required")
     return ym_product_card.get_product_card(db, article)
 
 
