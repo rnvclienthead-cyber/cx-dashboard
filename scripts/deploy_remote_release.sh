@@ -40,6 +40,7 @@ mkdir -p "$BACKUP_DIR"
 
 tar \
   --exclude='./.env' \
+  --exclude='./bot_api_key.json' \
   --exclude='./venv' \
   --exclude='./uploads' \
   --exclude='./static' \
@@ -74,6 +75,7 @@ sync_source() {
   local source_dir="$1"
   rsync -az --delete \
     --exclude='.env' \
+    --exclude='bot_api_key.json' \
     --exclude='venv/' \
     --exclude='uploads/' \
     --exclude='static/' \
