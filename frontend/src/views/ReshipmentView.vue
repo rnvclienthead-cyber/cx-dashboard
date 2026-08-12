@@ -452,6 +452,62 @@ const saveSkus = async () => {
 
 const warehouseRejectForm = ref({ rejection_reason: '' })
 const yandexForm          = ref({ track_number: '', shipping_cost: '' })
+const yandexActs          = ref([])
+const yandexActsLoading   = ref(false)
+const yandexActGenerating = ref(false)
+const yandexActPending    = ref(0)
+const yandexActHasStamp   = ref(false)
+
+const loadYandexActs = async () => {
+  if (!isWarehouse.value) return
+  yandexActsLoading.value = true
+  try {
+    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts`)
+    const data = await res.json()
+    yandexActs.value = data.data || []
+    yandexActPending.value = data.pending_count || 0
+    yandexActHasStamp.value = !!data.has_auto_stamp
+  } catch (e) {
+    console.error(e)
+  } finally {
+    yandexActsLoading.value = false
+  }
+}
+
+const downloadYandexAct = async (actId, format = 'pdf') => {
+  const token = localStorage.getItem('token')
+  const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts/${actId}/download?format=${format}`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.target = '_blank'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+const generateYandexAct = async () => {
+  if (!yandexActPending.value) {
+    alert('Нет собранных Яндекс-заявок без акта')
+    return
+  }
+  yandexActGenerating.value = true
+  try {
+    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts/generate?processed_by=${encodeURIComponent(username.value)}`, {
+      method: 'POST'
+    })
+    const data = await res.json()
+    const actId = data?.data?.id
+    await Promise.all([reload(), loadYandexActs()])
+    if (actId) await downloadYandexAct(actId, 'pdf')
+  } catch (e) {
+    alert(e.message)
+  } finally {
+    yandexActGenerating.value = false
+  }
+}
 
 // ── Ручная смена статуса (только admin/moderator) ────────────────────────────
 const statusOptions = [
@@ -687,6 +743,7 @@ const select = async (req) => {
 
 const reload = async () => {
   await load()
+  if (isWarehouse.value) await loadYandexActs()
   if (selected.value) {
     selected.value = requests.value.find(r => r.id === selected.value.id) || null
   }
@@ -1169,6 +1226,7 @@ onMounted(async () => {
   filterStatus.value = defaultStatus.value
   await load()
   if (isCS.value) loadPromoCode()
+  if (isWarehouse.value) loadYandexActs()
   await openFromQuery()
   window.addEventListener('keydown', onKeydown)
 })
@@ -1228,6 +1286,48 @@ onUnmounted(() => {
             <button @click="reload" :class="['p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors', loading ? 'animate-spin' : '']">
               <RefreshCw class="w-4 h-4" />
             </button>
+          </div>
+        </div>
+
+        <div v-if="isWarehouse" class="mb-3 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 p-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-[10px] font-bold uppercase tracking-wider text-amber-700">Акт Яндекс</p>
+              <p class="text-xs text-slate-700 mt-1">
+                Без акта: <strong>{{ yandexActPending }}</strong>
+                <span v-if="yandexActs[0]" class="text-slate-500"> · последний {{ yandexActs[0].act_number }}</span>
+              </p>
+              <p class="text-[10px] mt-1" :class="yandexActHasStamp ? 'text-emerald-700' : 'text-slate-500'">
+                {{ yandexActHasStamp ? 'Печать подставится автоматически' : 'Печать не настроена: в PDF будет место для ручной печати/подписи' }}
+              </p>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <button @click="loadYandexActs" :disabled="yandexActsLoading"
+                class="p-1.5 rounded-lg text-slate-400 hover:bg-white/70 hover:text-slate-600 disabled:opacity-50 transition-colors">
+                <RefreshCw :class="['w-4 h-4', yandexActsLoading ? 'animate-spin' : '']" />
+              </button>
+              <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
+                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-xs font-semibold transition-colors">
+                <Loader2 v-if="yandexActGenerating" class="w-3.5 h-3.5 animate-spin" />
+                <FileDown v-else class="w-3.5 h-3.5" />
+                <span>Сформировать акт</span>
+              </button>
+            </div>
+          </div>
+          <div v-if="yandexActs.length" class="mt-2 space-y-1.5">
+            <div v-for="act in yandexActs.slice(0, 3)" :key="act.id"
+              class="flex items-center justify-between gap-2 rounded-lg bg-white/80 border border-white px-2.5 py-2">
+              <div class="min-w-0">
+                <p class="text-[11px] font-semibold text-slate-700 truncate">{{ act.act_number }}</p>
+                <p class="text-[10px] text-slate-500">
+                  {{ fmt(act.created_at) }} · {{ act.requests_count }} шт. · {{ fmtCost(act.total_shipping_cost) }}
+                </p>
+              </div>
+              <button @click="downloadYandexAct(act.id, 'pdf')"
+                class="flex items-center gap-1 text-[11px] font-semibold text-amber-700 hover:text-amber-800 transition-colors">
+                <FileDown class="w-3.5 h-3.5" /> PDF
+              </button>
+            </div>
           </div>
         </div>
 

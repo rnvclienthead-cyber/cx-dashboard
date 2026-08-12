@@ -4,15 +4,18 @@ import json
 import uuid
 import asyncio
 import logging
+import base64
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
 from typing import Optional
 from ..database import get_db, db_session
 from .auth import get_current_user
+from weasyprint import HTML
+from weasyprint.text.fonts import FontConfiguration
 
 try:
     from slowapi import Limiter
@@ -30,6 +33,10 @@ UPLOAD_DIR = Path(os.getenv("CX_UPLOAD_BASE_DIR", "/root/cx-dashboard/uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 MAX_FILE_SIZE_MB = 15
+_ACT_COMPANY_NAME = os.getenv("RESHIPMENT_ACT_COMPANY_NAME", "ООО «Видовито»")
+_ACT_SIGNER_NAME = os.getenv("RESHIPMENT_ACT_SIGNER_NAME", "")
+_ACT_SIGNER_ROLE = os.getenv("RESHIPMENT_ACT_SIGNER_ROLE", "Ответственный за передачу")
+_ACT_STAMP_PATH = os.getenv("RESHIPMENT_ACT_STAMP_PATH", "").strip()
 
 # ── Публичный роутер (без авторизации) ──────────────────────────────────────
 public_router = APIRouter(prefix="/api/v1/reshipment", tags=["Reshipment / Доотправка"])
@@ -76,6 +83,178 @@ def _fmt_ru_date(d) -> str:
     if not d:
         return ""
     return f"{d.day} {_RU_MONTHS_GEN.get(d.month, '')}"
+
+
+def _get_yandex_act_stamp_data_uri() -> str:
+    if not _ACT_STAMP_PATH:
+        return ""
+    try:
+        path = Path(_ACT_STAMP_PATH)
+        if not path.exists() or not path.is_file():
+            return ""
+        mime = "image/png"
+        if path.suffix.lower() in {".jpg", ".jpeg"}:
+            mime = "image/jpeg"
+        elif path.suffix.lower() == ".webp":
+            mime = "image/webp"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+    except Exception:
+        return ""
+
+
+def _next_yandex_act_number(db: Session) -> str:
+    prefix = datetime.date.today().strftime("YA-%Y%m%d-")
+    last = db.execute(text("""
+        SELECT act_number
+        FROM yandex_dispatch_acts
+        WHERE act_number LIKE :prefix
+        ORDER BY act_number DESC
+        LIMIT 1
+    """), {"prefix": f"{prefix}%"}).scalar()
+    seq = 1
+    if last:
+        try:
+            seq = int(str(last).rsplit("-", 1)[-1]) + 1
+        except Exception:
+            seq = 1
+    return f"{prefix}{seq:03d}"
+
+
+def _serialize_yandex_dispatch_rows(rows) -> list[dict]:
+    payload = []
+    for idx, row in enumerate(rows, 1):
+        payload.append({
+            "line_no": idx,
+            "request_id": row["id"],
+            "track_number": row.get("track_number") or "",
+            "customer_name": row.get("customer_name") or "",
+            "customer_phone": row.get("customer_phone") or "",
+            "city": row.get("address_city") or row.get("client_pvz_city") or "",
+            "pickup_address": row.get("yandex_pvz_address") or row.get("client_pvz_address") or "",
+            "pickup_name": row.get("yandex_pvz_name") or "",
+            "items_to_send": row.get("items_to_send") or "",
+            "shipping_cost": float(row["shipping_cost"]) if row.get("shipping_cost") is not None else None,
+            "packed_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
+        })
+    return payload
+
+
+def _render_yandex_dispatch_act_html(
+    act_number: str,
+    created_at,
+    payload: list[dict],
+    total_shipping_cost: float,
+    created_by: str = "",
+) -> str:
+    created_dt = created_at or datetime.datetime.now()
+    created_str = created_dt.strftime("%d.%m.%Y %H:%M")
+    stamp_uri = _get_yandex_act_stamp_data_uri()
+    rows_html = []
+    for row in payload:
+        cost_str = f"{float(row['shipping_cost']):,.2f}".replace(",", " ").replace(".", ",") if row.get("shipping_cost") is not None else "—"
+        rows_html.append(f"""
+            <tr>
+              <td>{row['line_no']}</td>
+              <td>#{row['request_id']}</td>
+              <td>{row['customer_name']}</td>
+              <td>{row['customer_phone'] or '—'}</td>
+              <td>{row['city'] or '—'}</td>
+              <td>{row['pickup_address'] or '—'}</td>
+              <td>{row['items_to_send'] or '—'}</td>
+              <td>{row['track_number'] or '—'}</td>
+              <td class="num">{cost_str}</td>
+            </tr>
+        """.strip())
+    signer_name = _ACT_SIGNER_NAME or "________________"
+    stamp_html = (
+        f'<img class="stamp" src="{stamp_uri}" alt="Печать компании" />'
+        if stamp_uri else
+        '<div class="stamp-placeholder">М.П. (при наличии)</div>'
+    )
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page {{ size: A4 portrait; margin: 14mm 12mm 16mm; }}
+    body {{ font-family: DejaVu Sans, Arial, sans-serif; color: #0f172a; font-size: 11px; line-height: 1.35; }}
+    h1 {{ margin: 0 0 4mm; font-size: 18px; }}
+    .muted {{ color: #475569; }}
+    .meta {{ display: flex; justify-content: space-between; gap: 8mm; margin-bottom: 5mm; }}
+    .meta-box {{ flex: 1; border: 1px solid #cbd5e1; border-radius: 8px; padding: 3mm 4mm; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 3mm; }}
+    th, td {{ border: 1px solid #cbd5e1; padding: 2.2mm 2.5mm; vertical-align: top; }}
+    th {{ background: #f8fafc; text-align: left; font-size: 10px; }}
+    .num {{ text-align: right; white-space: nowrap; }}
+    .summary {{ margin-top: 4mm; display: flex; justify-content: space-between; align-items: flex-start; gap: 8mm; }}
+    .summary-box {{ border: 1px solid #cbd5e1; border-radius: 8px; padding: 3mm 4mm; min-width: 68mm; }}
+    .signatures {{ margin-top: 10mm; display: grid; grid-template-columns: 1fr 1fr; gap: 12mm; align-items: end; }}
+    .sign-block {{ min-height: 34mm; position: relative; }}
+    .line {{ border-bottom: 1px solid #334155; height: 18mm; margin-bottom: 2mm; }}
+    .stamp {{ position: absolute; right: 0; bottom: 6mm; width: 30mm; max-height: 30mm; object-fit: contain; opacity: 0.94; }}
+    .stamp-placeholder {{ position: absolute; right: 0; bottom: 9mm; width: 34mm; height: 24mm; border: 1px dashed #94a3b8; border-radius: 10px; color: #64748b; display: flex; align-items: center; justify-content: center; font-size: 10px; text-align: center; padding: 2mm; }}
+    .footnote {{ margin-top: 4mm; font-size: 10px; color: #64748b; }}
+  </style>
+</head>
+<body>
+  <h1>Акт приёма-передачи отправлений Яндекс Доставки</h1>
+  <div class="muted">Акт № {act_number} от {created_str}</div>
+
+  <div class="meta">
+    <div class="meta-box">
+      <div><strong>Передающая сторона:</strong> {_ACT_COMPANY_NAME}</div>
+      <div><strong>Адрес забора:</strong> Техническая 17Б, Казань</div>
+      <div><strong>Сформировал:</strong> {created_by or 'система CX Dashboard'}</div>
+    </div>
+    <div class="meta-box">
+      <div><strong>Перевозчик:</strong> Яндекс Доставка</div>
+      <div><strong>Кол-во отправлений:</strong> {len(payload)}</div>
+      <div><strong>Сумма доставки:</strong> {f"{total_shipping_cost:,.2f}".replace(",", " ").replace(".", ",")} ₽</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:6%">№</th>
+        <th style="width:8%">Заявка</th>
+        <th style="width:15%">Клиент</th>
+        <th style="width:13%">Телефон</th>
+        <th style="width:10%">Город</th>
+        <th style="width:22%">ПВЗ / адрес</th>
+        <th style="width:18%">Что отправить</th>
+        <th style="width:12%">Трек</th>
+        <th style="width:8%">Цена</th>
+      </tr>
+    </thead>
+    <tbody>
+      {"".join(rows_html)}
+    </tbody>
+  </table>
+
+  <div class="summary">
+    <div class="summary-box">
+      <div><strong>Основание:</strong> собранные заявки со статусом «Собрано — ждёт забор курьера».</div>
+      <div class="footnote">Документ сохраняет состав отправлений на момент формирования и доступен для повторного скачивания из системы.</div>
+    </div>
+  </div>
+
+  <div class="signatures">
+    <div class="sign-block">
+      <div class="line"></div>
+      <div><strong>{_ACT_SIGNER_ROLE}</strong></div>
+      <div class="muted">{signer_name}</div>
+      {stamp_html}
+    </div>
+    <div class="sign-block">
+      <div class="line"></div>
+      <div><strong>Представитель Яндекс Доставки</strong></div>
+      <div class="muted">Подпись / ФИО</div>
+    </div>
+  </div>
+</body>
+</html>"""
 
 
 @router.get("/promo-code")
@@ -2448,6 +2627,130 @@ def get_stats(db: Session = Depends(get_db)):
 import io
 import datetime
 from fastapi.responses import StreamingResponse
+
+
+# ── Склад: акты приёма-передачи Яндекс ──────────────────────────────────────
+
+@router.get("/warehouse/yandex-acts")
+def get_yandex_dispatch_acts(db: Session = Depends(get_db)):
+    acts = db.execute(text("""
+        SELECT id, act_number, created_at, created_by, requests_count, total_shipping_cost
+        FROM yandex_dispatch_acts
+        ORDER BY created_at DESC, id DESC
+        LIMIT 30
+    """)).mappings().all()
+    pending = db.execute(text("""
+        SELECT COUNT(*) AS cnt
+        FROM reshipment_requests
+        WHERE delivery_method = 'yandex'
+          AND status = 'packed'
+          AND track_number IS NOT NULL
+          AND COALESCE(yandex_dispatch_act_id, 0) = 0
+    """)).mappings().first()
+    return {
+        "status": "success",
+        "pending_count": int((pending or {}).get("cnt") or 0),
+        "has_auto_stamp": bool(_get_yandex_act_stamp_data_uri()),
+        "data": [dict(r) for r in acts],
+    }
+
+
+@router.post("/warehouse/yandex-acts/generate")
+def generate_yandex_dispatch_act(processed_by: Optional[str] = None, db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+        SELECT id, updated_at, customer_name, customer_phone,
+               address_city, client_pvz_city, client_pvz_address,
+               yandex_pvz_name, yandex_pvz_address,
+               items_to_send, track_number, shipping_cost
+        FROM reshipment_requests
+        WHERE delivery_method = 'yandex'
+          AND status = 'packed'
+          AND track_number IS NOT NULL
+          AND COALESCE(yandex_dispatch_act_id, 0) = 0
+        ORDER BY updated_at ASC, id ASC
+    """)).mappings().all()
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="Нет собранных Яндекс-заявок без акта")
+
+    payload = _serialize_yandex_dispatch_rows(rows)
+    act_number = _next_yandex_act_number(db)
+    total_shipping_cost = round(sum(float(r["shipping_cost"] or 0) for r in rows), 2)
+    actor = processed_by or "system"
+
+    act_row = db.execute(text("""
+        INSERT INTO yandex_dispatch_acts (act_number, created_by, requests_count, total_shipping_cost, payload)
+        VALUES (:act_number, :created_by, :requests_count, :total_shipping_cost, CAST(:payload AS jsonb))
+        RETURNING id, created_at
+    """), {
+        "act_number": act_number,
+        "created_by": actor,
+        "requests_count": len(payload),
+        "total_shipping_cost": total_shipping_cost,
+        "payload": json.dumps(payload, ensure_ascii=False),
+    }).mappings().first()
+
+    act_id = act_row["id"]
+    req_ids = [r["id"] for r in rows]
+    db.execute(text("""
+        UPDATE reshipment_requests
+        SET yandex_dispatch_act_id = :act_id
+        WHERE id = ANY(:ids)
+    """), {"act_id": act_id, "ids": req_ids})
+    db.commit()
+
+    return {
+        "status": "success",
+        "data": {
+            "id": act_id,
+            "act_number": act_number,
+            "requests_count": len(payload),
+            "total_shipping_cost": total_shipping_cost,
+            "download_pdf_url": f"/api/v1/reshipment/warehouse/yandex-acts/{act_id}/download?format=pdf",
+            "download_html_url": f"/api/v1/reshipment/warehouse/yandex-acts/{act_id}/download?format=html",
+        },
+    }
+
+
+@router.get("/warehouse/yandex-acts/{act_id}/download")
+def download_yandex_dispatch_act(
+    act_id: int,
+    format: str = Query("pdf", pattern="^(pdf|html)$"),
+    db: Session = Depends(get_db),
+):
+    act = db.execute(text("""
+        SELECT id, act_number, created_at, created_by, total_shipping_cost, payload
+        FROM yandex_dispatch_acts
+        WHERE id = :id
+    """), {"id": act_id}).mappings().first()
+    if not act:
+        raise HTTPException(status_code=404, detail="Акт не найден")
+
+    payload = act["payload"] or []
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    html = _render_yandex_dispatch_act_html(
+        act_number=act["act_number"],
+        created_at=act["created_at"],
+        payload=payload,
+        total_shipping_cost=float(act["total_shipping_cost"] or 0),
+        created_by=act.get("created_by") or "",
+    )
+    safe_name = act["act_number"].replace("/", "-")
+
+    if format == "html":
+        return HTMLResponse(
+            content=html,
+            headers={"Content-Disposition": f'inline; filename="{safe_name}.html"'},
+        )
+
+    font_config = FontConfiguration()
+    pdf_bytes = HTML(string=html).write_pdf(font_config=font_config)
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{safe_name}.pdf"'},
+    )
 
 
 # ── Склад: очередь заявок к отправке ────────────────────────────────────────

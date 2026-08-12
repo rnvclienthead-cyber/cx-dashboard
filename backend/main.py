@@ -81,6 +81,21 @@ async def lifespan(app: FastAPI):
                 ADD COLUMN IF NOT EXISTS yandex_pvz_lng DOUBLE PRECISION
         """))
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS yandex_dispatch_acts (
+                id BIGSERIAL PRIMARY KEY,
+                act_number VARCHAR(64) UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                created_by VARCHAR(255),
+                requests_count INTEGER NOT NULL DEFAULT 0,
+                total_shipping_cost NUMERIC(12,2) NOT NULL DEFAULT 0,
+                payload JSONB NOT NULL DEFAULT '[]'::jsonb
+            )
+        """))
+        conn.execute(text("""
+            ALTER TABLE reshipment_requests
+                ADD COLUMN IF NOT EXISTS yandex_dispatch_act_id BIGINT
+        """))
+        conn.execute(text("""
             ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_chat_id VARCHAR(100)
         """))
         # WB чаты с покупателями: состояние для мониторинга очереди ответов
