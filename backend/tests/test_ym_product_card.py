@@ -20,6 +20,8 @@ class YmProductCardTests(unittest.TestCase):
                             {"name": "Конструкция", "value": "складная"},
                             {"name": "Бренд", "value": "Видовито"},
                             {"name": "Код продавца", "value": "2-СБ-Black"},
+                            {"name": "Назначение", "value": "для дома"},
+                            {"name": "Комплектация", "value": "сушилка, крепеж"},
                             {"name": "Пустой", "value": ""},
                         ],
                     }},
@@ -36,6 +38,7 @@ class YmProductCardTests(unittest.TestCase):
             {"name": "Цвет", "value": "чёрный"},
             {"name": "Материал", "value": "сталь, пластик"},
             {"name": "Конструкция", "value": "складная"},
+            {"name": "Комплектация", "value": "сушилка, крепеж"},
         ])
         self.assertNotIn("manuals", card["product"])
 

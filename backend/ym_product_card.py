@@ -28,7 +28,22 @@ HIDDEN_PARAM_NAMES = {
     "код продавца",
     "количество заводских упаковок",
     "название",
+    "назначение",
+    "аннотация",
+    "тн вэд коды еаэс",
 }
+VISIBLE_PARAM_KEYWORDS = (
+    "цвет",
+    "материал",
+    "комплект",
+    "вес",
+    "габарит",
+    "длина",
+    "ширина",
+    "высота",
+    "размер",
+    "конструк",
+)
 
 
 def init_product_card_cache(engine) -> None:
@@ -81,6 +96,11 @@ def _is_hidden_param(name: str) -> bool:
     return _text(name).strip().lower() in HIDDEN_PARAM_NAMES
 
 
+def _is_visible_param(name: str) -> bool:
+    normalized = _text(name).strip().lower()
+    return any(key in normalized for key in VISIBLE_PARAM_KEYWORDS)
+
+
 def parse_offer_card(data: dict, article: str) -> dict:
     """Берёт только поля, которые вернул API; отсутствующие не придумывает."""
     result = data.get("result") if isinstance(data, dict) else None
@@ -113,7 +133,7 @@ def parse_offer_card(data: dict, article: str) -> dict:
             continue
         name = _text(param.get("name"))
         value = _param_value(param)
-        if name and value and not _is_hidden_param(name):
+        if name and value and not _is_hidden_param(name) and _is_visible_param(name):
             params.append({"name": name, "value": value})
 
     return {
