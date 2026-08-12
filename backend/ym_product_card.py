@@ -15,6 +15,20 @@ from . import ym_client
 
 CACHE_TTL_SECONDS = 12 * 60 * 60
 MAX_VISIBLE_PARAMS = 32
+HIDDEN_PARAM_NAMES = {
+    "бренд",
+    "название модели (для объединения в одну карточку)",
+    "#хештеги",
+    "ключевые слова",
+    "название группы",
+    "единиц в одном товаре",
+    "страна-изготовитель",
+    "планирую доставлять товар в нескольких упаковках",
+    "вид выпуска товара",
+    "код продавца",
+    "количество заводских упаковок",
+    "название",
+}
 
 
 def init_product_card_cache(engine) -> None:
@@ -63,6 +77,10 @@ def _param_value(param: dict) -> str:
     return ""
 
 
+def _is_hidden_param(name: str) -> bool:
+    return _text(name).strip().lower() in HIDDEN_PARAM_NAMES
+
+
 def parse_offer_card(data: dict, article: str) -> dict:
     """Берёт только поля, которые вернул API; отсутствующие не придумывает."""
     result = data.get("result") if isinstance(data, dict) else None
@@ -95,7 +113,7 @@ def parse_offer_card(data: dict, article: str) -> dict:
             continue
         name = _text(param.get("name"))
         value = _param_value(param)
-        if name and value:
+        if name and value and not _is_hidden_param(name):
             params.append({"name": name, "value": value})
 
     return {

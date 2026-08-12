@@ -534,19 +534,19 @@ def _get_article(db: Session, nm_id) -> str:
     if not nm_id:
         return ""
     try:
-        n = int(nm_id)
+        n = str(int(nm_id))
     except (TypeError, ValueError):
         return ""
     for sql in (
-        """SELECT supplier_article FROM wb_orders
-           WHERE nm_id = :n AND supplier_article IS NOT NULL AND supplier_article != ''
-           ORDER BY dt DESC NULLS LAST LIMIT 1""",
         """SELECT supplier_article FROM wb_feedbacks
-           WHERE nm_id = :n AND supplier_article IS NOT NULL AND supplier_article != ''
+           WHERE TRIM(COALESCE(nm_id, '')) = :n AND supplier_article IS NOT NULL AND supplier_article != ''
            ORDER BY created_date DESC NULLS LAST LIMIT 1""",
         """SELECT supplier_article FROM wb_claims
-           WHERE nm_id = :n AND supplier_article IS NOT NULL AND supplier_article != ''
-           LIMIT 1""",
+           WHERE TRIM(COALESCE(nm_id, '')) = :n AND supplier_article IS NOT NULL AND supplier_article != ''
+           ORDER BY claim_date DESC NULLS LAST, created_dt DESC NULLS LAST LIMIT 1""",
+        """SELECT supplier_article FROM wb_logistics
+           WHERE TRIM(COALESCE(nm_id, '')) = :n AND supplier_article IS NOT NULL AND supplier_article != ''
+           ORDER BY last_change_date DESC NULLS LAST, dt DESC NULLS LAST LIMIT 1""",
     ):
         try:
             row = db.execute(text(sql), {"n": n}).fetchone()

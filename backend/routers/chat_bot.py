@@ -3,6 +3,7 @@ API бота автоответов: статус, журнал теневых �
 """
 import re
 from typing import Optional
+import requests
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -13,16 +14,42 @@ from ..database import get_db
 from .auth import get_current_user
 from .. import chat_bot
 from .. import ym_product_card
+from .. import wb_client
 from . import chat_playbook
 
 router = APIRouter(prefix="/api/v1/chat-bot", tags=["chat-bot"])
 bot_api_router = APIRouter(prefix="/api/v1/bot", tags=["chat-bot"])
 
 
+def _resolve_wb_article_by_nm_api(nm_id: int | None) -> str:
+    if not nm_id:
+        return ""
+    key = wb_client.content_key()
+    if not key:
+        return ""
+    try:
+        r = requests.post(
+            f"{wb_client.CONTENT_BASE}/content/v2/get/cards/list",
+            json={"settings": {"cursor": {"limit": 100}, "filter": {"textSearch": str(int(nm_id))}}},
+            headers=wb_client.auth_headers(key),
+            timeout=20,
+        )
+        if not r.ok:
+            return ""
+        for card in (r.json().get("data") or {}).get("cards") or []:
+            if int(card.get("nmID") or 0) != int(nm_id):
+                continue
+            return str(card.get("vendorCode") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
 @router.get("/product-card")
 def product_card(
     article: str = Query("", max_length=255, description="Артикул продавца из чата"),
     nm_id: Optional[int] = Query(None, description="WB nm_id, если артикул в чате недоступен"),
+    chat_id: str = Query("", max_length=255, description="ID чата для серверного резолва артикула"),
     mp: str = Query("wb", description="wb | ozon | ym"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -30,22 +57,91 @@ def product_card(
     """Точечная карточка товара. Не подбирает похожие товары."""
     mp = (mp or "wb").strip().lower()
     article = (article or "").strip()
-    if not article and mp == "wb" and nm_id is not None:
+    chat_id = (chat_id or "").strip()
+
+    if mp == "wb" and not article and nm_id is not None:
+        article = chat_bot._get_article(db, nm_id).strip()
+        if not article:
+            article = _resolve_wb_article_by_nm_api(nm_id)
+
+    if mp == "ozon" and chat_id:
         row = db.execute(text("""
-            SELECT supplier_article FROM wb_logistics
-            WHERE nm_id = :nm AND nullif(trim(supplier_article), '') IS NOT NULL
-            ORDER BY last_change_date DESC NULLS LAST, dt DESC NULLS LAST
+            SELECT COALESCE(
+                     NULLIF(TRIM(c.context_article), ''),
+                     (
+                        SELECT r.supplier_article
+                        FROM ozon_returns r
+                        WHERE c.context_sku IS NOT NULL
+                          AND r.ozon_sku = c.context_sku
+                          AND NULLIF(TRIM(r.supplier_article), '') IS NOT NULL
+                        ORDER BY r.return_date DESC NULLS LAST
+                        LIMIT 1
+                     ),
+                     (
+                        SELECT r.supplier_article
+                        FROM ozon_returns r
+                        WHERE NULLIF(TRIM(c.order_number), '') IS NOT NULL
+                          AND (
+                            r.posting_number = c.order_number
+                            OR r.order_number = c.order_number
+                            OR r.posting_number LIKE c.order_number || '-%'
+                          )
+                          AND NULLIF(TRIM(r.supplier_article), '') IS NOT NULL
+                        ORDER BY r.return_date DESC NULLS LAST
+                        LIMIT 1
+                     ),
+                     (
+                        SELECT o.supplier_article
+                        FROM ozon_orders o
+                        WHERE NULLIF(TRIM(c.order_number), '') IS NOT NULL
+                          AND (
+                            o.posting_number = c.order_number
+                            OR o.order_number = c.order_number
+                            OR o.posting_number LIKE c.order_number || '-%'
+                          )
+                          AND NULLIF(TRIM(o.supplier_article), '') IS NOT NULL
+                        ORDER BY o.created_at DESC NULLS LAST
+                        LIMIT 1
+                     )
+                   ) AS supplier_article
+            FROM ozon_chats c
+            WHERE c.chat_id = :cid
             LIMIT 1
-        """), {"nm": int(nm_id)}).fetchone()
-        if not row:
-            row = db.execute(text("""
-                SELECT supplier_article FROM wb_claims
-                WHERE nm_id = :nm AND nullif(trim(supplier_article), '') IS NOT NULL
-                ORDER BY claim_date DESC NULLS LAST, created_dt DESC NULLS LAST
-                LIMIT 1
-            """), {"nm": int(nm_id)}).fetchone()
+        """), {"cid": chat_id}).fetchone()
         if row and row[0]:
             article = str(row[0]).strip()
+
+    if mp == "ym" and chat_id:
+        row = db.execute(text("""
+            SELECT COALESCE(
+                     NULLIF(TRIM(c.context_article), ''),
+                     (
+                        SELECT o.supplier_article
+                        FROM ym_orders o
+                        WHERE c.order_id IS NOT NULL
+                          AND o.order_id::text = c.order_id
+                          AND NULLIF(TRIM(o.supplier_article), '') IS NOT NULL
+                        LIMIT 1
+                     ),
+                     (
+                        SELECT r.supplier_article
+                        FROM ym_returns r
+                        WHERE (
+                            (c.return_id IS NOT NULL AND r.return_id::text = c.return_id)
+                            OR (c.order_id IS NOT NULL AND r.order_id::text = c.order_id)
+                        )
+                          AND NULLIF(TRIM(r.supplier_article), '') IS NOT NULL
+                        ORDER BY r.created_at DESC NULLS LAST
+                        LIMIT 1
+                     )
+                   ) AS supplier_article
+            FROM ym_chats c
+            WHERE c.chat_id = :cid
+            LIMIT 1
+        """), {"cid": chat_id}).fetchone()
+        if row and row[0]:
+            article = str(row[0]).strip()
+
     if not article:
         raise HTTPException(status_code=400, detail="article_or_nm_id_required")
     return ym_product_card.get_product_card(db, article)

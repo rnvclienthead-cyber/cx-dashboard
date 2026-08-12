@@ -18,6 +18,8 @@ class YmProductCardTests(unittest.TestCase):
                             {"name": "Цвет", "value": "чёрный"},
                             {"name": "Материал", "values": ["сталь", "пластик"]},
                             {"name": "Конструкция", "value": "складная"},
+                            {"name": "Бренд", "value": "Видовито"},
+                            {"name": "Код продавца", "value": "2-СБ-Black"},
                             {"name": "Пустой", "value": ""},
                         ],
                     }},

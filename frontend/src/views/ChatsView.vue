@@ -2579,14 +2579,16 @@ let chatSelectionRequest = 0
 
 const productCardRequest = computed(() => {
   const mp = chatMp(chatItem.value)
+  const chatId = String(chatItem.value?.id || '').trim()
   const article = String(chatItem.value?.sku || '').trim()
   if (['ym', 'ozon'].includes(mp)) {
-    if (!article || ['DIRECT', 'RETURN', 'ORDER'].includes(article.toUpperCase())) return null
-    return { mp, article, nmId: null }
+    const markerOnly = ['DIRECT', 'RETURN', 'ORDER'].includes(article.toUpperCase())
+    if (!chatId && !article) return null
+    return { mp, article: markerOnly ? '' : article, nmId: null, chatId }
   }
   const nmId = Number(chatItem.value?.nm_id || 0)
   if (mp === 'wb' && Number.isFinite(nmId) && nmId > 0) {
-    return { mp, article: '', nmId }
+    return { mp, article: '', nmId, chatId }
   }
   return null
 })
@@ -2605,6 +2607,7 @@ async function toggleProductCard() {
     const params = new URLSearchParams({ mp: productCardRequest.value.mp || 'wb' })
     if (productCardRequest.value.article) params.set('article', productCardRequest.value.article)
     if (productCardRequest.value.nmId) params.set('nm_id', String(productCardRequest.value.nmId))
+    if (productCardRequest.value.chatId) params.set('chat_id', productCardRequest.value.chatId)
     const r = await apiFetch(`/api/v1/chat-bot/product-card?${params}`)
     const data = await r.json()
     if (chatItem.value?.id === selectedId) productCard.value = data
