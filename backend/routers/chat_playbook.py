@@ -412,6 +412,13 @@ SEED_OZON_VARIANTS = [
 
 # Для Яндекс Маркета пока нужен только новый первый шаг возврата.
 SEED_YM_VARIANTS = [
+    ("zapchasti", "", "",
+     "Здравствуйте! Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. "
+     "Если нужна именно замена расходника — попробуйте поиск по маркетплейсу по запросу "
+     "«сменная насадка для швабры».", 1),
+    ("krepezh", "", "",
+     "Здравствуйте! Заглушки, защёлки и другой мелкий крепёж отдельно мы не продаём. "
+     "Если детали не было в комплекте или она с браком — оформите возврат через раздел «Заказы».", 1),
     ("vozvrat", "ask_reason", "Уточнить причину",
      "Подскажите, пожалуйста, почему решили вернуть товар? Например: не подошёл размер, "
      "обнаружили брак, товар оказался лишним или вы передумали. "
@@ -441,6 +448,7 @@ SEED_SETTINGS = [
 
 _VARIANT_MP_MIGRATION = "chat_variants_blank_legacy_wb_v1"
 _PARTS_VARIANTS_CLEANUP = "chat_variants_parts_cleanup_v1"
+_PARTS_MP_SPLIT_CLEANUP = "chat_variants_parts_mp_split_v1"
 
 
 def _migrate_legacy_blank_variant_mp(conn) -> int:
@@ -518,6 +526,48 @@ def _cleanup_parts_variants(conn) -> int:
     return updated
 
 
+def _cleanup_parts_mp_split(conn) -> int:
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _PARTS_MP_SPLIT_CLEANUP}).scalar()
+    if applied:
+        return 0
+
+    updated = 0
+    updated += conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET body = 'Здравствуйте! Отдельно сменные насадки на Wildberries у нас сейчас не представлены. Если товар с дефектом — оформите возврат во вкладке «Покупки».'
+        WHERE theme_key = 'zapchasti'
+          AND coalesce(branch_key, '') = ''
+          AND coalesce(mp, 'wb') = 'wb'
+    """)).rowcount or 0
+
+    updated += conn.execute(text("""
+        INSERT INTO cx_chat_variants (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+        SELECT 'zapchasti', '', '', 'Здравствуйте! Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. Если нужна именно замена расходника — попробуйте поиск по маркетплейсу по запросу «сменная насадка для швабры».', 1, 'ym', true, 'system'
+        WHERE NOT EXISTS (
+            SELECT 1 FROM cx_chat_variants
+            WHERE theme_key = 'zapchasti' AND coalesce(branch_key, '') = '' AND coalesce(mp, '') = 'ym'
+        )
+    """)).rowcount or 0
+
+    updated += conn.execute(text("""
+        INSERT INTO cx_chat_variants (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+        SELECT 'krepezh', '', '', 'Здравствуйте! Заглушки, защёлки и другой мелкий крепёж отдельно мы не продаём. Если детали не было в комплекте или она с браком — оформите возврат через раздел «Заказы».', 1, 'ym', true, 'system'
+        WHERE NOT EXISTS (
+            SELECT 1 FROM cx_chat_variants
+            WHERE theme_key = 'krepezh' AND coalesce(branch_key, '') = '' AND coalesce(mp, '') = 'ym'
+        )
+    """)).rowcount or 0
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _PARTS_MP_SPLIT_CLEANUP})
+    return updated
+
+
 def init_playbook_tables(engine):
     with engine.connect() as conn:
         conn.execute(text("""
@@ -563,6 +613,7 @@ def init_playbook_tables(engine):
         """))
         _migrate_legacy_blank_variant_mp(conn)
         _cleanup_parts_variants(conn)
+        _cleanup_parts_mp_split(conn)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_settings (
                 key        TEXT PRIMARY KEY,
