@@ -195,19 +195,24 @@ def sync_recent_questions(db) -> int:
         q_text = (q.get("text") or "").strip()
         if not q_text:
             continue
-        sku = (q.get("productDetails") or {}).get("supplierArticle") or "Без артикула"
+        details = q.get("productDetails") or {}
+        sku = details.get("supplierArticle") or "Без артикула"
+        nm_id = details.get("nmId") or details.get("nmID")
         ans_obj = q.get("answer") or {}
         try:
             db.execute(text("""
-                INSERT INTO wb_questions (id, supplier_article, created_date, text, answer_text, state)
-                VALUES (:id, :sku, :created, :text, :ans, 'active')
+                INSERT INTO wb_questions (id, supplier_article, nm_id, created_date, text, answer_text, state)
+                VALUES (:id, :sku, :nm_id, :created, :text, :ans, 'active')
                 ON CONFLICT (id) DO UPDATE SET
+                    supplier_article = COALESCE(EXCLUDED.supplier_article, wb_questions.supplier_article),
+                    nm_id        = COALESCE(EXCLUDED.nm_id, wb_questions.nm_id),
                     text        = EXCLUDED.text,
                     answer_text = COALESCE(EXCLUDED.answer_text, wb_questions.answer_text),
                     state       = 'active'
             """), {
                 "id":      qid,
                 "sku":     sku,
+                "nm_id":   nm_id,
                 "created": q.get("createdDate"),
                 "text":    q_text,
                 "ans":     ans_obj.get("text") if ans_obj else None,
@@ -252,17 +257,22 @@ def sync_all_answered_questions(db) -> int:
                 if not qid:
                     continue
                 q_text = (q.get("text") or "").strip()
-                sku = (q.get("productDetails") or {}).get("supplierArticle") or "Без артикула"
+                details = q.get("productDetails") or {}
+                sku = details.get("supplierArticle") or "Без артикула"
+                nm_id = details.get("nmId") or details.get("nmID")
                 ans_obj = q.get("answer") or {}
                 db.execute(text("""
-                    INSERT INTO wb_questions (id, supplier_article, created_date, text, answer_text, state)
-                    VALUES (:id, :sku, :created, :text, :ans, 'archive')
+                    INSERT INTO wb_questions (id, supplier_article, nm_id, created_date, text, answer_text, state)
+                    VALUES (:id, :sku, :nm_id, :created, :text, :ans, 'archive')
                     ON CONFLICT (id) DO UPDATE SET
+                        supplier_article = COALESCE(EXCLUDED.supplier_article, wb_questions.supplier_article),
+                        nm_id        = COALESCE(EXCLUDED.nm_id, wb_questions.nm_id),
                         answer_text = COALESCE(EXCLUDED.answer_text, wb_questions.answer_text),
                         state       = 'archive'
                 """), {
                     "id":      qid,
                     "sku":     sku,
+                    "nm_id":   nm_id,
                     "created": q.get("createdDate"),
                     "text":    q_text,
                     "ans":     ans_obj.get("text") if ans_obj else None,

@@ -207,6 +207,10 @@ async def lifespan(app: FastAPI):
             ON ozon_questions (published_at)
             WHERE status IN ('NEW', 'VIEWED', 'UNPROCESSED')
         """))
+        conn.execute(text("""
+            ALTER TABLE wb_questions
+                ADD COLUMN IF NOT EXISTS nm_id BIGINT
+        """))
         # Ozon чаты с покупателями
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ozon_chats (

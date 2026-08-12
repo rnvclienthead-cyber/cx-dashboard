@@ -100,7 +100,15 @@
           <div class="flex gap-3 p-4">
             <!-- Превью товара -->
             <div class="shrink-0">
-              <div v-if="item.product_photo"
+              <a v-if="item.product_photo && productCardUrl(item)"
+                :href="productCardUrl(item)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="block w-[72px] h-24 rounded-lg overflow-hidden bg-gray-100 border border-gray-200 hover:border-sky-300 transition-colors"
+                :aria-label="item.sku ? `Открыть карточку товара ${item.sku}` : 'Открыть карточку товара'">
+                <img :src="item.product_photo" :alt="item.sku ? `Товар ${item.sku}` : 'Товар'" class="w-full h-full object-cover" />
+              </a>
+              <div v-else-if="item.product_photo"
                 class="w-[72px] h-24 rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
                 <img :src="item.product_photo" :alt="item.sku ? `Товар ${item.sku}` : 'Товар'" class="w-full h-full object-cover" />
               </div>
@@ -127,7 +135,16 @@
                 </div>
               </div>
 
-              <p v-if="item.sku" class="text-xs text-gray-400 mb-1">Арт. {{ item.sku }}</p>
+              <p v-if="item.sku" class="text-xs mb-1">
+                <a v-if="productCardUrl(item)"
+                  :href="productCardUrl(item)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="text-gray-400 hover:text-sky-600 transition-colors underline decoration-transparent hover:decoration-sky-300 underline-offset-2">
+                  Арт. {{ item.sku }}
+                </a>
+                <span v-else class="text-gray-400">Арт. {{ item.sku }}</span>
+              </p>
               <p class="text-sm text-gray-700 leading-relaxed">{{ item.body }}</p>
             </div>
           </div>
@@ -570,6 +587,9 @@ async function loadQueue() {
     const data = await res.json()
     queueItems.value = (data.items || []).map(i => ({
       ...i,
+      nm_id: i.nm_id ? Number(i.nm_id) : null,
+      question_product_url: String(i.question_product_url || '').trim() || null,
+      question_market_sku: String(i.question_market_sku || '').trim() || null,
       _reply: '',
       _suggest: null,
       _suggestMiss: null,
@@ -616,6 +636,26 @@ function replyRows(text) {
 
 function isWbQuestion(item) {
   return item.mp === 'wb' && item.item_type === 'question'
+}
+
+function wbProductUrl(nmId) {
+  const nm = Number(nmId)
+  return Number.isFinite(nm) && nm > 0
+    ? `https://www.wildberries.ru/catalog/${nm}/detail.aspx`
+    : ''
+}
+
+function ymProductUrl(marketSku) {
+  const sku = String(marketSku || '').trim()
+  return sku ? `https://market.yandex.ru/product--/${encodeURIComponent(sku)}` : ''
+}
+
+function productCardUrl(item) {
+  if (!item || item.item_type !== 'question') return ''
+  if (item.mp === 'wb') return wbProductUrl(item.nm_id)
+  if (item.mp === 'ozon') return String(item.question_product_url || '').trim()
+  if (item.mp === 'ym') return ymProductUrl(item.question_market_sku)
+  return ''
 }
 
 function publicAnswerLabel(item) {

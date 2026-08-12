@@ -455,10 +455,14 @@ def fetch_questions():
     print("⏳ Запуск сбора ВОПРОСОВ (новых и отвеченных)...")
 
     upsert_sql = text("""
-        INSERT INTO wb_questions (id, supplier_article, created_date, text, answer_text, state)
-        VALUES (:id, :sku, :created, :text, :ans, :state)
-        ON CONFLICT (id) 
-        DO UPDATE SET answer_text = EXCLUDED.answer_text, state = EXCLUDED.state
+        INSERT INTO wb_questions (id, supplier_article, nm_id, created_date, text, answer_text, state)
+        VALUES (:id, :sku, :nm_id, :created, :text, :ans, :state)
+        ON CONFLICT (id)
+        DO UPDATE SET
+            supplier_article = COALESCE(EXCLUDED.supplier_article, wb_questions.supplier_article),
+            nm_id = COALESCE(EXCLUDED.nm_id, wb_questions.nm_id),
+            answer_text = EXCLUDED.answer_text,
+            state = EXCLUDED.state
     """)
     
     total_saved = 0
@@ -488,12 +492,14 @@ def fetch_questions():
                     if not q_text:
                         continue
                         
-                    sku = q.get('productDetails', {}).get('supplierArticle', 'Без артикула')
+                    details = q.get('productDetails') or {}
+                    sku = details.get('supplierArticle', 'Без артикула')
+                    nm_id = details.get('nmId') or details.get('nmID')
                     created = q.get('createdDate', '')
                     ans = q.get('answer', {}).get('text', '') if q.get('answer') else ''
                     
                     valid_questions.append({
-                        "id": str(q.get('id')), "sku": sku, "created": created,
+                        "id": str(q.get('id')), "sku": sku, "nm_id": nm_id, "created": created,
                         "text": q_text, "ans": ans, "state": state_label
                     })
                 

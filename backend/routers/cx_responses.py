@@ -308,7 +308,7 @@ _UNIFIED_QUEUE_VIEW_SQL = """
 
     SELECT
         q.id, 'wb', 'question',
-        q.supplier_article, NULL::text,
+        q.supplier_article, q.nm_id::text,
         q.text, NULL::int, NULL::text, NULL::text,
         NULL::text, NULL::text, NULL::text,
         q.created_date,
@@ -590,13 +590,30 @@ def get_queue(
             SELECT q.*,
                 COALESCE(
                     pp.photo_url,
+                    (SELECT wpp.photo_url
+                     FROM wb_product_photos wpp
+                     WHERE q.mp = 'wb' AND q.item_type = 'question'
+                       AND wpp.nm_id::text = q.nm_id
+                     LIMIT 1),
                     (SELECT pp2.photo_url
                      FROM wb_feedbacks wf
                      JOIN product_photos pp2 ON pp2.supplier_article = wf.supplier_article
                      WHERE wf.nm_id::text = q.nm_id LIMIT 1)
-                ) AS product_photo
+                ) AS product_photo,
+                CASE
+                    WHEN q.mp = 'ozon' AND q.item_type = 'question' THEN oq.product_url
+                    ELSE NULL
+                END AS question_product_url,
+                CASE
+                    WHEN q.mp = 'ym' AND q.item_type = 'question' THEN ya.market_sku::text
+                    ELSE NULL
+                END AS question_market_sku
             FROM {UNIFIED_QUEUE_VIEW} q
             LEFT JOIN product_photos pp ON pp.supplier_article = q.sku
+            LEFT JOIN ozon_questions oq
+              ON q.mp = 'ozon' AND q.item_type = 'question' AND oq.question_id = q.id
+            LEFT JOIN ym_assortment ya
+              ON q.mp = 'ym' AND q.item_type = 'question' AND ya.supplier_article = q.sku
             WHERE 1=1 {mp_filter}
             ORDER BY
                 CASE WHEN item_type='review' AND rating IS NOT NULL AND rating<=3 THEN 0 ELSE 1 END,
@@ -804,10 +821,35 @@ def get_quality_question_queue(
             SELECT
                 q.*, c.id AS clarification_id, c.note AS clarification_note,
                 c.requested_by AS clarification_requested_by,
-                c.requested_at AS clarification_requested_at
+                c.requested_at AS clarification_requested_at,
+                COALESCE(
+                    pp.photo_url,
+                    (SELECT wpp.photo_url
+                     FROM wb_product_photos wpp
+                     WHERE q.mp = 'wb' AND q.item_type = 'question'
+                       AND wpp.nm_id::text = q.nm_id
+                     LIMIT 1),
+                    (SELECT pp2.photo_url
+                     FROM wb_feedbacks wf
+                     JOIN product_photos pp2 ON pp2.supplier_article = wf.supplier_article
+                     WHERE wf.nm_id::text = q.nm_id LIMIT 1)
+                ) AS product_photo,
+                CASE
+                    WHEN q.mp = 'ozon' AND q.item_type = 'question' THEN oq.product_url
+                    ELSE NULL
+                END AS question_product_url,
+                CASE
+                    WHEN q.mp = 'ym' AND q.item_type = 'question' THEN ya.market_sku::text
+                    ELSE NULL
+                END AS question_market_sku
             FROM cx_question_clarifications c
             JOIN {UNIFIED_QUEUE_VIEW} q
               ON q.mp = c.mp AND q.item_type = 'question' AND q.id = c.question_id
+            LEFT JOIN product_photos pp ON pp.supplier_article = q.sku
+            LEFT JOIN ozon_questions oq
+              ON q.mp = 'ozon' AND q.item_type = 'question' AND oq.question_id = q.id
+            LEFT JOIN ym_assortment ya
+              ON q.mp = 'ym' AND q.item_type = 'question' AND ya.supplier_article = q.sku
             WHERE c.status = 'pending' {mp_filter}
             ORDER BY c.requested_at ASC
         """), params).mappings().all()

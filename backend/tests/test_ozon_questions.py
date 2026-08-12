@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
@@ -128,6 +129,14 @@ class OzonQuestionTests(unittest.TestCase):
     def test_unified_queue_and_clarification_include_ozon(self):
         self.assertIn("FROM ozon_questions q", cx_responses._UNIFIED_QUEUE_VIEW_SQL)
         self.assertIn("q.status IN ('NEW', 'VIEWED', 'UNPROCESSED')", cx_responses._UNIFIED_QUEUE_VIEW_SQL)
+
+    def test_question_queue_enriches_marketplace_product_links(self):
+        source = (Path(__file__).resolve().parents[1] / "routers" / "cx_responses.py").read_text()
+        self.assertIn("END AS question_product_url", source)
+        self.assertIn("END AS question_market_sku", source)
+        self.assertIn("LEFT JOIN ozon_questions oq", source)
+        self.assertIn("LEFT JOIN ym_assortment ya", source)
+        self.assertIn("q.supplier_article, q.nm_id::text", cx_responses._UNIFIED_QUEUE_VIEW_SQL)
 
 
 if __name__ == "__main__":
