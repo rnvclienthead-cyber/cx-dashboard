@@ -67,7 +67,7 @@
       </div>
 
       <div v-else-if="filteredItems.length === 0" class="flex flex-col items-center justify-center py-20">
-        <div class="text-5xl mb-4">🎉</div>
+        <CircleCheckBig class="w-12 h-12 mb-4 text-emerald-500" aria-hidden="true" />
         <p class="text-gray-500 font-medium">{{ hasQualityQuestionsAccess ? 'Уточнений нет' : 'Вопросов нет' }}</p>
         <p class="text-gray-400 text-sm mt-1">{{ hasQualityQuestionsAccess ? 'Все уточнения обработаны' : 'Все вопросы обработаны' }}</p>
       </div>
@@ -102,7 +102,7 @@
             <div class="shrink-0">
               <div v-if="item.product_photo"
                 class="w-[72px] h-24 rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
-                <img :src="item.product_photo" class="w-full h-full object-cover" />
+                <img :src="item.product_photo" :alt="item.sku ? `Товар ${item.sku}` : 'Товар'" class="w-full h-full object-cover" />
               </div>
               <div v-else class="w-[72px] h-24 rounded-lg bg-gray-100 border border-gray-200 flex items-center justify-center text-gray-300">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
@@ -120,6 +120,7 @@
                 <div class="flex items-center gap-2 shrink-0">
                   <span :class="['text-xs px-2 py-0.5 rounded-full font-medium', ageCls(item.age_sec)]">{{ fmtAge(item.age_sec) }}</span>
                   <button @click="dismissItem(item)" title="В архив без ответа"
+                    aria-label="Перенести вопрос в архив без ответа"
                     class="text-gray-300 hover:text-red-400 transition-colors">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
                   </button>
@@ -146,7 +147,7 @@
               class="w-full min-h-[6.5rem] border border-violet-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent bg-white"
             ></textarea>
             <div class="flex items-center justify-between gap-3">
-              <p class="text-[11px] text-violet-800 leading-snug">Текст вернётся менеджеру КС. На WB/ЯМ он не отправляется.</p>
+              <p class="text-[11px] text-violet-800 leading-snug">Текст вернётся менеджеру КС. На маркетплейс он не отправляется.</p>
               <button @click="sendQaAnswer(item)" :disabled="!item._qaReply?.trim() || item._qaSaving"
                 :class="['shrink-0 min-h-10 px-4 py-2 rounded-lg text-sm font-medium transition-all',
                   item._qaReply?.trim() && !item._qaSaving
@@ -267,6 +268,7 @@
             <textarea
               v-model="item._reply"
               placeholder="Написать ответ…"
+              :maxlength="item.mp === 'ozon' ? 3000 : undefined"
               :rows="replyRows(item._reply)"
               class="w-full min-h-[6.5rem] border border-gray-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
             ></textarea>
@@ -278,21 +280,21 @@
               </button>
               <div class="flex flex-wrap gap-2 sm:ml-auto sm:justify-end">
                 <button v-if="isWbQuestion(item)" @click="sendReply(item, 'private')"
-                  :disabled="!item._reply?.trim()"
+                  :disabled="!canSendQuestionReply(item)"
                   title="Ответ увидит только автор вопроса"
                   :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
                   :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border',
-                    item._reply?.trim()
+                    canSendQuestionReply(item)
                       ? 'bg-white hover:bg-gray-50 text-gray-700 border-gray-300'
                       : 'bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed']">
                   Ответить автору
                 </button>
                 <button @click="sendReply(item, 'public')"
-                  :disabled="!item._reply?.trim()"
+                  :disabled="!canSendQuestionReply(item)"
                   :title="publicAnswerHelp(item)"
                   :aria-describedby="`question-publish-help-${item.mp}-${item.id}`"
                   :class="['min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all',
-                    item._reply?.trim()
+                    canSendQuestionReply(item)
                       ? 'bg-sky-600 hover:bg-sky-700 text-white'
                       : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
                   {{ publicAnswerLabel(item) }}
@@ -366,6 +368,7 @@
               <option value="">Все / WB</option>
               <option value="wb">WB</option>
               <option value="ym">ЯМ</option>
+              <option value="ozon">Ozon</option>
             </select>
           </div>
           <div>
@@ -449,7 +452,7 @@
         <ul class="text-sm text-gray-600 space-y-2 list-disc pl-5">
           <li>WB: можно опубликовать ответ на карточке или отправить его только автору вопроса.</li>
           <li>ЯМ: ответ публикуется на карточке товара.</li>
-          <li>Ozon в очереди вопросов пока нет (только отзывы/чаты).</li>
+          <li>Ozon: ответ публикуется в разделе вопросов на карточке товара.</li>
           <li>Плейбук вопросов — отдельная копия чатового; можно править независимо.</li>
         </ul>
         <div class="mt-4 flex flex-wrap gap-3 text-xs">
@@ -482,7 +485,7 @@ import { usePermissionsStore } from '../stores/permissions'
 import { useToast } from '../composables/useToast'
 import { useCxQueueActions } from '../composables/useCxQueueActions'
 import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls } from '../utils/cx'
-import { ClipboardPenLine } from 'lucide-vue-next'
+import { CircleCheckBig, ClipboardPenLine } from 'lucide-vue-next'
 
 const platformStore = usePlatformStore()
 const permissionsStore = usePermissionsStore()
@@ -503,7 +506,7 @@ const hasQualityQuestionsAccess = computed(() =>
 )
 const questionsSubtitle = computed(() => hasQualityQuestionsAccess.value
   ? 'Общая очередь уточнений от менеджеров КС'
-  : 'WB · ЯМ — ответ публикуется на карточке товара'
+  : 'WB · ЯМ · Ozon — ответ публикуется на карточке товара'
 )
 
 const { toast, showToast } = useToast()
@@ -624,8 +627,11 @@ function moderationPublishLabel(item) {
 }
 
 function publicAnswerHelp(item) {
-  return isWbQuestion(item)
-    ? 'Ответ будет виден всем покупателям в разделе «Вопросы» на карточке товара.'
+  if (isWbQuestion(item)) {
+    return 'Ответ будет виден всем покупателям в разделе «Вопросы» на карточке товара.'
+  }
+  return item.mp === 'ozon'
+    ? 'Ответ публикуется на карточке товара. Ограничение Ozon — от 2 до 3000 символов.'
     : 'Ответ публикуется на карточке товара.'
 }
 
@@ -633,6 +639,12 @@ function questionReplyHelp(item) {
   return isWbQuestion(item)
     ? '«Опубликовать» увидят все покупатели на карточке. «Ответить автору» увидит только автор вопроса.'
     : publicAnswerHelp(item)
+}
+
+function canSendQuestionReply(item) {
+  const text = String(item?._reply || '').trim()
+  if (item?.mp === 'ozon') return text.length >= 2 && text.length <= 3000
+  return Boolean(text)
 }
 
 function normalizeBody(s) {
@@ -921,6 +933,7 @@ function replyEndpoint(item, visibility = 'public') {
   const map = {
     'wb:question': `/wb/questions/${id}/answer?visibility=${visibility === 'private' ? 'private' : 'public'}`,
     'ym:question': `/ym/questions/${id}/answer`,
+    'ozon:question': `/ozon/questions/${id}/answer`,
   }
   return map[`${item.mp}:${item.item_type}`] || null
 }

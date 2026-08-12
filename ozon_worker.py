@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from backend import ozon_client
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
@@ -523,7 +523,163 @@ def sync_orders(days_back=7):
     _log_db("ozon_sync_orders", "success", f"{total} строк")
 
 
-# ── 3. Синхронизация отзывов Ozon ────────────────────────────────────────────
+# ── 3. Синхронизация вопросов Ozon ───────────────────────────────────────────
+
+def _question_product_map(skus: list[int]) -> dict[int, dict]:
+    """Сопоставляет Ozon SKU с артикулом продавца, названием и фото."""
+    result: dict[int, dict] = {}
+    unique_skus = sorted({int(sku) for sku in skus if int(sku or 0) > 0})
+    for offset in range(0, len(unique_skus), 100):
+        batch = unique_skus[offset:offset + 100]
+        try:
+            data = _post("/v3/product/info/list", {"sku": batch})
+        except Exception as exc:
+            log.warning("Не удалось сопоставить SKU вопросов Ozon: %s", exc)
+            continue
+        for item in data.get("items") or []:
+            sku = int(item.get("sku") or 0)
+            if sku <= 0:
+                continue
+            primary = item.get("primary_image") or []
+            images = item.get("images") or []
+            if isinstance(primary, list):
+                image = primary[0] if primary else ""
+            else:
+                image = str(primary or "")
+            if not image and images:
+                image = images[0]
+            result[sku] = {
+                "supplier_article": str(item.get("offer_id") or "").strip() or None,
+                "product_name": str(item.get("name") or "").strip() or None,
+                "photo_url": str(image or "").strip() or None,
+            }
+    return result
+
+
+def _normalize_question(question: dict, product: dict | None = None) -> dict | None:
+    """Нормализует один элемент Ozon Question API для записи в БД."""
+    qid = str(question.get("id") or "").strip()
+    body = str(question.get("text") or "").strip()
+    sku = int(question.get("sku") or 0)
+    if not qid or not body or sku <= 0:
+        return None
+    product = product or {}
+    return {
+        "question_id": qid,
+        "sku": sku,
+        "supplier_article": product.get("supplier_article"),
+        "product_name": product.get("product_name"),
+        "product_url": str(question.get("product_url") or "").strip() or None,
+        "question_link": str(question.get("question_link") or "").strip() or None,
+        "author_name": str(question.get("author_name") or "").strip() or None,
+        "text": body,
+        "status": str(question.get("status") or "VIEWED").strip().upper(),
+        "answers_count": int(question.get("answers_count") or 0),
+        "published_at": question.get("published_at"),
+        "photo_url": product.get("photo_url"),
+    }
+
+
+def _fetch_unprocessed_questions() -> list[dict]:
+    """Полностью читает открытую очередь; при ошибке не возвращает полуснимок."""
+    items: dict[str, dict] = {}
+    last_id = None
+    while True:
+        body = {"filter": {"status": "UNPROCESSED"}, "limit": 100}
+        if last_id:
+            body["last_id"] = last_id
+        data = ozon_client.list_questions_page(body=body, timeout=25)
+        for question in data.get("questions") or []:
+            qid = str(question.get("id") or "").strip()
+            if qid:
+                items[qid] = question
+        if not data.get("has_next"):
+            break
+        next_id = str(data.get("last_id") or "").strip()
+        if not next_id or next_id == last_id:
+            raise RuntimeError("Ozon question/list вернул некорректный курсор")
+        last_id = next_id
+        time.sleep(0.3)
+    return list(items.values())
+
+
+def sync_questions() -> int:
+    """Синхронизирует открытые вопросы и закрывает локально исчезнувшие.
+
+    Сначала полностью читается API. Поэтому сетевой сбой на любой странице не
+    может ошибочно убрать вопросы из рабочей очереди.
+    """
+    log.info("Синхронизация вопросов Ozon...")
+    raw_questions = _fetch_unprocessed_questions()
+    products = _question_product_map([q.get("sku") for q in raw_questions])
+    questions = [
+        normalized
+        for q in raw_questions
+        if (normalized := _normalize_question(q, products.get(int(q.get("sku") or 0))))
+    ]
+    open_ids = [q["question_id"] for q in questions]
+
+    with engine.begin() as conn:
+        for q in questions:
+            conn.execute(text("""
+                INSERT INTO ozon_questions
+                    (question_id, sku, supplier_article, product_name,
+                     product_url, question_link, author_name, text, status,
+                     answers_count, published_at, synced_at)
+                VALUES
+                    (:question_id, :sku, :supplier_article, :product_name,
+                     :product_url, :question_link, :author_name, :text, :status,
+                     :answers_count, :published_at, NOW())
+                ON CONFLICT (question_id) DO UPDATE SET
+                    sku = EXCLUDED.sku,
+                    supplier_article = COALESCE(EXCLUDED.supplier_article, ozon_questions.supplier_article),
+                    product_name = COALESCE(EXCLUDED.product_name, ozon_questions.product_name),
+                    product_url = COALESCE(EXCLUDED.product_url, ozon_questions.product_url),
+                    question_link = COALESCE(EXCLUDED.question_link, ozon_questions.question_link),
+                    author_name = COALESCE(EXCLUDED.author_name, ozon_questions.author_name),
+                    text = EXCLUDED.text,
+                    status = CASE
+                        WHEN ozon_questions.answer_text IS NOT NULL
+                          THEN ozon_questions.status
+                        ELSE EXCLUDED.status
+                    END,
+                    answers_count = EXCLUDED.answers_count,
+                    published_at = COALESCE(EXCLUDED.published_at, ozon_questions.published_at),
+                    synced_at = NOW()
+            """), {k: v for k, v in q.items() if k != "photo_url"})
+            if q.get("supplier_article") and q.get("photo_url"):
+                conn.execute(text("""
+                    INSERT INTO product_photos (supplier_article, photo_url, source, updated_at)
+                    VALUES (:article, :url, 'ozon', NOW())
+                    ON CONFLICT (supplier_article) DO UPDATE SET
+                        photo_url = EXCLUDED.photo_url,
+                        source = 'ozon',
+                        updated_at = NOW()
+                """), {"article": q["supplier_article"], "url": q["photo_url"]})
+
+        close_sql = """
+            UPDATE ozon_questions
+            SET status = 'PROCESSED',
+                answered_at = COALESCE(answered_at, NOW()),
+                synced_at = NOW()
+            WHERE status IN ('NEW', 'VIEWED', 'UNPROCESSED')
+        """
+        params = {}
+        statement = text(close_sql)
+        if open_ids:
+            statement = text(close_sql + " AND question_id NOT IN :open_ids").bindparams(
+                bindparam("open_ids", expanding=True)
+            )
+            params["open_ids"] = open_ids
+        closed = conn.execute(statement, params).rowcount
+
+    summary = f"открытых {len(questions)}, закрыто локально {max(0, closed or 0)}"
+    log.info("Вопросы Ozon: %s", summary)
+    _log_db("ozon_sync_questions", "success", summary)
+    return len(questions)
+
+
+# ── 4. Синхронизация отзывов Ozon ────────────────────────────────────────────
 
 def sync_reviews():
     """Забирает отзывы через v2/review/list (курсорная пагинация) и сохраняет в ozon_reviews.
@@ -629,8 +785,11 @@ if __name__ == "__main__":
 
     if task == "hourly":
         run(sync_returns)
+        run(sync_questions)
         # sync_reviews отключён: Ozon Review API требует подписку «Управление отзывами»
         # run(sync_reviews)
+    elif task == "questions":
+        run(sync_questions)
     elif task == "sticky":
         # Лёгкий проход: OnSellerApproval / в пути — иначе статусы залипают до суточного hourly
         try:
@@ -654,5 +813,5 @@ if __name__ == "__main__":
     elif task == "rule_tags":
         run(apply_rule_tags)
     else:
-        log.error(f"Неизвестная задача: '{task}'. Используй: hourly | sticky | daily | backfill | backfill_orders | rule_tags")
+        log.error(f"Неизвестная задача: '{task}'. Используй: hourly | questions | sticky | daily | backfill | backfill_orders | rule_tags")
         sys.exit(1)

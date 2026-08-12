@@ -6,6 +6,7 @@ Logika «zhdet otveta»:
   WB otzyvy   - wb_feedbacks.state = 'active'
   WB voprosy  - wb_questions.state = 'active'
   YaM voprosy - ym_questions.state = 'UNANSWERED'
+  Ozon voprosy - ozon_questions.status IN ('NEW','VIEWED','UNPROCESSED')
   YaM otzyvy  - status otveta v BD net -> rezhim «novye» (intake), bez SLA
 
 SLA-limity (defolt):
@@ -39,6 +40,7 @@ SLA_DEFAULTS = {
     "wb_rev_pos": 1440,
     "wb_q":       1440,
     "ym_q":       1440,
+    "ozon_q":     1440,
     "mod_wb_claims": 4320,
     "mod_ym_returns": 4320,
     "mod_ozon_returns": 4320,
@@ -67,6 +69,9 @@ QUEUE_ROWS = [
      "table": "wb_questions", "cond": "state = 'active'"},
     {"id": "ym_q", "mp": "ym", "title_ru": "Вопросы", "type": "question",
      "table": "ym_questions", "cond": "state = 'UNANSWERED'"},
+    {"id": "ozon_q", "mp": "ozon", "title_ru": "Вопросы", "type": "question",
+     "table": "ozon_questions", "cond": "status IN ('NEW','VIEWED','UNPROCESSED')",
+     "date_col": "published_at", "id_col": "question_id", "sku_col": "supplier_article", "text_col": "text"},
 ]
 
 # Отзывы без текста — отдельный блок, без SLA
@@ -125,6 +130,8 @@ PLAN = [
      "table": "ozon_reviews",   "date_col": "created_at"},
     {"id": "ozon_chats",   "mp": "ozon", "label": "Ozon · Чаты",    "budget_min": 30,
      "table": "ozon_chats",     "date_col": "waiting_since"},
+    {"id": "ozon_questions", "mp": "ozon", "label": "Ozon · Вопросы", "budget_min": 5,
+     "table": "ozon_questions", "date_col": "published_at"},
     {"id": "ym_chats",     "mp": "ym",   "label": "ЯМ · Чаты",      "budget_min": 30,
      "table": "ym_chats",       "date_col": "waiting_since"},
     {"id": "ozon_returns", "mp": "ozon", "label": "Ozon · Возвраты", "budget_min": 0,

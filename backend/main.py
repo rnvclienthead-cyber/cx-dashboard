@@ -167,6 +167,31 @@ async def lifespan(app: FastAPI):
                 synced_at   TIMESTAMP DEFAULT NOW()
             )
         """))
+        # Ozon вопросы о товарах. Открытые NEW/VIEWED попадают в общую
+        # очередь; ответ публикуется в Q&A карточки товара.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ozon_questions (
+                question_id     TEXT PRIMARY KEY,
+                sku             BIGINT NOT NULL,
+                supplier_article TEXT,
+                product_name    TEXT,
+                product_url     TEXT,
+                question_link   TEXT,
+                author_name     TEXT,
+                text            TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                answers_count   INTEGER NOT NULL DEFAULT 0,
+                published_at    TIMESTAMP,
+                answer_text     TEXT,
+                answered_at     TIMESTAMP,
+                synced_at       TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ozon_questions_open
+            ON ozon_questions (published_at)
+            WHERE status IN ('NEW', 'VIEWED', 'UNPROCESSED')
+        """))
         # Ozon чаты с покупателями
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ozon_chats (
@@ -320,7 +345,9 @@ async def lifespan(app: FastAPI):
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_question_clarifications (
                 id            SERIAL PRIMARY KEY,
-                mp            VARCHAR(10)  NOT NULL CHECK (mp IN ('wb', 'ym')),
+                mp            VARCHAR(10)  NOT NULL
+                              CONSTRAINT cx_question_clarifications_mp_check
+                              CHECK (mp IN ('wb', 'ym', 'ozon')),
                 question_id   TEXT         NOT NULL,
                 requested_by  VARCHAR(255) NOT NULL,
                 note          TEXT         NOT NULL DEFAULT '',
@@ -360,6 +387,34 @@ async def lifespan(app: FastAPI):
                     ALTER TABLE cx_question_clarifications
                     ADD CONSTRAINT cx_question_clarifications_status_check
                     CHECK (status IN ('pending', 'answered', 'cancelled'));
+                END IF;
+            END $$
+        """))
+        # Ozon добавлен в тот же универсальный поток уточнений, что WB/ЯМ.
+        # Ограничение меняется один раз; корректное не трогаем при старте.
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conrelid = 'cx_question_clarifications'::regclass
+                      AND conname = 'cx_question_clarifications_mp_check'
+                      AND pg_get_constraintdef(oid) NOT LIKE '%ozon%'
+                ) THEN
+                    ALTER TABLE cx_question_clarifications
+                    DROP CONSTRAINT cx_question_clarifications_mp_check;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conrelid = 'cx_question_clarifications'::regclass
+                      AND conname = 'cx_question_clarifications_mp_check'
+                ) THEN
+                    ALTER TABLE cx_question_clarifications
+                    ADD CONSTRAINT cx_question_clarifications_mp_check
+                    CHECK (mp IN ('wb', 'ym', 'ozon'));
                 END IF;
             END $$
         """))

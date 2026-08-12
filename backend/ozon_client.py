@@ -51,6 +51,34 @@ def answer_review(review_id: str, text: str, *, timeout: int = 20) -> dict:
     return post("/v1/review/comment/create", {"review_uuid": review_id, "text": text}, timeout=timeout)
 
 
+# ── Вопросы о товарах ────────────────────────────────────────────────────────
+
+def list_questions_page(*, body: dict, timeout: int = 25) -> dict:
+    """Одна страница вопросов Ozon; пагинацию ведёт ``ozon_worker.py``."""
+    return post("/v1/question/list", body, timeout=timeout)
+
+
+def answer_question(question_id: str, sku: int, text: str, *, timeout: int = 20) -> dict:
+    """Опубликовать ответ на вопрос о товаре Ozon.
+
+    В отличие от WB, Ozon Question API не предлагает отдельную private/public
+    видимость: ответ относится к публичному Q&A карточки товара.
+    """
+    qid = (question_id or "").strip()
+    txt = (text or "").strip()
+    if not qid:
+        raise ValueError("question_id пустой")
+    if int(sku or 0) <= 0:
+        raise ValueError("sku вопроса отсутствует")
+    if not 2 <= len(txt) <= 3000:
+        raise ValueError("ответ Ozon должен содержать от 2 до 3000 символов")
+    return post(
+        "/v1/question/answer/create",
+        {"question_id": qid, "sku": int(sku), "text": txt},
+        timeout=timeout,
+    )
+
+
 # ── Чаты ──────────────────────────────────────────────────────────────────────
 
 def list_chats_page(*, body: dict, timeout: int = 25) -> dict:

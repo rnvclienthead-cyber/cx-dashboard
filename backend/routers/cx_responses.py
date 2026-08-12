@@ -340,6 +340,23 @@ _UNIFIED_QUEUE_VIEW_SQL = """
 
     UNION ALL
 
+    SELECT
+        q.question_id, 'ozon', 'question',
+        q.supplier_article, q.sku::text,
+        q.text, NULL::int, NULL::text, NULL::text,
+        NULL::text, NULL::text, q.author_name,
+        q.published_at,
+        EXTRACT(epoch FROM now()-q.published_at)::int,
+        NULL::bigint,
+        NULL::boolean,
+        NULL::text
+    FROM ozon_questions q
+    WHERE q.status IN ('NEW', 'VIEWED', 'UNPROCESSED')
+      AND q.question_id NOT IN
+          (SELECT item_id FROM cx_dismissed_items WHERE mp='ozon' AND item_type='question')
+
+    UNION ALL
+
     -- WB чаты: все за последние 30 дней (не только ждущие ответа),
     -- кроме закрывающих («спасибо» и т.п.)
     SELECT
@@ -535,7 +552,7 @@ def init_unified_queue_view(engine) -> None:
     Идемпотентно (CREATE OR REPLACE VIEW), вызывается при каждом старте
     приложения из backend/main.py, как и другие init_*_tables() модулей.
     Требует уже существующих таблиц cx_dismissed_items, wb_feedbacks,
-    ym_feedbacks, wb_questions, ym_questions, wb_chats, ozon_reviews,
+    ym_feedbacks, wb_questions, ym_questions, ozon_questions, wb_chats, ozon_reviews,
     ozon_chats, ozon_chat_messages, ym_chats, ym_chat_messages, wb_claims.
     """
     with engine.connect() as conn:
@@ -727,11 +744,11 @@ def request_question_clarification(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Поставить открытый вопрос WB/ЯМ в общую очередь отдела качества."""
+    """Поставить открытый вопрос WB/ЯМ/Ozon в общую очередь отдела качества."""
     if current_user.get("role") not in ("cs_manager", "admin"):
         raise HTTPException(status_code=403, detail="Уточнение может запросить менеджер КС или администратор")
-    if mp not in ("wb", "ym"):
-        raise HTTPException(status_code=400, detail="Поддерживаются только вопросы WB и ЯМ")
+    if mp not in ("wb", "ym", "ozon"):
+        raise HTTPException(status_code=400, detail="Поддерживаются вопросы WB, ЯМ и Ozon")
     note = (payload.note or "").strip()
     if len(note) > 2000:
         raise HTTPException(status_code=400, detail="Комментарий не должен быть длиннее 2000 символов")
@@ -777,8 +794,8 @@ def get_quality_question_queue(
     mp: str = Query("all"),
 ):
     """Общая очередь QA: только активные уточнения, без кнопок отправки в МП."""
-    if mp not in ("all", "wb", "ym"):
-        raise HTTPException(status_code=400, detail="mp: all, wb или ym")
+    if mp not in ("all", "wb", "ym", "ozon"):
+        raise HTTPException(status_code=400, detail="mp: all, wb, ym или ozon")
     params = {} if mp == "all" else {"mp": mp}
     mp_filter = "" if mp == "all" else "AND c.mp = :mp"
     with db.bind.connect() as conn:
@@ -835,7 +852,7 @@ def answer_question_clarification(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Сохранить предложение QA. В API WB/ЯМ этот метод принципиально не ходит."""
+    """Сохранить предложение QA. В API WB/ЯМ/Ozon этот метод не ходит."""
     proposed_text = payload.text.strip()
     if not proposed_text:
         raise HTTPException(status_code=400, detail="Введите предлагаемый ответ")
@@ -3436,6 +3453,66 @@ def answer_ym_question(
     return {"status": "ok"}
 
 
+# ── Ответ на вопрос Ozon ─────────────────────────────────────────────────────
+
+@router.post("/ozon/questions/{question_id}/answer")
+def answer_ozon_question(
+    question_id: str,
+    payload: AnswerPayload,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    txt = payload.text.strip()
+    if not 2 <= len(txt) <= 3000:
+        raise HTTPException(status_code=400, detail="Ответ Ozon должен содержать от 2 до 3000 символов")
+    if not _oz_key() or not _oz_cid():
+        raise HTTPException(status_code=503, detail="OZON_API_KEY / OZON_CLIENT_ID не настроены")
+
+    with db.bind.connect() as conn:
+        question = conn.execute(text("""
+            SELECT sku, status
+            FROM ozon_questions
+            WHERE question_id = :qid
+        """), {"qid": question_id}).mappings().first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Вопрос Ozon не найден")
+    if question["status"] not in ("NEW", "VIEWED", "UNPROCESSED"):
+        raise HTTPException(status_code=409, detail="Вопрос Ozon уже обработан")
+
+    try:
+        ozon_client.answer_question(question_id, int(question["sku"]), txt, timeout=20)
+    except requests.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ozon API {exc.response.status_code}: {exc.response.text[:200]}",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    with db.bind.connect() as conn:
+        conn.execute(text("""
+            UPDATE ozon_questions
+            SET status = 'PROCESSED', answer_text = :answer,
+                answered_at = NOW(), synced_at = NOW()
+            WHERE question_id = :qid
+        """), {"qid": question_id, "answer": txt})
+        conn.execute(text("""
+            INSERT INTO cx_response_log (item_type, item_id, mp, answered_by, answer_text)
+            VALUES ('question', :qid, 'ozon', :user, :answer)
+        """), {
+            "qid": question_id,
+            "user": current_user["username"],
+            "answer": txt,
+        })
+        conn.execute(text("""
+            DELETE FROM cx_pending_moderation
+            WHERE item_type = 'question' AND mp = 'ozon' AND item_id = :qid
+        """), {"qid": question_id})
+        conn.commit()
+
+    return {"status": "ok", "visibility": "public"}
+
+
 # ── Ответ на отзыв Ozon ──────────────────────────────────────────────────────
 
 def _oz_key() -> str:
@@ -3975,6 +4052,35 @@ def confirm_moderation(
             with db.bind.connect() as conn:
                 conn.execute(text("UPDATE ym_feedbacks SET answered_at=now(),answer_text=:a WHERE feedback_id=:i"),
                              {"a": txt, "i": item_id})
+                conn.commit()
+
+        elif mp == "ym" and itype == "question":
+            ym_client.answer_question(item_id, txt, biz=_ym_business_id(), key=_ym_key(), timeout=20)
+            with db.bind.connect() as conn:
+                conn.execute(text("UPDATE ym_questions SET state='ANSWERED',answer_text=:a WHERE question_id=:i"),
+                             {"a": txt, "i": item_id})
+                conn.commit()
+
+        elif mp == "ozon" and itype == "question":
+            if not 2 <= len(txt.strip()) <= 3000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ответ Ozon должен содержать от 2 до 3000 символов",
+                )
+            with db.bind.connect() as conn:
+                sku = conn.execute(text(
+                    "SELECT sku FROM ozon_questions WHERE question_id=:i"
+                ), {"i": item_id}).scalar()
+            if not sku:
+                raise HTTPException(status_code=404, detail="Вопрос Ozon не найден")
+            ozon_client.answer_question(item_id, int(sku), txt, timeout=20)
+            with db.bind.connect() as conn:
+                conn.execute(text("""
+                    UPDATE ozon_questions
+                    SET status='PROCESSED', answer_text=:a,
+                        answered_at=NOW(), synced_at=NOW()
+                    WHERE question_id=:i
+                """), {"a": txt, "i": item_id})
                 conn.commit()
 
         else:

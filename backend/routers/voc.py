@@ -103,9 +103,13 @@ def _compute_trends(conn, platform: str, date_from: date, date_to: date, date_fr
     elif platform == "ym":
         fb_tables   = ["ym_feedbacks"]
         q_tables    = ["ym_questions"]
+    elif platform == "ozon":
+        # Ozon отзывы требуют отдельной платной подписки, вопросы доступны.
+        fb_tables   = []
+        q_tables    = ["ozon_questions"]
     else:
         fb_tables   = ["wb_feedbacks", "ym_feedbacks"]
-        q_tables    = ["wb_questions", "ym_questions"]
+        q_tables    = ["wb_questions", "ym_questions", "ozon_questions"]
 
     # ── 2. Текущий период: суточные теги из отзывов ───────────────────────────
 
@@ -235,19 +239,20 @@ def _compute_trends(conn, platform: str, date_from: date, date_to: date, date_fr
     q_totals_daily:  dict[str, int] = {}
 
     for tbl in q_tables:
+        date_col = "published_at" if tbl == "ozon_questions" else "created_date"
         rows = conn.execute(text(f"""
-            SELECT text, created_date::date AS day
+            SELECT text, {date_col}::date AS day
             FROM {tbl}
             WHERE text IS NOT NULL AND TRIM(text) != ''
-              AND created_date::date BETWEEN :df AND :dt
+              AND {date_col}::date BETWEEN :df AND :dt
         """), {"df": date_from, "dt": date_to}).fetchall()
         q_rows_cur.extend(rows)
 
         rows_prev = conn.execute(text(f"""
-            SELECT text, created_date::date AS day
+            SELECT text, {date_col}::date AS day
             FROM {tbl}
             WHERE text IS NOT NULL AND TRIM(text) != ''
-              AND created_date::date BETWEEN :df AND :dt
+              AND {date_col}::date BETWEEN :df AND :dt
         """), {"df": date_from_prev, "dt": date_from - timedelta(days=1)}).fetchall()
         q_rows_prev.extend(rows_prev)
 
@@ -383,6 +388,20 @@ def get_voc_dashboard(
                     "SELECT id, supplier_article, created_date, text, answer_text, state "
                     "FROM ym_questions ORDER BY created_date DESC LIMIT 100"
                 )
+            elif platform == "ozon":
+                fb_query = text("""
+                    SELECT NULL::integer AS id, NULL::text AS supplier_article,
+                           NULL::timestamp AS created_date, NULL::integer AS valuation,
+                           NULL::jsonb AS ai_tags
+                    WHERE FALSE
+                """)
+                q_query = text("""
+                    SELECT question_id AS id, supplier_article,
+                           published_at AS created_date, text, answer_text,
+                           status AS state
+                    FROM ozon_questions
+                    ORDER BY published_at DESC LIMIT 100
+                """)
             else:
                 fb_query = text("""
                     SELECT id, supplier_article, created_date, valuation, ai_tags
@@ -397,6 +416,11 @@ def get_voc_dashboard(
                         SELECT id, supplier_article, created_date, text, answer_text, state FROM wb_questions
                         UNION ALL
                         SELECT id, supplier_article, created_date, text, answer_text, state FROM ym_questions
+                        UNION ALL
+                        SELECT question_id AS id, supplier_article,
+                               published_at AS created_date, text, answer_text,
+                               status AS state
+                        FROM ozon_questions
                     ) combined
                     ORDER BY created_date DESC LIMIT 100
                 """)

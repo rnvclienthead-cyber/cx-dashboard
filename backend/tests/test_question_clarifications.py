@@ -157,6 +157,7 @@ class QuestionClarificationTests(unittest.TestCase):
         with (
             patch.object(cx_responses.wb_client, "answer_question") as wb_answer,
             patch.object(cx_responses.ym_client, "answer_question") as ym_answer,
+            patch.object(cx_responses.ozon_client, "answer_question") as ozon_answer,
         ):
             result = cx_responses.answer_question_clarification(
                 7,
@@ -173,8 +174,10 @@ class QuestionClarificationTests(unittest.TestCase):
         self.assertIn("set status = 'cancelled'", sql)
         self.assertNotIn("wb_questions", sql)
         self.assertNotIn("ym_questions", sql)
+        self.assertNotIn("ozon_questions", sql)
         wb_answer.assert_not_called()
         ym_answer.assert_not_called()
+        ozon_answer.assert_not_called()
 
     def test_qa_answer_rejects_and_commits_cancelled_request(self):
         db = _Db()

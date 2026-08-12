@@ -106,17 +106,19 @@ def check_alerts(db) -> list[dict]:
             # ── Alert 1: Prosrochennye ocheredi ──────────────────────────────
             QUEUES = [
                 ("wb_rev_neg", "WB отзывы негатив", "wb_feedbacks",
-                 "state='active' AND COALESCE(valuation,0)<=3", 240),
+                 "state='active' AND COALESCE(valuation,0)<=3", 240, "created_date"),
                 ("wb_rev_pos", "WB отзывы позитив", "wb_feedbacks",
-                 "state='active' AND COALESCE(valuation,0)>=4", 1440),
-                ("wb_q",  "WB вопросы",  "wb_questions", "state='active'", 240),
-                ("ym_q",  "ЯМ вопросы",  "ym_questions", "state='UNANSWERED'", 240),
+                 "state='active' AND COALESCE(valuation,0)>=4", 1440, "created_date"),
+                ("wb_q",  "WB вопросы",  "wb_questions", "state='active'", 240, "created_date"),
+                ("ym_q",  "ЯМ вопросы",  "ym_questions", "state='UNANSWERED'", 240, "created_date"),
+                ("ozon_q", "Ozon вопросы", "ozon_questions",
+                 "status IN ('NEW','VIEWED','UNPROCESSED')", 240, "published_at"),
             ]
-            for qid, qlabel, tbl, cond, sla_min in QUEUES:
+            for qid, qlabel, tbl, cond, sla_min, date_col in QUEUES:
                 r = conn.execute(text(f"""
                     SELECT
-                        count(*) FILTER (WHERE now()-created_date > make_interval(mins=>{sla_min})) red,
-                        COALESCE(ROUND(EXTRACT(epoch FROM now()-min(created_date))/60)::int,0) oldest_min
+                        count(*) FILTER (WHERE now()-{date_col} > make_interval(mins=>{sla_min})) red,
+                        COALESCE(ROUND(EXTRACT(epoch FROM now()-min({date_col}))/60)::int,0) oldest_min
                     FROM {tbl} WHERE {cond}
                 """)).fetchone()
                 red, oldest = int(r[0] or 0), int(r[1] or 0)
