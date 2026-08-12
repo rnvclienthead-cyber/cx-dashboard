@@ -1548,7 +1548,7 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
     if not body and branch:
         body = chat_playbook.pick_variant(db, theme, "", mp=mp)
     if not body:
-        body = chat_faq.FAQ_FALLBACKS.get(theme, "")
+        body = chat_faq.faq_fallback(theme, mp)
     if not body:
         return "", action
 
@@ -2432,7 +2432,7 @@ def suggest_for_question(
         if not body and branch:
             body = question_playbook.pick_variant(db, theme, "", mp=mp)
         if not body:
-            body = chat_faq.FAQ_FALLBACKS.get(theme, "")
+            body = chat_faq.faq_fallback(theme, mp)
         if body:
             body = re.sub(r"\{form_url\}", "", body).strip()
             body = re.sub(
