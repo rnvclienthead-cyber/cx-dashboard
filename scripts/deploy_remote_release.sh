@@ -61,6 +61,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+ensure_static_access() {
+  # Nginx раздает /static и /uploads напрямую из /root/cx-dashboard.
+  # Ему нужен execute-bit на каждом родительском каталоге, иначе все фото
+  # и вложения массово падают с 403 Permission denied.
+  chmod 711 "$BACKEND_ROOT"
+  [[ -d "$BACKEND_ROOT/static" ]] && chmod 755 "$BACKEND_ROOT/static"
+  [[ -d "$BACKEND_ROOT/uploads" ]] && chmod 755 "$BACKEND_ROOT/uploads"
+}
+
 sync_source() {
   local source_dir="$1"
   rsync -az --delete \
@@ -80,6 +89,7 @@ sync_source() {
 tar -xzf "$INCOMING_DIR/source.tgz" -C "$RELEASE_SOURCE"
 tar -xzf "$INCOMING_DIR/frontend-dist.tgz" -C "$RELEASE_FRONTEND"
 sync_source "$RELEASE_SOURCE"
+ensure_static_access
 rsync -az --delete "$RELEASE_FRONTEND/" "$FRONTEND_ROOT/"
 
 systemctl restart cx-backend
@@ -102,6 +112,7 @@ if [[ "$HEALTHY" -ne 1 ]]; then
   tar -xzf "$BACKUP_DIR/source.tgz" -C "$ROLLBACK_SOURCE"
   tar -xzf "$BACKUP_DIR/frontend-dist.tgz" -C "$ROLLBACK_FRONTEND"
   sync_source "$ROLLBACK_SOURCE"
+  ensure_static_access
   rsync -az --delete "$ROLLBACK_FRONTEND/" "$FRONTEND_ROOT/"
   systemctl restart cx-backend
   exit 1
