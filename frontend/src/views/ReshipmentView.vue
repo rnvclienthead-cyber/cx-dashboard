@@ -1285,23 +1285,26 @@ onUnmounted(() => {
               {{ userRole === 'cs_manager' ? 'Менеджер КС' : userRole === 'warehouse_manager' ? 'Менеджер склада' : 'Все заявки' }}
             </p>
           </div>
-          <div class="flex flex-wrap items-center gap-1">
+          <div class="flex max-w-full flex-wrap items-center gap-1.5">
             <button v-if="isAdmin" @click="openSkuSettings"
               title="Товары, по которым можно предлагать доотправку деталей (только администратор)"
-              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
+              class="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
               <PackageCheck class="w-3.5 h-3.5" />
+              <span>Товары</span>
             </button>
             <button v-if="isCS" @click="showPromoSettings = true"
               title="Промокод на следующую покупку (для отказов)"
-              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
+              class="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
               <Tag class="w-3.5 h-3.5" />
+              <span>{{ currentPromoCode || 'Промокод' }}</span>
             </button>
             <button @click="copyTemplate" :disabled="templateLoading"
               :title="copiedTemplate ? 'Скопировано!' : 'Сгенерировать уникальную ссылку для клиента'"
-              :class="['flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors disabled:opacity-50',
+              :class="['inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap',
                 copiedTemplate ? 'bg-emerald-100 text-emerald-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600']">
               <Loader2 v-if="templateLoading" class="w-3.5 h-3.5 animate-spin" />
               <LinkIcon v-else class="w-3.5 h-3.5" />
+              <span>{{ copiedTemplate ? 'Скопировано!' : 'Ссылка для клиента' }}</span>
             </button>
             <button @click="reload" :class="['flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 transition-colors', loading ? 'animate-spin' : '']">
               <RefreshCw class="w-4 h-4" />
