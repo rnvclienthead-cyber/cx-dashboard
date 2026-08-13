@@ -1276,8 +1276,8 @@ onUnmounted(() => {
     <div :class="['flex flex-col min-h-0 md:w-80 xl:w-96 md:flex-shrink-0 border-r border-slate-200 bg-white', selected ? 'hidden md:flex' : 'flex w-full']">
 
       <div class="p-4 border-b border-slate-100">
-        <div class="flex items-center justify-between mb-3">
-          <div>
+        <div class="mb-3 flex flex-wrap items-start gap-2">
+          <div class="min-w-0 flex-1">
             <h1 class="text-base font-bold text-slate-800 flex items-center gap-2">
               <PackageCheck class="w-4 h-4 text-emerald-600" /> Отправка деталей
             </h1>
@@ -1285,26 +1285,26 @@ onUnmounted(() => {
               {{ userRole === 'cs_manager' ? 'Менеджер КС' : userRole === 'warehouse_manager' ? 'Менеджер склада' : 'Все заявки' }}
             </p>
           </div>
-          <div class="flex items-center gap-1">
+          <div class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
             <button v-if="isAdmin" @click="openSkuSettings"
               title="Товары, по которым можно предлагать доотправку деталей (только администратор)"
-              class="p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+              class="shrink-0 rounded-lg p-1.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 flex items-center gap-1">
               <PackageCheck class="w-3.5 h-3.5" />
-              <span class="hidden xl:inline">Товары</span>
+              <span class="hidden 2xl:inline">Товары</span>
             </button>
             <button v-if="isCS" @click="showPromoSettings = true"
               title="Промокод на следующую покупку (для отказов)"
-              class="p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+              class="shrink-0 rounded-lg p-1.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 flex items-center gap-1">
               <Tag class="w-3.5 h-3.5" />
-              <span class="hidden xl:inline">{{ currentPromoCode || 'Промокод' }}</span>
+              <span class="hidden 2xl:inline">{{ currentPromoCode || 'Промокод' }}</span>
             </button>
             <button @click="copyTemplate" :disabled="templateLoading"
               :title="copiedTemplate ? 'Скопировано!' : 'Сгенерировать уникальную ссылку для клиента'"
-              :class="['p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium disabled:opacity-50',
+              :class="['shrink-0 rounded-lg p-1.5 text-xs font-medium transition-colors disabled:opacity-50 flex items-center gap-1 whitespace-nowrap',
                 copiedTemplate ? 'bg-emerald-100 text-emerald-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600']">
               <Loader2 v-if="templateLoading" class="w-3.5 h-3.5 animate-spin" />
               <LinkIcon v-else class="w-3.5 h-3.5" />
-              <span class="hidden xl:inline">{{ copiedTemplate ? 'Скопировано!' : 'Ссылка для клиента' }}</span>
+              <span class="hidden 2xl:inline">{{ copiedTemplate ? 'Скопировано!' : 'Ссылка для клиента' }}</span>
             </button>
             <button @click="reload" :class="['p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors', loading ? 'animate-spin' : '']">
               <RefreshCw class="w-4 h-4" />
