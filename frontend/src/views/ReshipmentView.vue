@@ -1313,18 +1313,18 @@ onUnmounted(() => {
         </div>
 
         <div v-if="canManageYandexActs"
-          class="mb-3 rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-2 shadow-[0_10px_30px_-24px_rgba(217,119,6,0.5)]">
+          class="mb-3 rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-1.5 shadow-[0_10px_30px_-24px_rgba(217,119,6,0.5)]">
           <div class="flex flex-col xl:flex-row gap-2">
             <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
               :title="yandexActPending ? `Без акта: ${yandexActPending}` : 'Нет заявок без акта'"
-              class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-amber-600 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-amber-500 min-h-[46px]">
-              <Loader2 v-if="yandexActGenerating" class="w-4 h-4 animate-spin" />
-              <FileDown v-else class="w-4 h-4" />
+              class="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-3 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-amber-600 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-amber-500 min-h-[40px]">
+              <Loader2 v-if="yandexActGenerating" class="h-3.5 w-3.5 animate-spin" />
+              <FileDown v-else class="h-3.5 w-3.5" />
               <span>Сформировать акт</span>
             </button>
             <button @click="openYandexActsRegistry"
-              class="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:shadow-md min-h-[46px]">
-              <History class="w-4 h-4" />
+              class="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:shadow-md min-h-[40px]">
+              <History class="h-3.5 w-3.5" />
               <span>Реестр актов Яндекс</span>
             </button>
           </div>
