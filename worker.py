@@ -1416,6 +1416,7 @@ if __name__ == "__main__":
         run(fetch_and_save_logistics, "https://statistics-api.wildberries.ru/api/v1/supplier/sales", "SALE")
         run(fetch_and_save_orders, "https://statistics-api.wildberries.ru/api/v1/supplier/orders")
         run(sync_wb_report_detail)
+        run(sync_roi_reshipment_sheet, label="Синхронизация ROI доотправок")
         log_to_system("Воркер WB (full)", "SUCCESS", "Полный прогон завершён")
         print("🏁 WB full завершён")
         run_ai_tagger_wb()
