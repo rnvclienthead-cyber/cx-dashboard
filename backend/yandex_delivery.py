@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 YD_API_KEY = os.getenv("YANDEX_DELIVERY_API_KEY", "")
 YD_BASE    = "https://b2b.taxi.yandex.net/b2b/cargo/integration/v2"
 
-# Наш склад-отправитель в Казани
-FROM_FULLNAME = os.getenv("YD_FROM_FULLNAME", "Казань, улица Техническая, 23Б")
-FROM_COORDS   = [float(x) for x in os.getenv("YD_FROM_COORDS", "49.1064,55.7961").split(",")]
+# Резервный контур старого Cargo API: по умолчанию тоже указываем ПВЗ-источник.
+FROM_FULLNAME = os.getenv("YD_FROM_FULLNAME", "Казань, Тульская 40")
+FROM_COORDS   = [float(x) for x in os.getenv("YD_FROM_COORDS", "49.143371,55.73335").split(",")]
 FROM_NAME     = os.getenv("YD_FROM_NAME", "Видовито")
 FROM_PHONE    = os.getenv("YD_FROM_PHONE", "+79172226822")
 

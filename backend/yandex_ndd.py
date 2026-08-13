@@ -1,10 +1,10 @@
-"""Яндекс Доставка по России (NDD) — расчёт цены, поиск ПВЗ и создание заказа склад→ПВЗ.
+"""Яндекс Доставка по России (NDD) — расчёт цены, поиск ПВЗ и создание заказа ПВЗ→ПВЗ.
 
 Используется тот же YANDEX_DELIVERY_API_KEY, что и в yandex_delivery.py (Express/Cargo) —
 это другой продукт Яндекса, но авторизация общая для аккаунта.
 
-Источник отправки — наш склад в ЛК Яндекса (Техническая 17Б). Курьер забирает посылки
-по расписанию (вторник). Destination — ПВЗ получателя (platform_station).
+Источник отправки — наш ПВЗ в Казани (Тульская 40). Destination — ПВЗ получателя
+(platform_station).
 Поиск клиентских ПВЗ по-прежнему через available_for_dropoff / nearest pickup.
 """
 import os
@@ -26,11 +26,10 @@ logger = logging.getLogger(__name__)
 YD_API_KEY = os.getenv("YANDEX_DELIVERY_API_KEY", "")
 NDD_BASE   = "https://b2b.taxi.yandex.net/api/b2b/platform"
 
-# Наш склад в ЛК Яндекса (Казань, Техническая 17Б). Боевые значения — в .env (YD_NDD_FROM_PVZ_*).
-# Раньше сдавали в ПВЗ Кулагина 6 — больше не используем.
-FROM_ADDRESS     = os.getenv("YD_FROM_FULLNAME", "Казань, улица Техническая, 17Б")
-FROM_PVZ_ADDRESS = os.getenv("YD_NDD_FROM_PVZ_ADDRESS", "Казань, улица Техническая, 17Б")
-FROM_PVZ_ID      = os.getenv("YD_NDD_FROM_PVZ_ID", "019f3b915e357758b6b311a4aa67fd11")
+# Наш ПВЗ-источник в Яндексе. Боевые значения можно переопределить через .env.
+FROM_ADDRESS     = os.getenv("YD_FROM_FULLNAME", "Казань, Тульская 40")
+FROM_PVZ_ADDRESS = os.getenv("YD_NDD_FROM_PVZ_ADDRESS", "Казань, Тульская 40")
+FROM_PVZ_ID      = os.getenv("YD_NDD_FROM_PVZ_ID", "019fdc1bbc7971e4b3a8459698fd9b5b")
 WAREHOUSE_STATION_ID = FROM_PVZ_ID
 
 _BAD_GEO_WORDS = ("село", "деревня", "станица", "снт", "садоводческ", "посёлок", "кп ")
@@ -261,18 +260,6 @@ def calculate_price(destination_platform_station_id: str, total_weight_g: int = 
         return None
 
 
-def next_pickup_date_hint() -> str:
-    """Ближайший вторник забора (для подсказок на складе)."""
-    from datetime import date, timedelta
-    d = date.today()
-    # Если сегодня вторник — ещё сегодня; иначе ближайший следующий.
-    days_ahead = (1 - d.weekday()) % 7
-    nxt = d + timedelta(days=days_ahead)
-    months = ("", "янв", "фев", "мар", "апр", "май", "июн",
-              "июл", "авг", "сен", "окт", "ноя", "дек")
-    return f"{nxt.day} {months[nxt.month]}"
-
-
 def create_order(
     req_id: int,
     customer_name: str,
@@ -285,8 +272,7 @@ def create_order(
 ) -> dict:
     """
     Полное автосоздание заказа: offers/create -> offers/confirm.
-    Источник — наш склад (platform_station = WAREHOUSE_STATION_ID), назначение — ПВЗ клиента.
-    Посылки копятся на складе до еженедельного забора курьера (вторник).
+    Источник — наш ПВЗ (platform_station = WAREHOUSE_STATION_ID), назначение — ПВЗ клиента.
     Возвращает {'request_id': ..., 'price': float|None}. Бросает исключение при ошибке API.
     """
     name_parts = (customer_name or "Клиент").strip().split(maxsplit=1)
@@ -345,8 +331,8 @@ def create_order(
 # Статусная модель Яндекс NDD → наши статусы reshipment_requests
 # (из официальной документации Яндекс Доставки по России)
 #
-# Цепочка при заборе со склада (вторник):
-#   SORTING_CENTER_LOADED  — заказ создан, ждёт курьера на складе → у нас packed
+# Цепочка после создания заказа и сдачи в исходный ПВЗ:
+#   SORTING_CENTER_LOADED  — заказ создан, ждёт фактической сдачи → у нас packed
 #   SORTING_CENTER_AT_START — принят курьером/на СЦ
 #   SORTING_CENTER_PREPARED — готов к отгрузке в службу доставки (уже после забора!)
 #   SORTING_CENTER_TRANSMITTED — отправлен в службу доставки

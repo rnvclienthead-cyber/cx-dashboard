@@ -21,10 +21,10 @@ class ReshipmentEconomicsTests(unittest.TestCase):
         self.assertEqual(result["ret_logistics"], 1116)
         self.assertEqual(result["loss_if_return_v1"], 1800)
         self.assertEqual(result["loss_if_return_v2"], 2916)
-        self.assertEqual(result["benefit_vs_v1"], 2400)
-        self.assertEqual(result["benefit_vs_v2"], 1284)
-        self.assertEqual(result["avg_benefit_vs_v1"], 800)
-        self.assertEqual(result["avg_benefit_vs_v2"], 428)
+        self.assertEqual(result["benefit_vs_v1"], 3000)
+        self.assertEqual(result["benefit_vs_v2"], 4116)
+        self.assertEqual(result["avg_benefit_vs_v1"], 1000)
+        self.assertEqual(result["avg_benefit_vs_v2"], 1372)
 
     def test_all_stay_with_client_does_not_add_reverse_logistics(self):
         result = _parse_reshipment_economics(
@@ -38,8 +38,8 @@ class ReshipmentEconomicsTests(unittest.TestCase):
         self.assertEqual(result["ret_logistics"], 744)
         self.assertEqual(result["loss_if_return_v1"], 1100)
         self.assertEqual(result["loss_if_return_v2"], 1844)
-        self.assertEqual(result["benefit_vs_v1"], 1400)
-        self.assertEqual(result["benefit_vs_v2"], 656)
+        self.assertEqual(result["benefit_vs_v1"], 1800)
+        self.assertEqual(result["benefit_vs_v2"], 2544)
 
     def test_empty_aggregate_is_not_rendered(self):
         self.assertIsNone(

@@ -120,10 +120,13 @@ def _parse_reshipment_economics(row, avg_return_delivery: float):
     counterfactual_loss = stay_cog + wb_rc + return_log
     reshipment_result = ppvz - cog - delivery
     real_benefit = reshipment_result + counterfactual_loss
-    # В справочных вариантах WB-расходы остаются расходами и вычитаются.
-    # Эти значения не участвуют в фактическом смешанном итоге выше.
-    benefit_vs_v1 = ppvz - wb_rc - delivery
-    benefit_vs_v2 = ppvz - wb_rc - ret_logistics - delivery
+    # Справочные зелёные блоки показывают именно выгоду инструмента
+    # относительно сценариев возврата:
+    #   выгода = результат_с_доотправкой - результат_сценария_возврата
+    # Варианты возврата сверху уже показаны как потери (loss_if_return_v*),
+    # поэтому здесь добавляем их к фактическому результату доотправки.
+    benefit_vs_v1 = reshipment_result + loss_if_return_v1
+    benefit_vs_v2 = reshipment_result + loss_if_return_v2
 
     return {
         "requests_with_data":          n,

@@ -274,6 +274,7 @@ const lastShipResult = ref(null)
 
 const copiedTemplate = ref(false)
 const templateLoading = ref(false)
+const YANDEX_SOURCE_PVZ = 'Казань, Тульская 40'
 const copyTemplate = async () => {
   templateLoading.value = true
   try {
@@ -2138,21 +2139,21 @@ onUnmounted(() => {
           <div :class="['rounded-xl border p-4', selected.status === 'packed' ? 'bg-teal-50 border-teal-200' : 'bg-violet-50 border-violet-200']">
             <p :class="['text-xs font-bold uppercase tracking-wider mb-2', selected.status === 'packed' ? 'text-teal-600' : 'text-violet-500']">
               {{ selected.status === 'packed'
-                ? (selected.delivery_method === 'yandex' ? '✓ Собрано — ждёт забор курьера' : '✓ Собрано — готово к сдаче')
+                ? (selected.delivery_method === 'yandex' ? '✓ Собрано — готово к сдаче в ПВЗ' : '✓ Собрано — готово к сдаче')
                 : 'К отправке' }}
             </p>
             <p v-if="selected.moderator_comment" class="text-sm text-slate-700 mb-3 italic">«{{ selected.moderator_comment }}»</p>
 
-            <!-- Яндекс: заказ уже создан автоматически при одобрении; копятся до вторника -->
+            <!-- Яндекс: заказ уже создан автоматически при одобрении -->
             <div v-if="selected.delivery_method === 'yandex' && selected.track_number" class="mb-3 text-xs bg-white/70 rounded-lg px-3 py-2 text-slate-600 font-mono">
               Яндекс заказ создан ✓ ({{ selected.track_number }})<br class="font-sans">
-              <span class="font-sans">Забор курьера со склада <strong>Техническая 17Б</strong> — по <strong>вторникам</strong> (10:00–13:00).<br>
+              <span class="font-sans">Точка отправки: <strong>{{ YANDEX_SOURCE_PVZ }}</strong>.<br>
               Получатель: <strong>{{ selected.client_pvz_address || '—' }}</strong></span>
             </div>
             <!-- Яндекс: автосоздание не удалось — кнопка повтора -->
             <div v-else-if="selected.delivery_method === 'yandex'" class="mb-3 text-xs bg-amber-50 rounded-lg px-3 py-2 text-amber-700 border border-amber-200">
               ⚠️ Заказ Яндекс не создался автоматически.<br>
-              После создания посылка останется на складе до забора курьера (вторник).<br>
+              После создания сдайте посылку в ПВЗ: <strong>{{ YANDEX_SOURCE_PVZ }}</strong>.<br>
               Получатель: <strong>{{ selected.client_pvz_address || '—' }}</strong>
               <button @click="doYandexRetry(selected.id)" :disabled="panelLoading"
                 class="mt-2 flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
@@ -2183,9 +2184,9 @@ onUnmounted(() => {
                 </button>
               </template>
 
-              <!-- Статус "Собраны", Яндекс: копятся до вторника, статус сам после забора курьера -->
+              <!-- Статус "Собраны", Яндекс: нужно сдать в исходный ПВЗ -->
               <template v-else-if="selected.status === 'packed' && selected.delivery_method === 'yandex' && selected.track_number">
-                <p class="text-xs text-slate-500 italic self-center">Не возить в ПВЗ. Ждёт забор курьера во вторник — статус обновится сам</p>
+                <p class="text-xs text-slate-500 italic self-center">Сдайте посылку в ПВЗ Яндекс: {{ YANDEX_SOURCE_PVZ }}. После приёмки статус обновится сам</p>
                 <button @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-xl transition-colors">
                   <Printer class="w-4 h-4" /> Этикетка Яндекс A5

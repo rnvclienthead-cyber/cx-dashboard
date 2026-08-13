@@ -828,8 +828,74 @@ watch(() => platformStore.platform, loadDashboardData)
           <TrendingDown v-else class="w-8 h-8 text-rose-500 flex-shrink-0" />
         </div>
         <div :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200 text-emerald-800' : 'border-rose-200 text-rose-800'"
-             class="mt-4 pt-3 border-t text-[11px]">
-          Рассчитано по всем фактически отправленным заявкам с финданными. Количество отменённых возвратов на итог не влияет.
+             class="mt-4 pt-3 border-t text-[11px] space-y-2">
+          <details class="group">
+            <summary class="flex justify-between items-center gap-4 cursor-pointer list-none rounded-lg hover:bg-white/40 py-1 transition-colors">
+              <span class="font-medium">Могли потерять при возврате</span>
+              <span class="flex items-center gap-2">
+                <span class="font-bold tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.counterfactual_return_loss) }}</span>
+                <ChevronDown class="w-4 h-4 opacity-60 transition-transform duration-200 group-open:rotate-180" />
+              </span>
+            </summary>
+            <div class="mt-2 rounded-xl bg-white/60 p-3 space-y-1.5"
+                 :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border border-emerald-100' : 'border border-rose-100'">
+              <div class="flex justify-between gap-4">
+                <span>СС товаров, которые остались бы у клиента (2-СБ, кроме Full Black)</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.stay_with_client_cog) }}</span>
+              </div>
+              <div class="flex justify-between gap-4">
+                <span>WB-расходы при возврате</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+              </div>
+              <div class="flex justify-between gap-4">
+                <span>Обратная логистика товаров, которые вернулись бы на склад</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.return_logistics) }}</span>
+              </div>
+              <div class="flex justify-between gap-4 border-t pt-2 font-black"
+                   :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
+                <span>Итого возможная потеря</span>
+                <span class="tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.counterfactual_return_loss) }}</span>
+              </div>
+            </div>
+          </details>
+          <details class="group border-t pt-2"
+               :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
+            <summary class="flex justify-between items-center gap-4 cursor-pointer list-none rounded-lg hover:bg-white/40 py-1 transition-colors">
+              <span class="font-medium">Факт после доотправок</span>
+              <span class="flex items-center gap-2">
+                <span class="font-bold tabular-nums">{{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}</span>
+                <ChevronDown class="w-4 h-4 opacity-60 transition-transform duration-200 group-open:rotate-180" />
+              </span>
+            </summary>
+            <div class="mt-2 rounded-xl bg-white/60 p-3 space-y-1.5"
+                 :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border border-emerald-100' : 'border border-rose-100'">
+              <div class="flex justify-between gap-4">
+                <span>Сохранённая выплата WB (ppvz)</span>
+                <span class="font-bold tabular-nums">+{{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }}</span>
+              </div>
+              <div class="flex justify-between gap-4">
+                <span>Себестоимость товара</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.total_cog) }}</span>
+              </div>
+              <div class="flex justify-between gap-4">
+                <span>Доставка деталей</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }}</span>
+              </div>
+              <div class="flex justify-between gap-4 border-t pt-2 font-black"
+                   :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
+                <span>Итого факт после доотправок</span>
+                <span class="tabular-nums">{{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}</span>
+              </div>
+            </div>
+          </details>
+          <div class="flex justify-between gap-4 border-t pt-2 font-black"
+               :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-300' : 'border-rose-300'">
+            <span>Выгода = разница</span>
+            <span class="tabular-nums">{{ dashboardData.reshipment_economics.real_benefit >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.real_benefit) }}</span>
+          </div>
+          <div class="pt-1 opacity-80">
+            По всем фактически отправленным заявкам с финданными. Количество отменённых возвратов на итог не влияет.
+          </div>
         </div>
       </div>
 
@@ -934,7 +1000,7 @@ watch(() => platformStore.platform, loadDashboardData)
               <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'text-emerald-800' : 'text-rose-700'" class="text-2xl font-black tabular-nums">
                 {{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}
               </div>
-              <div class="text-[11px] text-slate-500 mt-1">СС деталей и доставка вычтены из сохранённой выплаты</div>
+              <div class="text-[11px] text-slate-500 mt-1">СС товара и доставка вычтены из сохранённой выплаты</div>
             </div>
           </div>
         </div>
@@ -945,29 +1011,29 @@ watch(() => platformStore.platform, loadDashboardData)
             <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
               <div class="flex items-start justify-between gap-2 mb-3">
                 <div>
-                  <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Расчёт по варианту 1</div>
+                  <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Выгода против варианта 1</div>
                   <div class="text-3xl font-black text-emerald-700 tabular-nums">{{ dashboardData.reshipment_economics.benefit_vs_v1 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v1) }}</div>
                   <div class="text-[12px] text-emerald-600 mt-0.5">В среднем {{ dashboardData.reshipment_economics.avg_benefit_vs_v1 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v1) }}/заявку</div>
                 </div>
                 <TrendingUp class="w-7 h-7 text-emerald-400 flex-shrink-0 mt-1" />
               </div>
               <div class="bg-emerald-100 rounded-xl p-3 text-[11px] text-emerald-800 space-y-1">
-                <div class="font-bold">ppvz − WB-расходы − доставка деталей</div>
-                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }} − {{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }} − {{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }}</div>
+                <div class="font-bold">Наш результат − результат варианта 1</div>
+                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.net_v3) }} − ({{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v1) }})</div>
               </div>
             </div>
             <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
               <div class="flex items-start justify-between gap-2 mb-3">
                 <div>
-                  <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Расчёт по варианту 2</div>
+                  <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Выгода против варианта 2</div>
                   <div class="text-3xl font-black text-emerald-700 tabular-nums">{{ dashboardData.reshipment_economics.benefit_vs_v2 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v2) }}</div>
                   <div class="text-[12px] text-emerald-600 mt-0.5">В среднем {{ dashboardData.reshipment_economics.avg_benefit_vs_v2 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v2) }}/заявку</div>
                 </div>
                 <TrendingUp class="w-7 h-7 text-emerald-400 flex-shrink-0 mt-1" />
               </div>
               <div class="bg-emerald-100 rounded-xl p-3 text-[11px] text-emerald-800 space-y-1">
-                <div class="font-bold">ppvz − WB-расходы − обратная логистика − доставка деталей</div>
-                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }} − {{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }} − {{ formatMoney(dashboardData.reshipment_economics.ret_logistics) }} − {{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }}</div>
+                <div class="font-bold">Наш результат − результат варианта 2</div>
+                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.net_v3) }} − ({{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v2) }})</div>
               </div>
             </div>
           </div>

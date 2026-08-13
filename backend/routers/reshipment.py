@@ -2325,53 +2325,51 @@ def ship_yandex(req_id: int, payload: ShipYandexRequest, db: Session = Depends(g
 
 @router.post("/requests/{req_id}/ship-yandex-auto")
 def ship_yandex_auto(req_id: int, processed_by: Optional[str] = None, db: Session = Depends(get_db)):
-    """Создать заявку Яндекс Доставки автоматически через API."""
+    """Создать заявку Яндекс автоматически через API ПВЗ→ПВЗ."""
     row = _check_exists(req_id, db)
 
     if row["status"] != "approved":
         raise HTTPException(status_code=400, detail="Заявка должна быть в статусе 'одобрена'")
 
-    # Собираем адрес клиента
-    city   = row.get("address_city") or row.get("client_pvz_city") or ""
-    street = row.get("address_street") or ""
-    house  = row.get("address_house") or ""
-    if not city:
-        raise HTTPException(status_code=400, detail="В заявке не указан город — невозможно создать заявку Яндекс")
+    pvz_code = row.get("yandex_pvz_code") or row.get("client_pvz_code") or ""
+    if not pvz_code:
+        raise HTTPException(status_code=400, detail="У заявки нет подобранного ПВЗ Яндекса")
 
-    to_fullname = ", ".join(filter(None, [city, street, house]))
-
+    cost = None
+    claim_status = "created"
     try:
-        from ..yandex_delivery import create_claim, is_enabled
-        if not is_enabled():
+        from .. import yandex_ndd
+        if not yandex_ndd.is_enabled():
             raise HTTPException(status_code=503, detail="YANDEX_DELIVERY_API_KEY не настроен")
-
-        result = create_claim(
+        result = yandex_ndd.create_order(
             req_id=req_id,
             customer_name=row["customer_name"],
             customer_phone=row["customer_phone"],
-            to_fullname=to_fullname,
+            destination_pvz_id=pvz_code,
             items_description=row.get("items_to_send", "Комплектующие"),
         )
+        claim_id = result["request_id"]
+        cost = result.get("price")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ошибка Яндекс API: {e}")
 
-    claim_id     = result["claim_id"]
-    claim_status = result["status"]
-    token        = secrets.token_hex(32)
+    token = secrets.token_hex(32)
 
     db.execute(text("""
         UPDATE reshipment_requests SET
             status = 'shipped',
             delivery_method = 'yandex',
             track_number = :track,
+            shipping_cost = COALESCE(:cost, shipping_cost),
             shipped_at = NOW(),
             confirmation_token = :token,
             processed_by = COALESCE(:by, processed_by)
         WHERE id = :id
     """), {
         "track": claim_id,
+        "cost":  cost,
         "token": token,
         "by":    processed_by,
         "id":    req_id,
@@ -2383,7 +2381,7 @@ def ship_yandex_auto(req_id: int, processed_by: Optional[str] = None, db: Sessio
     # Уведомить клиента через Salebot
     salebot_notified = False
     salebot_id = row.get("salebot_client_id")
-    if salebot_id and claim_status not in ("estimating_failed",):
+    if salebot_id:
         try:
             from ..salebot import notify_shipped, is_enabled as sb_enabled
             if sb_enabled():
@@ -2402,7 +2400,6 @@ def ship_yandex_auto(req_id: int, processed_by: Optional[str] = None, db: Sessio
         "claim_status":     claim_status,
         "confirmation_url": confirm_url,
         "salebot_notified": salebot_notified,
-        "warning":          "Яндекс не смог рассчитать маршрут — обработайте заявку вручную в портале" if claim_status == "estimating_failed" else None,
     }
 
 
