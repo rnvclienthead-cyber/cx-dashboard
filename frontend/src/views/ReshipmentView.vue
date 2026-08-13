@@ -1276,55 +1276,57 @@ onUnmounted(() => {
     <div :class="['flex flex-col min-h-0 md:w-80 xl:w-96 md:flex-shrink-0 border-r border-slate-200 bg-white', selected ? 'hidden md:flex' : 'flex w-full']">
 
       <div class="p-4 border-b border-slate-100">
-        <div class="mb-3 space-y-2">
-          <div class="min-w-0">
-            <h1 class="flex items-center gap-2 text-base font-bold text-slate-800">
-              <PackageCheck class="w-4 h-4 text-emerald-600" /> Отправка деталей
-            </h1>
-            <p class="text-[10px] text-slate-400 mt-0.5">
-              {{ userRole === 'cs_manager' ? 'Менеджер КС' : userRole === 'warehouse_manager' ? 'Менеджер склада' : 'Все заявки' }}
-            </p>
+        <div class="mb-2.5">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <h1 class="flex items-center gap-2 text-base font-bold text-slate-800">
+                <PackageCheck class="w-4 h-4 text-emerald-600" /> Отправка деталей
+              </h1>
+              <p class="mt-0.5 text-[10px] text-slate-400">
+                {{ userRole === 'cs_manager' ? 'Менеджер КС' : userRole === 'warehouse_manager' ? 'Менеджер склада' : 'Все заявки' }}
+              </p>
+            </div>
+            <button @click="reload" :class="['flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 transition-colors', loading ? 'animate-spin' : '']">
+              <RefreshCw class="w-3.5 h-3.5" />
+            </button>
           </div>
-          <div class="flex max-w-full flex-wrap items-center gap-1.5">
+          <div class="mt-2 flex max-w-full flex-wrap items-center gap-1">
             <button v-if="isAdmin" @click="openSkuSettings"
               title="Товары, по которым можно предлагать доотправку деталей (только администратор)"
-              class="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
-              <PackageCheck class="w-3.5 h-3.5" />
+              class="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
+              <PackageCheck class="h-3.5 w-3.5" />
               <span>Товары</span>
             </button>
             <button v-if="isCS" @click="showPromoSettings = true"
               title="Промокод на следующую покупку (для отказов)"
-              class="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
-              <Tag class="w-3.5 h-3.5" />
+              class="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
+              <Tag class="h-3.5 w-3.5" />
               <span>{{ currentPromoCode || 'Промокод' }}</span>
             </button>
             <button @click="copyTemplate" :disabled="templateLoading"
               :title="copiedTemplate ? 'Скопировано!' : 'Сгенерировать уникальную ссылку для клиента'"
-              :class="['inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap',
+              :class="['inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 whitespace-nowrap',
                 copiedTemplate ? 'bg-emerald-100 text-emerald-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600']">
-              <Loader2 v-if="templateLoading" class="w-3.5 h-3.5 animate-spin" />
-              <LinkIcon v-else class="w-3.5 h-3.5" />
+              <Loader2 v-if="templateLoading" class="h-3.5 w-3.5 animate-spin" />
+              <LinkIcon v-else class="h-3.5 w-3.5" />
               <span>{{ copiedTemplate ? 'Скопировано!' : 'Ссылка для клиента' }}</span>
-            </button>
-            <button @click="reload" :class="['flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 transition-colors', loading ? 'animate-spin' : '']">
-              <RefreshCw class="w-4 h-4" />
             </button>
           </div>
         </div>
 
         <div v-if="canManageYandexActs"
-          class="mb-3 rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-1.5 shadow-[0_10px_30px_-24px_rgba(217,119,6,0.5)]">
-          <div class="flex flex-col xl:flex-row gap-2">
+          class="mb-3 rounded-xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-1 shadow-[0_10px_24px_-24px_rgba(217,119,6,0.5)]">
+          <div class="grid grid-cols-2 gap-1.5">
             <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
               :title="yandexActPending ? `Без акта: ${yandexActPending}` : 'Нет заявок без акта'"
-              class="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-3 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-amber-600 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-amber-500 min-h-[40px]">
-              <Loader2 v-if="yandexActGenerating" class="h-3.5 w-3.5 animate-spin" />
-              <FileDown v-else class="h-3.5 w-3.5" />
+              class="inline-flex min-h-[36px] w-full items-center justify-center gap-1 rounded-lg bg-amber-500 px-2.5 py-2 text-[12px] font-semibold text-white shadow-sm transition-all hover:bg-amber-600 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-amber-500 whitespace-nowrap">
+              <Loader2 v-if="yandexActGenerating" class="h-3 w-3 animate-spin" />
+              <FileDown v-else class="h-3 w-3" />
               <span>Сформировать акт</span>
             </button>
             <button @click="openYandexActsRegistry"
-              class="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:shadow-md min-h-[40px]">
-              <History class="h-3.5 w-3.5" />
+              class="inline-flex min-h-[36px] w-full items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[12px] font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:shadow-md whitespace-nowrap">
+              <History class="h-3 w-3" />
               <span>Реестр актов Яндекс</span>
             </button>
           </div>
