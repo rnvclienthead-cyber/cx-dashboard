@@ -799,7 +799,7 @@ def start_tagging(
 
 @router.post("/start-audit")
 def start_audit(model: str = "qwen-plus", batch_size: int = 10, background_tasks: BackgroundTasks = None):
-    return {"status": "started", "message": "Процесс аудита запущен в фоне."}
+    return {"status": "disabled", "message": "Автоаудит брака отключён. Проверка тегов — в разделе Модерация."}
 
 @router.post("/start-feedback-tagging")
 def start_feedback_tagging(

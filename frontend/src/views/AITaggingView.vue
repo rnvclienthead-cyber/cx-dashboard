@@ -1,14 +1,12 @@
 <script setup>
 import { ref, computed, onMounted, watch, onBeforeUnmount } from 'vue'
-import { useRouter } from 'vue-router'
-import { Tag, ShieldCheck, Play, Loader2, Cpu, RefreshCw, MessageSquarePlus, Zap, Target } from 'lucide-vue-next'
+import { Tag, Play, Loader2, Cpu, RefreshCw, MessageSquarePlus, Zap, Target } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
 
-const router = useRouter()
 const platformStore = usePlatformStore()
 
-const activeTab = ref('tagging') // 'tagging', 'audit', 'feedback'
+const activeTab = ref('tagging') // 'tagging' | 'feedback'
 
 // Настройки
 const batchSize = ref(10)
@@ -25,7 +23,7 @@ const progress = ref(0)
 const statusText = ref('')
 const resultMessage = ref(null)
 
-const stats = ref({ untagged: 0, unaudited: 0, untaggedFeedbacks: 0 })
+const stats = ref({ untagged: 0, untaggedFeedbacks: 0 })
 const isStatsLoading = ref(true)
 
 let pollingInterval = null
@@ -53,7 +51,6 @@ const fetchStats = async () => {
     const data = await res.json()
     if (data.status === 'success') {
       stats.value.untagged = data.untagged_count
-      stats.value.unaudited = data.unaudited_count
       stats.value.untaggedFeedbacks = data.untagged_feedbacks
       stats.value.last_log = data.last_log
     }
@@ -73,7 +70,7 @@ onMounted(async () => {
     if (age < 3_600_000 && job.platform === platformStore.platform) {
       initialCount.value = job.initialCount
       isProcessing.value = true
-      activeTab.value = job.tab
+      activeTab.value = job.tab === 'feedback' ? 'feedback' : 'tagging'
       startPolling()
     } else {
       clearJob()
@@ -122,9 +119,8 @@ function startPolling() {
 }
 
 const currentCount = computed(() => {
-  if (activeTab.value === 'tagging') return stats.value.untagged
-  if (activeTab.value === 'audit') return stats.value.unaudited
-  return stats.value.untaggedFeedbacks
+  if (activeTab.value === 'feedback') return stats.value.untaggedFeedbacks
+  return stats.value.untagged
 })
 
 const estimatedCost = computed(() => {
@@ -136,10 +132,6 @@ const estimatedCost = computed(() => {
 })
 
 const startProcess = async () => {
-  if (activeTab.value === 'audit') {
-    router.push('/moderation')
-    return
-  }
   if (currentCount.value === 0) return
 
   isProcessing.value = true
@@ -149,14 +141,9 @@ const startProcess = async () => {
   saveJob()
 
   const modelKey = selectedModel.value
-
-  let endpoint = ''
-  if (activeTab.value === 'tagging')
-    endpoint = `/api/v1/ai/start-tagging?platform=${platformStore.platform}&model=${modelKey}&batch_size=${batchSize.value}`
-  else if (activeTab.value === 'audit')
-    endpoint = `/api/v1/ai/start-audit?model=${modelKey}&batch_size=${batchSize.value}`
-  else
-    endpoint = `/api/v1/ai/start-feedback-tagging?platform=${platformStore.platform}&model=${modelKey}&batch_size=${batchSize.value}`
+  const endpoint = activeTab.value === 'feedback'
+    ? `/api/v1/ai/start-feedback-tagging?platform=${platformStore.platform}&model=${modelKey}&batch_size=${batchSize.value}`
+    : `/api/v1/ai/start-tagging?platform=${platformStore.platform}&model=${modelKey}&batch_size=${batchSize.value}`
 
   try {
     statusText.value = 'Запрос к нейросети...'
@@ -194,9 +181,6 @@ const startProcess = async () => {
         <Tag class="w-4 h-4" />
         {{ platformStore.platform === 'ym' ? 'Разметка брака (Возвраты ЯМ)' : platformStore.platform === 'ozon' ? 'Разметка брака (Возвраты Ozon)' : 'Разметка брака (Претензии)' }}
       </button>
-      <button @click="activeTab = 'audit'" :class="['px-5 py-2.5 text-sm font-semibold rounded-t-lg transition-colors flex items-center gap-2', activeTab === 'audit' ? 'bg-white text-indigo-600 border-t border-l border-r border-slate-200 shadow-[0_2px_0_0_white]' : 'text-slate-500 hover:bg-slate-100']">
-        <ShieldCheck class="w-4 h-4" /> Аудит брака
-      </button>
       <button @click="activeTab = 'feedback'" :class="['px-5 py-2.5 text-sm font-semibold rounded-t-lg transition-colors flex items-center gap-2', activeTab === 'feedback' ? 'bg-white text-rose-600 border-t border-l border-r border-slate-200 shadow-[0_2px_0_0_white]' : 'text-slate-500 hover:bg-slate-100']">
         <MessageSquarePlus class="w-4 h-4" />
         {{ platformStore.platform === 'ym' ? 'Отзывы ЯМ: Поиск идей (VOC)' : platformStore.platform === 'ozon' ? 'Отзывы Ozon (недоступно)' : 'Отзывы: Поиск идей (VOC)' }}
@@ -233,7 +217,7 @@ const startProcess = async () => {
             <div v-else>
               <div class="flex justify-between items-center mb-2">
                 <span class="text-sm font-medium text-slate-600">
-                  {{ activeTab === 'tagging' ? 'Без тегов (в очереди):' : activeTab === 'audit' ? 'Ждут ручного аудита:' : 'Очередь отзывов:' }}
+                  {{ activeTab === 'tagging' ? 'Без тегов (в очереди):' : 'Очередь отзывов:' }}
                 </span>
                 <span :class="['font-black text-lg', currentCount > 0 ? (activeTab==='feedback'?'text-rose-600':'text-indigo-600') : 'text-emerald-600']">{{ currentCount }} шт.</span>
               </div>
@@ -249,9 +233,6 @@ const startProcess = async () => {
                   ИИ проанализирует комментарии покупателей и проставит категории дефектов (1–13) по претензиям WB.
                 </span>
               </div>
-              <div v-if="activeTab === 'audit'" class="text-[11px] text-slate-500 mb-3 leading-relaxed">
-                Записи прошли автотегирование. Перейдите в раздел <b>Модерация тегов</b>, чтобы проверить и подтвердить результат вручную.
-              </div>
 
               <div v-if="activeTab === 'feedback'" class="flex justify-between items-center mb-2">
                 <span class="text-sm font-medium text-slate-600">К отправке в ИИ (анализ болей):</span>
@@ -261,15 +242,12 @@ const startProcess = async () => {
                 * Локальный скрипт отбрасывает пустые и короткие отзывы на 5 звезд (~75%). Нейросеть проанализирует все отзывы 1-4 звезды и развернутые комментарии.
               </p>
 
-              <div v-if="activeModel.cost != null && activeTab !== 'audit'" class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
+              <div v-if="activeModel.cost != null" class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
                 <span class="text-sm font-medium text-slate-600">Ориентировочный расход:</span>
                 <span class="font-bold text-slate-800">~{{ estimatedCost.value }} {{ estimatedCost.currency }}</span>
               </div>
 
-              <p v-if="activeTab === 'audit'" class="text-[11px] text-slate-400 mt-3 leading-relaxed">
-                Запуск в этой вкладке не требуется — аудит выполняется вручную в разделе Модерации.
-              </p>
-              <p v-else-if="activeTab !== 'feedback'" class="text-[11px] text-slate-400 mt-3 leading-relaxed">
+              <p v-if="activeTab !== 'feedback'" class="text-[11px] text-slate-400 mt-3 leading-relaxed">
                 Точная сумма зависит от количества токенов в комментариях клиентов. Фоновый процесс работает партиями.
               </p>
               <p v-else class="text-[11px] text-rose-500 mt-3 font-semibold leading-relaxed">
@@ -279,13 +257,12 @@ const startProcess = async () => {
           </div>
 
           <button @click="startProcess"
-            :disabled="activeTab !== 'audit' && (isProcessing || currentCount === 0 || isStatsLoading)"
+            :disabled="isProcessing || currentCount === 0 || isStatsLoading"
             :class="['mt-6 w-full flex items-center justify-center gap-2 py-3 px-4 text-white font-bold rounded-xl transition-all shadow-sm disabled:opacity-50',
               activeTab === 'feedback' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700']">
             <Loader2 v-if="isProcessing" class="w-5 h-5 animate-spin" />
             <Play v-else class="w-5 h-5" />
-            <span v-if="activeTab === 'audit'">ПЕРЕЙТИ В МОДЕРАЦИЮ</span>
-            <span v-else-if="currentCount === 0 && !isStatsLoading">НЕТ ЗАДАЧ</span>
+            <span v-if="currentCount === 0 && !isStatsLoading">НЕТ ЗАДАЧ</span>
             <span v-else>{{ isProcessing ? 'Отправка...' : 'ЗАПУСТИТЬ АНАЛИЗ' }}</span>
           </button>
         </div>
