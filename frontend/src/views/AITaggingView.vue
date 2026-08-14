@@ -1,9 +1,11 @@
 <script setup>
 import { ref, computed, onMounted, watch, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { Tag, ShieldCheck, Play, Loader2, Cpu, RefreshCw, MessageSquarePlus, Zap, Target } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
 
+const router = useRouter()
 const platformStore = usePlatformStore()
 
 const activeTab = ref('tagging') // 'tagging', 'audit', 'feedback'
@@ -134,6 +136,10 @@ const estimatedCost = computed(() => {
 })
 
 const startProcess = async () => {
+  if (activeTab.value === 'audit') {
+    router.push('/moderation')
+    return
+  }
   if (currentCount.value === 0) return
 
   isProcessing.value = true
@@ -255,7 +261,7 @@ const startProcess = async () => {
                 * Локальный скрипт отбрасывает пустые и короткие отзывы на 5 звезд (~75%). Нейросеть проанализирует все отзывы 1-4 звезды и развернутые комментарии.
               </p>
 
-              <div v-if="activeModel.cost != null" class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
+              <div v-if="activeModel.cost != null && activeTab !== 'audit'" class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
                 <span class="text-sm font-medium text-slate-600">Ориентировочный расход:</span>
                 <span class="font-bold text-slate-800">~{{ estimatedCost.value }} {{ estimatedCost.currency }}</span>
               </div>
@@ -273,7 +279,7 @@ const startProcess = async () => {
           </div>
 
           <button @click="startProcess"
-            :disabled="isProcessing || currentCount === 0 || isStatsLoading || activeTab === 'audit'"
+            :disabled="activeTab !== 'audit' && (isProcessing || currentCount === 0 || isStatsLoading)"
             :class="['mt-6 w-full flex items-center justify-center gap-2 py-3 px-4 text-white font-bold rounded-xl transition-all shadow-sm disabled:opacity-50',
               activeTab === 'feedback' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700']">
             <Loader2 v-if="isProcessing" class="w-5 h-5 animate-spin" />
