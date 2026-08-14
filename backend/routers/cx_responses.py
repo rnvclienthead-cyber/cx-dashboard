@@ -3,7 +3,7 @@
 
 Доступ: admin или пользователь с правом cx_responses в role_permissions.
 Фаза 1: WB отзывы, вопросы, чаты.
-Фаза 2: ЯМ отзывы, вопросы. ИИ-черновики (Haiku).
+Фаза 2: ЯМ отзывы, вопросы. ИИ-черновики (Qwen Plus).
 """
 import os
 import time
@@ -3077,10 +3077,8 @@ def get_ai_draft(
     sku: str       = Query(""),
     db: Session    = Depends(get_db),
 ):
-    """Генерирует черновик ответа через Claude Haiku, опираясь на фирменную базу шаблонов Vidovito."""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY не настроен")
+    """Генерирует черновик ответа через Qwen Plus, опираясь на фирменную базу шаблонов Vidovito."""
+    from ..llm import complete_sync
 
     mp_label = {"wb": "Wildberries", "ym": "Яндекс Маркет", "ozon": "Ozon"}.get(mp, mp)
     type_label = {"review": "отзыв", "question": "вопрос", "chat": "сообщение в чате"}.get(item_type, item_type)
@@ -3132,23 +3130,13 @@ def get_ai_draft(
     )
 
     try:
-        import anthropic as _anthropic
-        # Прокси через Cloudflare Worker (api.anthropic.com заблокирован для RU-IP)
-        kwargs = {"api_key": api_key}
-        base_url = os.getenv("ANTHROPIC_BASE_URL", "").strip()
-        if base_url:
-            kwargs["base_url"] = base_url
-            proxy_token = os.getenv("ANTHROPIC_PROXY_TOKEN", "").strip()
-            if proxy_token:
-                kwargs["default_headers"] = {"x-proxy-token": proxy_token}
-        client = _anthropic.Anthropic(**kwargs)
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
+        draft = complete_sync(
             system=system,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        draft = msg.content[0].text.strip()
+            user=user_msg,
+            model_key="qwen-plus",
+            temperature=0.4,
+            max_tokens=500,
+        ).strip()
         draft += "\n\nАлександр, команда Видовито"
         return {"draft": draft}
     except Exception as e:

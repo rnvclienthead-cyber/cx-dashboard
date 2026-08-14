@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import List, Dict, Any
 from ..database import get_db, SessionLocal
+from ..llm import complete_async, is_yandex_lite
+from ..qwen_client import mask_pii
 from .auth import get_current_user
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -15,6 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 router = APIRouter(prefix="/api/v1/ai", tags=["AI / Автоматическое тегирование"], dependencies=[Depends(get_current_user)])
+
+# qwen-plus — основная модель. yandex-lite остаётся запасным выбором в UI.
 
 CATEGORIES = {
     1: "Некомплект: Фурнитура", 2: "Некомплект: Несущие детали", 3: "Состояние упаковки",
@@ -224,54 +228,26 @@ async def fetch_ai_tags(session: aiohttp.ClientSession, batch: List[Dict[str, An
     Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}
     ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект (рейтинг 4-5) - СТРОГО Категория 12.
     ВОТ ПРИМЕРЫ ПОХОЖИХ СИТУАЦИЙ ИЗ БАЗЫ:
-    {memory_string}
+    {mask_pii(memory_string)}
     ИНСТРУКЦИЯ: Верни ТОЛЬКО массив category_ids (цифры подходящих категорий). Никакого текста!
     ОТВЕТЬ СТРОГО JSON: {{"results": [{{"id": "...", "category_ids": [1, 5]}}]}}"""
 
-    if "yandex" in model_key:
-        url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
-        api_key = os.getenv('YANDEX_API_KEY') or ""
-        folder_id = os.getenv('FOLDER_ID') or ""
-        headers = {"Authorization": f"Api-Key {api_key}", "Content-Type": "application/json"}
-        if folder_id: headers["x-folder-id"] = str(folder_id)
-            
-        yandex_model_name = "yandexgpt-lite" if model_key == "yandex-lite" else "yandexgpt"
-        payload = {
-            "modelUri": f"gpt://{folder_id}/{yandex_model_name}/latest",
-            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
-            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
-        }
-        
-        for attempt in range(3):
-            try:
-                async with session.post(url, headers=headers, json=payload, timeout=90) as resp:
-                    if resp.status == 200:
-                        res = await resp.json()
-                        return parse_ai_response(res['result']['alternatives'][0]['message']['text'])
-                    elif resp.status == 429:
-                        await asyncio.sleep(10 * (attempt + 1))
-                        continue
-                    return [{"error": f"Ошибка Яндекса ({resp.status}): {await resp.text()}"}]
-            except Exception as e:
-                if attempt == 2: return [{"error": str(e)}]
-                await asyncio.sleep(5)
+    content = mask_pii(content)
 
-    elif "claude" in model_key:
-        try:
-            import anthropic as _anthropic
-            _client = _anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-            _model = "claude-haiku-4-5-20251001" if model_key == "claude-haiku" else "claude-sonnet-4-6"
-            msg = await _client.messages.create(
-                model=_model,
-                max_tokens=2000,
-                system=system_prompt,
-                messages=[{"role": "user", "content": content}],
-            )
-            return parse_ai_response(msg.content[0].text)
-        except Exception as e:
-            return [{"error": f"Claude ошибка: {str(e)}"}]
-
-    return []
+    try:
+        raw = await complete_async(
+            system=system_prompt,
+            user=content,
+            model_key=model_key,
+            temperature=0.1,
+            max_tokens=2000,
+            response_format=None if is_yandex_lite(model_key) else {"type": "json_object"},
+            session=session,
+            mask_user_text=False,
+        )
+        return parse_ai_response(raw)
+    except Exception as e:
+        return [{"error": str(e)}]
 
 # ==========================================
 # НЕЙРОСЕТЬ: ОТПРАВКА ДЛЯ ОТЗЫВОВ (VOC)
@@ -298,7 +274,7 @@ async def fetch_ai_feedback_tags(session: aiohttp.ClientSession, batch: List[Dic
     - "ОЖИДАНИЯ: Отличие цвета от фото"
     - "ОЖИДАНИЯ: Ощущение дешевизны вживую"
 
-    {examples_text}
+    {mask_pii(examples_text)}
 
     ИНСТРУКЦИЯ:
     Верни результат СТРОГО в виде JSON-объекта с массивом `results`. 
@@ -311,50 +287,22 @@ async def fetch_ai_feedback_tags(session: aiohttp.ClientSession, batch: List[Dic
         {{"id": "REF_1", "tags": [], "suggestion": ""}}
     ]}}"""
 
-    if "yandex" in model_key:
-        url = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion'
-        api_key = os.getenv('YANDEX_API_KEY') or ""
-        folder_id = os.getenv('FOLDER_ID') or ""
-        headers = {"Authorization": f"Api-Key {api_key}", "Content-Type": "application/json"}
-        if folder_id: headers["x-folder-id"] = str(folder_id)
-            
-        yandex_model_name = "yandexgpt-lite" if model_key == "yandex-lite" else "yandexgpt"
-        payload = {
-            "modelUri": f"gpt://{folder_id}/{yandex_model_name}/latest",
-            "completionOptions": {"temperature": 0.1, "maxTokens": 2000},
-            "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": content}]
-        }
-        
-        for attempt in range(3):
-            try:
-                async with session.post(url, headers=headers, json=payload, timeout=90) as resp:
-                    if resp.status == 200:
-                        res = await resp.json()
-                        return parse_ai_response(res['result']['alternatives'][0]['message']['text'])
-                    elif resp.status == 429:
-                        await asyncio.sleep(5 * (attempt + 1))
-                        continue
-                    return [{"error": f"Ошибка Яндекса ({resp.status})"}]
-            except Exception as e:
-                if attempt == 2: return [{"error": str(e)}]
-                await asyncio.sleep(3)
+    content = mask_pii(content)
 
-    elif "claude" in model_key:
-        try:
-            import anthropic as _anthropic
-            _client = _anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-            _model = "claude-haiku-4-5-20251001" if model_key == "claude-haiku" else "claude-sonnet-4-6"
-            msg = await _client.messages.create(
-                model=_model,
-                max_tokens=2000,
-                system=system_prompt,
-                messages=[{"role": "user", "content": content}],
-            )
-            return parse_ai_response(msg.content[0].text)
-        except Exception as e:
-            return [{"error": f"Claude ошибка: {str(e)}"}]
-
-    return []
+    try:
+        raw = await complete_async(
+            system=system_prompt,
+            user=content,
+            model_key=model_key,
+            temperature=0.1,
+            max_tokens=2000,
+            response_format=None if is_yandex_lite(model_key) else {"type": "json_object"},
+            session=session,
+            mask_user_text=False,
+        )
+        return parse_ai_response(raw)
+    except Exception as e:
+        return [{"error": str(e)}]
 
 # --- ФОНОВЫЕ ЗАДАЧИ ---
 async def process_tagging_task(model_key: str, batch_size: int):
@@ -836,7 +784,7 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
 @router.post("/start-tagging")
 def start_tagging(
     platform: str = "wb",
-    model: str = "yandex-lite",
+    model: str = "qwen-plus",
     batch_size: int = 10,
     background_tasks: BackgroundTasks = None
 ):
@@ -850,13 +798,13 @@ def start_tagging(
     return {"status": "started", "message": "Процесс разметки запущен в фоне."}
 
 @router.post("/start-audit")
-def start_audit(model: str = "grok", batch_size: int = 10, background_tasks: BackgroundTasks = None):
+def start_audit(model: str = "qwen-plus", batch_size: int = 10, background_tasks: BackgroundTasks = None):
     return {"status": "started", "message": "Процесс аудита запущен в фоне."}
 
 @router.post("/start-feedback-tagging")
 def start_feedback_tagging(
     platform: str = "wb",
-    model: str = "yandex-lite",
+    model: str = "qwen-plus",
     batch_size: int = 15,
     background_tasks: BackgroundTasks = None
 ):

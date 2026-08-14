@@ -1010,8 +1010,8 @@
                     <select :value="settingVal('bot_model')"
                       @change="setSettingVal('bot_model', $event.target.value)"
                       :class="['w-full border border-gray-200 rounded-lg px-2.5 py-2 text-xs bg-white focus:outline-none focus:ring-2', mpUi.ring]">
-                      <option value="yandexgpt-lite">YandexGPT Lite — быстрее и дешевле</option>
-                      <option value="yandexgpt">YandexGPT Pro — точнее</option>
+                      <option value="qwen-plus">Qwen Plus — основная</option>
+                      <option value="yandexgpt-lite">YandexGPT Lite — запасной</option>
                     </select>
                   </div>
                   <div>
@@ -1019,8 +1019,8 @@
                     <select :value="settingVal('bot_ai_draft_model')"
                       @change="setSettingVal('bot_ai_draft_model', $event.target.value)"
                       :class="['w-full border border-gray-200 rounded-lg px-2.5 py-2 text-xs bg-white focus:outline-none focus:ring-2', mpUi.ring]">
-                      <option value="yandexgpt-lite">YandexGPT Lite — быстрее и дешевле</option>
-                      <option value="yandexgpt">YandexGPT Pro — точнее</option>
+                      <option value="qwen-plus">Qwen Plus — основная</option>
+                      <option value="yandexgpt-lite">YandexGPT Lite — запасной</option>
                     </select>
                   </div>
                 </div>

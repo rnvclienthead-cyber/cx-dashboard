@@ -2,7 +2,7 @@
 ИИ-бот автоответов в WB-чатах.
 
 Архитектура (согласована с Рустамом 2026-07-22/23, дополнена 2026-07-24):
-  1. Диспетчер (YandexGPT-lite + жёсткие правила) → тема / уверенность / нужен человек
+  1. Диспетчер (Qwen Plus + жёсткие правила) → тема / уверенность / нужен человек
   2. Плейбук → текст + действие (форма, статус, передача менеджеру)
   3. Нет шаблона → ИИ-черновик (lite + портрет + похожие ответы менеджеров),
      зона принудительно draft (клиенту сам не шлём)
@@ -321,12 +321,12 @@ EXTRA_SETTINGS = [
     ("bot_only_no_manager", "true",
      "Только чаты без ответа менеджера. Если в чате уже писал продавец, а бот его ещё не брал — пропуск. "
      "Чаты, которые бот уже вёл, продолжает."),
-    ("bot_model", "yandexgpt-lite",
-     "Модель Яндекса для классификации темы: yandexgpt-lite (дешевле) или yandexgpt (Pro, точнее)."),
+    ("bot_model", "qwen-plus",
+     "Модель для классификации темы: qwen-plus (основная) или yandexgpt-lite (запасной)."),
     ("bot_ai_draft", "true",
      "Если нет шаблона — ИИ пишет черновик менеджеру (true/false). Клиенту сам не отправляет."),
-    ("bot_ai_draft_model", "yandexgpt-lite",
-     "Модель для черновика без шаблона: yandexgpt-lite (дешевле) или yandexgpt."),
+    ("bot_ai_draft_model", "qwen-plus",
+     "Модель для черновика без шаблона: qwen-plus (основная) или yandexgpt-lite (запасной)."),
     ("bot_persona", DEFAULT_PERSONA,
      "Портрет/правила тона для ИИ-черновика. Можно править под ваш стиль."),
     ("bot_suggest_on_open", "true",
@@ -413,6 +413,15 @@ def init_bot_tables(engine):
                 VALUES (:k, :v, :d, 'system')
                 ON CONFLICT (key) DO UPDATE SET descr = EXCLUDED.descr
             """), {"k": k, "v": v, "d": d})
+        conn.execute(text("""
+            UPDATE cx_chat_settings
+               SET value = 'qwen-plus', updated_at = now()
+             WHERE key IN ('bot_model', 'bot_ai_draft_model')
+               AND value IN (
+                    'yandexgpt-lite', 'yandexgpt', 'yandex-lite', 'yandex-pro',
+                    'claude-haiku', 'claude-sonnet'
+               )
+        """))
         conn.commit()
     from .routers.chat_playbook import ensure_mp_control_settings
     ensure_mp_control_settings(engine)
@@ -972,17 +981,9 @@ def _themes_for_prompt(db: Session) -> List[dict]:
     return [dict(r) for r in rows]
 
 
-def _yandex_classify(msg: str, history: List[dict], themes: List[dict],
-                     article: str, stage: str, *, model: str = "yandexgpt-lite") -> Optional[dict]:
-    api_key = os.getenv("YANDEX_API_KEY", "").strip()
-    folder_id = os.getenv("FOLDER_ID", "").strip()
-    if not api_key or not folder_id:
-        logger.warning("[ChatBot] YANDEX_API_KEY/FOLDER_ID не заданы")
-        return None
-
-    model_name = (model or "yandexgpt-lite").strip()
-    if model_name not in ("yandexgpt-lite", "yandexgpt"):
-        model_name = "yandexgpt-lite"
+def _llm_classify(msg: str, history: List[dict], themes: List[dict],
+                  article: str, stage: str, *, model: str = "qwen-plus") -> Optional[dict]:
+    from .llm import complete_sync, is_yandex_lite
 
     theme_lines = "\n".join(
         f"- {t['theme_key']}: {t['name']} — {t['when_text']}" for t in themes
@@ -1006,34 +1007,21 @@ def _yandex_classify(msg: str, history: List[dict], themes: List[dict],
         f"История:\n{hist_lines}\n\n"
         f"Новое сообщение клиента:\n{msg}\n"
     )
-
-    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json",
-        "x-folder-id": folder_id,
-    }
-    payload = {
-        "modelUri": f"gpt://{folder_id}/{model_name}/latest",
-        "completionOptions": {"temperature": 0.1, "maxTokens": 300},
-        "messages": [
-            {"role": "system", "text": system},
-            {"role": "user", "text": user},
-        ],
-    }
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=40)
-        if r.status_code != 200:
-            logger.warning("[ChatBot] Yandex %s: %s", r.status_code, r.text[:200])
-            return None
-        raw = r.json()["result"]["alternatives"][0]["message"]["text"]
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        raw = complete_sync(
+            system=system,
+            user=user,
+            model_key=model,
+            temperature=0.1,
+            max_tokens=300,
+            response_format=None if is_yandex_lite(model) else {"type": "json_object"},
+        )
+        m = re.search(r"\{.*\}", raw or "", re.DOTALL)
         if not m:
             return None
-        data = json.loads(m.group(0))
-        return data
+        return json.loads(m.group(0))
     except Exception as e:
-        logger.warning("[ChatBot] Yandex classify error: %s", e)
+        logger.warning("[ChatBot] classify error: %s", e)
         return None
 
 
@@ -1044,8 +1032,8 @@ def classify(db: Session, msg: str, stage: str, history: List[dict],
         theme, conf, need, reason = ruled
     else:
         themes = _themes_for_prompt(db)
-        model = chat_playbook.get_setting(db, "bot_model", "yandexgpt-lite")
-        ai = _yandex_classify(msg, history, themes, article, stage, model=model)
+        model = chat_playbook.get_setting(db, "bot_model", "qwen-plus")
+        ai = _llm_classify(msg, history, themes, article, stage, model=model)
         if not ai:
             return ("utochnenie", 0.55, False, "ИИ недоступен → меню уточнения")
 
@@ -1199,37 +1187,21 @@ def _similar_seller_replies(db: Session, *, nm_id, client_msg: str,
     return uniq
 
 
-def _yandex_complete(*, system: str, user: str, model: str = "yandexgpt-lite",
-                     temperature: float = 0.3, max_tokens: int = 450) -> Optional[str]:
-    api_key = os.getenv("YANDEX_API_KEY", "").strip()
-    folder_id = os.getenv("FOLDER_ID", "").strip()
-    if not api_key or not folder_id:
-        return None
-    model_name = (model or "yandexgpt-lite").strip()
-    if model_name not in ("yandexgpt-lite", "yandexgpt"):
-        model_name = "yandexgpt-lite"
-    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json",
-        "x-folder-id": folder_id,
-    }
-    payload = {
-        "modelUri": f"gpt://{folder_id}/{model_name}/latest",
-        "completionOptions": {"temperature": temperature, "maxTokens": max_tokens},
-        "messages": [
-            {"role": "system", "text": system},
-            {"role": "user", "text": user},
-        ],
-    }
+def _llm_complete(*, system: str, user: str, model: str = "qwen-plus",
+                  temperature: float = 0.3, max_tokens: int = 450) -> Optional[str]:
+    from .llm import complete_sync
+
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=45)
-        if r.status_code != 200:
-            logger.warning("[ChatBot] Yandex draft %s: %s", r.status_code, r.text[:200])
-            return None
-        return (r.json()["result"]["alternatives"][0]["message"]["text"] or "").strip()
+        raw = complete_sync(
+            system=system,
+            user=user,
+            model_key=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return (raw or "").strip() or None
     except Exception as e:
-        logger.warning("[ChatBot] Yandex draft error: %s", e)
+        logger.warning("[ChatBot] draft error: %s", e)
         return None
 
 
@@ -1241,7 +1213,7 @@ def generate_ai_draft(db: Session, *, client_msg: str, theme: str, article: str,
         return None
 
     persona = chat_playbook.get_setting(db, "bot_persona", DEFAULT_PERSONA) or DEFAULT_PERSONA
-    model = chat_playbook.get_setting(db, "bot_ai_draft_model", "yandexgpt-lite")
+    model = chat_playbook.get_setting(db, "bot_ai_draft_model", "qwen-plus")
     examples = _similar_seller_replies(db, nm_id=nm_id, client_msg=client_msg, mp=mp)
 
     theme_name = ""
@@ -1291,7 +1263,7 @@ def generate_ai_draft(db: Session, *, client_msg: str, theme: str, article: str,
         f"История чата:\n{hist_lines}\n\n"
         f"Новое сообщение клиента:\n{client_msg}\n"
     )
-    raw = _yandex_complete(system=persona, user=user, model=model,
+    raw = _llm_complete(system=persona, user=user, model=model,
                            temperature=0.35, max_tokens=450)
     if not raw:
         return None

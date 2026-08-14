@@ -875,7 +875,7 @@ async function generateTemplate(item) {
   }
 }
 
-// ✨ ИИ (Claude, с опорой на фирменные шаблоны)
+// ✨ ИИ (Qwen Plus, с опорой на фирменные шаблоны)
 async function generateAI(item) {
   if (item._generating) return false
   item._generating = 'ai'

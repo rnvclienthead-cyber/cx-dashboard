@@ -8,7 +8,7 @@ async def main():
     print("🚀 [1/3] Инициализация ручного запуска...")
     try:
         print("⏳ [2/3] Вызов функции тегирования (берем 5 отзывов для теста)...")
-        await process_feedback_tagging_task("yandex-lite", 5)
+        await process_feedback_tagging_task("qwen-plus", 5)
         print("✅ [3/3] Скрипт отработал до конца!")
     except Exception as e:
         print("\n❌ КРИТИЧЕСКАЯ ОШИБКА:")

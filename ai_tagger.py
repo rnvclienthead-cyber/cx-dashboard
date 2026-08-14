@@ -19,6 +19,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+from backend.qwen_client import QwenClient, QwenError, mask_pii
+from backend.llm import is_yandex_lite
+
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 logging.basicConfig(
@@ -34,6 +37,7 @@ DATABASE_URL = os.getenv(
 )
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
 FOLDER_ID      = os.getenv("FOLDER_ID", "").strip()
+AI_PROVIDER    = (os.getenv("AI_PROVIDER") or "qwen").strip().lower()
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
@@ -103,6 +107,39 @@ def _get_memory(text_sample: str) -> str:
     except Exception:
         pass
     return "Опыта пока нет."
+
+
+async def _ask_qwen(session: aiohttp.ClientSession, batch: list, memory: str) -> list:
+    content = mask_pii("\n".join(f"ID {i['id']}: {i['text']}" for i in batch))
+    prompt = (
+        f"Ты эксперт контроля качества.\n"
+        f"Категории (ID: Название): {json.dumps(CATEGORIES, ensure_ascii=False)}\n"
+        f"ПРАВИЛО 12: Если клиент хвалит, но есть мелкий дефект — СТРОГО Категория 12.\n"
+        f"ПРИМЕРЫ ИЗ БАЗЫ:\n{mask_pii(memory)}\n"
+        f"Верни ТОЛЬКО JSON-объект, без текста вокруг.\n"
+        f"ОТВЕТЬ СТРОГО JSON: {{\"results\": [{{\"id\": \"...\", \"category_ids\": [1, 5]}}]}}"
+    )
+    try:
+        raw = await QwenClient().chat(
+            system=prompt,
+            messages=[{"role": "user", "content": content}],
+            response_format={"type": "json_object"},
+            session=session,
+            mask_user_text=False,
+        )
+        return _parse_response(raw)
+    except QwenError as e:
+        log.warning(f"Qwen: {e}")
+        return []
+    except Exception as e:
+        log.error(f"Qwen ошибка: {e}")
+        return []
+
+
+async def _ask_llm(session: aiohttp.ClientSession, batch: list, memory: str) -> list:
+    if is_yandex_lite(AI_PROVIDER):
+        return await _ask_yandex(session, batch, memory)
+    return await _ask_qwen(session, batch, memory)
 
 
 async def _ask_yandex(session: aiohttp.ClientSession, batch: list, memory: str) -> list:
@@ -228,7 +265,7 @@ async def _tag_platform(platform: str):
                     text_body = f"Артикул: {row[1]}. Текст: {row[2]}"
                 batch_data.append({"id": ref, "text": text_body})
 
-            results = await _ask_yandex(session, batch_data, memory)
+            results = await _ask_llm(session, batch_data, memory)
 
             saved = 0
             details = []
@@ -275,8 +312,12 @@ async def main(platforms: list):
 
 
 if __name__ == "__main__":
-    if not YANDEX_API_KEY or not FOLDER_ID:
-        log.error("Не заданы YANDEX_API_KEY / FOLDER_ID в .env")
+    if is_yandex_lite(AI_PROVIDER):
+        if not YANDEX_API_KEY or not FOLDER_ID:
+            log.error("Не заданы YANDEX_API_KEY / FOLDER_ID в .env")
+            sys.exit(1)
+    elif not os.getenv("QWEN_BASE_URL", "").strip():
+        log.error("Не задан QWEN_BASE_URL в .env")
         sys.exit(1)
 
     task = sys.argv[1].lower() if len(sys.argv) > 1 else "all"

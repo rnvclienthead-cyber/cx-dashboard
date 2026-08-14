@@ -160,7 +160,7 @@ def bot_status(
     shadow = chat_playbook.get_setting(db, "bot_shadow", "true")
     only_days = chat_playbook.get_setting_mp(db, "bot_only_days", mp, "2")
     only_no_mgr = chat_playbook.get_setting_mp(db, "bot_only_no_manager", mp, "true")
-    bot_model = chat_playbook.get_setting(db, "bot_model", "yandexgpt-lite")
+    bot_model = chat_playbook.get_setting(db, "bot_model", "qwen-plus")
     ai_draft = chat_playbook.get_setting_mp(db, "bot_ai_draft", mp, "true")
     try:
         days = int(float(only_days or "2"))

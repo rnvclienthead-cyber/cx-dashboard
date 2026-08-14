@@ -10,12 +10,10 @@ const activeTab = ref('tagging') // 'tagging', 'audit', 'feedback'
 
 // Настройки
 const batchSize = ref(10)
-const selectedModel = ref('yandex-lite')
+const selectedModel = ref('qwen-plus')
 const models = [
-  { key: 'yandex-lite',   label: 'YandexGPT Lite',         icon: Zap,    hint: 'Быстрый · дешевле', cost: 0.08, currency: '₽' },
-  { key: 'yandex-pro',    label: 'YandexGPT Pro',          icon: Target, hint: 'Точный · качество',  cost: 0.40, currency: '₽' },
-  { key: 'claude-haiku',  label: 'Claude Haiku (Быстрый)', icon: Zap,    hint: 'Быстрый · дешевле', cost: 0.05, currency: '$' },
-  { key: 'claude-sonnet', label: 'Claude Sonnet (Точный)', icon: Target, hint: 'Точный · качество',  cost: 0.25, currency: '$' },
+  { key: 'qwen-plus',   label: 'Qwen Plus',      icon: Target, hint: 'Основная · качество и цена' },
+  { key: 'yandex-lite', label: 'YandexGPT Lite', icon: Zap,    hint: 'Запасной', cost: 0.08, currency: '₽' },
 ]
 
 const activeModel = computed(() => models.find(m => m.key === selectedModel.value) || models[0])
@@ -129,6 +127,7 @@ const currentCount = computed(() => {
 
 const estimatedCost = computed(() => {
   const { cost, currency } = activeModel.value
+  if (cost == null) return { value: 'по факту', currency: '' }
   const count = activeTab.value === 'feedback' ? currentCount.value * 0.25 : currentCount.value
   const decimals = currency === '$' ? 3 : 2
   return { value: (count * cost).toFixed(decimals), currency }
@@ -215,7 +214,7 @@ const startProcess = async () => {
                   <span class="text-sm font-medium text-slate-700">{{ model.label }}</span>
                   <span class="ml-2 text-xs text-slate-400">{{ model.hint }}</span>
                 </div>
-                <span class="text-xs font-semibold text-slate-500">{{ model.cost }} {{ model.currency }}/шт.</span>
+                <span v-if="model.cost != null" class="text-xs font-semibold text-slate-500">{{ model.cost }} {{ model.currency }}/шт.</span>
               </label>
             </div>
           </div>
@@ -256,7 +255,7 @@ const startProcess = async () => {
                 * Локальный скрипт отбрасывает пустые и короткие отзывы на 5 звезд (~75%). Нейросеть проанализирует все отзывы 1-4 звезды и развернутые комментарии.
               </p>
 
-              <div class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
+              <div v-if="activeModel.cost != null" class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
                 <span class="text-sm font-medium text-slate-600">Ориентировочный расход:</span>
                 <span class="font-bold text-slate-800">~{{ estimatedCost.value }} {{ estimatedCost.currency }}</span>
               </div>
