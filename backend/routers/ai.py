@@ -627,7 +627,7 @@ def start_audit(model: str = "qwen-plus", batch_size: int = 10, background_tasks
 @router.post("/start-feedback-tagging")
 def start_feedback_tagging(
     platform: str = "wb",
-    model: str = "qwen-plus",
+    model: str = "qwen3.7-plus",
     batch_size: int = 20,
     background_tasks: BackgroundTasks = None
 ):

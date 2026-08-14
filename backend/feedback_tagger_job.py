@@ -12,9 +12,57 @@ from typing import Optional
 
 from sqlalchemy import text
 
+from backend.llm import is_yandex_lite
+
 ROOT = Path(__file__).resolve().parent.parent
 TMP = ROOT / "tmp"
 EMPTY_TAGS = json.dumps({"processed": True, "tags": [], "suggestion": ""}, ensure_ascii=False)
+
+# Отзывы не трогают qwen-plus — его лимит оставляем браку.
+# Если бесплатный 1 млн на модели кончится, очередь сама берёт следующую.
+FEEDBACK_FREE_MODELS = (
+    "qwen3.7-plus",
+    "qwen3.5-plus-2026-02-15",
+    "qwen-plus-2025-07-28",
+    "qwen3-max",
+    "qwen-max",
+    "qwen3.5-122b-a10b",
+)
+
+
+def resolve_feedback_models(model_key: str) -> list[str]:
+    if is_yandex_lite(model_key):
+        return [(model_key or "").strip() or "yandex-lite"]
+    k = (model_key or "").strip()
+    kl = k.lower()
+    chain = list(FEEDBACK_FREE_MODELS)
+    if kl in ("", "qwen-plus", "qwen-reviews", "qwen-feedback"):
+        return chain
+    if k in chain:
+        i = chain.index(k)
+        return chain[i:] + chain[:i]
+    return [k] + [m for m in chain if m != k]
+
+
+def should_rotate_feedback_model(err: str) -> bool:
+    e = (err or "").lower()
+    needles = (
+        "allocationquota",
+        "freetieronly",
+        "insufficient_quota",
+        "quota exceeded",
+        "free tier",
+        "invalidparameter.model",
+        "invalid_parameter",
+        "model_not_found",
+        "unknown model",
+        "model does not exist",
+        "model not exist",
+        "invalid model",
+        "http 403",
+        "http 404",
+    )
+    return any(n in e for n in needles)
 
 
 def _pid_path(platform: str) -> Path:
@@ -58,6 +106,7 @@ def spawn_feedback_job(platform: str, model: str, batch_size: int) -> tuple[bool
         return False, "Неизвестная площадка"
     if is_feedback_job_running(platform):
         return False, "already_running"
+    model = resolve_feedback_models(model)[0]
 
     TMP.mkdir(exist_ok=True)
     unit = _unit_name(platform)
@@ -159,6 +208,9 @@ async def _loop_table(
     from backend.routers.ai import add_system_log_db, fetch_ai_feedback_tags
 
     batch_size = max(5, min(int(batch_size or 20), 40))
+    models = resolve_feedback_models(model_key)
+    model_i = 0
+    current_model = models[model_i]
     db = SessionLocal()
     try:
         skipped = db.execute(text(f"""
@@ -171,7 +223,7 @@ async def _loop_table(
         db.commit()
         add_system_log_db(
             db, f"{log_prefix}: Старт", "INFO",
-            f"Короткие 5★ закрыты без ИИ: {skipped}. Дальше Qwen пачками по {batch_size}.",
+            f"Короткие 5★ закрыты без ИИ: {skipped}. Дальше {current_model} пачками по {batch_size}.",
         )
 
         examples_text = _examples(db)
@@ -201,14 +253,33 @@ async def _loop_table(
 
                 results = []
                 last_err = ""
+                rotated = False
                 for attempt in range(3):
-                    results = await fetch_ai_feedback_tags(session, batch, model_key, examples_text)
+                    results = await fetch_ai_feedback_tags(session, batch, current_model, examples_text)
                     if results and not all(isinstance(r, dict) and "error" in r for r in results):
                         break
                     last_err = ""
                     if results and isinstance(results[0], dict):
                         last_err = str(results[0].get("error") or "")
+                    if should_rotate_feedback_model(last_err) and model_i + 1 < len(models):
+                        prev = current_model
+                        model_i += 1
+                        current_model = models[model_i]
+                        rotated = True
+                        add_system_log_db(
+                            db, f"{log_prefix}: смена модели", "WARNING",
+                            f"{prev} исчерпала лимит или недоступна. Дальше {current_model}.",
+                        )
+                        break
                     await asyncio.sleep(4 * (attempt + 1))
+                if rotated:
+                    continue
+                if should_rotate_feedback_model(last_err) and model_i + 1 >= len(models):
+                    add_system_log_db(
+                        db, f"{log_prefix}: STOP", "ERROR",
+                        "Бесплатный лимит на запасных моделях кончился. Очередь не трогаем — запусти позже с другой моделью.",
+                    )
+                    return
 
                 saved = set()
                 error_details = []
@@ -247,7 +318,7 @@ async def _loop_table(
                     SELECT count(*) FROM {table}
                     WHERE ai_tags IS NULL OR NOT (ai_tags ? 'processed')
                 """)).scalar() or 0
-                note = f"ИИ в этой пачке: {len(saved)}. Всего ИИ: {done_ai}. Осталось: {left}."
+                note = f"{current_model}. ИИ в этой пачке: {len(saved)}. Всего ИИ: {done_ai}. Осталось: {left}."
                 if error_details or last_err:
                     add_system_log_db(
                         db, f"{log_prefix} пачка", "WARNING",
@@ -303,7 +374,7 @@ async def process_ym_feedback_tagging_task(model_key: str, batch_size: int) -> N
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--platform", default="wb", choices=("wb", "ym"))
-    parser.add_argument("--model", default="qwen-plus")
+    parser.add_argument("--model", default="qwen3.7-plus")
     parser.add_argument("--batch", type=int, default=20)
     args = parser.parse_args(argv)
     _mark_pid(args.platform)

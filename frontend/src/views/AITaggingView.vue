@@ -11,12 +11,17 @@ const activeTab = ref('tagging') // 'tagging' | 'feedback'
 // Настройки
 const batchSize = ref(20)
 const selectedModel = ref('qwen-plus')
-const models = [
-  { key: 'qwen-plus',   label: 'Qwen Plus',      icon: Target, hint: 'Основная · ориентир', cost: 0.01, currency: '₽' },
+const CLAIM_MODELS = [
+  { key: 'qwen-plus',   label: 'Qwen Plus',      icon: Target, hint: 'Для брака · свой лимит', cost: 0.01, currency: '₽' },
   { key: 'yandex-lite', label: 'YandexGPT Lite', icon: Zap,    hint: 'Запасной', cost: 0.08, currency: '₽' },
 ]
+const FEEDBACK_MODELS = [
+  { key: 'qwen-reviews', label: 'Qwen (бесплатный лимит)', icon: Cpu, hint: 'Plus не трогаем', cost: 0, currency: '₽' },
+  { key: 'yandex-lite',  label: 'YandexGPT Lite',          icon: Zap, hint: 'Запасной', cost: 0.08, currency: '₽' },
+]
+const models = computed(() => activeTab.value === 'feedback' ? FEEDBACK_MODELS : CLAIM_MODELS)
 
-const activeModel = computed(() => models.find(m => m.key === selectedModel.value) || models[0])
+const activeModel = computed(() => models.value.find(m => m.key === selectedModel.value) || models.value[0])
 
 const isProcessing = ref(false)
 const progress = ref(0)
@@ -95,9 +100,10 @@ watch(() => platformStore.platform, () => {
   fetchStats()
 })
 
-watch(activeTab, () => {
+watch(activeTab, (tab) => {
   if (isProcessing.value) return
   resultMessage.value = null
+  selectedModel.value = tab === 'feedback' ? 'qwen-reviews' : 'qwen-plus'
 })
 
 onBeforeUnmount(() => {
@@ -286,7 +292,7 @@ const startProcess = async () => {
                 Точная сумма зависит от количества токенов в комментариях клиентов. Фоновый процесс работает партиями.
               </p>
               <p v-else class="text-[11px] text-slate-500 mt-3 leading-relaxed">
-                Короткие пятёрки закрываются бесплатно. Qwen разбирает только отзывы с болью и развёрнутым текстом.
+                Короткие пятёрки закрываются бесплатно. Для отзывов берём модели с полным лимитом, Qwen Plus оставляем браку.
               </p>
             </div>
           </div>

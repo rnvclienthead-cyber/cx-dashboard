@@ -22,9 +22,11 @@ def is_yandex_lite(model_key: Optional[str]) -> bool:
 
 def qwen_model_name(model_key: Optional[str] = None) -> str:
     """Pro/Claude/пустое → qwen-plus. Явный qwen-* оставляем как есть."""
-    k = (model_key or "").strip().lower()
-    if k in ("qwen-plus", "qwen-turbo", "qwen-flash", "qwen-max", "qwen3.8-max"):
-        return k
+    raw = (model_key or "").strip()
+    k = raw.lower()
+    # Алиас очереди отзывов — не имя API. Остальные qwen* (plus/max/даты) идут как есть.
+    if k.startswith("qwen") and k not in {"qwen-reviews", "qwen-feedback"}:
+        return raw
     env = (os.getenv("QWEN_MODEL") or DEFAULT_QWEN).strip()
     return env or DEFAULT_QWEN
 
