@@ -12,7 +12,7 @@ const activeTab = ref('tagging') // 'tagging', 'audit', 'feedback'
 const batchSize = ref(10)
 const selectedModel = ref('qwen-plus')
 const models = [
-  { key: 'qwen-plus',   label: 'Qwen Plus',      icon: Target, hint: 'Основная · качество и цена' },
+  { key: 'qwen-plus',   label: 'Qwen Plus',      icon: Target, hint: 'Основная · ориентир', cost: 0.01, currency: '₽' },
   { key: 'yandex-lite', label: 'YandexGPT Lite', icon: Zap,    hint: 'Запасной', cost: 0.08, currency: '₽' },
 ]
 
