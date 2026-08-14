@@ -89,6 +89,10 @@ def find_similar_examples_sql(target_text: str, db: Session, top_n: int = 2) -> 
         print(f"Ошибка поиска в базе знаний: {e}")
         return "Ошибка доступа к опыту."
 
+def _feedback_job_flag(platform: str) -> bool:
+    from ..feedback_tagger_job import is_feedback_job_running
+    return is_feedback_job_running(platform)
+
 def add_system_log_db(db: Session, action: str, status: str, details: str = ""):
     sql = text("INSERT INTO system_logs (action, status, details) VALUES (:action, :status, :details)")
     try:
@@ -142,6 +146,7 @@ def get_ai_stats(
                 "untagged_count":     int(untagged),
                 "unaudited_count":    int(unaudited),
                 "untagged_feedbacks": 0,
+                "feedback_job_running": False,
                 "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
             }
 
@@ -184,6 +189,7 @@ def get_ai_stats(
                 "untagged_count":    int(untagged),
                 "unaudited_count":   int(unaudited),
                 "untagged_feedbacks": int(untagged_feedbacks),
+                "feedback_job_running": _feedback_job_flag("ym"),
                 "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
             }
 
@@ -212,6 +218,7 @@ def get_ai_stats(
             "untagged_count": untagged,
             "unaudited_count": unaudited,
             "untagged_feedbacks": untagged_feedbacks,
+            "feedback_job_running": _feedback_job_flag("wb"),
             "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
         }
     except Exception as e:
@@ -377,197 +384,13 @@ async def process_tagging_task(model_key: str, batch_size: int):
     finally: db.close()
 
 async def process_feedback_tagging_task(model_key: str, batch_size: int):
-    db = SessionLocal()
-    try:
-        examples_query = text("SELECT content, tags, suggestion FROM ai_feedback_knowledge_base ORDER BY RANDOM() LIMIT 5")
-        examples_rows = db.execute(examples_query).fetchall()
-        examples_text = ""
-        if examples_rows:
-            examples_text = "ПРИМЕРЫ АНАЛИЗА (ОБРАЗЕЦ ЛОГИКИ):\n"
-            for ex in examples_rows:
-                tags_str = '[]'
-                if ex.tags:
-                    tags_arr = [f'"{t.strip()}"' for t in ex.tags.split(',') if t.strip()]
-                    tags_str = f"[{', '.join(tags_arr)}]"
-                sugg = ex.suggestion if ex.suggestion else ""
-                examples_text += f"- Текст: {ex.content}\n  Теги: {tags_str}. Идея: '{sugg}'\n\n"
+    from ..feedback_tagger_job import run_wb
+    await run_wb(model_key, batch_size)
 
-        query = text("""
-            SELECT id, text, valuation 
-            FROM wb_feedbacks 
-            WHERE ai_tags IS NULL OR NOT (ai_tags ? 'processed')
-            LIMIT 2000
-        """)
-        rows = db.execute(query).fetchall()
-        if not rows: return
-
-        add_system_log_db(db, "ИИ Отзывы: Старт", "INFO", f"Взято в работу {len(rows)} отзывов. Примеров: {len(examples_rows)}")
-
-        async with aiohttp.ClientSession() as session:
-            for i in range(0, len(rows), batch_size):
-                chunk = rows[i:i+batch_size]
-                batch_to_send = []
-                id_map = {}
-                skipped_count = 0
-                
-                try:
-                    for idx, row in enumerate(chunk):
-                        f_id = str(row[0])
-                        f_text = str(row[1]).strip()
-                        val = int(row[2]) if row[2] else 5
-                        
-                        if val == 5 and len(f_text) < 60:
-                            empty_payload = json.dumps({"processed": True, "tags": [], "suggestion": ""}, ensure_ascii=False)
-                            db.execute(text("UPDATE wb_feedbacks SET ai_tags = CAST(:tags AS jsonb) WHERE id = :id"), {"tags": empty_payload, "id": f_id})
-                            skipped_count += 1
-                        else:
-                            ref_id = f"REF_{idx}"
-                            id_map[ref_id] = f_id
-                            batch_to_send.append({"id": ref_id, "text": f_text})
-                    db.commit()
-                except Exception as prep_e:
-                    db.rollback()
-                    add_system_log_db(db, f"Отзывы Пачка {i}", "ERROR", f"Сбой БД при фильтрации: {str(prep_e)}")
-                    continue 
-
-                if batch_to_send:
-                    try:
-                        results = await fetch_ai_feedback_tags(session, batch_to_send, model_key, examples_text)
-                        
-                        if not results:
-                            add_system_log_db(db, f"Отзывы Пачка {i}", "ERROR", "Яндекс завис или вернул пустой ответ")
-                            continue
-                            
-                        ai_saved_count = 0
-                        error_details = []
-                        
-                        for res in results:
-                            if "error" in res:
-                                error_details.append(res["error"])
-                                continue
-                                
-                            ref_id = res.get('id', '')
-                            f_id = id_map.get(ref_id)
-                            
-                            if f_id:
-                                json_payload = json.dumps({
-                                    "processed": True, 
-                                    "tags": res.get('tags', []), 
-                                    "suggestion": res.get('suggestion', '')
-                                }, ensure_ascii=False)
-                                
-                                db.execute(text("UPDATE wb_feedbacks SET ai_tags = CAST(:tags AS jsonb) WHERE id = :id"), {"tags": json_payload, "id": f_id})
-                                ai_saved_count += 1
-                                
-                        db.commit()
-                        
-                        if error_details:
-                            add_system_log_db(db, f"Отзывы Пачка {i}", "WARNING", f"Размечено ИИ: {ai_saved_count}. Ошибка АПИ: {error_details[0]}")
-                        else:
-                            add_system_log_db(db, f"Отзывы Пачка {i}", "SUCCESS", f"Размечено ИИ: {ai_saved_count}. Отброшено: {skipped_count}")
-                            
-                        await asyncio.sleep(2)
-                    except Exception as inner_e:
-                        db.rollback()
-                        add_system_log_db(db, f"Отзывы Пачка {i}", "ERROR", f"Критический сбой кода: {str(inner_e)}")
-                else:
-                    add_system_log_db(db, f"Отзывы Пачка {i}", "SUCCESS", f"Вся пачка ({skipped_count}) отсеяна фильтром.")
-                    
-    except Exception as e:
-        db.rollback()
-        add_system_log_db(db, "ИИ Отзывы: FATAL", "ERROR", f"Полный сбой воркера: {str(e)}")
-    finally:
-        db.close()
 
 async def process_ym_feedback_tagging_task(model_key: str, batch_size: int):
-    db = SessionLocal()
-    try:
-        examples_rows = db.execute(text(
-            "SELECT content, tags, suggestion FROM ai_feedback_knowledge_base ORDER BY RANDOM() LIMIT 5"
-        )).fetchall()
-        examples_text = ""
-        if examples_rows:
-            examples_text = "ПРИМЕРЫ АНАЛИЗА (ОБРАЗЕЦ ЛОГИКИ):\n"
-            for ex in examples_rows:
-                tags_str = "[]"
-                if ex.tags:
-                    tags_arr = [f'"{t.strip()}"' for t in ex.tags.split(',') if t.strip()]
-                    tags_str = f"[{', '.join(tags_arr)}]"
-                examples_text += f"- Текст: {ex.content}\n  Теги: {tags_str}. Идея: '{ex.suggestion or ''}'\n\n"
-
-        rows = db.execute(text("""
-            SELECT id,
-                   TRIM(CONCAT_WS(' ', NULLIF(pro_text,''), NULLIF(contra_text,''), NULLIF(comment,''))) AS combined_text,
-                   valuation
-            FROM ym_feedbacks
-            WHERE ai_tags IS NULL OR NOT (ai_tags ? 'processed')
-            LIMIT 2000
-        """)).fetchall()
-
-        if not rows:
-            add_system_log_db(db, "ИИ Отзывы ЯМ", "INFO", "Нет необработанных отзывов")
-            return
-
-        add_system_log_db(db, "ИИ Отзывы ЯМ: Старт", "INFO", f"Взято в работу {len(rows)} отзывов ЯМ. Примеров: {len(examples_rows)}")
-
-        async with aiohttp.ClientSession() as session:
-            for i in range(0, len(rows), batch_size):
-                chunk = rows[i:i+batch_size]
-                batch_to_send = []
-                id_map = {}
-                skipped_count = 0
-                try:
-                    for idx, row in enumerate(chunk):
-                        f_id = str(row[0])
-                        f_text = str(row[1] or "").strip()
-                        val = int(row[2]) if row[2] else 5
-                        if val == 5 and len(f_text) < 60:
-                            empty_payload = json.dumps({"processed": True, "tags": [], "suggestion": ""}, ensure_ascii=False)
-                            db.execute(text("UPDATE ym_feedbacks SET ai_tags = CAST(:tags AS jsonb) WHERE id = :id"), {"tags": empty_payload, "id": f_id})
-                            skipped_count += 1
-                        else:
-                            ref_id = f"REF_{idx}"
-                            id_map[ref_id] = f_id
-                            batch_to_send.append({"id": ref_id, "text": f_text})
-                    db.commit()
-                except Exception as prep_e:
-                    db.rollback()
-                    add_system_log_db(db, f"ЯМ Отзывы Пачка {i}", "ERROR", f"Сбой БД при фильтрации: {str(prep_e)}")
-                    continue
-
-                if batch_to_send:
-                    try:
-                        results = await fetch_ai_feedback_tags(session, batch_to_send, model_key, examples_text)
-                        if not results:
-                            add_system_log_db(db, f"ЯМ Отзывы Пачка {i}", "ERROR", "Яндекс завис или вернул пустой ответ")
-                            continue
-                        ai_saved_count = 0
-                        error_details = []
-                        for res in results:
-                            if "error" in res:
-                                error_details.append(res["error"])
-                                continue
-                            f_id = id_map.get(res.get('id', ''))
-                            if f_id:
-                                json_payload = json.dumps({"processed": True, "tags": res.get('tags', []), "suggestion": res.get('suggestion', '')}, ensure_ascii=False)
-                                db.execute(text("UPDATE ym_feedbacks SET ai_tags = CAST(:tags AS jsonb) WHERE id = :id"), {"tags": json_payload, "id": f_id})
-                                ai_saved_count += 1
-                        db.commit()
-                        if error_details:
-                            add_system_log_db(db, f"ЯМ Отзывы Пачка {i}", "WARNING", f"Размечено ИИ: {ai_saved_count}. Ошибка АПИ: {error_details[0]}")
-                        else:
-                            add_system_log_db(db, f"ЯМ Отзывы Пачка {i}", "SUCCESS", f"Размечено ИИ: {ai_saved_count}. Отброшено: {skipped_count}")
-                        await asyncio.sleep(2)
-                    except Exception as inner_e:
-                        db.rollback()
-                        add_system_log_db(db, f"ЯМ Отзывы Пачка {i}", "ERROR", f"Критический сбой: {str(inner_e)}")
-                else:
-                    add_system_log_db(db, f"ЯМ Отзывы Пачка {i}", "SUCCESS", f"Вся пачка ({skipped_count}) отсеяна фильтром.")
-    except Exception as e:
-        db.rollback()
-        add_system_log_db(db, "ИИ Отзывы ЯМ: FATAL", "ERROR", f"Полный сбой воркера: {str(e)}")
-    finally:
-        db.close()
+    from ..feedback_tagger_job import run_ym
+    await run_ym(model_key, batch_size)
 
 
 # ==========================================
@@ -808,13 +631,19 @@ def start_feedback_tagging(
     batch_size: int = 20,
     background_tasks: BackgroundTasks = None
 ):
+    from ..feedback_tagger_job import is_feedback_job_running, spawn_feedback_job
     if platform == "ozon":
         return {"status": "skipped", "message": "Отзывы Ozon недоступны (требуется подписка)."}
-    if platform == "ym":
-        background_tasks.add_task(process_ym_feedback_tagging_task, model, batch_size)
-        return {"status": "started", "message": "Разметка отзывов ЯМ запущена."}
-    background_tasks.add_task(process_feedback_tagging_task, model, batch_size)
-    return {"status": "started", "message": "Разметка отзывов запущена."}
+    if platform not in ("wb", "ym"):
+        platform = "wb"
+    if is_feedback_job_running(platform):
+        return {"status": "already_running", "message": "Разметка отзывов уже идёт на сервере. Страницу можно закрыть."}
+    ok, msg = spawn_feedback_job(platform, model, batch_size)
+    if msg == "already_running":
+        return {"status": "already_running", "message": "Разметка отзывов уже идёт на сервере. Страницу можно закрыть."}
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "started", "message": msg}
 
 # =====================================================================
 # БЛОК МОДЕРАЦИИ И САМООБУЧЕНИЯ

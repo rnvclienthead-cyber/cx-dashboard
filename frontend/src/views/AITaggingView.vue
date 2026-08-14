@@ -23,10 +23,11 @@ const progress = ref(0)
 const statusText = ref('')
 const resultMessage = ref(null)
 
-const stats = ref({ untagged: 0, untaggedFeedbacks: 0 })
+const stats = ref({ untagged: 0, untaggedFeedbacks: 0, jobRunning: false })
 const isStatsLoading = ref(true)
 
 let pollingInterval = null
+let pollTicks = 0
 const initialCount = ref(0)
 
 const BG_JOB_KEY = 'cx_ai_job'
@@ -52,6 +53,7 @@ const fetchStats = async () => {
     if (data.status === 'success') {
       stats.value.untagged = data.untagged_count
       stats.value.untaggedFeedbacks = data.untagged_feedbacks
+      stats.value.jobRunning = !!data.feedback_job_running
       stats.value.last_log = data.last_log
     }
   } catch (e) {
@@ -63,11 +65,18 @@ const fetchStats = async () => {
 
 onMounted(async () => {
   await fetchStats()
+  if (stats.value.jobRunning) {
+    activeTab.value = 'feedback'
+    isProcessing.value = true
+    if (!initialCount.value) initialCount.value = currentCount.value
+    startPolling()
+    return
+  }
   const saved = localStorage.getItem(BG_JOB_KEY)
   if (saved) {
     const job = JSON.parse(saved)
     const age = Date.now() - job.startedAt
-    if (age < 3_600_000 && job.platform === platformStore.platform) {
+    if (age < 12 * 3_600_000 && job.platform === platformStore.platform) {
       initialCount.value = job.initialCount
       isProcessing.value = true
       activeTab.value = job.tab === 'feedback' ? 'feedback' : 'tagging'
@@ -87,9 +96,8 @@ watch(() => platformStore.platform, () => {
 })
 
 watch(activeTab, () => {
+  if (isProcessing.value) return
   resultMessage.value = null
-  stopPolling()
-  clearJob()
 })
 
 onBeforeUnmount(() => {
@@ -103,19 +111,44 @@ function stopPolling() {
 }
 
 function startPolling() {
+  pollTicks = 0
+  if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null }
   pollingInterval = setInterval(async () => {
     await fetchStats()
-    const processed = initialCount.value - currentCount.value
-    progress.value = Math.min(100, processed > 0 ? Math.floor((processed / initialCount.value) * 100) : 0)
+    pollTicks += 1
+    const processed = Math.max(0, initialCount.value - currentCount.value)
+    progress.value = initialCount.value > 0
+      ? Math.min(100, Math.floor((processed / initialCount.value) * 100))
+      : 0
+
+    if (activeTab.value === 'feedback') {
+      statusText.value = stats.value.jobRunning
+        ? `Идёт на сервере: готово ${processed} из ${initialCount.value}. Страницу можно закрыть.`
+        : `Обработано ${processed} из ${initialCount.value}.`
+      if (currentCount.value === 0) {
+        finishJob('Очередь отзывов разобрана.')
+        return
+      }
+      if (!stats.value.jobRunning && pollTicks >= 3) {
+        if (processed > 0) finishJob('Фоновая разметка остановилась. Можно запустить ещё раз для остатка.')
+        else finishJob('Фоновый процесс не найден. Запустите ещё раз.', true)
+      }
+      return
+    }
+
     statusText.value = `Успешно обработано: ${processed} из ${initialCount.value} шт.`
     if (currentCount.value === 0 || progress.value >= 100) {
-      stopPolling()
-      clearJob()
-      progress.value = 100
-      statusText.value = 'Завершено!'
-      resultMessage.value = { type: 'success', text: 'Все доступные данные были успешно обработаны ИИ.' }
+      finishJob('Все доступные данные были успешно обработаны ИИ.')
     }
   }, 5000)
+}
+
+function finishJob(text, isError = false) {
+  stopPolling()
+  clearJob()
+  progress.value = isError ? progress.value : 100
+  statusText.value = isError ? 'Остановка' : 'Завершено!'
+  resultMessage.value = { type: isError ? 'error' : 'success', text }
 }
 
 const currentCount = computed(() => {
@@ -150,6 +183,8 @@ const startProcess = async () => {
     const response = await apiFetch(endpoint, { method: 'POST' })
 
     if (response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      statusText.value = payload.message || 'Работает на сервере. Страницу можно закрыть.'
       startPolling()
     } else {
       throw new Error('Ошибка сервера')
@@ -239,7 +274,7 @@ const startProcess = async () => {
                 <span class="font-bold text-slate-800">~{{ Math.round(currentCount * 0.25) }} шт.</span>
               </div>
               <p v-if="activeTab === 'feedback'" class="text-[11px] text-rose-500 mt-1 font-semibold leading-relaxed">
-                * Локальный скрипт отбрасывает пустые и короткие отзывы на 5 звезд (~75%). Нейросеть проанализирует все отзывы 1-4 звезды и развернутые комментарии.
+                После запуска работает на сервере до конца очереди — страницу можно закрыть. Короткие отзывы на 5★ закрываются сразу, без нейросети.
               </p>
 
               <div v-if="activeModel.cost != null" class="flex justify-between items-center pb-3 border-b border-slate-200 mt-2">
@@ -250,8 +285,8 @@ const startProcess = async () => {
               <p v-if="activeTab !== 'feedback'" class="text-[11px] text-slate-400 mt-3 leading-relaxed">
                 Точная сумма зависит от количества токенов в комментариях клиентов. Фоновый процесс работает партиями.
               </p>
-              <p v-else class="text-[11px] text-rose-500 mt-3 font-semibold leading-relaxed">
-                * Основной массив (~95%) обрабатывается бесплатным алгоритмом. Платная нейросеть анализирует только сложные тексты.
+              <p v-else class="text-[11px] text-slate-500 mt-3 leading-relaxed">
+                Короткие пятёрки закрываются бесплатно. Qwen разбирает только отзывы с болью и развёрнутым текстом.
               </p>
             </div>
           </div>
