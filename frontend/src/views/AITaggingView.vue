@@ -9,7 +9,7 @@ const platformStore = usePlatformStore()
 const activeTab = ref('tagging') // 'tagging' | 'feedback'
 
 // Настройки
-const batchSize = ref(10)
+const batchSize = ref(20)
 const selectedModel = ref('qwen-plus')
 const models = [
   { key: 'qwen-plus',   label: 'Qwen Plus',      icon: Target, hint: 'Основная · ориентир', cost: 0.01, currency: '₽' },

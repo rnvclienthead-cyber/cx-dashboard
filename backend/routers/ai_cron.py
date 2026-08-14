@@ -9,8 +9,8 @@ from backend.routers.ai import process_tagging_task
 
 async def main():
     print("🚀 [КРОН ИИ] Старт автоматической разметки через Qwen Plus...")
-    # Запускаем оригинальную фоновую задачу (модель qwen-plus, пачками по 10)
-    await process_tagging_task(model_key="qwen-plus", batch_size=10)
+    # Запускаем оригинальную фоновую задачу (модель qwen-plus, пачками по 20)
+    await process_tagging_task(model_key="qwen-plus", batch_size=20)
     print("🏁 [КРОН ИИ] Автоматическая разметка успешно завершена.")
 
 if __name__ == "__main__":

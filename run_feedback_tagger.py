@@ -8,7 +8,7 @@ load_dotenv("/root/cx-dashboard/.env")
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 DB_URL      = os.getenv("DATABASE_URL_LOCAL", "postgresql://db_user:RDB_r6o_BA0qSlVVGjb_2026@127.0.0.1:5432/cx_dashboard")
-BATCH_SIZE  = 15
+BATCH_SIZE  = 20
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
 

@@ -295,7 +295,7 @@ async def fetch_ai_feedback_tags(session: aiohttp.ClientSession, batch: List[Dic
             user=content,
             model_key=model_key,
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=4000,
             response_format=None if is_yandex_lite(model_key) else {"type": "json_object"},
             session=session,
             mask_user_text=False,
@@ -785,7 +785,7 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
 def start_tagging(
     platform: str = "wb",
     model: str = "qwen-plus",
-    batch_size: int = 10,
+    batch_size: int = 20,
     background_tasks: BackgroundTasks = None
 ):
     if platform == "ym":
@@ -805,7 +805,7 @@ def start_audit(model: str = "qwen-plus", batch_size: int = 10, background_tasks
 def start_feedback_tagging(
     platform: str = "wb",
     model: str = "qwen-plus",
-    batch_size: int = 15,
+    batch_size: int = 20,
     background_tasks: BackgroundTasks = None
 ):
     if platform == "ozon":
