@@ -42,7 +42,7 @@ async def ask_llm(batch):
             user=content,
             model_key="qwen-plus",
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=4000,
             response_format={"type": "json_object"},
         )
         clean = re.sub(r"```json|```", "", raw).strip()
