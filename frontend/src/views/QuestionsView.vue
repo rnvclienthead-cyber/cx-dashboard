@@ -23,12 +23,22 @@
             </div>
           </div>
 
-          <div v-if="activeSection === 'queue' && counts.questions != null && counts.questions > 0"
+          <div v-if="activeSection === 'queue'"
             class="flex items-center gap-2">
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200">
+            <span v-if="counts.questions != null && counts.questions > 0"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200">
               <span class="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>
               {{ counts.questions }} {{ hasQualityQuestionsAccess ? 'уточнений' : 'вопросов' }}
             </span>
+            <button v-if="canShowAnsweredFilter && answeredCount > 0"
+              @click="toggleAnsweredFilter"
+              :class="['inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors',
+                showAnsweredOnly
+                  ? 'bg-emerald-600 text-white border-emerald-600'
+                  : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100']"
+              :title="showAnsweredOnly ? 'Показать все вопросы' : 'Только вопросы с ответом качества'">
+              Получен ответ · {{ answeredCount }}
+            </button>
           </div>
         </div>
 
@@ -45,9 +55,20 @@
         </div>
       </div>
 
-      <!-- Строка 3: обновить (только очередь) -->
+      <!-- Строка 3: фильтр ответа качества + обновить -->
       <div v-if="activeSection === 'queue'" class="border-t border-gray-100 bg-gray-50/60">
-        <div class="max-w-7xl mx-auto px-5 py-2 flex items-center justify-end gap-3">
+        <div class="max-w-7xl mx-auto px-5 py-2 flex items-center justify-between gap-3">
+          <button v-if="canShowAnsweredFilter" @click="toggleAnsweredFilter"
+            :class="['inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors',
+              showAnsweredOnly
+                ? 'bg-emerald-600 text-white border-emerald-600'
+                : 'bg-white text-gray-600 border-gray-200 hover:border-emerald-300 hover:text-emerald-700']"
+            :aria-pressed="showAnsweredOnly"
+            title="Показать только вопросы, на которые ответил отдел качества">
+            Получен ответ
+            <span v-if="answeredCount" class="opacity-80">{{ answeredCount }}</span>
+          </button>
+          <span v-else></span>
           <button @click="loadQueue()" class="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 transition-colors">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
             Обновить
@@ -68,8 +89,12 @@
 
       <div v-else-if="filteredItems.length === 0" class="flex flex-col items-center justify-center py-20">
         <CircleCheckBig class="w-12 h-12 mb-4 text-emerald-500" aria-hidden="true" />
-        <p class="text-gray-500 font-medium">{{ hasQualityQuestionsAccess ? 'Уточнений нет' : 'Вопросов нет' }}</p>
-        <p class="text-gray-400 text-sm mt-1">{{ hasQualityQuestionsAccess ? 'Все уточнения обработаны' : 'Все вопросы обработаны' }}</p>
+        <p class="text-gray-500 font-medium">{{ emptyQueueTitle }}</p>
+        <p class="text-gray-400 text-sm mt-1">{{ emptyQueueHint }}</p>
+        <button v-if="showAnsweredOnly" @click="toggleAnsweredFilter"
+          class="mt-3 text-sm text-emerald-700 hover:text-emerald-800 font-medium">
+          Показать все вопросы
+        </button>
       </div>
 
       <div v-else class="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -559,6 +584,37 @@ const counts       = ref({})
 const perPage      = ref(25)
 const currentPage  = ref(1)
 const sortDesc     = ref(true)
+const showAnsweredOnly = ref(false)
+
+function hasQualityAnswer(item) {
+  return item?.clarification?.status === 'answered'
+}
+
+const canShowAnsweredFilter = computed(() =>
+  canRequestClarification.value && !hasQualityQuestionsAccess.value
+)
+
+const answeredCount = computed(() =>
+  (Array.isArray(queueItems.value) ? queueItems.value : [])
+    .filter(i => i.item_type === 'question' && hasQualityAnswer(i)).length
+)
+
+const emptyQueueTitle = computed(() => {
+  if (hasQualityQuestionsAccess.value) return 'Уточнений нет'
+  if (showAnsweredOnly.value) return 'Нет вопросов с ответом качества'
+  return 'Вопросов нет'
+})
+
+const emptyQueueHint = computed(() => {
+  if (hasQualityQuestionsAccess.value) return 'Все уточнения обработаны'
+  if (showAnsweredOnly.value) return 'Качество ещё не ответило — или снимите фильтр, чтобы увидеть все вопросы'
+  return 'Все вопросы обработаны'
+})
+
+function toggleAnsweredFilter() {
+  showAnsweredOnly.value = !showAnsweredOnly.value
+  currentPage.value = 1
+}
 
 function toggleSort() {
   sortDesc.value = !sortDesc.value
@@ -568,6 +624,9 @@ function toggleSort() {
 const filteredItems = computed(() => {
   let list = (Array.isArray(queueItems.value) ? queueItems.value : [])
     .filter(i => i.item_type === 'question')
+  if (showAnsweredOnly.value) {
+    list = list.filter(hasQualityAnswer)
+  }
   const dir = sortDesc.value ? 1 : -1
   return [...list].sort((a, b) => ((a.age_sec || 0) - (b.age_sec || 0)) * dir)
 })

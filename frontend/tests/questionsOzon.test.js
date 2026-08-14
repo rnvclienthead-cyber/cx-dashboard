@@ -20,6 +20,15 @@ test('quality clarification copy is marketplace-neutral', () => {
   assert.doesNotMatch(source, /На WB\/ЯМ он не отправляется/)
 })
 
+test('cs manager can filter questions answered by quality', () => {
+  assert.match(source, /function hasQualityAnswer\(item\)/)
+  assert.match(source, /item\?\.clarification\?\.status === 'answered'/)
+  assert.match(source, /showAnsweredOnly/)
+  assert.match(source, /Получен ответ/)
+  assert.match(source, /if \(showAnsweredOnly\.value\) \{/)
+  assert.match(source, /list = list\.filter\(hasQualityAnswer\)/)
+})
+
 test('question cards link image and article to marketplace product pages', () => {
   assert.match(source, /function productCardUrl\(item\)/)
   assert.match(source, /https:\/\/www\.wildberries\.ru\/catalog\/\$\{nm\}\/detail\.aspx/)
