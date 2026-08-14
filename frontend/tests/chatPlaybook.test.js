@@ -27,6 +27,14 @@ test('wb nonreturnable logic is embedded into return theme in playbook', () => {
   assert.match(source, /\/api\/v1\/nonreturnable-cats/)
 })
 
+test('wb return_expired note has no ozon wording and nasadki toggle exists', () => {
+  assert.match(source, /const WB_THEME_UI = \{/)
+  assert.match(source, /return_expired:\s*\{\s*note: 'Вести в поддержку Wildberries/)
+  assert.match(source, /nasadki_in_stock/)
+  assert.match(source, /Сменные насадки в наличии/)
+  assert.doesNotMatch(source, /WB_THEME_UI[\s\S]*Не давить «Заказы»/)
+})
+
 test('product card is visible in chat and supports wb nm_id fallback', () => {
   assert.match(source, /title="Карточка товара"/)
   assert.match(source, /Загружаем карточку товара…/)

@@ -104,7 +104,8 @@ SEED_THEMES = [
     ("zapchasti", "Сменные насадки",
      "«Где купить сменные насадки», «сменная тряпка к швабре», «докупить насадку».",
      "auto", "",
-     "Только сменные насадки. Заглушки/крепёж — тема krepezh.", 175),
+     "Только сменные насадки. Заглушки/крепёж — тема krepezh. "
+     "Наличие включает переключатель «Сменные насадки в наличии» в настройках.", 175),
     ("krepezh", "Заглушки и крепёж",
      "«Где купить заглушки», «защёлки», «пробки сливные», мелкий крепёж отдельно.",
      "auto", "",
@@ -116,8 +117,8 @@ SEED_THEMES = [
     ("return_expired", "Срок возврата истёк",
      "«Срок возврата истёк», «не получается оформить возврат», «нет кнопки Вернуть».",
      "draft", "",
-     "WB: «Покупки» / поддержка WB. Ozon: не давить «Заказы» — в поддержку Ozon. "
-     "Решение за площадкой.", 65),
+     "Вести в поддержку маркетплейса. Решение за площадкой. "
+     "Подсказка для каждой площадки — в настройках шаблонов (WB / Ozon / ЯМ).", 65),
 ]
 
 # (theme_key, branch_key, branch_label, text, sort)
@@ -248,8 +249,11 @@ SEED_VARIANTS = [
      "Подключаю коллегу — по срокам возврата денег разберётся он. "
      "Обычно зачислением занимается Wildberries и банк, не продавец.", 1),
 
-    ("zapchasti", "", "",
-     "Здравствуйте! Отдельно сменные насадки на Wildberries у нас сейчас не представлены. "
+    ("zapchasti", "in_stock", "В наличии",
+     "Отдельно сменные насадки на Wildberries у нас сейчас не представлены. "
+     "Если товар с дефектом — оформите возврат во вкладке «Покупки».", 1),
+    ("zapchasti", "out_of_stock", "Нет в наличии",
+     "Сменные насадки к швабре сейчас временно нет в наличии. "
      "Если товар с дефектом — оформите возврат во вкладке «Покупки».", 1),
 
     ("krepezh", "", "",
@@ -386,9 +390,12 @@ SEED_OZON_VARIANTS = [
     ("blagodarnost", "just_thanks", "Просто благодарность",
      "Пожалуйста! Если что-то ещё понадобится — пишите сюда.", 1),
 
-    ("zapchasti", "", "",
-     "Здравствуйте! Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: "
+    ("zapchasti", "in_stock", "В наличии",
+     "Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: "
      "https://ozon.ru/t/8MDukTG", 1),
+    ("zapchasti", "out_of_stock", "Нет в наличии",
+     "Сменные насадки к швабре сейчас временно нет в наличии. "
+     "Когда появятся снова — их можно будет заказать в нашем магазине на Ozon.", 1),
 
     ("krepezh", "", "",
      "Здравствуйте! Заглушки для сливных отверстий, защёлки и другой мелкий крепёж "
@@ -560,10 +567,13 @@ SEED_YM_VARIANTS = [
     ("blagodarnost", "just_thanks", "Просто благодарность",
      "Пожалуйста! Если что-то ещё понадобится — пишите сюда.", 1),
 
-    ("zapchasti", "", "",
-     "Здравствуйте! Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. "
+    ("zapchasti", "in_stock", "В наличии",
+     "Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. "
      "Если нужна именно замена расходника — попробуйте поиск по маркетплейсу по запросу "
      "«сменная насадка для швабры».", 1),
+    ("zapchasti", "out_of_stock", "Нет в наличии",
+     "Сменные насадки к швабре сейчас временно нет в наличии. "
+     "Если товар с дефектом — оформите возврат в кабинете Яндекс Маркета.", 1),
 
     ("krepezh", "", "",
      "Здравствуйте! Заглушки для сливных отверстий, защёлки и другой мелкий крепёж "
@@ -586,6 +596,8 @@ SEED_YM_VARIANTS = [
 ]
 
 SEED_SETTINGS = [
+    ("nasadki_in_stock", "true",
+     "Сменные насадки в наличии (true/false). Выкл — бот отвечает, что сейчас нет."),
     ("signature", "\n\nАлександр, команда Видовито",
      "Подпись под содержательным ответом. Под короткими репликами не ставится."),
     ("red_zone_client_text",
@@ -610,10 +622,43 @@ _VARIANT_MP_MIGRATION = "chat_variants_blank_legacy_wb_v1"
 _PARTS_VARIANTS_CLEANUP = "chat_variants_parts_cleanup_v1"
 _PARTS_MP_SPLIT_CLEANUP = "chat_variants_parts_mp_split_v1"
 _PARTS_WB_OZON_LEAK_FIX = "chat_variants_parts_wb_ozon_leak_v2"
+_NASADKI_STOCK_BRANCHES = "chat_variants_nasadki_stock_v1"
+_RETURN_EXPIRED_NOTE_WB = "chat_themes_return_expired_note_v1"
 
 _WB_ZAPCHASTI_BODY = (
-    "Здравствуйте! Отдельно сменные насадки на Wildberries у нас сейчас не представлены. "
+    "Отдельно сменные насадки на Wildberries у нас сейчас не представлены. "
     "Если товар с дефектом — оформите возврат во вкладке «Покупки»."
+)
+
+_WB_ZAPCHASTI_OUT = (
+    "Сменные насадки к швабре сейчас временно нет в наличии. "
+    "Если товар с дефектом — оформите возврат во вкладке «Покупки»."
+)
+_OZON_ZAPCHASTI_IN = (
+    "Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: "
+    "https://ozon.ru/t/8MDukTG"
+)
+_OZON_ZAPCHASTI_OUT = (
+    "Сменные насадки к швабре сейчас временно нет в наличии. "
+    "Когда появятся снова — их можно будет заказать в нашем магазине на Ozon."
+)
+_YM_ZAPCHASTI_IN = (
+    "Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. "
+    "Если нужна именно замена расходника — попробуйте поиск по маркетплейсу по запросу "
+    "«сменная насадка для швабры»."
+)
+_YM_ZAPCHASTI_OUT = (
+    "Сменные насадки к швабре сейчас временно нет в наличии. "
+    "Если товар с дефектом — оформите возврат в кабинете Яндекс Маркета."
+)
+
+_NOTE_RETURN_EXPIRED = (
+    "Вести в поддержку маркетплейса. Решение за площадкой. "
+    "Подсказка для каждой площадки — в настройках шаблонов (WB / Ozon / ЯМ)."
+)
+_NOTE_ZAPCHASTI = (
+    "Только сменные насадки. Заглушки/крепёж — тема krepezh. "
+    "Наличие включает переключатель «Сменные насадки в наличии» в настройках."
 )
 
 
@@ -777,6 +822,113 @@ def _fix_parts_wb_ozon_leak(conn) -> int:
     return updated
 
 
+def _migrate_return_expired_note(conn) -> int:
+    """Убирает Ozon-фразу из общей заметки темы — подсказки теперь per-MP в UI."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _RETURN_EXPIRED_NOTE_WB}).scalar()
+    if applied:
+        return 0
+
+    updated = conn.execute(text("""
+        UPDATE cx_chat_themes
+        SET note = :note, updated_at = now()
+        WHERE theme_key = 'return_expired'
+          AND (
+            note ILIKE '%не давить%'
+            OR note ILIKE '%Ozon%'
+            OR note ILIKE '%Заказы%'
+          )
+    """), {"note": _NOTE_RETURN_EXPIRED}).rowcount or 0
+
+    # Даже если старая заметка уже другая — нормализуем на нейтральную.
+    if not updated:
+        updated = conn.execute(text("""
+            UPDATE cx_chat_themes
+            SET note = :note, updated_at = now()
+            WHERE theme_key = 'return_expired'
+        """), {"note": _NOTE_RETURN_EXPIRED}).rowcount or 0
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _RETURN_EXPIRED_NOTE_WB})
+    return updated
+
+
+def _ensure_variant(conn, theme_key, branch_key, branch_label, body, mp, sort_order=1) -> int:
+    exists = conn.execute(text("""
+        SELECT 1 FROM cx_chat_variants
+        WHERE theme_key = :tk
+          AND coalesce(branch_key, '') = :bk
+          AND coalesce(mp, '') = :mp
+        LIMIT 1
+    """), {"tk": theme_key, "bk": branch_key, "mp": mp}).scalar()
+    if exists:
+        return 0
+    conn.execute(text("""
+        INSERT INTO cx_chat_variants
+            (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+        VALUES (:tk, :bk, :bl, :body, :s, :mp, true, 'system')
+    """), {
+        "tk": theme_key, "bk": branch_key, "bl": branch_label,
+        "body": body, "s": sort_order, "mp": mp,
+    })
+    return 1
+
+
+def _migrate_nasadki_stock_branches(conn) -> int:
+    """Пустая ветка zapchasti → in_stock; добавляет out_of_stock по площадкам."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _NASADKI_STOCK_BRANCHES}).scalar()
+    if applied:
+        return 0
+
+    updated = 0
+    updated += conn.execute(text("""
+        UPDATE cx_chat_themes
+        SET note = :note, updated_at = now()
+        WHERE theme_key = 'zapchasti'
+    """), {"note": _NOTE_ZAPCHASTI}).rowcount or 0
+
+    # Старые варианты без ветки — это «в наличии»
+    updated += conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET branch_key = 'in_stock',
+            branch_label = 'В наличии',
+            updated_at = now()
+        WHERE theme_key = 'zapchasti'
+          AND coalesce(branch_key, '') = ''
+    """)).rowcount or 0
+
+    # WB без ozon-ссылки
+    updated += conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET body = :body, updated_at = now()
+        WHERE theme_key = 'zapchasti'
+          AND coalesce(branch_key, '') = 'in_stock'
+          AND coalesce(mp, 'wb') = 'wb'
+          AND body ILIKE '%ozon.ru%'
+    """), {"body": _WB_ZAPCHASTI_BODY}).rowcount or 0
+
+    for mp, body_in, body_out in (
+        ("wb", _WB_ZAPCHASTI_BODY, _WB_ZAPCHASTI_OUT),
+        ("ozon", _OZON_ZAPCHASTI_IN, _OZON_ZAPCHASTI_OUT),
+        ("ym", _YM_ZAPCHASTI_IN, _YM_ZAPCHASTI_OUT),
+    ):
+        updated += _ensure_variant(conn, "zapchasti", "in_stock", "В наличии", body_in, mp)
+        updated += _ensure_variant(conn, "zapchasti", "out_of_stock", "Нет в наличии", body_out, mp)
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _NASADKI_STOCK_BRANCHES})
+    return updated
+
+
 def init_playbook_tables(engine):
     with engine.connect() as conn:
         conn.execute(text("""
@@ -824,6 +976,8 @@ def init_playbook_tables(engine):
         _cleanup_parts_variants(conn)
         _cleanup_parts_mp_split(conn)
         _fix_parts_wb_ozon_leak(conn)
+        _migrate_return_expired_note(conn)
+        _migrate_nasadki_stock_branches(conn)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_settings (
                 key        TEXT PRIMARY KEY,

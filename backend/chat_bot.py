@@ -306,6 +306,8 @@ DEFAULT_PERSONA = (
 )
 
 EXTRA_SETTINGS = [
+    ("nasadki_in_stock", "true",
+     "Сменные насадки в наличии (true/false). Выкл — бот отвечает, что сейчас нет."),
     ("bot_enabled", "false",
      "Полная автоотправка бота (true/false). false = только подсказки при открытии чата / кнопка «Прогнать»."),
     ("bot_shadow", "false",
@@ -1390,6 +1392,9 @@ def _resolve_branch(db: Session, theme: str, article: str,
         return _resolve_branch_ozon(theme, msg, stage=stage, last_theme=last_theme)
     if theme == "nekomplekt":
         return "sku_allowed" if reshipment_skus.is_allowed(db, article) else "sku_denied"
+    if theme == "zapchasti":
+        in_stock = chat_playbook.get_setting(db, "nasadki_in_stock", "true").lower() == "true"
+        return "in_stock" if in_stock else "out_of_stock"
     if theme == "status_zayavki" and reship:
         st = reship.get("status") or "new"
         if st in ("new", "pending", "awaiting"):
@@ -1555,7 +1560,7 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
     if not body and branch:
         body = chat_playbook.pick_variant(db, theme, "", mp=mp)
     if not body:
-        body = chat_faq.faq_fallback(theme, mp)
+        body = chat_faq.faq_fallback(theme, mp, branch=branch)
     if not body:
         return "", action
 

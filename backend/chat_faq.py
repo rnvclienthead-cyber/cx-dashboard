@@ -38,18 +38,30 @@ FAQ_FALLBACKS = {
 }
 
 FAQ_FALLBACKS_MP = {
-    ("zapchasti", "wb"): (
+    ("zapchasti", "wb", "in_stock"): (
         "Отдельно сменные насадки на Wildberries у нас сейчас не представлены. "
         "Если товар с дефектом — оформите возврат во вкладке «Покупки»."
     ),
-    ("zapchasti", "ozon"): (
+    ("zapchasti", "wb", "out_of_stock"): (
+        "Сменные насадки к швабре сейчас временно нет в наличии. "
+        "Если товар с дефектом — оформите возврат во вкладке «Покупки»."
+    ),
+    ("zapchasti", "ozon", "in_stock"): (
         "Сменные насадки к швабре Видовито можно заказать в нашем магазине на Ozon: "
         "https://ozon.ru/t/8MDukTG"
     ),
-    ("zapchasti", "ym"): (
+    ("zapchasti", "ozon", "out_of_stock"): (
+        "Сменные насадки к швабре сейчас временно нет в наличии. "
+        "Когда появятся снова — их можно будет заказать в нашем магазине на Ozon."
+    ),
+    ("zapchasti", "ym", "in_stock"): (
         "Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. "
         "Если нужна именно замена расходника — попробуйте поиск по маркетплейсу по запросу "
         "«сменная насадка для швабры»."
+    ),
+    ("zapchasti", "ym", "out_of_stock"): (
+        "Сменные насадки к швабре сейчас временно нет в наличии. "
+        "Если товар с дефектом — оформите возврат в кабинете Яндекс Маркета."
     ),
     ("krepezh", "wb"): (
         "Заглушки, защёлки и мелкий крепёж отдельно не продаём. "
@@ -82,11 +94,19 @@ FAQ_FALLBACKS_MP = {
 }
 
 
-def faq_fallback(theme: str, mp: str = "wb") -> str:
-    key = ((theme or "").strip(), (mp or "wb").strip().lower())
+def faq_fallback(theme: str, mp: str = "wb", branch: str = "") -> str:
+    mp = (mp or "wb").strip().lower()
+    theme = (theme or "").strip()
+    branch = (branch or "").strip()
+    if theme == "zapchasti":
+        stock = branch if branch in ("in_stock", "out_of_stock") else "in_stock"
+        keyed = FAQ_FALLBACKS_MP.get((theme, mp, stock))
+        if keyed:
+            return keyed
+    key = (theme, mp)
     if key in FAQ_FALLBACKS_MP:
         return FAQ_FALLBACKS_MP[key]
-    return FAQ_FALLBACKS.get(key[0], "")
+    return FAQ_FALLBACKS.get(theme, "")
 
 # Меню уточнения: цифра / ключевые слова → theme_key
 CLARIFY_MENU_MAP = {

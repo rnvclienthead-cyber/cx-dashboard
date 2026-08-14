@@ -1024,6 +1024,23 @@
                       :class="['w-full border border-gray-200 rounded-lg px-3 py-2 text-xs resize-y focus:outline-none focus:ring-2', mpUi.ring]"></textarea>
                   </div>
                 </div>
+
+                <label class="flex items-start justify-between gap-4 cursor-pointer pt-1">
+                  <div class="min-w-0">
+                    <p class="text-xs font-medium text-gray-800">Сменные насадки в наличии</p>
+                    <p class="text-[11px] text-gray-400 mt-0.5">
+                      Вкл — бот даёт ссылку/подсказку, где купить. Выкл — отвечает, что сейчас нет.
+                    </p>
+                  </div>
+                  <button type="button" role="switch"
+                    :aria-checked="settingOn('nasadki_in_stock')"
+                    @click="toggleSetting('nasadki_in_stock')"
+                    :class="['relative shrink-0 w-11 h-6 rounded-full transition-colors',
+                      settingOn('nasadki_in_stock') ? mpUi.toggleOn : 'bg-gray-200']">
+                    <span :class="['absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                      settingOn('nasadki_in_stock') ? 'translate-x-5' : '']"/>
+                  </button>
+                </label>
               </div>
 
               <!-- Красная зона -->
@@ -1738,7 +1755,7 @@ const OZON_THEME_UI = {
   zapchasti: {
     name: 'Насадки (сменные)',
     when: 'Где купить сменные насадки или тряпку к швабре.',
-    note: 'Только насадки — ссылка на карточку Ozon. Заглушки — тема «Заглушки и крепёж».',
+    note: 'Только насадки — ссылка на карточку Ozon, если включено «в наличии». Заглушки — тема «Заглушки и крепёж».',
   },
   krepezh: {
     name: 'Заглушки и крепёж',
@@ -1777,7 +1794,7 @@ const YM_THEME_UI = {
   zapchasti: {
     name: 'Насадки (сменные)',
     when: 'Где купить сменные насадки или тряпку к швабре.',
-    note: 'На ЯМ отдельной карточки насадок нет — подсказка поиска. Заглушки — тема «Заглушки и крепёж».',
+    note: 'На ЯМ отдельной карточки насадок нет — подсказка поиска (если «в наличии»). Заглушки — тема «Заглушки и крепёж».',
   },
   krepezh: {
     name: 'Заглушки и крепёж',
@@ -1789,10 +1806,13 @@ const YM_THEME_UI = {
   },
 }
 const WB_THEME_UI = {
+  return_expired: {
+    note: 'Вести в поддержку Wildberries (профиль → «Задать вопрос»). Решение за площадкой.',
+  },
   zapchasti: {
     name: 'Сменные насадки',
     when: 'Где купить сменные насадки или тряпку к швабре.',
-    note: 'Только сменные насадки. Заглушки, защёлки и мелкий крепёж — отдельная тема ниже.',
+    note: 'Только сменные насадки. Заглушки, защёлки и мелкий крепёж — отдельная тема ниже. Наличие — переключатель в настройках.',
   },
   krepezh: {
     name: 'Заглушки и крепёж',
