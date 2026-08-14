@@ -580,30 +580,31 @@
                 {{ chatSuggestGenerating ? 'Генерируем…' : 'Сгенерировать черновик' }}
               </button>
             </div>
-            <div v-if="chatTemplatesLoading || visibleChatTemplates.length" class="relative mb-2">
+            <div v-if="chatTemplatesLoading || chatTemplateGroups.length" class="relative mb-2">
               <div class="flex min-w-0 items-center gap-1.5">
                 <p class="shrink-0 text-[10px] font-medium text-gray-400">Быстрые шаблоны</p>
                 <div v-if="chatTemplatesLoading" class="text-[10px] text-gray-400">Загружаем…</div>
                 <template v-else>
                   <div class="flex min-w-0 flex-1 gap-1.5 overflow-hidden">
-                    <button v-for="template in compactChatTemplates" :key="template.id"
+                    <button v-for="group in compactChatTemplateGroups" :key="group.theme_key"
                       type="button"
-                      :title="template.title"
-                      @click="applyChatTemplate(template)"
+                      :title="group.theme_name"
+                      @click="onChatThemeChip(group)"
                       :class="['min-w-0 max-w-44 truncate rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
-                        isChatTemplateActive(template)
+                        isChatThemeActive(group)
                           ? mpUi.chipOn
                           : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50']">
-                      {{ template.title }}
+                      {{ group.theme_name }}
+                      <span v-if="group.templates.length > 1" class="opacity-60">· {{ group.templates.length }}</span>
                     </button>
                   </div>
-                  <button v-if="hasMoreChatTemplates" type="button"
-                    @click="chatTemplatesExpanded = !chatTemplatesExpanded"
+                  <button v-if="hasMoreChatTemplateGroups" type="button"
+                    @click="toggleChatTemplatesPanel()"
                     :aria-expanded="chatTemplatesExpanded"
                     aria-controls="chat-template-panel"
                     :class="['flex min-h-9 shrink-0 items-center gap-1 rounded-lg border px-2 text-[11px] font-medium transition-colors focus:outline-none focus:ring-2',
                       chatTemplatesExpanded ? mpUi.chipOn : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50']">
-                    <span>{{ chatTemplatesExpanded ? 'Свернуть' : `Все · ${visibleChatTemplates.length}` }}</span>
+                    <span>{{ chatTemplatesExpanded ? 'Свернуть' : `Темы · ${chatTemplateGroups.length}` }}</span>
                     <svg :class="['h-3.5 w-3.5 transition-transform', chatTemplatesExpanded ? 'rotate-180' : '']"
                       viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                       <path d="m6 9 6 6 6-6" />
@@ -612,24 +613,54 @@
                 </template>
               </div>
               <div v-if="chatTemplatesExpanded" id="chat-template-panel"
-                class="absolute inset-x-0 bottom-full z-20 mb-2 max-h-64 overflow-y-auto rounded-xl border border-gray-200 bg-white p-2.5 shadow-lg">
+                class="absolute inset-x-0 bottom-full z-20 mb-2 max-h-72 overflow-y-auto rounded-xl border border-gray-200 bg-white p-2.5 shadow-lg">
                 <div class="mb-2 flex items-center justify-between gap-3 px-0.5">
-                  <p class="text-xs font-semibold text-gray-700">Все шаблоны · {{ visibleChatTemplates.length }}</p>
-                  <button type="button" @click="chatTemplatesExpanded = false"
-                    class="min-h-9 rounded-lg px-2 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-300">
-                    Свернуть
+                  <p class="text-xs font-semibold text-gray-700">
+                    <template v-if="chatTemplatesFocusTheme">
+                      {{ focusedChatTemplateGroup?.theme_name || 'Тема' }}
+                      · {{ focusedChatTemplateGroup?.templates?.length || 0 }}
+                    </template>
+                    <template v-else>Темы · {{ chatTemplateGroups.length }}</template>
+                  </p>
+                  <div class="flex items-center gap-1">
+                    <button v-if="chatTemplatesFocusTheme" type="button" @click="chatTemplatesFocusTheme = ''"
+                      class="min-h-9 rounded-lg px-2 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-300">
+                      ← Все темы
+                    </button>
+                    <button type="button" @click="chatTemplatesExpanded = false; chatTemplatesFocusTheme = ''"
+                      class="min-h-9 rounded-lg px-2 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-300">
+                      Свернуть
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Список тем -->
+                <div v-if="!chatTemplatesFocusTheme" class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  <button v-for="group in chatTemplateGroups" :key="group.theme_key"
+                    type="button"
+                    @click="onChatThemeChip(group)"
+                    :class="['min-h-[44px] rounded-lg border px-3 py-2 text-left text-xs font-medium leading-snug transition-colors',
+                      isChatThemeActive(group)
+                        ? mpUi.chipOn
+                        : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50']">
+                    <span class="block truncate">{{ group.theme_name }}</span>
+                    <span class="mt-0.5 block text-[10px] font-normal text-gray-400">
+                      {{ group.templates.length === 1 ? '1 ответ' : `${group.templates.length} варианта` }}
+                    </span>
                   </button>
                 </div>
-                <div class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                  <button v-for="template in visibleChatTemplates" :key="template.id"
+
+                <!-- Варианты выбранной темы -->
+                <div v-else class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  <button v-for="template in (focusedChatTemplateGroup?.templates || [])" :key="template.id"
                     type="button"
-                    :title="template.title"
+                    :title="templateVariantLabel(template)"
                     @click="applyChatTemplate(template)"
                     :class="['min-h-[44px] rounded-lg border px-3 py-2 text-left text-xs font-medium leading-snug transition-colors',
                       isChatTemplateActive(template)
                         ? mpUi.chipOn
                         : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50']">
-                    {{ template.title }}
+                    {{ templateVariantLabel(template) }}
                   </button>
                 </div>
               </div>
@@ -1362,6 +1393,7 @@ import { usePlatformStore } from '../stores/platform'
 import { usePermissionsStore } from '../stores/permissions'
 import { useToast } from '../composables/useToast'
 import { CX_BASE, fmtAge, ageCls } from '../utils/cx'
+import { groupTemplatesByTheme, templateVariantLabel } from '../utils/templateGroups'
 import ReviewCard from '../components/ReviewCard.vue'
 import {
   canSendChatContent,
@@ -2642,6 +2674,7 @@ const chatSuggestGenerating = ref(false)
 const chatTemplates = ref([])
 const chatTemplatesLoading = ref(false)
 const chatTemplatesExpanded = ref(false)
+const chatTemplatesFocusTheme = ref('')
 const chatTemplateGreeting = ref('Здравствуйте!')
 const chatTemplateSignature = ref('')
 const productCardOpen = ref(false)
@@ -2781,8 +2814,34 @@ const visibleChatTemplates = computed(() => {
   })
 })
 
-const compactChatTemplates = computed(() => visibleChatTemplates.value.slice(0, 2))
-const hasMoreChatTemplates = computed(() => visibleChatTemplates.value.length > compactChatTemplates.value.length)
+const chatTemplateGroups = computed(() => {
+  const suggestedTheme = chatSuggest.value?.theme || chatSuggestMiss.value?.theme || ''
+  return groupTemplatesByTheme(visibleChatTemplates.value, suggestedTheme)
+})
+const compactChatTemplateGroups = computed(() => chatTemplateGroups.value.slice(0, 3))
+const hasMoreChatTemplateGroups = computed(() => chatTemplateGroups.value.length > 0)
+const focusedChatTemplateGroup = computed(() =>
+  chatTemplateGroups.value.find(g => g.theme_key === chatTemplatesFocusTheme.value) || null
+)
+
+function toggleChatTemplatesPanel() {
+  chatTemplatesExpanded.value = !chatTemplatesExpanded.value
+  if (!chatTemplatesExpanded.value) chatTemplatesFocusTheme.value = ''
+}
+
+function onChatThemeChip(group) {
+  if (!group) return
+  if ((group.templates || []).length === 1) {
+    applyChatTemplate(group.templates[0])
+    return
+  }
+  chatTemplatesFocusTheme.value = group.theme_key
+  chatTemplatesExpanded.value = true
+}
+
+function isChatThemeActive(group) {
+  return (group?.templates || []).some(template => isChatTemplateActive(template))
+}
 
 function normalizeChatTemplateText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
@@ -2834,6 +2893,7 @@ function isChatTemplateActive(template) {
 
 function applyChatTemplate(template) {
   chatTemplatesExpanded.value = false
+  chatTemplatesFocusTheme.value = ''
   chatReply.value = polishChatTemplate(template.body)
   nextTick(autoGrowReply)
 }
@@ -3014,6 +3074,7 @@ async function selectChat(item) {
   chatSuggestGenerating.value = false
   chatTemplatesLoading.value = false
   chatTemplatesExpanded.value = false
+  chatTemplatesFocusTheme.value = ''
   productCardOpen.value = false
   productCardLoading.value = false
   productCard.value = null

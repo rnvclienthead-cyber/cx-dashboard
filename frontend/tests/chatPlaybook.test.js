@@ -46,3 +46,10 @@ test('product card is visible in chat and supports wb nm_id fallback', () => {
   assert.match(source, /params\.set\('chat_id', productCardRequest\.value\.chatId\)/)
   assert.doesNotMatch(source, /Карточка товара из Яндекс Маркета/)
 })
+
+test('chat quick templates are grouped by theme folders', () => {
+  assert.match(source, /groupTemplatesByTheme/)
+  assert.match(source, /chatTemplateGroups/)
+  assert.match(source, /onChatThemeChip/)
+  assert.match(source, /Темы · \$\{chatTemplateGroups\.length\}/)
+})

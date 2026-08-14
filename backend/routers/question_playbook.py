@@ -247,16 +247,12 @@ def list_chip_templates(db: Session, mp: str = "wb") -> list[dict]:
         ORDER BY t.sort_order, v.theme_key, v.sort_order, v.id
     """), {"mp": mp}).mappings().all()
 
-    seen = set()
     items = []
     for r in rows:
-        key = r["theme_key"]
-        if key in seen:
-            continue
-        seen.add(key)
         body = re.sub(r"\{form_url\}", "", r["body"] or "").strip()
         if not body:
             continue
+        key = r["theme_key"]
         title = r["theme_name"] or key
         if r.get("branch_label"):
             title = f"{title}: {r['branch_label']}"
@@ -265,6 +261,9 @@ def list_chip_templates(db: Session, mp: str = "wb") -> list[dict]:
             "title": title,
             "body": body,
             "theme_key": key,
+            "theme_name": r["theme_name"] or key,
+            "branch_key": r.get("branch_key") or "",
+            "branch_label": r.get("branch_label") or "",
             "mp": r["mp"] or "all",
             "item_type": "question",
             "source": "question-playbook",

@@ -294,18 +294,68 @@
               </button>
             </div>
 
-            <div v-if="chipsFor(item).length" class="mb-2 flex flex-wrap gap-1.5">
-              <button v-for="t in chipsFor(item)" :key="t.id"
-                type="button"
-                @click="applyChip(item, t)"
-                :class="[
-                  'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
-                  isChipActive(item, t)
-                    ? 'bg-sky-600 text-white border-sky-600'
-                    : 'bg-white hover:bg-sky-50 text-gray-600 hover:text-sky-700 border-gray-200 hover:border-sky-200'
-                ]">
-                {{ t.title }}
-              </button>
+            <div v-if="chipGroupsFor(item).length" class="relative mb-2">
+              <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                <button v-for="group in compactChipGroupsFor(item)" :key="group.theme_key"
+                  type="button"
+                  @click="onQuestionThemeChip(item, group)"
+                  :class="[
+                    'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                    isQuestionThemeActive(item, group)
+                      ? 'bg-sky-600 text-white border-sky-600'
+                      : 'bg-white hover:bg-sky-50 text-gray-600 hover:text-sky-700 border-gray-200 hover:border-sky-200'
+                  ]">
+                  {{ group.theme_name }}
+                  <span v-if="group.templates.length > 1" class="opacity-70">· {{ group.templates.length }}</span>
+                </button>
+                <button v-if="chipGroupsFor(item).length > 3" type="button"
+                  @click="toggleQuestionTplPanel(item)"
+                  class="px-2.5 py-1 rounded-full text-xs font-medium border border-gray-200 bg-white text-gray-500 hover:bg-gray-50">
+                  {{ item._tplOpen ? 'Свернуть' : `Темы · ${chipGroupsFor(item).length}` }}
+                </button>
+              </div>
+              <div v-if="item._tplOpen"
+                class="mt-2 rounded-xl border border-gray-200 bg-white p-2.5 shadow-sm">
+                <div class="mb-2 flex items-center justify-between gap-2">
+                  <p class="text-xs font-semibold text-gray-700">
+                    <template v-if="item._tplTheme">
+                      {{ focusedChipGroup(item)?.theme_name || 'Тема' }}
+                    </template>
+                    <template v-else>Темы · {{ chipGroupsFor(item).length }}</template>
+                  </p>
+                  <button v-if="item._tplTheme" type="button" @click="item._tplTheme = ''"
+                    class="text-[11px] font-medium text-gray-500 hover:text-gray-700">
+                    ← Все темы
+                  </button>
+                </div>
+                <div v-if="!item._tplTheme" class="flex flex-wrap gap-1.5">
+                  <button v-for="group in chipGroupsFor(item)" :key="group.theme_key"
+                    type="button"
+                    @click="onQuestionThemeChip(item, group)"
+                    :class="[
+                      'px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                      isQuestionThemeActive(item, group)
+                        ? 'bg-sky-600 text-white border-sky-600'
+                        : 'bg-white text-gray-700 border-gray-200 hover:border-sky-200 hover:bg-sky-50'
+                    ]">
+                    {{ group.theme_name }}
+                    <span class="opacity-60">· {{ group.templates.length }}</span>
+                  </button>
+                </div>
+                <div v-else class="flex flex-wrap gap-1.5">
+                  <button v-for="t in (focusedChipGroup(item)?.templates || [])" :key="t.id"
+                    type="button"
+                    @click="applyChip(item, t)"
+                    :class="[
+                      'px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                      isChipActive(item, t)
+                        ? 'bg-sky-600 text-white border-sky-600'
+                        : 'bg-white text-gray-700 border-gray-200 hover:border-sky-200 hover:bg-sky-50'
+                    ]">
+                    {{ templateVariantLabel(t) }}
+                  </button>
+                </div>
+              </div>
             </div>
             <textarea
               v-model="item._reply"
@@ -527,6 +577,7 @@ import { usePermissionsStore } from '../stores/permissions'
 import { useToast } from '../composables/useToast'
 import { useCxQueueActions } from '../composables/useCxQueueActions'
 import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls } from '../utils/cx'
+import { groupTemplatesByTheme, templateVariantLabel } from '../utils/templateGroups'
 import { CircleCheckBig, ClipboardPenLine } from 'lucide-vue-next'
 
 const platformStore = usePlatformStore()
@@ -769,6 +820,51 @@ function isChipActive(item, t) {
 function applyChip(item, t) {
   item._reply = withSignature(t.body || '')
   item._chipId = t.id
+  item._tplOpen = false
+  item._tplTheme = ''
+}
+
+function chipsFor(item) {
+  const fromPb = (playbookTemplates.value || []).filter(t =>
+    t.mp === 'all' || !t.mp || t.mp === item.mp
+  )
+  const theme = item._suggest?.theme
+  return [...fromPb].sort((a, b) => {
+    if (theme && a.theme_key === theme) return -1
+    if (theme && b.theme_key === theme) return 1
+    return 0
+  })
+}
+
+function chipGroupsFor(item) {
+  return groupTemplatesByTheme(chipsFor(item), item._suggest?.theme || '')
+}
+
+function compactChipGroupsFor(item) {
+  return chipGroupsFor(item).slice(0, 3)
+}
+
+function focusedChipGroup(item) {
+  return chipGroupsFor(item).find(g => g.theme_key === item._tplTheme) || null
+}
+
+function toggleQuestionTplPanel(item) {
+  item._tplOpen = !item._tplOpen
+  if (!item._tplOpen) item._tplTheme = ''
+}
+
+function onQuestionThemeChip(item, group) {
+  if (!group) return
+  if ((group.templates || []).length === 1) {
+    applyChip(item, group.templates[0])
+    return
+  }
+  item._tplTheme = group.theme_key
+  item._tplOpen = true
+}
+
+function isQuestionThemeActive(item, group) {
+  return (group?.templates || []).some(t => isChipActive(item, t))
 }
 
 async function loadSignature() {
@@ -780,25 +876,6 @@ async function loadSignature() {
   } catch {
     replySignature.value = ''
   }
-}
-
-function chipsFor(item) {
-  const fromPb = (playbookTemplates.value || []).filter(t =>
-    t.mp === 'all' || !t.mp || t.mp === item.mp
-  )
-  const theme = item._suggest?.theme
-  const ordered = [...fromPb].sort((a, b) => {
-    if (theme && a.theme_key === theme) return -1
-    if (theme && b.theme_key === theme) return 1
-    return 0
-  })
-  const seen = new Set()
-  return ordered.filter(t => {
-    const k = t.id || t.title
-    if (seen.has(k)) return false
-    seen.add(k)
-    return true
-  }).slice(0, 12)
 }
 
 async function loadPlaybookTemplates() {

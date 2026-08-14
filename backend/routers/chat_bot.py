@@ -463,6 +463,7 @@ def chat_templates(
             "theme_key": row["theme_key"],
             "theme_name": row["theme_name"] or row["theme_key"],
             "branch_key": row["branch_key"] or "",
+            "branch_label": row["branch_label"] or "",
             "mp": row["mp"] or "all",
         })
 
