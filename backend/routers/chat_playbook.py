@@ -624,6 +624,7 @@ _PARTS_MP_SPLIT_CLEANUP = "chat_variants_parts_mp_split_v1"
 _PARTS_WB_OZON_LEAK_FIX = "chat_variants_parts_wb_ozon_leak_v2"
 _NASADKI_STOCK_BRANCHES = "chat_variants_nasadki_stock_v1"
 _RETURN_EXPIRED_NOTE_WB = "chat_themes_return_expired_note_v1"
+_TEMPLATE_DUPES_CLEANUP = "chat_question_template_dupes_v1"
 
 _WB_ZAPCHASTI_BODY = (
     "Отдельно сменные насадки на Wildberries у нас сейчас не представлены. "
@@ -929,6 +930,143 @@ def _migrate_nasadki_stock_branches(conn) -> int:
     return updated
 
 
+def _cleanup_template_duplicates(conn) -> int:
+    """Удаляет точные/пустые дубли в чатах и вопросах (одноразово)."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _TEMPLATE_DUPES_CLEANUP}).scalar()
+    if applied:
+        return 0
+
+    deleted = 0
+
+    deleted += conn.execute(text("""
+        DELETE FROM cx_chat_variants WHERE coalesce(trim(body), '') = ''
+    """)).rowcount or 0
+
+    deleted += conn.execute(text("""
+        DELETE FROM cx_chat_variants v
+        USING (
+          SELECT id,
+                 row_number() OVER (
+                   PARTITION BY coalesce(mp,''), theme_key, coalesce(branch_key,''),
+                                regexp_replace(lower(trim(body)), '[[:space:]]+', ' ', 'g')
+                   ORDER BY id
+                 ) AS rn
+          FROM cx_chat_variants
+          WHERE active
+        ) d
+        WHERE v.id = d.id AND d.rn > 1
+    """)).rowcount or 0
+
+    deleted += conn.execute(text("""
+        DELETE FROM cx_chat_variants v
+        WHERE NOT v.active
+          AND EXISTS (
+            SELECT 1 FROM cx_chat_variants a
+            WHERE a.active AND a.id <> v.id
+              AND coalesce(a.mp,'') = coalesce(v.mp,'')
+              AND a.theme_key = v.theme_key
+              AND coalesce(a.branch_key,'') = coalesce(v.branch_key,'')
+              AND regexp_replace(lower(trim(a.body)), '[[:space:]]+', ' ', 'g')
+                = regexp_replace(lower(trim(v.body)), '[[:space:]]+', ' ', 'g')
+          )
+    """)).rowcount or 0
+
+    deleted += conn.execute(text("""
+        DELETE FROM cx_chat_variants v
+        WHERE v.theme_key = 'zapchasti'
+          AND coalesce(v.mp,'wb') = 'wb'
+          AND coalesce(v.branch_key,'') = 'in_stock'
+          AND v.body ~* '^\\s*(здравствуйте|добрый\\s+(день|вечер|утро)|привет)'
+          AND EXISTS (
+            SELECT 1 FROM cx_chat_variants o
+            WHERE o.theme_key = 'zapchasti'
+              AND coalesce(o.mp,'wb') = 'wb'
+              AND coalesce(o.branch_key,'') = 'in_stock'
+              AND o.id <> v.id AND o.active
+              AND o.body !~* '^\\s*(здравствуйте|добрый\\s+(день|вечер|утро)|привет)'
+          )
+    """)).rowcount or 0
+
+    deleted += conn.execute(text("""
+        DELETE FROM cx_chat_variants v
+        WHERE v.theme_key IN ('return_expired', 'wrong_item')
+          AND coalesce(v.mp,'wb') = 'wb'
+          AND v.body ~* '^\\s*здравствуйте'
+          AND EXISTS (
+            SELECT 1 FROM cx_chat_variants o
+            WHERE o.theme_key = v.theme_key
+              AND coalesce(o.mp,'') = coalesce(v.mp,'')
+              AND coalesce(o.branch_key,'') = coalesce(v.branch_key,'')
+              AND o.id <> v.id AND o.active
+              AND regexp_replace(
+                    lower(regexp_replace(o.body, '^\\s*здравствуйте[!.,]?\\s*', '', 'i')),
+                    '[[:space:]]+', ' ', 'g')
+                = regexp_replace(
+                    lower(regexp_replace(v.body, '^\\s*здравствуйте[!.,]?\\s*', '', 'i')),
+                    '[[:space:]]+', ' ', 'g')
+          )
+    """)).rowcount or 0
+
+    deleted += conn.execute(text("""
+        DELETE FROM cx_chat_variants v
+        WHERE v.theme_key = 'return_expired'
+          AND coalesce(v.mp,'wb') = 'wb'
+          AND v.body ILIKE '%поддержку маркетплейса%'
+          AND EXISTS (
+            SELECT 1 FROM cx_chat_variants o
+            WHERE o.theme_key = 'return_expired'
+              AND coalesce(o.mp,'wb') = 'wb'
+              AND o.active AND o.id <> v.id
+              AND o.body ILIKE '%поддержку Wildberries%'
+          )
+    """)).rowcount or 0
+
+    # Вопросы: те же правила + ozon nasadki twin
+    try:
+        deleted += conn.execute(text("""
+            DELETE FROM cx_question_variants WHERE coalesce(trim(body), '') = ''
+        """)).rowcount or 0
+        deleted += conn.execute(text("""
+            DELETE FROM cx_question_variants v
+            USING (
+              SELECT id,
+                     row_number() OVER (
+                       PARTITION BY coalesce(mp,''), theme_key, coalesce(branch_key,''),
+                                    regexp_replace(lower(trim(body)), '[[:space:]]+', ' ', 'g')
+                       ORDER BY id
+                     ) AS rn
+              FROM cx_question_variants
+              WHERE active
+            ) d
+            WHERE v.id = d.id AND d.rn > 1
+        """)).rowcount or 0
+        deleted += conn.execute(text("""
+            DELETE FROM cx_question_variants v
+            WHERE v.theme_key = 'zapchasti'
+              AND coalesce(v.mp,'') = 'ozon'
+              AND v.body ILIKE '%фирменные сменные насадки%'
+              AND EXISTS (
+                SELECT 1 FROM cx_question_variants o
+                WHERE o.theme_key = 'zapchasti'
+                  AND coalesce(o.mp,'') = 'ozon'
+                  AND o.id <> v.id AND o.active
+                  AND o.body ILIKE '%можно заказать%'
+              )
+        """)).rowcount or 0
+    except Exception:
+        # таблицы вопросов может ещё не быть на свежем стенде
+        pass
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _TEMPLATE_DUPES_CLEANUP})
+    return deleted
+
+
 def init_playbook_tables(engine):
     with engine.connect() as conn:
         conn.execute(text("""
@@ -978,6 +1116,7 @@ def init_playbook_tables(engine):
         _fix_parts_wb_ozon_leak(conn)
         _migrate_return_expired_note(conn)
         _migrate_nasadki_stock_branches(conn)
+        _cleanup_template_duplicates(conn)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_settings (
                 key        TEXT PRIMARY KEY,
