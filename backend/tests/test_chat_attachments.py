@@ -289,11 +289,42 @@ class MarketplaceClientPayloadTests(unittest.TestCase):
         send_message.assert_called_once()
         self.assertGreaterEqual(offload.await_count, 3)
 
-    def test_yandex_attachment_route_is_explicitly_unsupported(self):
-        with self.assertRaises(HTTPException) as caught:
-            asyncio.run(cx_responses.send_ym_chat_message_with_files("ym-chat", "", []))
-        self.assertEqual(caught.exception.status_code, 501)
-        self.assertIn("Яндекс Маркете", caught.exception.detail)
+    def test_yandex_attachment_route_sends_files(self):
+        upload = DummyUpload("a.png", b"\x89PNG\r\n\x1a\n", "image/png")
+        progress = {
+            "status": "complete",
+            "text": {"state": "not_requested"},
+            "files": [{"index": 0, "name": "a.png", "state": "confirmed"}],
+            "warnings": [],
+            "persistence": "confirmed",
+        }
+        with (
+            patch.object(cx_responses, "_ym_key", return_value="key"),
+            patch.object(cx_responses, "_ym_business_id", return_value="biz"),
+            patch.object(cx_responses, "_run_ym_chat_send_steps", new=AsyncMock(return_value=progress)),
+        ):
+            response = asyncio.run(cx_responses.send_ym_chat_message_with_files(
+                "ym-chat", "", [upload], Mock(), {"username": "manager"}
+            ))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["files"][0]["state"], "confirmed")
+
+    def test_ym_client_send_chat_file_posts_multipart(self):
+        from backend import ym_client
+
+        with patch.object(ym_client.requests, "post") as post_mock:
+            post_mock.return_value = Mock(status_code=200, raise_for_status=Mock())
+            ym_client.send_chat_file(
+                "42", "photo.png", b"\x89PNG\r\n\x1a\n",
+                content_type="image/png", biz="99", key="secret",
+            )
+        self.assertEqual(
+            post_mock.call_args.args[0],
+            "https://api.partner.market.yandex.ru/v2/businesses/99/chats/file/send",
+        )
+        self.assertEqual(post_mock.call_args.kwargs["params"]["chatId"], 42)
+        self.assertNotIn("Content-Type", post_mock.call_args.kwargs["headers"])
+        self.assertIn("file", post_mock.call_args.kwargs["files"])
 
 
 class UploadGuardTests(unittest.TestCase):

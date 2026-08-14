@@ -686,6 +686,24 @@ def send_message(chat_id: str, text: str) -> None:
     ym_client.send_chat_message(chat_id, text, biz=_business_id(), key=_key())
 
 
+def send_file(
+    chat_id: str,
+    filename: str,
+    content: bytes,
+    *,
+    content_type: str | None = None,
+) -> None:
+    """Отправка файла в чат ЯМ (multipart Partner API)."""
+    ym_client.send_chat_file(
+        chat_id,
+        filename,
+        content,
+        content_type=content_type,
+        biz=_business_id(),
+        key=_key(),
+    )
+
+
 async def start_ym_chat_sync_worker(get_db_func) -> None:
     logger.info("[YmChat] worker starting (interval=%ds)", SYNC_INTERVAL)
     await asyncio.sleep(50)

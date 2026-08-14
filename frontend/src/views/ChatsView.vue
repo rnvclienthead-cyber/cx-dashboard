@@ -674,10 +674,10 @@
                 accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
                 @change="onChatAttachmentsSelected" />
               <button type="button" @click="chooseChatAttachments"
-                :disabled="!chatAttachmentsAvailable || chatSending"
-                :title="chatAttachmentsAvailable ? 'Прикрепить JPEG, PNG или PDF до 5 МиБ' : 'На Яндекс Маркете вложения пока недоступны'"
+                :disabled="chatSending"
+                title="Прикрепить JPEG, PNG или PDF до 5 МиБ"
                 :class="['w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border transition-colors focus:outline-none focus:ring-2',
-                  chatAttachmentsAvailable && !chatSending
+                  !chatSending
                     ? `border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700 ${mpUi.ring}`
                     : 'border-gray-200 bg-gray-100 text-gray-300 cursor-not-allowed']">
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -701,10 +701,6 @@
                 <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
               </button>
             </div>
-            <p v-if="!chatAttachmentsAvailable" class="mt-1.5 text-[11px] text-gray-500">
-              На Яндекс Маркете вложения в этой версии пока недоступны.
-              <button type="button" @click="showYmAttachmentUnavailable" class="font-medium text-gray-700 underline underline-offset-2">Почему?</button>
-            </p>
           </div>
         </template>
       </div>
@@ -1111,7 +1107,12 @@
             <p class="text-xs text-gray-500 leading-relaxed mb-3">
               Сейчас показаны шаблоны для
               <span class="font-medium text-gray-600">{{ pbMpLabel }}</span>.
-              Темы доотправки детали на Ozon/ЯМ скрыты — бот ведёт на возврат.
+              <template v-if="pbMp === 'ozon'">
+                Темы доотправки детали на Ozon скрыты — бот ведёт на возврат.
+              </template>
+              <template v-else-if="pbMp === 'ym'">
+                На ЯМ доотправку детали предлагаем в чате (как на WB).
+              </template>
               Режим темы (Авто / Согласование / Менеджер) общий для всех площадок.
             </p>
             <div class="grid sm:grid-cols-3 gap-2">
@@ -1704,8 +1705,8 @@ function chatSendFilesPath(item) {
 // ── Вкладки: переписка / настройка автоответов ──────────────────────────────
 const tab        = ref('chats')
 const pbThemes   = ref([])
-/** Темы только про доотправку WB — на Ozon/ЯМ бот их не использует (→ возврат). */
-const WB_ONLY_THEME_KEYS = new Set([
+/** Темы доотправки WB/ЯМ — на Ozon бот их не использует (→ возврат). */
+const OZON_HIDDEN_THEME_KEYS = new Set([
   'nekomplekt', 'soglasie', 'ssylka', 'status_zayavki', 'otkaz_dootpravki',
   'nevozvratny',
 ])
@@ -1748,6 +1749,45 @@ const OZON_THEME_UI = {
     note: 'Не давить «Заказы» — вести в поддержку Ozon. Решение за площадкой.',
   },
 }
+const YM_THEME_UI = {
+  dengi: {
+    note: 'Деньгами управляет Яндекс Маркет и банк. Бот не обещает сроки от продавца.',
+  },
+  srok_hraneniya: {
+    note: 'Сроком хранения управляет Яндекс Маркет, не продавец.',
+    when: 'Продлить хранение на ПВЗ ЯМ — направляем в поддержку Яндекс Маркета.',
+  },
+  dostavka_wb: {
+    name: 'Где мой заказ / сроки доставки',
+    when: 'Сдвиг срока, статус доставки, «когда приедет» на Яндекс Маркете.',
+    note: 'Сроки формирует Яндекс Маркет. Бот направляет в карточку заказа и поддержку площадки.',
+  },
+  cheque: {
+    when: 'Где скачать чек по заказу Яндекс Маркета.',
+  },
+  teh_sboi: {
+    note: 'Техсбой на стороне Яндекс Маркета — в поддержку площадки.',
+  },
+  vozvrat: {
+    note: 'На ЯМ: заказ в кабинете → оформить возврат. Доотправку детали предлагаем в чате.',
+  },
+  brak: {
+    note: 'На ЯМ: можно предложить замену детали (если товар в списке) или возврат через заказ.',
+  },
+  zapchasti: {
+    name: 'Насадки (сменные)',
+    when: 'Где купить сменные насадки или тряпку к швабре.',
+    note: 'На ЯМ отдельной карточки насадок нет — подсказка поиска. Заглушки — тема «Заглушки и крепёж».',
+  },
+  krepezh: {
+    name: 'Заглушки и крепёж',
+    when: 'Заглушки сливные, защёлки, пробки, мелкий крепёж отдельно.',
+    note: 'Отдельно не продаём. Не путать с насадками.',
+  },
+  return_expired: {
+    note: 'Вести в поддержку Яндекс Маркета. Решение за площадкой.',
+  },
+}
 const WB_THEME_UI = {
   zapchasti: {
     name: 'Сменные насадки',
@@ -1762,9 +1802,10 @@ const WB_THEME_UI = {
 }
 const visiblePbThemes = computed(() => {
   const list = pbThemes.value || []
-  if (pbMp.value === 'ozon' || pbMp.value === 'ym') {
-    return list.filter(t => !WB_ONLY_THEME_KEYS.has(t.theme_key))
+  if (pbMp.value === 'ozon') {
+    return list.filter(t => !OZON_HIDDEN_THEME_KEYS.has(t.theme_key))
   }
+  // WB и ЯМ: доотправка в чатах; невозвратность сушилок — только WB
   return list.filter(t => t.theme_key !== 'nevozvratny')
 })
 
@@ -1779,6 +1820,9 @@ function themeDisplayName(t) {
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.name) {
     return OZON_THEME_UI[t.theme_key].name
   }
+  if (pbMp.value === 'ym' && YM_THEME_UI[t.theme_key]?.name) {
+    return YM_THEME_UI[t.theme_key].name
+  }
   return t.name
 }
 function themeDisplayWhen(t) {
@@ -1787,6 +1831,9 @@ function themeDisplayWhen(t) {
   }
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.when) {
     return OZON_THEME_UI[t.theme_key].when
+  }
+  if (pbMp.value === 'ym' && YM_THEME_UI[t.theme_key]?.when) {
+    return YM_THEME_UI[t.theme_key].when
   }
   return t.when_text
 }
@@ -1797,6 +1844,9 @@ function themeDisplayNote(t) {
   if (pbMp.value === 'ozon' && OZON_THEME_UI[t.theme_key]?.note) {
     return OZON_THEME_UI[t.theme_key].note
   }
+  if (pbMp.value === 'ym' && YM_THEME_UI[t.theme_key]?.note) {
+    return YM_THEME_UI[t.theme_key].note
+  }
   if (pbMp.value === 'wb' && t.theme_key === 'vozvrat') {
     const base = t.note || ''
     const addon = nonreturnableCats.value.length
@@ -1804,8 +1854,11 @@ function themeDisplayNote(t) {
       : 'Для невозвратных категорий WB система автоматически подставляет отдельный текст.'
     return base ? `${base} ${addon}` : addon
   }
-  // Не показываем WB-заметки на Ozon/ЯМ
-  if ((pbMp.value === 'ozon' || pbMp.value === 'ym') && /WB|Wildberries|доотправ/i.test(t.note || '')) {
+  // Не показываем WB-заметки на Ozon; на ЯМ доотправка своя — оставляем заметки
+  if (pbMp.value === 'ozon' && /WB|Wildberries|доотправ/i.test(t.note || '')) {
+    return ''
+  }
+  if (pbMp.value === 'ym' && /WB|Wildberries/i.test(t.note || '')) {
     return ''
   }
   return t.note || ''
@@ -2633,15 +2686,7 @@ function fmtFileSize(bytes) {
 
 function chooseChatAttachments() {
   if (chatSending.value) return
-  if (!chatAttachmentsAvailable.value) {
-    showToast('На Яндекс Маркете вложения пока недоступны', 'error')
-    return
-  }
   chatAttachmentInput.value?.click()
-}
-
-function showYmAttachmentUnavailable() {
-  showToast('Отправка файлов Яндекс Маркета ещё не подключена в CX', 'error')
 }
 
 function onChatAttachmentsSelected(event) {
@@ -2703,8 +2748,10 @@ function isCurrentChatSelection(requestId, chatId) {
 const visibleChatTemplates = computed(() => {
   const mp = chatMp(chatItem.value)
   let templates = chatTemplates.value || []
-  if (mp === 'ozon' || mp === 'ym') {
-    templates = templates.filter(template => !WB_ONLY_THEME_KEYS.has(template.theme_key))
+  if (mp === 'ozon') {
+    templates = templates.filter(template => !OZON_HIDDEN_THEME_KEYS.has(template.theme_key))
+  } else if (mp === 'ym') {
+    templates = templates.filter(template => template.theme_key !== 'nevozvratny')
   }
   const suggestedTheme = chatSuggest.value?.theme || chatSuggestMiss.value?.theme || ''
   return [...templates].sort((a, b) => {
@@ -3009,7 +3056,7 @@ async function sendChatMessage() {
   const txt = chatReply.value.trim()
   if (!chatCanSend.value || !chatItem.value) return
   if (chatAttachments.value.length && !chatAttachmentsAvailable.value) {
-    showToast('На Яндекс Маркете вложения пока недоступны', 'error')
+    showToast('Вложения для этой площадки недоступны', 'error')
     return
   }
   const item = chatItem.value

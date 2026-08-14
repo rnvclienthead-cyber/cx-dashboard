@@ -131,6 +131,43 @@ def send_chat_message(chat_id: str, text: str, *, biz: str | None = None, key: s
     r.raise_for_status()
 
 
+def send_chat_file(
+    chat_id: str,
+    filename: str,
+    content: bytes,
+    *,
+    content_type: str | None = None,
+    biz: str | None = None,
+    key: str | None = None,
+    timeout: int = 25,
+) -> None:
+    """Отправка файла: POST /v2/businesses/{businessId}/chats/file/send (multipart)."""
+    biz = biz or business_id()
+    name = (filename or "").strip()
+    if not name:
+        raise ValueError("имя файла обязательно")
+    if not content:
+        raise ValueError("файл пустой")
+    cid: int | str = int(chat_id) if str(chat_id).isdigit() else chat_id
+    # Не ставим Content-Type: application/json — иначе сломается multipart boundary.
+    hdrs = {"Api-Key": key or api_key()}
+    r = requests.post(
+        f"{BASE}/v2/businesses/{biz}/chats/file/send",
+        headers=hdrs,
+        params={"chatId": cid},
+        files={
+            "file": (name, content, content_type or "application/octet-stream"),
+        },
+        timeout=timeout,
+    )
+    if r.status_code == 403:
+        raise PermissionError(
+            "YM токен без scope communication/all-methods — отправка недоступна. "
+            "Выпустите новый Api-Key с правом «Общение с покупателями»."
+        )
+    r.raise_for_status()
+
+
 def download_chat_file(url: str, *, key: str | None = None, timeout: int = 30) -> requests.Response:
     """Прокси вложений чата ЯМ: url — полный адрес (не REST-путь), поэтому не через get()/post()."""
     r = requests.get(url, headers=headers(key), timeout=timeout)

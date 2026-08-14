@@ -436,7 +436,7 @@ def _ts_to_msk_date(ts_ms: Optional[int]):
 
 def _remap_theme_for_mp(theme: str, mp: str, reason: str = "",
                         client_msg: str = "") -> Tuple[str, str]:
-    """На Ozon/ЯМ доотправки деталей нет — ветки некомплекта без формы WB."""
+    """На Ozon доотправки деталей нет. На ЯМ доотправка есть — пишем в чатах как на WB."""
     mp = (mp or "wb").lower()
     msg = client_msg or ""
     # ИИ часто путает «заглушки» с темой насадок — не шлём ссылку на насадки
@@ -451,12 +451,11 @@ def _remap_theme_for_mp(theme: str, mp: str, reason: str = "",
         note = f"→vozvrat ({mp}: nevozvratny только WB)"
         reason = f"{reason}; {note}".strip("; ") if reason else note
         return "vozvrat", reason
-    # Согласие/ссылка/статус заявки на WB-доотправку → некомплект без досылки
-    if theme in ("soglasie", "ssylka", "status_zayavki"):
+    # Только Ozon: согласие/ссылка/статус WB-доотправки → некомплект без досылки
+    if mp == "ozon" and theme in ("soglasie", "ssylka", "status_zayavki"):
         note = f"→nekomplekt ({mp}: без доотправки)"
         reason = f"{reason}; {note}".strip("; ") if reason else note
         return "nekomplekt", reason
-    # nekomplekt оставляем — ветки check_tubes / no_reship_return
     return theme, reason
 
 
@@ -495,15 +494,23 @@ def _looks_like_missing_parts(msg: str = "", reason: str = "") -> bool:
 
 
 def _clarify_menu_text(mp: str = "wb") -> str:
-    """Меню 1–5: на Ozon/ЯМ пункт 1 — некомплект без предложения досылки."""
-    if (mp or "wb").lower() in ("ozon", "ym"):
-        mp_name = "Ozon" if mp == "ozon" else "Яндекс Маркет"
+    """Меню 1–5: на Ozon пункт 1 без досылки; на ЯМ — с доотправкой, как на WB."""
+    if (mp or "wb").lower() == "ozon":
         return (
             "Подскажите, пожалуйста, что вам нужно — ответьте цифрой или коротко своими словами:\n"
             "1 — не хватает детали / неполная комплектация\n"
             "2 — брак или повреждение товара\n"
             "3 — вопрос по сборке, размерам или нагрузке\n"
-            f"4 — хочу оформить возврат на {mp_name}\n"
+            "4 — хочу оформить возврат на Ozon\n"
+            "5 — другое (подключу коллегу)"
+        )
+    if (mp or "wb").lower() == "ym":
+        return (
+            "Подскажите, пожалуйста, что вам нужно — ответьте цифрой или коротко своими словами:\n"
+            "1 — не хватает детали / нужна доотправка\n"
+            "2 — брак или повреждение товара\n"
+            "3 — вопрос по сборке, размерам или нагрузке\n"
+            "4 — хочу оформить возврат на Яндекс Маркете\n"
             "5 — другое (подключу коллегу)"
         )
     return chat_faq.CLARIFY_MENU_TEXT
@@ -1379,7 +1386,7 @@ def _resolve_branch(db: Session, theme: str, article: str,
     mp = (mp or "wb").lower()
     if theme == "vozvrat" and stage != "awaiting_return_reason" and not _has_return_reason(msg):
         return "ask_reason"
-    if mp in ("ozon", "ym"):
+    if mp == "ozon":
         return _resolve_branch_ozon(theme, msg, stage=stage, last_theme=last_theme)
     if theme == "nekomplekt":
         return "sku_allowed" if reshipment_skus.is_allowed(db, article) else "sku_denied"
@@ -1477,8 +1484,8 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
             body = _return_reason_text(mp)
         return _polish_reply(db, body, state, last_seller_ts), "ask_reason"
 
-    # Ozon/ЯМ: некомплект — ветки Альфреда (check_tubes / no_reship_return)
-    if mp in ("ozon", "ym") and theme == "nekomplekt":
+    # Ozon: некомплект — ветки Альфреда (check_tubes / no_reship_return). ЯМ — как WB.
+    if mp == "ozon" and theme == "nekomplekt":
         body = (
             chat_playbook.pick_variant(db, theme, branch, mp=mp)
             if branch else None
@@ -1504,8 +1511,8 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
             return _polish_reply(db, body, state, last_seller_ts), "explain_support"
         return "", action
 
-    # Legacy: remap раньше уводил некомплект в vozvrat — оставляем фолбэк
-    if mp in ("ozon", "ym") and theme == "vozvrat":
+    # Legacy: remap раньше уводил некомплект в vozvrat — оставляем фолбэк только для Ozon
+    if mp == "ozon" and theme == "vozvrat":
         from_parts = (
             source_theme in ("nekomplekt", "soglasie", "ssylka", "status_zayavki")
             or "без доотправки" in (reason or "")
@@ -1528,7 +1535,7 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
         if not body:
             body = _clarify_menu_text(mp)
         return _polish_reply(db, body, state, last_seller_ts), "ask_menu"
-    if mp in ("ozon", "ym") and theme == "brak":
+    if mp == "ozon" and theme == "brak":
         br = branch or "needs_return"
         if br == "wrong_item":
             body = (
@@ -1553,23 +1560,23 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
         return "", action
 
     form_url = ""
-    # Форма доотправки — только WB
-    if mp == "wb" and (
+    # Форма доотправки — WB и ЯМ (в чате); Ozon без доотправки
+    if mp in ("wb", "ym") and (
         action in ("offer_reshipment", "send_form_link", "resend_form_link", "ask_menu")
         or "{form_url}" in body
     ):
         if "{form_url}" in body or action in ("offer_reshipment", "send_form_link", "resend_form_link"):
             form_url = _make_form_url(db, chat_id)
 
-    # На Ozon/ЯМ не подставляем ссылку формы и не предлагаем досылку из шаблона
-    if mp in ("ozon", "ym"):
+    # На Ozon не подставляем ссылку формы и не предлагаем досылку из шаблона
+    if mp == "ozon":
         if "{form_url}" in (body or "") or action in (
             "offer_reshipment", "send_form_link", "resend_form_link"
         ):
             return _polish_reply(db, _return_only_text(mp), state, last_seller_ts), "explain_return"
         body = body.replace("{form_url}", "").strip()
 
-    body = _fill_placeholders(_strip_greeting(body), form_url=form_url, reship=reship if mp == "wb" else None)
+    body = _fill_placeholders(_strip_greeting(body), form_url=form_url, reship=reship if mp in ("wb", "ym") else None)
     return _polish_reply(db, body, state, last_seller_ts), action
 
 
@@ -2314,8 +2321,8 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
         theme_name = tr[0] or ""
     if theme == "nevozvratny":
         theme_name = "Хочу вернуть товар · WB невозвратный"
-    # Для менеджера понятнее: ветки Playbook 2.0
-    if mp in ("ozon", "ym"):
+    # Для менеджера понятнее: ветки Playbook 2.0 (Ozon без досылки)
+    if mp == "ozon":
         if theme == "nekomplekt" and branch == "check_tubes":
             theme_name = "Некомплект → проверить трубки"
         elif theme == "nekomplekt" and branch == "no_reship_return":
@@ -2332,6 +2339,11 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
             )
         ):
             theme_name = "Некомплект → возврат (без досылки)"
+    elif mp == "ym":
+        if theme == "wrong_item":
+            theme_name = theme_name or "Прислали не тот товар"
+        elif theme == "return_expired":
+            theme_name = theme_name or "Срок возврата истёк"
 
     can_generate = (not reply) and bool(msg) and zone != "human"
     # human тоже можно сгенерировать черновик менеджеру, если красный текст пустой

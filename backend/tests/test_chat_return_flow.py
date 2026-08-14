@@ -149,6 +149,22 @@ class ReturnFlowTests(unittest.TestCase):
         for mp in ("wb", "ozon", "ym"):
             self.assertIn((mp, "vozvrat", "ask_reason"), seeded)
 
+    def test_ym_seed_offers_reshipment_like_wb(self):
+        """ЯМ в чатах предлагает доотправку (sku_allowed), а не «не можем» как Ozon."""
+        ym_keys = {(item[0], item[1] or "") for item in chat_bot.chat_playbook.SEED_YM_VARIANTS}
+        self.assertIn(("nekomplekt", "sku_allowed"), ym_keys)
+        self.assertIn(("soglasie", ""), ym_keys)
+        self.assertNotIn(("nekomplekt", "no_reship_return"), ym_keys)
+        self.assertNotIn(("nekomplekt", "check_tubes"), ym_keys)
+        for item in chat_bot.chat_playbook.SEED_YM_VARIANTS:
+            if item[0] == "nekomplekt" and item[1] == "sku_allowed":
+                self.assertNotIn("не можем", item[3].lower())
+                self.assertIn("детал", item[3].lower())
+            body = item[3].lower()
+            self.assertNotIn("ozon", body)
+            self.assertNotIn("wildberries", body)
+            self.assertNotIn("«покупки»", body)
+
 
 if __name__ == "__main__":
     unittest.main()

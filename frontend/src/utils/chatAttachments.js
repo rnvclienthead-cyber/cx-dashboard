@@ -10,7 +10,7 @@ const ALLOWED_CHAT_ATTACHMENT_TYPES = new Set([
 const ALLOWED_CHAT_ATTACHMENT_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.pdf'])
 
 export function chatAttachmentsSupported(mp) {
-  return String(mp || 'wb').toLowerCase() !== 'ym'
+  return ['wb', 'ozon', 'ym'].includes(String(mp || 'wb').toLowerCase())
 }
 
 export function canSendChatContent(text, attachments, sending = false) {

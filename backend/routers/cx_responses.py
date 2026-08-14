@@ -3291,18 +3291,24 @@ def _persist_confirmed_chat_step(
 ) -> None:
     """Persist audit/queue state only; never create synthetic history rows."""
     preview = value if kind == "text" else f"Вложение: {value}"
-    table = "ozon_chats" if mp == "ozon" else "wb_chats"
     with db.bind.connect() as conn:
         if mp == "ozon":
-            conn.execute(text(f"""
-                UPDATE {table} SET needs_answer = false, last_sender = 'seller',
+            conn.execute(text("""
+                UPDATE ozon_chats SET needs_answer = false, last_sender = 'seller',
                     last_message = :preview, unread_count = 0, waiting_since = NULL,
                     updated_at = now()
                 WHERE chat_id = :cid
             """), {"cid": chat_id, "preview": preview[:500]})
+        elif mp == "ym":
+            conn.execute(text("""
+                UPDATE ym_chats SET needs_answer = false, last_sender = 'seller',
+                    last_message = :preview, waiting_since = NULL,
+                    status = 'WAITING_FOR_CUSTOMER', updated_at = now()
+                WHERE chat_id = :cid
+            """), {"cid": chat_id, "preview": preview[:500]})
         else:
-            conn.execute(text(f"""
-                UPDATE {table} SET needs_answer = false, last_sender = 'seller',
+            conn.execute(text("""
+                UPDATE wb_chats SET needs_answer = false, last_sender = 'seller',
                     last_message = :preview, last_ts = :ts, updated_at = now()
                 WHERE chat_id = :cid
             """), {"cid": chat_id, "preview": preview[:1000], "ts": int(time.time() * 1000)})
@@ -3371,6 +3377,48 @@ async def _run_ozon_chat_send_steps(
                 attachment["name"],
                 encoded,
                 timeout=20,
+            )
+        except Exception as exc:
+            return _stop_chat_send_progress(progress, file_step, exc)
+        file_step["state"] = "confirmed"
+        if not await _persist_or_stop_progress(
+            progress, file_step, persist_step, "file", attachment["name"]
+        ):
+            return progress
+
+    progress["status"] = "complete"
+    return progress
+
+
+async def _run_ym_chat_send_steps(
+    chat_id: str,
+    message: str,
+    attachments: list[dict],
+    persist_step,
+) -> dict:
+    """Текст и файлы ЯМ — отдельные вызовы API, с явной прогресс-моделью как у Ozon."""
+    from .. import ym_chat_sync
+
+    progress = _new_chat_send_progress(message, attachments)
+    text_step = progress["text"]
+    if message:
+        try:
+            await run_in_threadpool(ym_chat_sync.send_message, chat_id, message)
+        except Exception as exc:
+            return _stop_chat_send_progress(progress, text_step, exc)
+        text_step["state"] = "confirmed"
+        if not await _persist_or_stop_progress(progress, text_step, persist_step, "text", message):
+            return progress
+
+    for index, attachment in enumerate(attachments):
+        file_step = progress["files"][index]
+        try:
+            await run_in_threadpool(
+                ym_chat_sync.send_file,
+                chat_id,
+                attachment["name"],
+                attachment["content"],
+                content_type=attachment["content_type"],
             )
         except Exception as exc:
             return _stop_chat_send_progress(progress, file_step, exc)
@@ -3761,16 +3809,32 @@ async def send_ym_chat_message_with_files(
     chat_id: str,
     text_value: str = Form("", alias="text"),
     files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
-    # Multipart-параметры объявлены, чтобы клиент всегда получал явный ответ
-    # нашего API, а не 422 FastAPI. У ЯМ уже есть официальный метод
-    # POST /v2/businesses/{businessId}/chats/file/send, но текущий ym_client его
-    # не реализует; включение ЯМ вынесено из scope этой фазы.
-    _ = (chat_id, text_value, files)
-    raise HTTPException(
-        status_code=501,
-        detail="На Яндекс Маркете вложения пока недоступны",
-    )
+    txt = (text_value or "").strip()
+    attachments = await _validate_chat_attachments(files)
+    if not txt and not attachments:
+        raise HTTPException(status_code=400, detail="Добавьте текст или файл")
+    if not _ym_key() or not _ym_business_id():
+        raise HTTPException(status_code=503, detail="YM_API_KEY / YM_BUSINESS_ID не настроены")
+
+    def persist_step(kind: str, value: str) -> None:
+        _persist_confirmed_chat_step(
+            db,
+            mp="ym",
+            chat_id=chat_id,
+            username=current_user["username"],
+            kind=kind,
+            value=value,
+        )
+
+    try:
+        progress = await _run_ym_chat_send_steps(chat_id, txt, attachments, persist_step)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    status_code = 200 if progress["status"] == "complete" else 207
+    return JSONResponse(status_code=status_code, content=progress)
 
 
 # ── Ответ в чат WB ───────────────────────────────────────────────────────────

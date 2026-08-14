@@ -20,10 +20,10 @@ test('files enable send even when text is empty', () => {
   assert.equal(canSendChatContent('Текст', [], true), false)
 })
 
-test('Yandex Market attachments are unavailable', () => {
+test('Yandex Market attachments are available like WB and Ozon', () => {
   assert.equal(chatAttachmentsSupported('wb'), true)
   assert.equal(chatAttachmentsSupported('ozon'), true)
-  assert.equal(chatAttachmentsSupported('ym'), false)
+  assert.equal(chatAttachmentsSupported('ym'), true)
 })
 
 test('client validation enforces type and five MiB limit', () => {
@@ -69,15 +69,16 @@ test('partial progress removes confirmed and quarantines unknown while retaining
   assert.deepEqual(result.retainedIds, ['c', 'd'])
 })
 
-test('Yandex paperclip uses native disabled and adjacent explanation', () => {
+test('Yandex paperclip is enabled for all marketplaces', () => {
   const source = readFileSync(new URL('../src/views/ChatsView.vue', import.meta.url), 'utf8')
-  assert.match(source, /:disabled="!chatAttachmentsAvailable \|\| chatSending"/)
-  assert.match(source, /На Яндекс Маркете вложения в этой версии пока недоступны/)
+  assert.match(source, /title="Прикрепить JPEG, PNG или PDF до 5 МиБ"/)
+  assert.doesNotMatch(source, /На Яндекс Маркете вложения в этой версии пока недоступны/)
 })
 
 test('product card is on-demand and never substitutes a marketplace match', () => {
   const source = readFileSync(new URL('../src/views/ChatsView.vue', import.meta.url), 'utf8')
-  assert.match(source, /Характеристики из ЯМ/)
-  assert.match(source, /product-card\?article=/)
-  assert.match(source, /соответствия в Яндекс Маркете нет/)
+  assert.match(source, /title="Карточка товара"/)
+  assert.match(source, /Загружаем карточку товара…/)
+  assert.match(source, /\/api\/v1\/chat-bot\/product-card\?\$\{params\}/)
+  assert.match(source, /productCardRequest\.value\.article/)
 })

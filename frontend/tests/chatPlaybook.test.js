@@ -11,8 +11,15 @@ test('empty-template hint is honest about manager and fallback behavior', () => 
   assert.match(source, /бот попробует запасной ответ \(ИИ\/FAQ, если он есть\)/)
 })
 
+test('ym playbook has marketplace-specific theme UI like ozon', () => {
+  assert.match(source, /const YM_THEME_UI = \{/)
+  assert.match(source, /pbMp\.value === 'ym' && YM_THEME_UI/)
+  assert.match(source, /Доотправку детали предлагаем в чате/)
+})
+
 test('wb nonreturnable logic is embedded into return theme in playbook', () => {
   assert.match(source, /return list\.filter\(t => t\.theme_key !== 'nevozvratny'\)/)
+  assert.match(source, /OZON_HIDDEN_THEME_KEYS/)
   assert.match(source, /t\.theme_key === 'vozvrat'/)
   assert.match(source, /система автоматически подставляет текст о невозвратности WB/)
   assert.match(source, /branch_label: 'WB · невозвратный товар'/)
