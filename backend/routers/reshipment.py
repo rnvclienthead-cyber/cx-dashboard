@@ -2964,18 +2964,123 @@ def warehouse_packlist(db: Session = Depends(get_db)):
     )
 
 
-# ── Склад: PDF этикетки 58×40мм ─────────────────────────────────────────────
+# ── Склад: PDF этикетки 80×58 мм (горизонталь 80) ─────────────────────────────
 
-@router.get("/warehouse/labels")
-def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    """PDF с этикетками A5 landscape. ids=1,2,3 или все approved."""
+LABEL_W_MM = 80  # горизонталь
+LABEL_H_MM = 58  # вертикаль
+
+
+def _label_barcode_value(order: dict) -> str:
+    """Штрих-код для этикетки: place_barcode Яндекса или номер СДЭК."""
+    req_id = order["id"]
+    if order.get("delivery_method") == "yandex":
+        yd_track = order.get("track_number") or ""
+        if yd_track:
+            try:
+                from .. import yandex_ndd as _yndd
+                place_bc = _yndd.get_order_place_barcode(yd_track)
+                if place_bc:
+                    return place_bc
+            except Exception:
+                pass
+            return yd_track.replace("-", "")[-20:]
+        return f"REQ{req_id:06d}"
+    cdek_no = order.get("cdek_number") or ""
+    return cdek_no if cdek_no else f"REQ{req_id:06d}"
+
+
+def _build_labels_pdf_80x58(rows) -> io.BytesIO:
+    """Единый PDF: одна страница = одна этикетка 80×58 мм (СДЭК и Яндекс)."""
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.lib.units import mm
+    from reportlab.graphics.barcode import code128
+    from reportlab.lib import colors
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    _DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    _DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVu", _DEJAVU))
+        pdfmetrics.registerFont(TTFont("DejaVu-Bold", _DEJAVU_BOLD))
+        _F, _F_BOLD = "DejaVu", "DejaVu-Bold"
+    except Exception:
+        _F = _F_BOLD = "Helvetica"
+
+    W = LABEL_W_MM * mm
+    H = LABEL_H_MM * mm
+    MARGIN = 2.5 * mm
+
+    buf = io.BytesIO()
+    c = rl_canvas.Canvas(buf, pagesize=(W, H))
+
+    for order in rows:
+        req_id = order["id"]
+        name = (order.get("customer_name") or "").strip()
+        city = (order.get("client_pvz_city") or order.get("address_city") or "—").strip()
+        is_yandex = order.get("delivery_method") == "yandex"
+        barcode_val = _label_barcode_value(order)
+        carrier_label = "Яндекс Доставка" if is_yandex else "СДЭК"
+        carrier_color = colors.HexColor("#D97706") if is_yandex else colors.HexColor("#1D4ED8")
+
+        c.setPageSize((W, H))
+
+        # Рамка
+        c.setStrokeColor(colors.HexColor("#CCCCCC"))
+        c.setLineWidth(0.4)
+        c.rect(0.8 * mm, 0.8 * mm, W - 1.6 * mm, H - 1.6 * mm)
+
+        # Верх: перевозчик
+        c.setFont(_F_BOLD, 8)
+        c.setFillColor(carrier_color)
+        c.drawCentredString(W / 2, H - 5.5 * mm, carrier_label)
+
+        # Штрих-код на всю ширину 80 мм (полосы пропорциональные, без искажения scale)
+        FOOTER_H = 18 * mm
+        HEADER_H = 8 * mm
+        bc_height = H - HEADER_H - FOOTER_H
+        max_bc_w = W - 2 * MARGIN
+
+        try:
+            probe = code128.Code128(barcode_val, barWidth=1.0, quiet=False)
+            natural_w = probe.width or 1.0
+            # Растягиваем ровно на ширину этикетки — так код всегда помещается
+            bar_w = max_bc_w / natural_w
+            bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=bc_height, quiet=False)
+            bc.drawOn(c, MARGIN + (max_bc_w - bc.width) / 2, FOOTER_H)
+        except Exception:
+            c.setFont(_F_BOLD, 9)
+            c.setFillColor(colors.black)
+            c.drawCentredString(W / 2, H / 2, barcode_val)
+
+        # Под штрих-кодом: значение + заявка / город / ФИО
+        c.setFillColor(colors.black)
+        c.setFont(_F_BOLD, 7)
+        c.drawCentredString(W / 2, 13 * mm, barcode_val[:32])
+
+        c.setFont(_F_BOLD, 8)
+        c.drawCentredString(W / 2, 8 * mm, f"#{req_id:06d}  {city[:22]}")
+
+        c.setFont(_F, 7)
+        c.drawCentredString(W / 2, 3.5 * mm, name[:30] if name else "—")
+
+        c.showPage()
+
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+def _fetch_label_orders(db: Session, ids: Optional[str], *, yandex_only: bool = False):
     if ids:
         id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
-        where   = "WHERE id = ANY(:ids) AND status IN ('approved','packed','shipped')"
-        params  = {"ids": id_list}
+        where = "WHERE id = ANY(:ids) AND status IN ('approved','packed','shipped')"
+        params: dict = {"ids": id_list}
     else:
-        where  = "WHERE status = 'approved'"
+        where = "WHERE status = 'approved'"
         params = {}
+    if yandex_only:
+        where += " AND delivery_method = 'yandex'"
 
     rows = db.execute(text(f"""
         SELECT id, customer_name, address_city, client_pvz_city,
@@ -2985,226 +3090,34 @@ def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get
         FROM reshipment_requests {where}
         ORDER BY id ASC
     """), params).mappings().all()
-
     if not rows:
         raise HTTPException(status_code=404, detail="Нет заявок для печати")
+    return rows
 
-    from reportlab.pdfgen import canvas as rl_canvas
-    from reportlab.lib.units import mm
-    from reportlab.graphics.barcode import code128
-    from reportlab.lib import colors
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
 
-    _DEJAVU      = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    _DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    try:
-        pdfmetrics.registerFont(TTFont("DejaVu",     _DEJAVU))
-        pdfmetrics.registerFont(TTFont("DejaVu-Bold", _DEJAVU_BOLD))
-        _F      = "DejaVu"
-        _F_BOLD = "DejaVu-Bold"
-    except Exception:
-        _F = _F_BOLD = "Helvetica"
-
-    buf = io.BytesIO()
-    # Начальный размер страницы — потом меняем под каждый заказ
-    c = rl_canvas.Canvas(buf, pagesize=(210 * mm, 148 * mm))
-
-    for order in rows:
-        req_id          = order["id"]
-        name            = (order["customer_name"] or "")
-        city            = (order["client_pvz_city"] or order["address_city"] or "—")
-        cdek_no         = order["cdek_number"] or ""
-        is_yandex_label = order.get("delivery_method") == "yandex"
-        yd_track        = order.get("track_number") or ""
-        pvz_name        = order.get("yandex_pvz_name") or order.get("client_pvz_address") or ""
-
-        if is_yandex_label:
-            place_bc = None
-            if yd_track:
-                try:
-                    from .. import yandex_ndd as _yndd
-                    place_bc = _yndd.get_order_place_barcode(yd_track)
-                except Exception:
-                    pass
-            barcode_val = place_bc if place_bc else (yd_track.replace("-", "")[-20:] if yd_track else f"REQ{req_id:06d}")
-        else:
-            barcode_val = cdek_no if cdek_no else f"REQ{req_id:06d}"
-
-        carrier_label = "Яндекс Доставка" if is_yandex_label else "СДЭК"
-        carrier_color = colors.HexColor("#D97706") if is_yandex_label else colors.HexColor("#1D4ED8")
-
-        if is_yandex_label:
-            # ── A5 portrait (148×210 мм) для Яндекса ─────────────────────────
-            # barWidth фиксированный (не растянутый) — иначе лазерный сканер на ПВЗ не читает
-            W = 148 * mm
-            H = 210 * mm
-            c.setPageSize((W, H))
-
-            # Штрих-код: фиксированная ширина полосы 0.38мм, высота 50мм
-            bc_bar_w  = 0.38 * mm
-            bc_height = 50 * mm
-            bc_y      = H / 2 - 10 * mm  # по центру страницы, чуть выше
-
-            try:
-                bc = code128.Code128(barcode_val, barWidth=bc_bar_w, barHeight=bc_height, quiet=True)
-                bc.drawOn(c, (W - bc.width) / 2, bc_y)
-            except Exception:
-                c.setFont(_F_BOLD, 12)
-                c.setFillColor(colors.black)
-                c.drawCentredString(W / 2, bc_y + bc_height / 2, barcode_val)
-
-            # Значение штрих-кода
-            c.setFont(_F_BOLD, 10)
-            c.setFillColor(colors.black)
-            c.drawCentredString(W / 2, bc_y - 8 * mm, barcode_val)
-
-            # Номер заявки
-            c.setFont(_F, 9)
-            c.setFillColor(colors.HexColor("#666666"))
-            c.drawCentredString(W / 2, bc_y - 15 * mm, f"#{req_id:06d}  {city}  {name}")
-
-        else:
-            # ── 58×40 мм для СДЭК (без изменений) ───────────────────────────
-            W = 58 * mm
-            H = 40 * mm
-            MARGIN = 3 * mm
-            c.setPageSize((W, H))
-
-            try:
-                max_bc_w = W - 2 * MARGIN
-                bc_probe  = code128.Code128(barcode_val, barWidth=1.0, quiet=True)
-                natural_w = bc_probe.width
-                bar_w     = min(0.55 * mm, max_bc_w / natural_w) if natural_w > 0 else 0.55 * mm
-                bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=14 * mm, quiet=True)
-                bc.drawOn(c, (W - bc.width) / 2, 22 * mm)
-            except Exception:
-                c.setFont("Helvetica-Bold", 8)
-                c.drawCentredString(W / 2, 30 * mm, barcode_val)
-
-            c.setStrokeColor(colors.HexColor("#CCCCCC"))
-            c.setLineWidth(0.3)
-            c.rect(1 * mm, 1 * mm, W - 2 * mm, H - 2 * mm)
-            c.line(2 * mm, 20 * mm, W - 2 * mm, 20 * mm)
-
-            c.setFont(_F_BOLD, 6.5)
-            c.setFillColor(carrier_color)
-            c.drawString(2 * mm, 17 * mm, carrier_label)
-
-            c.setFillColor(colors.black)
-            c.setFont(_F_BOLD, 8)
-            c.drawString(2 * mm, 12.5 * mm, city[:20])
-
-            c.setFont(_F, 7)
-            c.drawString(2 * mm, 7.5 * mm, name[:24])
-
-            if cdek_no:
-                c.setFont(_F_BOLD, 6.5)
-                c.setFillColor(carrier_color)
-                c.drawString(2 * mm, 3 * mm, cdek_no)
-            else:
-                c.setFont(_F, 6)
-                c.setFillColor(colors.HexColor("#888888"))
-                c.drawString(2 * mm, 3 * mm, f"REQ{req_id:06d}")
-
-        c.showPage()
-
-    c.save()
-    buf.seek(0)
-
+@router.get("/warehouse/labels")
+def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    """PDF этикетки 80×58 мм (горизонталь 80) — СДЭК и Яндекс."""
+    rows = _fetch_label_orders(db, ids)
+    buf = _build_labels_pdf_80x58(rows)
     today = datetime.date.today().strftime("%Y-%m-%d")
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_{today}.pdf"'},
+        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
     )
 
 
 @router.get("/warehouse/labels/thermal")
 def warehouse_labels_thermal(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    """PDF 58×40мм для Яндекса — термопринтер, штрих-код на весь размер."""
-    if ids:
-        id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
-        where   = "WHERE id = ANY(:ids) AND delivery_method = 'yandex' AND status IN ('approved','packed','shipped')"
-        params  = {"ids": id_list}
-    else:
-        where  = "WHERE delivery_method = 'yandex' AND status = 'approved'"
-        params = {}
-
-    rows = db.execute(text(f"""
-        SELECT id, customer_name, address_city, client_pvz_city, track_number
-        FROM reshipment_requests {where}
-        ORDER BY id ASC
-    """), params).mappings().all()
-
-    if not rows:
-        raise HTTPException(status_code=404, detail="Нет заявок для печати")
-
-    from reportlab.pdfgen import canvas as rl_canvas
-    from reportlab.lib.units import mm
-    from reportlab.graphics.barcode import code128
-    from reportlab.lib import colors
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-    _DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    try:
-        pdfmetrics.registerFont(TTFont("DejaVu-Bold", _DEJAVU_BOLD))
-        _FB = "DejaVu-Bold"
-    except Exception:
-        _FB = "Helvetica-Bold"
-
-    W = 58 * mm
-    H = 40 * mm
-
-    buf = io.BytesIO()
-    c = rl_canvas.Canvas(buf, pagesize=(W, H))
-
-    for order in rows:
-        req_id   = order["id"]
-        city     = (order["client_pvz_city"] or order["address_city"] or "")[:16]
-        yd_track = order.get("track_number") or ""
-
-        place_bc = None
-        if yd_track:
-            try:
-                from .. import yandex_ndd as _yndd
-                place_bc = _yndd.get_order_place_barcode(yd_track)
-            except Exception:
-                pass
-        barcode_val = place_bc if place_bc else (yd_track.replace("-", "")[-20:] if yd_track else f"REQ{req_id:06d}")
-
-        # Штрих-код: заполняем всю ширину, фиксируя bar_w через пропорцию
-        # (не через scale — чтобы не искажать соотношение полос)
-        TEXT_H  = 6 * mm
-        MARGIN  = 2 * mm
-        bc_height   = H - TEXT_H - MARGIN
-
-        try:
-            bc_probe  = code128.Code128(barcode_val, barWidth=1.0, quiet=True)
-            natural_w = bc_probe.width
-            bar_w     = (W - 2 * MARGIN) / natural_w if natural_w > 0 else 0.3 * mm
-            bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=bc_height, quiet=True)
-            bc.drawOn(c, MARGIN, TEXT_H)
-        except Exception:
-            c.setFont(_FB, 7)
-            c.drawCentredString(W / 2, H / 2, barcode_val)
-
-        # Текст снизу: номер заявки + город
-        c.setFont(_FB, 6)
-        c.setFillColor(colors.black)
-        c.drawCentredString(W / 2, 2 * mm, f"#{req_id:06d}  {city}")
-
-        c.showPage()
-
-    c.save()
-    buf.seek(0)
-
+    """Тот же формат 80×58 мм (алиас для термопринтера)."""
+    rows = _fetch_label_orders(db, ids)
+    buf = _build_labels_pdf_80x58(rows)
     today = datetime.date.today().strftime("%Y-%m-%d")
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_thermal_{today}.pdf"'},
+        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
     )
 
 

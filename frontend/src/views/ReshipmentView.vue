@@ -1153,28 +1153,17 @@ const downloadPacklist = async () => {
   URL.revokeObjectURL(url)
 }
 
-// ── Склад: печать этикеток PDF ────────────────────────────────────────────────
+// ── Склад: печать этикеток PDF 80×58 ─────────────────────────────────────────
 const downloadLabels = async (ids = []) => {
   const token = localStorage.getItem('token')
   const idsParam = ids.length ? `?ids=${ids.join(',')}` : ''
   const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/labels${idsParam}`, {
     headers: { 'Authorization': `Bearer ${token}` }
   })
-  const blob = await res.blob()
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.target = '_blank'
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-const downloadLabelsThermal = async (ids = []) => {
-  const token = localStorage.getItem('token')
-  const idsParam = ids.length ? `?ids=${ids.join(',')}` : ''
-  const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/labels/thermal${idsParam}`, {
-    headers: { 'Authorization': `Bearer ${token}` }
-  })
+  if (!res.ok) {
+    alert('Не удалось сформировать этикетку')
+    return
+  }
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -2173,14 +2162,14 @@ onUnmounted(() => {
                   <Loader2 v-if="panelLoading" class="w-4 h-4 animate-spin" />
                   <CheckSquare v-else class="w-4 h-4" /> Отметить собранной
                 </button>
-                <!-- Этикетка: СДЭК — по cdek_number, Яндекс — по track_number -->
+                <!-- Этикетка 80×58: СДЭК — по cdek_number, Яндекс — по track_number -->
                 <button v-if="selected.delivery_method !== 'yandex' && selected.cdek_number" @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-slate-500 hover:bg-slate-600 text-white text-sm font-semibold rounded-xl transition-colors">
-                  <Printer class="w-4 h-4" /> Этикетка PDF
+                  <Printer class="w-4 h-4" /> Этикетка 80×58
                 </button>
                 <button v-else-if="selected.delivery_method === 'yandex' && selected.track_number" @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-xl transition-colors">
-                  <Printer class="w-4 h-4" /> Этикетка Яндекс A5
+                  <Printer class="w-4 h-4" /> Этикетка 80×58
                 </button>
               </template>
 
@@ -2189,7 +2178,7 @@ onUnmounted(() => {
                 <p class="text-xs text-slate-500 italic self-center">Сдайте посылку в ПВЗ Яндекс: {{ YANDEX_SOURCE_PVZ }}. После приёмки статус обновится сам</p>
                 <button @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-xl transition-colors">
-                  <Printer class="w-4 h-4" /> Этикетка Яндекс A5
+                  <Printer class="w-4 h-4" /> Этикетка 80×58
                 </button>
               </template>
 
@@ -2213,7 +2202,7 @@ onUnmounted(() => {
               <template v-else-if="selected.status === 'packed'">
                 <button v-if="selected.cdek_number" @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold rounded-xl transition-colors">
-                  <Printer class="w-4 h-4" /> Этикетка PDF
+                  <Printer class="w-4 h-4" /> Этикетка 80×58
                 </button>
                 <span v-else class="text-xs text-slate-400 italic self-center">Этикетка недоступна — нет номера СДЭК</span>
                 <span class="text-xs text-teal-600 italic self-center">Сдача на ПВЗ фиксируется автоматически</span>
