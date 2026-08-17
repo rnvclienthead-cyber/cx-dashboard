@@ -2964,10 +2964,10 @@ def warehouse_packlist(db: Session = Depends(get_db)):
     )
 
 
-# ── Склад: PDF этикетки 58×80 мм (горизонталь 58, вертикаль 80) ───────────────
+# ── Склад: PDF этикетки 80×58 мм (горизонталь 80) ─────────────────────────────
 
-LABEL_W_MM = 58  # горизонталь
-LABEL_H_MM = 80  # вертикаль
+LABEL_W_MM = 80  # горизонталь
+LABEL_H_MM = 58  # вертикаль
 
 
 def _label_barcode_value(order: dict) -> str:
@@ -2989,8 +2989,8 @@ def _label_barcode_value(order: dict) -> str:
     return cdek_no if cdek_no else f"REQ{req_id:06d}"
 
 
-def _build_labels_pdf_58x80(rows) -> io.BytesIO:
-    """Единый PDF: одна страница = одна этикетка 58×80 мм (СДЭК и Яндекс)."""
+def _build_labels_pdf_80x58(rows) -> io.BytesIO:
+    """Единый PDF: одна страница = одна этикетка 80×58 мм (СДЭК и Яндекс)."""
     from reportlab.pdfgen import canvas as rl_canvas
     from reportlab.lib.units import mm
     from reportlab.graphics.barcode import code128
@@ -3033,14 +3033,13 @@ def _build_labels_pdf_58x80(rows) -> io.BytesIO:
         # Верх: перевозчик
         c.setFont(_F_BOLD, 8)
         c.setFillColor(carrier_color)
-        c.drawCentredString(W / 2, H - 6 * mm, carrier_label)
+        c.drawCentredString(W / 2, H - 5.5 * mm, carrier_label)
 
-        # Штрих-код на всю ширину 58 мм, высокий по вертикали 80 мм
-        # Важно: Code128 рисует текущим fillColor — сбрасываем в чёрный.
+        # Штрих-код на всю ширину 80 мм; чёрный (Code128 берёт fillColor)
         c.setFillColor(colors.black)
         c.setStrokeColor(colors.black)
-        FOOTER_H = 22 * mm
-        HEADER_H = 9 * mm
+        FOOTER_H = 18 * mm
+        HEADER_H = 8 * mm
         bc_height = H - HEADER_H - FOOTER_H
         max_bc_w = W - 2 * MARGIN
 
@@ -3059,13 +3058,13 @@ def _build_labels_pdf_58x80(rows) -> io.BytesIO:
         # Под штрих-кодом: значение + заявка / город / ФИО
         c.setFillColor(colors.black)
         c.setFont(_F_BOLD, 7)
-        c.drawCentredString(W / 2, 16.5 * mm, barcode_val[:28])
+        c.drawCentredString(W / 2, 13 * mm, barcode_val[:32])
 
         c.setFont(_F_BOLD, 8)
-        c.drawCentredString(W / 2, 11 * mm, f"#{req_id:06d}  {city[:18]}")
+        c.drawCentredString(W / 2, 8 * mm, f"#{req_id:06d}  {city[:22]}")
 
         c.setFont(_F, 7)
-        c.drawCentredString(W / 2, 5.5 * mm, name[:26] if name else "—")
+        c.drawCentredString(W / 2, 3.5 * mm, name[:30] if name else "—")
 
         c.showPage()
 
@@ -3100,27 +3099,27 @@ def _fetch_label_orders(db: Session, ids: Optional[str], *, yandex_only: bool = 
 
 @router.get("/warehouse/labels")
 def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    """PDF этикетки 58×80 мм (портрет) — СДЭК и Яндекс."""
+    """PDF этикетки 80×58 мм (горизонталь 80) — СДЭК и Яндекс."""
     rows = _fetch_label_orders(db, ids)
-    buf = _build_labels_pdf_58x80(rows)
+    buf = _build_labels_pdf_80x58(rows)
     today = datetime.date.today().strftime("%Y-%m-%d")
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_58x80_{today}.pdf"'},
+        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
     )
 
 
 @router.get("/warehouse/labels/thermal")
 def warehouse_labels_thermal(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    """Тот же формат 58×80 мм (алиас для термопринтера)."""
+    """Тот же формат 80×58 мм (алиас для термопринтера)."""
     rows = _fetch_label_orders(db, ids)
-    buf = _build_labels_pdf_58x80(rows)
+    buf = _build_labels_pdf_80x58(rows)
     today = datetime.date.today().strftime("%Y-%m-%d")
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_58x80_{today}.pdf"'},
+        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
     )
 
 
