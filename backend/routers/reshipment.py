@@ -389,6 +389,16 @@ def get_pvz_list(city: str = Query(..., min_length=2)):
         raise HTTPException(status_code=502, detail=f"Ошибка получения ПВЗ: {e}")
 
 
+@public_router.get("/suggest-address")
+def suggest_address(q: str = Query("", min_length=0), count: int = Query(7, ge=1, le=10)):
+    """Подсказки адресов DaData для формы клиента (ключ только на сервере)."""
+    from ..pickup_resolver import suggest_addresses
+    query = (q or "").strip()
+    if len(query) < 2:
+        return {"status": "success", "suggestions": []}
+    return {"status": "success", "suggestions": suggest_addresses(query, count=count)}
+
+
 @public_router.get("/nearest-pickup")
 def get_nearest_pickup(
     city: str = Query(..., min_length=2),

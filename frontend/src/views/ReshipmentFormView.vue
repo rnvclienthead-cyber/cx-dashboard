@@ -90,11 +90,17 @@ const form = reactive({
 // ── Автоподбор пункта выдачи по адресу клиента ─────────────────────────────
 const addressQuery      = ref('')
 const pickupLoading     = ref(false)
+const suggestLoading    = ref(false)
 const pickupError       = ref('')
 const resolvedPickup    = ref(null)
 const addressImprecise  = ref(false)  // true если выбран только город без улицы
+const addressSuggestions = ref([])
+const showSuggestions   = ref(false)
 let addressDebounce = null
+let suggestDebounce = null
 let addressRequestId = 0
+let suggestAbort = null
+let pickupAbort = null
 
 const clearPickup = () => {
   resolvedPickup.value    = null
@@ -111,31 +117,101 @@ const onAddressInput = () => {
   clearPickup()
   delete errors.pvz
   clearTimeout(addressDebounce)
+  clearTimeout(suggestDebounce)
   const q = addressQuery.value.trim()
-  if (q.length < 3) return
-  const requestId = addressRequestId
-  addressDebounce = setTimeout(() => resolveTypedAddress(requestId), 500)
+  addressSuggestions.value = []
+  showSuggestions.value = false
+  if (q.length < 2) {
+    suggestLoading.value = false
+    pickupLoading.value = false
+    return
+  }
+  // Быстрый список подсказок DaData (как привычный автокомплит)
+  const suggestId = addressRequestId
+  suggestDebounce = setTimeout(() => fetchAddressSuggestions(suggestId), 250)
 }
 
-const resolveTypedAddress = async (requestId = addressRequestId) => {
+const fetchAddressSuggestions = async (requestId) => {
+  const q = addressQuery.value.trim()
+  if (q.length < 2) return
+  if (suggestAbort) suggestAbort.abort()
+  suggestAbort = new AbortController()
+  const timer = setTimeout(() => suggestAbort.abort(), 10000)
+  suggestLoading.value = true
+  try {
+    const params = new URLSearchParams({ q, count: '7' })
+    const res = await fetch(`${API_BASE}/api/v1/reshipment/suggest-address?${params}`, {
+      signal: suggestAbort.signal,
+    })
+    const data = await res.json()
+    if (requestId !== addressRequestId) return
+    addressSuggestions.value = (data.suggestions || []).filter(s => s.selectable !== false)
+    showSuggestions.value = addressSuggestions.value.length > 0
+    if (!addressSuggestions.value.length && q.length >= 3) {
+      // Нет кликабельных подсказок — пробуем старый путь (город целиком)
+      addressDebounce = setTimeout(() => resolveTypedAddress(requestId), 400)
+    }
+  } catch (e) {
+    if (e?.name === 'AbortError') return
+    if (requestId === addressRequestId) {
+      addressSuggestions.value = []
+      showSuggestions.value = false
+    }
+  } finally {
+    clearTimeout(timer)
+    if (requestId === addressRequestId) suggestLoading.value = false
+  }
+}
+
+const pickSuggestion = async (item) => {
+  if (!item?.value) return
+  showSuggestions.value = false
+  addressSuggestions.value = []
+  addressQuery.value = item.value
+  addressRequestId += 1
+  await resolveTypedAddress(addressRequestId, {
+    address: item.value,
+    city: item.city || item.value,
+    lat: item.lat,
+    lon: item.lon,
+  })
+}
+
+const hideSuggestionsSoon = () => {
+  setTimeout(() => { showSuggestions.value = false }, 200)
+}
+
+const resolveTypedAddress = async (requestId = addressRequestId, preset = null) => {
   if (resolvedPickup.value) return true
 
-  const query = addressQuery.value.trim()
+  const query = (preset?.address || addressQuery.value).trim()
   if (query.length < 3) {
     pickupError.value = 'Укажите город и улицу доставки'
     return false
   }
 
+  if (pickupAbort) pickupAbort.abort()
+  pickupAbort = new AbortController()
+  const timer = setTimeout(() => pickupAbort.abort(), 15000)
   pickupLoading.value = true
   pickupError.value = ''
   try {
     // DaData-ключ хранится на backend, а не в production-бандле браузера.
-    const params = new URLSearchParams({ city: query, address: query })
-    const res = await fetch(`${API_BASE}/api/v1/reshipment/nearest-pickup?${params}`)
+    const params = new URLSearchParams({
+      city: preset?.city || query,
+      address: query,
+    })
+    if (preset?.lat != null && preset?.lon != null) {
+      params.set('lat', String(preset.lat))
+      params.set('lon', String(preset.lon))
+    }
+    const res = await fetch(`${API_BASE}/api/v1/reshipment/nearest-pickup?${params}`, {
+      signal: pickupAbort.signal,
+    })
     const data = await res.json()
     if (requestId !== addressRequestId) return false
     if (data.status !== 'success' || !data.data) {
-      pickupError.value = 'Не нашли пункт выдачи рядом. Уточните город и улицу'
+      pickupError.value = 'Не нашли пункт выдачи рядом. Выберите адрес из списка подсказок'
       return false
     }
 
@@ -149,12 +225,19 @@ const resolveTypedAddress = async (requestId = addressRequestId) => {
     resolvedPickup.value = normalized
     delete errors.pvz
     return true
-  } catch {
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      if (requestId === addressRequestId) {
+        pickupError.value = 'Слишком долго проверяем адрес. Выберите подсказку из списка или попробуйте ещё раз'
+      }
+      return false
+    }
     if (requestId === addressRequestId) {
       pickupError.value = 'Не удалось проверить адрес. Попробуйте ещё раз'
     }
     return false
   } finally {
+    clearTimeout(timer)
     if (requestId === addressRequestId) pickupLoading.value = false
   }
 }
@@ -659,23 +742,36 @@ const submit = async () => {
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
 
-              <p class="text-xs mb-3" style="color:#9CA3AF;">Введите город и улицу — адрес уточним и ПВЗ подберём автоматически.</p>
+              <p class="text-xs mb-3" style="color:#9CA3AF;">Начните вводить город и улицу — выберите адрес из списка. ПВЗ подберём автоматически.</p>
 
-              <!-- Адрес нормализуется и ПВЗ подбирается автоматически -->
+              <!-- Адрес: подсказки DaData → затем проверка ПВЗ -->
               <div class="relative">
                 <input v-model="addressQuery" @input="onAddressInput"
+                  @focus="showSuggestions = addressSuggestions.length > 0"
+                  @blur="hideSuggestionsSoon"
                   type="text" autocomplete="off"
                   placeholder="Например: Москва, Тверская улица, 7"
                   class="form-input w-full px-4 py-3 rounded-2xl border text-sm outline-none transition-colors"
                   :style="errors.pvz ? 'border-color:#FCA5A5; background:#FEF2F2;' : 'border-color:#E5E7EB;'" />
 
                 <!-- Индикатор автоподбора -->
-                <div v-if="pickupLoading" class="absolute right-3 top-1/2 -translate-y-1/2">
+                <div v-if="pickupLoading || suggestLoading" class="absolute right-3 top-1/2 -translate-y-1/2">
                   <svg class="w-4 h-4 animate-spin" style="color:#9CA3AF;" viewBox="0 0 24 24" fill="none">
                     <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="60" stroke-dashoffset="20"/>
                   </svg>
                 </div>
 
+                <!-- Список подсказок -->
+                <div v-if="showSuggestions && addressSuggestions.length"
+                  class="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-y-auto rounded-2xl border bg-white shadow-lg"
+                  style="border-color:#E5E7EB;">
+                  <button v-for="(s, i) in addressSuggestions" :key="i" type="button"
+                    @mousedown.prevent="pickSuggestion(s)"
+                    class="block w-full text-left px-4 py-2.5 text-sm transition-colors hover:bg-amber-50"
+                    style="color:#1E2235; border-bottom:1px solid #F3F4F6;">
+                    {{ s.value }}
+                  </button>
+                </div>
               </div>
 
               <!-- Загрузка nearest-pickup -->
@@ -684,6 +780,9 @@ const submit = async () => {
                   <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="60" stroke-dashoffset="20"/>
                 </svg>
                 Проверяем адрес...
+              </div>
+              <div v-else-if="suggestLoading" class="flex items-center gap-2 mt-3 text-xs" style="color:#9CA3AF;">
+                Ищем адрес...
               </div>
 
               <!-- Ошибка -->

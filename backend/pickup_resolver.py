@@ -28,6 +28,94 @@ def distance_km(
         return None
 
 
+def _dadata_key() -> str:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    return (os.getenv("DADATA_API_KEY") or os.getenv("VITE_DADATA_KEY") or "").strip()
+
+
+def _suggestion_to_resolved(suggestion: dict, fallback_q: str = "") -> Optional[dict]:
+    """Превращает одну подсказку DaData в наш формат (нужны координаты и город)."""
+    if not suggestion:
+        return None
+    data = suggestion.get("data") or {}
+    lat = data.get("geo_lat")
+    lon = data.get("geo_lon")
+    if lat is None or lon is None:
+        return None
+    # Чистая область/край без города — для ПВЗ бесполезно
+    city = (
+        data.get("city") or data.get("settlement")
+        or data.get("city_with_type") or data.get("settlement_with_type")
+    )
+    if not city:
+        return None
+    city = str(city).strip()
+    granularity = data.get("granularity") or ""
+    return {
+        "address": suggestion.get("value") or fallback_q,
+        "city": city,
+        "lat": float(lat),
+        "lon": float(lon),
+        "address_imprecise": not data.get("street") and not data.get("house")
+            and granularity != "flat",
+    }
+
+
+def suggest_addresses(query: str, count: int = 7) -> list:
+    """Подсказки адресов через DaData (ключ только на сервере)."""
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+    key = _dadata_key()
+    if not key:
+        return []
+    import requests
+    try:
+        resp = requests.post(
+            "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address",
+            json={"query": q, "count": max(1, min(int(count), 10))},
+            headers={
+                "Authorization": f"Token {key}",
+                "Content-Type": "application/json",
+            },
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return []
+        out = []
+        for suggestion in (resp.json() or {}).get("suggestions") or []:
+            resolved = _suggestion_to_resolved(suggestion, q)
+            if resolved:
+                out.append({
+                    "value": resolved["address"],
+                    "city": resolved["city"],
+                    "lat": resolved["lat"],
+                    "lon": resolved["lon"],
+                    "address_imprecise": resolved["address_imprecise"],
+                    "selectable": True,
+                })
+                continue
+            value = (suggestion.get("value") or "").strip()
+            if not value:
+                continue
+            data = suggestion.get("data") or {}
+            out.append({
+                "value": value,
+                "city": data.get("city") or data.get("settlement") or "",
+                "lat": None,
+                "lon": None,
+                "selectable": False,
+            })
+        return out
+    except Exception as e:
+        logger.warning("DaData suggest failed for %r: %s", q[:80], e)
+        return []
+
+
 def resolve_address(address: str) -> Optional[dict]:
     """Нормализует адрес на сервере: сначала DaData, затем Nominatim.
 
@@ -39,18 +127,13 @@ def resolve_address(address: str) -> Optional[dict]:
         return None
 
     import requests
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
 
-    dadata_key = (os.getenv("DADATA_API_KEY") or os.getenv("VITE_DADATA_KEY") or "").strip()
+    dadata_key = _dadata_key()
     if dadata_key:
         try:
             resp = requests.post(
                 "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address",
-                json={"query": q, "count": 1},
+                json={"query": q, "count": 5},
                 headers={
                     "Authorization": f"Token {dadata_key}",
                     "Content-Type": "application/json",
@@ -59,25 +142,11 @@ def resolve_address(address: str) -> Optional[dict]:
             )
             if resp.status_code == 200:
                 suggestions = (resp.json() or {}).get("suggestions") or []
-                if suggestions:
-                    suggestion = suggestions[0]
-                    data = suggestion.get("data") or {}
-                    lat = data.get("geo_lat")
-                    lon = data.get("geo_lon")
-                    if lat is not None and lon is not None:
-                        city = (
-                            data.get("city") or data.get("settlement")
-                            or data.get("area_with_type") or data.get("region") or q
-                        )
-                        granularity = data.get("granularity") or ""
-                        return {
-                            "address": suggestion.get("value") or q,
-                            "city": city,
-                            "lat": float(lat),
-                            "lon": float(lon),
-                            "address_imprecise": not data.get("street") and not data.get("house")
-                                and granularity != "flat",
-                        }
+                # Первая подсказка с координатами и городом (не «Иркутская обл»)
+                for suggestion in suggestions:
+                    resolved = _suggestion_to_resolved(suggestion, q)
+                    if resolved:
+                        return resolved
         except Exception as e:
             logger.warning("geocode DaData failed for %r: %s", q[:80], e)
 
