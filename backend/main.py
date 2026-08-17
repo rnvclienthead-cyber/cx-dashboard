@@ -54,6 +54,20 @@ async def lifespan(app: FastAPI):
             ALTER TABLE reshipment_requests
                 ADD COLUMN IF NOT EXISTS ym_chat_id TEXT
         """))
+        # Внутренний артикул продавца (ЯМ context_article / WB supplier_article)
+        conn.execute(text("""
+            ALTER TABLE reshipment_requests
+                ADD COLUMN IF NOT EXISTS supplier_article TEXT
+        """))
+        # Подтянуть артикул из уже привязанных чатов ЯМ (если ещё пусто)
+        conn.execute(text("""
+            UPDATE reshipment_requests r
+            SET supplier_article = NULLIF(TRIM(y.context_article), '')
+            FROM ym_chats y
+            WHERE r.ym_chat_id = y.chat_id
+              AND (r.supplier_article IS NULL OR TRIM(r.supplier_article) = '')
+              AND NULLIF(TRIM(y.context_article), '') IS NOT NULL
+        """))
         conn.execute(text("""
             ALTER TABLE reshipment_chat_tokens
                 ADD COLUMN IF NOT EXISTS mp VARCHAR(10)

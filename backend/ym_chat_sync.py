@@ -642,7 +642,7 @@ def link_reshipment_tokens(db) -> int:
         hit = db.execute(sql_text("""
             SELECT chat_id FROM ym_chat_messages
             WHERE text ILIKE :pat
-              AND created_at <= (:used_at::timestamp + INTERVAL '2 hours')
+              AND created_at <= (CAST(:used_at AS timestamp) + INTERVAL '2 hours')
             ORDER BY created_at DESC
             LIMIT 1
         """), {"pat": f"%t={row['token']}%", "used_at": row["used_at"]}).mappings().first()
@@ -662,6 +662,7 @@ def link_reshipment_tokens(db) -> int:
                 ym_chat_id = :cid,
                 marketplace = 'ym',
                 order_number = COALESCE(NULLIF(order_number, ''), :oid),
+                supplier_article = COALESCE(NULLIF(TRIM(supplier_article), ''), :art),
                 product_category = COALESCE(NULLIF(product_category, ''), :art)
             WHERE id = :id
               AND (ym_chat_id IS NULL OR ym_chat_id = '')

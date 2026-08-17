@@ -625,6 +625,7 @@ def submit_reshipment(
     token_mp       = None
     category_val   = (product_category or "").strip() or None
     order_num_val  = (order_number or "").strip() or None
+    supplier_article_val = None
 
     # Новая схема: ищем chatID по токену (если воркер уже успел его привязать)
     if not clean_chat_id and clean_token:
@@ -662,8 +663,11 @@ def submit_reshipment(
             if ym_row:
                 if not order_num_val and ym_row.get("order_id"):
                     order_num_val = ym_row["order_id"]
-                if not category_val and ym_row.get("context_article"):
-                    category_val = ym_row["context_article"]
+                art = (ym_row.get("context_article") or "").strip() or None
+                if art:
+                    supplier_article_val = art
+                    if not category_val:
+                        category_val = art
         else:
             marketplace = "wb"
             wb_chat_id_val = clean_chat_id
@@ -686,7 +690,7 @@ def submit_reshipment(
         result = db.execute(text("""
             INSERT INTO reshipment_requests
                 (customer_name, customer_email, customer_phone, order_number, marketplace,
-                 product_category, problem_type, items_to_send,
+                 product_category, problem_type, items_to_send, supplier_article,
                  shipping_address, address_postal, address_region,
                  address_city, address_street, address_house,
                  client_pvz_code, client_pvz_address, client_pvz_city, cdek_cost,
@@ -697,7 +701,7 @@ def submit_reshipment(
                  salebot_client_id, chat_token)
             VALUES
                 (:name, :email, :phone, :order_num, :marketplace,
-                 :category, :problem_type, :items,
+                 :category, :problem_type, :items, :supplier_article,
                  :address, :postal, :region,
                  :city, :street, :house,
                  :pvz_code, :pvz_address, :pvz_city, :cdek_cost,
@@ -716,6 +720,7 @@ def submit_reshipment(
             "category":      category_val,
             "problem_type":  problem_type,
             "items":         items_to_send.strip(),
+            "supplier_article": supplier_article_val,
             "address":       shipping_address,
             "postal":        address_postal,
             "region":        address_region,
@@ -1024,6 +1029,7 @@ def get_requests(
     rows = db.execute(text(f"""
         SELECT r.id, r.created_at, r.updated_at, r.customer_name, r.customer_email, r.customer_phone,
                r.order_number, r.product_category, r.problem_type, r.items_to_send,
+               r.supplier_article,
                r.shipping_address, r.address_postal, r.address_region,
                r.address_city, r.address_street, r.address_house,
                r.client_pvz_code, r.client_pvz_address, r.client_pvz_city,
@@ -1038,7 +1044,7 @@ def get_requests(
                r.ym_chat_id, r.marketplace,
                y.cabinet_chat_id AS ym_cabinet_chat_id,
                y.context_type AS ym_context_type,
-               y.context_article AS ym_context_article,
+               COALESCE(NULLIF(TRIM(r.supplier_article), ''), y.context_article) AS ym_context_article,
                y.order_id AS ym_order_id,
                r.salebot_client_id, r.salebot_messenger, r.salebot_blocked,
                r.promo_code, r.promo_sent_at, r.chat_token, r.confirmation_token,
@@ -3035,12 +3041,12 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         c.setFillColor(carrier_color)
         c.drawCentredString(W / 2, H - 5.5 * mm, carrier_label)
 
-        # Штрих-код на всю ширину 80 мм; чёрный (Code128 берёт fillColor)
+        # Штрих-код: широкий, но низкий — меньше расход термоленты; сидит ближе к тексту
         c.setFillColor(colors.black)
         c.setStrokeColor(colors.black)
-        FOOTER_H = 18 * mm
-        HEADER_H = 8 * mm
-        bc_height = H - HEADER_H - FOOTER_H
+        FOOTER_H = 16 * mm
+        bc_height = 12 * mm
+        bc_y = FOOTER_H + 1.5 * mm
         max_bc_w = W - 2 * MARGIN
 
         try:
@@ -3049,7 +3055,7 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
             bar_w = max_bc_w / natural_w
             bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=bc_height, quiet=False)
             bc.fillColor = colors.black
-            bc.drawOn(c, MARGIN + (max_bc_w - bc.width) / 2, FOOTER_H)
+            bc.drawOn(c, MARGIN + (max_bc_w - bc.width) / 2, bc_y)
         except Exception:
             c.setFont(_F_BOLD, 9)
             c.setFillColor(colors.black)
@@ -3058,13 +3064,13 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         # Под штрих-кодом: значение + заявка / город / ФИО
         c.setFillColor(colors.black)
         c.setFont(_F_BOLD, 7)
-        c.drawCentredString(W / 2, 13 * mm, barcode_val[:32])
+        c.drawCentredString(W / 2, 12 * mm, barcode_val[:32])
 
         c.setFont(_F_BOLD, 8)
-        c.drawCentredString(W / 2, 8 * mm, f"#{req_id:06d}  {city[:22]}")
+        c.drawCentredString(W / 2, 7.5 * mm, f"#{req_id:06d}  {city[:22]}")
 
         c.setFont(_F, 7)
-        c.drawCentredString(W / 2, 3.5 * mm, name[:30] if name else "—")
+        c.drawCentredString(W / 2, 3.2 * mm, name[:30] if name else "—")
 
         c.showPage()
 

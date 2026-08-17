@@ -222,6 +222,11 @@ const marketplaceLabel = (req) => {
   return 'WB'
 }
 
+/** Внутренний артикул продавца (ЯМ / сохранённый) */
+const displayArticle = (req) => {
+  return (req?.supplier_article || req?.ym_context_article || '').trim()
+}
+
 // ── Экономика заявки ─────────────────────────────────────────────────────────
 const economicsData    = ref(null)
 const economicsLoading = ref(false)
@@ -628,6 +633,8 @@ const filteredRequests = computed(() => {
         (r.customer_name       || '').toLowerCase().includes(q) ||
         (r.order_number        || '').toLowerCase().includes(q) ||
         (r.items_to_send       || '').toLowerCase().includes(q) ||
+        (r.supplier_article    || '').toLowerCase().includes(q) ||
+        (r.ym_context_article  || '').toLowerCase().includes(q) ||
         (r.customer_phone      || '').includes(q) ||
         (r.wb_chat_id          || '').toLowerCase().includes(q) ||
         (r.ym_chat_id          || '').toLowerCase().includes(q) ||
@@ -1397,7 +1404,11 @@ onUnmounted(() => {
                 {{ statusMeta[req.status]?.label || req.status }}
               </span>
             </div>
-            <div class="text-xs text-slate-500 truncate mb-1">{{ req.problem_type }} · {{ req.items_to_send }}</div>
+            <div class="text-xs text-slate-500 truncate mb-1">
+              <span v-if="displayArticle(req)" class="font-mono font-semibold text-slate-700">{{ displayArticle(req) }}</span>
+              <span v-if="displayArticle(req)"> · </span>
+              {{ req.problem_type }} · {{ req.items_to_send }}
+            </div>
             <div class="flex items-center gap-2 text-[10px] text-slate-400 flex-wrap">
               <span>#{{ req.id }}</span>
               <span v-if="req.order_number">· {{ req.order_number }}</span>
@@ -1450,6 +1461,11 @@ onUnmounted(() => {
                     ? 'bg-yellow-100 text-yellow-800'
                     : 'bg-violet-100 text-violet-700'">
                   {{ marketplaceLabel(selected) }}
+                </span>
+                <span v-if="displayArticle(selected)"
+                  class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700"
+                  :title="'Внутренний артикул'">
+                  {{ displayArticle(selected) }}
                 </span>
                 <!-- Статус + дата + тултип с историей -->
                 <div class="relative group">
@@ -1585,9 +1601,9 @@ onUnmounted(() => {
                 <ExternalLink class="w-3 h-3" /> Открыть чат ЯМ
               </a>
             </div>
-            <p v-if="selected.ym_chat_id && selected.ym_context_article" class="text-[10px] text-slate-500 mt-1.5">
-              Товар: <span class="font-mono font-semibold text-slate-700">{{ selected.ym_context_article }}</span>
-              <span v-if="selected.ym_order_id"> · заказ {{ selected.ym_order_id }}</span>
+            <p v-if="displayArticle(selected)" class="text-[10px] text-slate-500 mt-1.5">
+              Товар: <span class="font-mono font-semibold text-slate-700">{{ displayArticle(selected) }}</span>
+              <span v-if="selected.ym_order_id || selected.order_number"> · заказ {{ selected.ym_order_id || selected.order_number }}</span>
             </p>
           </div>
           <div v-else-if="!isWarehouseOnly" class="bg-slate-50 rounded-xl border border-slate-200 p-3 flex items-center justify-center">
@@ -1939,6 +1955,10 @@ onUnmounted(() => {
             <div class="flex items-center gap-1 mb-1.5">
               <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Категория:</p>
               <span class="text-[10px] font-semibold" :class="selected.product_category ? 'text-slate-600' : 'text-slate-400 italic'">{{ selected.product_category || 'Не указана' }}</span>
+            </div>
+            <div v-if="displayArticle(selected)" class="flex items-center gap-1 mb-1.5">
+              <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Артикул:</p>
+              <span class="text-[11px] font-mono font-bold text-slate-800">{{ displayArticle(selected) }}</span>
             </div>
             <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Что отправить</p>
             <p class="text-xs font-medium text-slate-800 leading-snug">{{ selected.items_to_send }}</p>
