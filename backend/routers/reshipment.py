@@ -3036,17 +3036,16 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         c.setLineWidth(0.4)
         c.rect(0.8 * mm, 0.8 * mm, W - 1.6 * mm, H - 1.6 * mm)
 
-        # Верх: перевозчик
+        # Верх: перевозчик — сразу над штрих-кодом (без пустой «башни»)
         c.setFont(_F_BOLD, 8)
         c.setFillColor(carrier_color)
-        c.drawCentredString(W / 2, H - 5.5 * mm, carrier_label)
+        c.drawCentredString(W / 2, 28.5 * mm, carrier_label)
 
-        # Штрих-код: широкий, но низкий — меньше расход термоленты; сидит ближе к тексту
+        # Штрих-код: низкий (экономия ленты) и ближе к тексту внизу
         c.setFillColor(colors.black)
         c.setStrokeColor(colors.black)
-        FOOTER_H = 16 * mm
-        bc_height = 12 * mm
-        bc_y = FOOTER_H + 1.5 * mm
+        bc_height = 8 * mm
+        bc_y = 18 * mm
         max_bc_w = W - 2 * MARGIN
 
         try:
@@ -3059,18 +3058,18 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         except Exception:
             c.setFont(_F_BOLD, 9)
             c.setFillColor(colors.black)
-            c.drawCentredString(W / 2, H / 2, barcode_val)
+            c.drawCentredString(W / 2, 22 * mm, barcode_val)
 
         # Под штрих-кодом: значение + заявка / город / ФИО
         c.setFillColor(colors.black)
         c.setFont(_F_BOLD, 7)
-        c.drawCentredString(W / 2, 12 * mm, barcode_val[:32])
+        c.drawCentredString(W / 2, 13.5 * mm, barcode_val[:32])
 
         c.setFont(_F_BOLD, 8)
-        c.drawCentredString(W / 2, 7.5 * mm, f"#{req_id:06d}  {city[:22]}")
+        c.drawCentredString(W / 2, 8.5 * mm, f"#{req_id:06d}  {city[:22]}")
 
         c.setFont(_F, 7)
-        c.drawCentredString(W / 2, 3.2 * mm, name[:30] if name else "—")
+        c.drawCentredString(W / 2, 3.5 * mm, name[:30] if name else "—")
 
         c.showPage()
 
@@ -3112,7 +3111,11 @@ def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
+        headers={
+            "Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"',
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
     )
 
 
@@ -3125,7 +3128,11 @@ def warehouse_labels_thermal(ids: Optional[str] = Query(None), db: Session = Dep
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
+        headers={
+            "Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"',
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
     )
 
 
