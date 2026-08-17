@@ -1171,9 +1171,9 @@ const downloadPacklist = async () => {
 // ── Склад: печать этикеток PDF 80×58 ─────────────────────────────────────────
 const downloadLabels = async (ids = []) => {
   const token = localStorage.getItem('token')
-  const idsParam = ids.length ? `?ids=${ids.join(',')}&_=${Date.now()}` : `?_=${Date.now()}`
+  const idsParam = ids.length ? `?ids=${ids.join(',')}` : ''
   const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/labels${idsParam}`, {
-    headers: { 'Authorization': `Bearer ${token}`, 'Cache-Control': 'no-cache' }
+    headers: { 'Authorization': `Bearer ${token}` }
   })
   if (!res.ok) {
     alert('Не удалось сформировать этикетку')

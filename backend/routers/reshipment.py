@@ -3036,16 +3036,17 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         c.setLineWidth(0.4)
         c.rect(0.8 * mm, 0.8 * mm, W - 1.6 * mm, H - 1.6 * mm)
 
-        # Верх: перевозчик — сразу над штрих-кодом (без пустой «башни»)
+        # Верх: перевозчик
         c.setFont(_F_BOLD, 8)
         c.setFillColor(carrier_color)
-        c.drawCentredString(W / 2, 28.5 * mm, carrier_label)
+        c.drawCentredString(W / 2, H - 5.5 * mm, carrier_label)
 
-        # Штрих-код: низкий (экономия ленты) и ближе к тексту внизу
+        # Штрих-код на всю ширину 80 мм; чёрный (Code128 берёт fillColor)
         c.setFillColor(colors.black)
         c.setStrokeColor(colors.black)
-        bc_height = 8 * mm
-        bc_y = 18 * mm
+        FOOTER_H = 18 * mm
+        HEADER_H = 8 * mm
+        bc_height = H - HEADER_H - FOOTER_H
         max_bc_w = W - 2 * MARGIN
 
         try:
@@ -3054,19 +3055,19 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
             bar_w = max_bc_w / natural_w
             bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=bc_height, quiet=False)
             bc.fillColor = colors.black
-            bc.drawOn(c, MARGIN + (max_bc_w - bc.width) / 2, bc_y)
+            bc.drawOn(c, MARGIN + (max_bc_w - bc.width) / 2, FOOTER_H)
         except Exception:
             c.setFont(_F_BOLD, 9)
             c.setFillColor(colors.black)
-            c.drawCentredString(W / 2, 22 * mm, barcode_val)
+            c.drawCentredString(W / 2, H / 2, barcode_val)
 
         # Под штрих-кодом: значение + заявка / город / ФИО
         c.setFillColor(colors.black)
         c.setFont(_F_BOLD, 7)
-        c.drawCentredString(W / 2, 13.5 * mm, barcode_val[:32])
+        c.drawCentredString(W / 2, 13 * mm, barcode_val[:32])
 
         c.setFont(_F_BOLD, 8)
-        c.drawCentredString(W / 2, 8.5 * mm, f"#{req_id:06d}  {city[:22]}")
+        c.drawCentredString(W / 2, 8 * mm, f"#{req_id:06d}  {city[:22]}")
 
         c.setFont(_F, 7)
         c.drawCentredString(W / 2, 3.5 * mm, name[:30] if name else "—")
@@ -3111,11 +3112,7 @@ def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"',
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
     )
 
 
@@ -3128,11 +3125,7 @@ def warehouse_labels_thermal(ids: Optional[str] = Query(None), db: Session = Dep
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"',
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
     )
 
 
