@@ -3036,6 +3036,9 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         c.drawCentredString(W / 2, H - 5.5 * mm, carrier_label)
 
         # Штрих-код на всю ширину 80 мм (полосы пропорциональные, без искажения scale)
+        # Важно: Code128 рисует текущим fillColor — сбрасываем в чёрный.
+        c.setFillColor(colors.black)
+        c.setStrokeColor(colors.black)
         FOOTER_H = 18 * mm
         HEADER_H = 8 * mm
         bc_height = H - HEADER_H - FOOTER_H
@@ -3047,6 +3050,7 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
             # Растягиваем ровно на ширину этикетки — так код всегда помещается
             bar_w = max_bc_w / natural_w
             bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=bc_height, quiet=False)
+            bc.fillColor = colors.black
             bc.drawOn(c, MARGIN + (max_bc_w - bc.width) / 2, FOOTER_H)
         except Exception:
             c.setFont(_F_BOLD, 9)
