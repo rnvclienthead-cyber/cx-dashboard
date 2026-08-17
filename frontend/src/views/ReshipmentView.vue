@@ -189,7 +189,15 @@ const closeLightbox = () => { lightboxPhotos.value = [] }
 const lightboxPrev  = () => { lightboxIndex.value = (lightboxIndex.value - 1 + lightboxPhotos.value.length) % lightboxPhotos.value.length }
 const lightboxNext  = () => { lightboxIndex.value = (lightboxIndex.value + 1) % lightboxPhotos.value.length }
 
-const parsePhotos = (photosStr) => (photosStr || '').split(' ').map(u => u.trim()).filter(Boolean)
+const parsePhotos = (str) => {
+  if (!str || str === 'nan' || String(str).toLowerCase() === 'none') return []
+  return String(str).split(/\s+/).map(g => {
+    const parts = g.split('|').map(p => p.trim()).filter(Boolean)
+    let url = parts[0] || ''
+    if (url.startsWith('//')) url = 'https:' + url
+    return url
+  }).filter(url => url.startsWith('http') || url.startsWith('/static/')).slice(0, 12)
+}
 
 // ── WB / ЯМ Chat URL ───────────────────────────────────────────────────────────
 const wbChatUrl = (chatId) => {
@@ -759,7 +767,7 @@ const select = async (req) => {
     // считаться именно по нему, а не по значению, оставшемуся от прошлой заявки
     selectedCarrier.value = req.delivery_method || 'cdek'
   }
-  if (req.wb_chat_id || req.wb_nm_id) loadWbContext(req.id)
+  if (req.wb_chat_id || req.wb_nm_id || req.matched_srid) loadWbContext(req.id)
   if (!isWarehouseOnly.value) loadEconomics(req.id)
   showStatusHistory.value = false
   loadStatusHistory(req.id)
@@ -1645,11 +1653,12 @@ onUnmounted(() => {
                   <div v-if="wbCtx.claim.user_comment" class="mt-1 text-[10px] text-slate-600 leading-relaxed bg-white rounded p-1.5 border border-rose-100">
                     {{ wbCtx.claim.user_comment }}
                   </div>
-                  <div v-if="wbCtx.claim.photos" class="flex flex-wrap gap-1 mt-1">
+                  <div v-if="wbCtx.claim.photos" class="flex flex-wrap gap-1.5 mt-1.5">
                     <button v-for="(url, i) in parsePhotos(wbCtx.claim.photos)" :key="i"
+                      type="button"
                       @click="openLightbox(parsePhotos(wbCtx.claim.photos), i)"
-                      class="text-[10px] px-1.5 py-0.5 bg-rose-100 text-rose-700 rounded hover:bg-rose-200 flex items-center gap-0.5">
-                      <RotateCcw class="w-2 h-2" /> {{ i + 1 }}
+                      class="w-14 h-14 rounded-lg overflow-hidden border border-rose-200 bg-white hover:ring-2 hover:ring-rose-300 transition">
+                      <img :src="url" :alt="`Фото ${i + 1}`" class="w-full h-full object-cover" loading="lazy" />
                     </button>
                   </div>
                 </div>
