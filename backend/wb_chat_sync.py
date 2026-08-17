@@ -282,18 +282,30 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
                     last_ts = ets
             conn.commit()
 
-            # Публикуем обновлённые чаты в Centrifugo
+            # Публикуем обновлённые чаты в Centrifugo + предрасчёт подсказки
             if updated_ids:
                 rows = conn.execute(text("""
                     SELECT chat_id, client_name, nm_id, good_name,
                            last_message, last_sender, last_ts, needs_answer
                     FROM wb_chats WHERE chat_id = ANY(:ids)
                 """), {"ids": list(set(updated_ids))}).mappings().all()
+                from . import chat_realtime
                 for row in rows:
-                    centrifugo.publish("chats", {
-                        "type": "chat_updated",
-                        "chat": dict(row),
+                    chat_realtime.publish_chat_updated({
+                        "chat_id": row["chat_id"],
+                        "mp": "wb",
+                        "client_name": row.get("client_name"),
+                        "nm_id": row.get("nm_id"),
+                        "good_name": row.get("good_name"),
+                        "last_message": row.get("last_message"),
+                        "last_sender": row.get("last_sender"),
+                        "last_ts": row.get("last_ts"),
+                        "needs_answer": row.get("needs_answer"),
                     })
+                    if row.get("needs_answer") and str(row.get("last_sender") or "").lower() in (
+                        "client", "customer", "buyer", ""
+                    ):
+                        chat_realtime.schedule_suggest_precompute("wb", row["chat_id"])
 
             nxt = res.get("next")
             if not nxt or int(nxt) <= cursor:
@@ -306,7 +318,8 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
             _set_cursor(conn, last_ts)
 
         # Автоархив: наше последнее сообщение, клиент молчит >2 дней
-        archived = conn.execute(text("""
+        archived_ids = [
+            str(r[0]) for r in conn.execute(text("""
             WITH targets AS (
               SELECT c.chat_id
               FROM wb_chats c
@@ -325,9 +338,10 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
               ON CONFLICT (item_type, item_id, mp) DO NOTHING
               RETURNING item_id
             )
-            SELECT count(*) FROM ins
-        """)).scalar() or 0
-        if archived:
+            SELECT item_id FROM ins
+        """)).fetchall()
+        ]
+        if archived_ids:
             conn.execute(text("""
                 UPDATE wb_chats c SET needs_answer = false, waiting_since = NULL, updated_at = now()
                 WHERE EXISTS (
@@ -338,10 +352,17 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
                   AND c.needs_answer = true
             """))
             conn.commit()
-            logger.info("[WBChatSync] auto-archived seller-silent>2d: %s", archived)
+            logger.info("[WBChatSync] auto-archived seller-silent>2d: %s", len(archived_ids))
+            try:
+                from . import chat_realtime
+                for cid in archived_ids:
+                    chat_realtime.publish_chat_removed(cid, "wb")
+            except Exception as e:
+                logger.warning("[WBChatSync] realtime remove: %s", e)
 
         # Уже помеченные is_closing, но ещё не в архиве
-        thanks = conn.execute(text("""
+        thanks_ids = [
+            str(r[0]) for r in conn.execute(text("""
             WITH targets AS (
               SELECT c.chat_id FROM wb_chats c
               LEFT JOIN cx_dismissed_items d
@@ -356,15 +377,22 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
               ON CONFLICT (item_type, item_id, mp) DO NOTHING
               RETURNING item_id
             )
-            SELECT count(*) FROM ins
-        """)).scalar() or 0
-        if thanks:
+            SELECT item_id FROM ins
+        """)).fetchall()
+        ]
+        if thanks_ids:
             conn.execute(text("""
                 UPDATE wb_chats SET needs_answer = false, waiting_since = NULL, updated_at = now()
                 WHERE is_closing = true AND needs_answer = true
             """))
             conn.commit()
-            logger.info("[WBChatSync] auto-archived thanks/closing: %s", thanks)
+            logger.info("[WBChatSync] auto-archived thanks/closing: %s", len(thanks_ids))
+            try:
+                from . import chat_realtime
+                for cid in thanks_ids:
+                    chat_realtime.publish_chat_removed(cid, "wb")
+            except Exception as e:
+                logger.warning("[WBChatSync] realtime remove thanks: %s", e)
 
         logger.info("[WBChatSync] processed %d events, %d pages, cursor=%d",
                     processed, pages, last_ts)

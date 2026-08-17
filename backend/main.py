@@ -313,6 +313,24 @@ async def lifespan(app: FastAPI):
             CREATE INDEX IF NOT EXISTS idx_ym_chat_messages_chat
             ON ym_chat_messages (chat_id, created_at)
         """))
+        # Горячие индексы для быстрого списка чатов (VIEW cx_chats_queue)
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_wb_chats_last_ts
+            ON wb_chats (last_ts DESC NULLS LAST)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ozon_chats_status_open
+            ON ozon_chats (chat_status)
+            WHERE chat_status = 'OPENED'
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ozon_chat_messages_chat_created_desc
+            ON ozon_chat_messages (chat_id, created_at DESC)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_ym_chat_messages_chat_created_desc
+            ON ym_chat_messages (chat_id, created_at DESC)
+        """))
         # ЯМ отзывы: поля для хранения ответа менеджера
         conn.execute(text("""
             ALTER TABLE ym_feedbacks
@@ -470,6 +488,10 @@ async def lifespan(app: FastAPI):
                 dismissed_at TIMESTAMP    DEFAULT NOW(),
                 UNIQUE (item_type, item_id, mp)
             )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_cx_dismissed_items_lookup
+            ON cx_dismissed_items (mp, item_type, item_id)
         """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS wb_product_photos (

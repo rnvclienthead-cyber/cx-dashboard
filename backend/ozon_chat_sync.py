@@ -715,6 +715,7 @@ def sync_chats(db) -> int:
 
     synced = 0
     history_done = 0
+    touched_ids: list[str] = []
     with db.bind.connect() as conn:
         # Сначала непрочитанные
         priority = sorted(
@@ -727,6 +728,7 @@ def sync_chats(db) -> int:
                 if not cid:
                     continue
                 synced += 1
+                touched_ids.append(cid)
                 unread_n = int(item.get("unread_count") or 0)
                 # Всегда копим историю в БД (как WB копит события) — открытие чата без live API.
                 # Приоритет: непрочитанные / без ленты / сменился last_message_id / первые N.
@@ -767,8 +769,41 @@ def sync_chats(db) -> int:
                 logger.error("[OzonChat] upsert error: %s", e)
         conn.commit()
 
+        # Realtime + предрасчёт подсказки для затронутых чатов
+        if touched_ids:
+            try:
+                from . import chat_realtime
+                rows = conn.execute(text("""
+                    SELECT chat_id, context_article, context_sku, order_number,
+                           last_message, last_sender, needs_answer, updated_at,
+                           EXTRACT(epoch FROM COALESCE(
+                             (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+                             c.waiting_since, c.created_at, c.updated_at, now()
+                           ))::bigint * 1000 AS last_ts
+                    FROM ozon_chats c
+                    WHERE chat_id = ANY(:ids)
+                """), {"ids": list(set(touched_ids))}).mappings().all()
+                for row in rows:
+                    chat_realtime.publish_chat_updated({
+                        "chat_id": row["chat_id"],
+                        "mp": "ozon",
+                        "sku": row.get("context_article") or "",
+                        "nm_id": row.get("context_sku"),
+                        "last_message": row.get("last_message"),
+                        "last_sender": row.get("last_sender"),
+                        "last_ts": row.get("last_ts"),
+                        "needs_answer": row.get("needs_answer"),
+                    })
+                    if row.get("needs_answer") and str(row.get("last_sender") or "").lower() in (
+                        "customer", "buyer", "client", ""
+                    ):
+                        chat_realtime.schedule_suggest_precompute("ozon", row["chat_id"])
+            except Exception as e:
+                logger.warning("[OzonChat] realtime publish: %s", e)
+
         # Добиваем хвост: seller last + тишина >3д (даже если history в этом цикле не трогали)
-        archived = conn.execute(text("""
+        archived_ids = [
+            str(r[0]) for r in conn.execute(text("""
             WITH targets AS (
               SELECT c.chat_id
               FROM ozon_chats c
@@ -789,9 +824,10 @@ def sync_chats(db) -> int:
               ON CONFLICT (item_type, item_id, mp) DO NOTHING
               RETURNING item_id
             )
-            SELECT count(*) FROM ins
-        """)).scalar() or 0
-        if archived:
+            SELECT item_id FROM ins
+        """)).fetchall()
+        ]
+        if archived_ids:
             conn.execute(text("""
                 UPDATE ozon_chats c SET needs_answer = false, waiting_since = NULL, updated_at = now()
                 WHERE EXISTS (
@@ -802,7 +838,13 @@ def sync_chats(db) -> int:
                   AND c.needs_answer = true
             """))
             conn.commit()
-            logger.info("[OzonChat] auto-archived seller-silent>2d: %s", archived)
+            logger.info("[OzonChat] auto-archived seller-silent>2d: %s", len(archived_ids))
+            try:
+                from . import chat_realtime
+                for cid in archived_ids:
+                    chat_realtime.publish_chat_removed(cid, "ozon")
+            except Exception as e:
+                logger.warning("[OzonChat] realtime remove: %s", e)
 
         # Чаты с уже согласованным/закрытым возвратом — как WB «Одобрено»
         try:

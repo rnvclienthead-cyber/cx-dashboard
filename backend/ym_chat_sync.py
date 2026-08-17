@@ -517,6 +517,7 @@ def sync_chats(db) -> int:
 
     synced = 0
     hist = 0
+    touched_ids: list[str] = []
     with db.bind.connect() as conn:
         for chat in waiting:
             try:
@@ -524,6 +525,7 @@ def sync_chats(db) -> int:
                 if not cid:
                     continue
                 synced += 1
+                touched_ids.append(cid)
                 if hist < HISTORY_LIMIT_CHATS:
                     try:
                         _sync_history(conn, cid)
@@ -539,6 +541,7 @@ def sync_chats(db) -> int:
                 if not cid:
                     continue
                 synced += 1
+                touched_ids.append(cid)
                 if hist < HISTORY_LIMIT_CHATS:
                     try:
                         _sync_history(conn, cid)
@@ -550,7 +553,39 @@ def sync_chats(db) -> int:
 
         conn.commit()
 
-        archived = conn.execute(text("""
+        if touched_ids:
+            try:
+                from . import chat_realtime
+                rows = conn.execute(text("""
+                    SELECT chat_id, customer_name, context_article, last_message,
+                           last_sender, needs_answer,
+                           EXTRACT(epoch FROM COALESCE(
+                             (SELECT MAX(m.created_at) FROM ym_chat_messages m WHERE m.chat_id = c.chat_id),
+                             c.waiting_since, c.updated_at, c.created_at, now()
+                           ))::bigint * 1000 AS last_ts
+                    FROM ym_chats c
+                    WHERE chat_id = ANY(:ids)
+                """), {"ids": list(set(touched_ids))}).mappings().all()
+                for row in rows:
+                    chat_realtime.publish_chat_updated({
+                        "chat_id": row["chat_id"],
+                        "mp": "ym",
+                        "client_name": row.get("customer_name"),
+                        "sku": row.get("context_article") or "",
+                        "last_message": row.get("last_message"),
+                        "last_sender": row.get("last_sender"),
+                        "last_ts": row.get("last_ts"),
+                        "needs_answer": row.get("needs_answer"),
+                    })
+                    if row.get("needs_answer") and str(row.get("last_sender") or "").lower() in (
+                        "customer", "buyer", "client", "user", ""
+                    ):
+                        chat_realtime.schedule_suggest_precompute("ym", row["chat_id"])
+            except Exception as e:
+                logger.warning("[YmChat] realtime publish: %s", e)
+
+        archived_ids = [
+            str(r[0]) for r in conn.execute(text("""
             WITH targets AS (
               SELECT c.chat_id
               FROM ym_chats c
@@ -571,11 +606,18 @@ def sync_chats(db) -> int:
               ON CONFLICT (item_type, item_id, mp) DO NOTHING
               RETURNING item_id
             )
-            SELECT count(*) FROM ins
-        """)).scalar() or 0
-        if archived:
+            SELECT item_id FROM ins
+        """)).fetchall()
+        ]
+        if archived_ids:
             conn.commit()
-            logger.info("[YmChat] auto-archived seller-silent>2d: %s", archived)
+            logger.info("[YmChat] auto-archived seller-silent>2d: %s", len(archived_ids))
+            try:
+                from . import chat_realtime
+                for cid in archived_ids:
+                    chat_realtime.publish_chat_removed(cid, "ym")
+            except Exception as e:
+                logger.warning("[YmChat] realtime remove: %s", e)
 
     try:
         backfill_chat_articles(db, limit=25)

@@ -2636,7 +2636,8 @@ async function loadQueue() {
   queueLoading.value = true
   currentPage.value  = 1
   try {
-    const res = await apiFetch(`${BASE}/queue?mp=${currentMp.value}`)
+    // Лёгкий endpoint только чатов (кэш ~8с) — отзывы/вопросы сюда не тянем
+    const res = await apiFetch(`${BASE}/chats-queue?mp=${currentMp.value}`)
     const data = await res.json()
     queueItems.value = (data.items || [])
   } catch {
@@ -3284,21 +3285,56 @@ function isNewDay(idx) {
 // ── Centrifugo real-time ──────────────────────────────────────────────────
 let centrifuge = null
 
+function _chatListKey(id, mp) {
+  return `${(mp || 'wb').toLowerCase()}:${String(id || '')}`
+}
+
+function _applyRealtimeRemoved(chatId, mp) {
+  const key = _chatListKey(chatId, mp)
+  queueItems.value = queueItems.value.filter(i => _chatListKey(i.id, chatMp(i)) !== key)
+}
+
 function _applyRealtimeChat(chatData) {
-  const idx = queueItems.value.findIndex(i => i.id === chatData.chat_id)
-  if (idx !== -1) {
-    // Обновляем существующий чат точечно
-    const item = queueItems.value[idx]
-    queueItems.value[idx] = {
-      ...item,
-      body:         chatData.last_message ?? item.body,
-      last_ts:      chatData.last_ts      ?? item.last_ts,
-      needs_answer: chatData.needs_answer ?? item.needs_answer,
-      age_sec:      Math.floor((Date.now() - (chatData.last_ts || Date.now())) / 1000),
+  const chatId = String(chatData.chat_id || '')
+  const mp = (chatData.mp || 'wb').toLowerCase()
+  if (!chatId) return
+
+  // Другая вкладка МП — не трогаем список, но обновляем открытый диалог
+  const mpOk = currentMp.value === 'all' || currentMp.value === mp
+  if (mpOk) {
+    const idx = queueItems.value.findIndex(i => String(i.id) === chatId && chatMp(i) === mp)
+    const lastTs = chatData.last_ts ?? (idx >= 0 ? queueItems.value[idx].last_ts : Date.now())
+    const patch = {
+      body: chatData.last_message ?? chatData.body ?? (idx >= 0 ? queueItems.value[idx].body : ''),
+      last_ts: lastTs,
+      needs_answer: chatData.needs_answer ?? (idx >= 0 ? queueItems.value[idx].needs_answer : true),
+      last_sender: chatData.last_sender ?? (idx >= 0 ? queueItems.value[idx].last_sender : ''),
+      contact: chatData.contact || (idx >= 0 ? queueItems.value[idx].contact : ''),
+      sku: chatData.sku || (idx >= 0 ? queueItems.value[idx].sku : ''),
+      nm_id: chatData.nm_id ?? (idx >= 0 ? queueItems.value[idx].nm_id : null),
+      product_photo: chatData.product_photo ?? (idx >= 0 ? queueItems.value[idx].product_photo : null),
+      cabinet_url: chatData.cabinet_url ?? (idx >= 0 ? queueItems.value[idx].cabinet_url : null),
+      age_sec: Math.floor((Date.now() - (lastTs || Date.now())) / 1000),
+      item_type: 'chat',
+      mp,
+      id: chatId,
     }
+    if (idx !== -1) {
+      queueItems.value[idx] = { ...queueItems.value[idx], ...patch }
+    } else {
+      // Новый чат — сразу в список без полного reload
+      queueItems.value = [patch, ...queueItems.value]
+    }
+    // Как на бэке: сначала «ждёт», потом свежее сверху
+    queueItems.value = [...queueItems.value].sort((a, b) => {
+      const na = a.needs_answer ? 1 : 0
+      const nb = b.needs_answer ? 1 : 0
+      if (na !== nb) return nb - na
+      return (b.last_ts || 0) - (a.last_ts || 0)
+    })
   }
-  // Если открыт именно этот чат — подгружаем новые сообщения
-  if (chatItem.value?.id === chatData.chat_id) {
+
+  if (chatItem.value && String(chatItem.value.id) === chatId && chatMp(chatItem.value) === mp) {
     fetchChatMsgs(true)
   }
 }
@@ -3314,8 +3350,9 @@ async function initCentrifugo() {
 
     const sub = centrifuge.newSubscription('chats')
     sub.on('publication', ctx => {
-      const { type, chat } = ctx.data || {}
+      const { type, chat, chat_id, mp } = ctx.data || {}
       if (type === 'chat_updated' && chat) _applyRealtimeChat(chat)
+      else if (type === 'chat_removed' && chat_id) _applyRealtimeRemoved(chat_id, mp)
     })
     sub.subscribe()
     centrifuge.connect()

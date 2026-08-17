@@ -545,9 +545,158 @@ _UNIFIED_QUEUE_VIEW_SQL = """
           (SELECT item_id FROM cx_dismissed_items WHERE mp='wb' AND item_type='claim')
 """
 
+# Только чаты — для быстрого раздела «Чаты» (без отзывов/вопросов/претензий).
+_CHATS_QUEUE_VIEW_SQL = """
+    SELECT
+        c.chat_id                                          AS id,
+        'wb'::text                                         AS mp,
+        'chat'::text                                       AS item_type,
+        c.good_name                                        AS sku,
+        c.nm_id::text                                      AS nm_id,
+        c.last_message                                     AS body,
+        NULL::int                                         AS rating,
+        NULL::text                                        AS pros,
+        NULL::text                                        AS cons,
+        NULL::text                                        AS photos_raw,
+        NULL::text                                        AS order_number,
+        c.client_name                                      AS contact,
+        c.created_at                                       AS created_at,
+        EXTRACT(epoch FROM now()-c.created_at)::int        AS age_sec,
+        c.last_ts                                          AS last_ts,
+        c.needs_answer                                     AS needs_answer,
+        c.last_sender                                      AS last_sender
+    FROM wb_chats c
+    WHERE NOT COALESCE(c.is_closing,false)
+      AND c.last_ts > EXTRACT(epoch FROM now()-INTERVAL '30 days')*1000
+      AND c.chat_id NOT IN
+          (SELECT item_id FROM cx_dismissed_items WHERE mp='wb' AND item_type='chat')
+
+    UNION ALL
+
+    SELECT
+        c.chat_id, 'ozon', 'chat',
+        COALESCE(
+            NULLIF(TRIM(c.context_article), ''),
+            (
+              SELECT o.supplier_article FROM ozon_orders o
+              WHERE NULLIF(TRIM(c.order_number), '') IS NOT NULL
+                AND (
+                  o.posting_number = c.order_number
+                  OR o.order_number = c.order_number
+                  OR o.posting_number LIKE c.order_number || '-%'
+                )
+                AND NULLIF(TRIM(o.supplier_article), '') IS NOT NULL
+              ORDER BY o.created_at DESC NULLS LAST
+              LIMIT 1
+            )
+        ),
+        c.context_sku::text,
+        c.last_message, NULL::int, NULL::text, NULL::text,
+        NULL::text, c.order_number::text,
+        CASE
+          WHEN NULLIF(TRIM(c.context_article), '') IS NOT NULL
+            THEN TRIM(c.context_article)
+          WHEN NULLIF(TRIM(c.order_number), '') IS NOT NULL
+            THEN 'Заказ ' || TRIM(c.order_number)
+          WHEN c.context_sku IS NOT NULL
+            THEN 'Ozon · SKU ' || c.context_sku::text
+          ELSE 'Покупатель'
+        END,
+        COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND m.sender_type IN ('customer', 'buyer', 'client')),
+            c.waiting_since, c.created_at, c.updated_at, now()
+        ),
+        EXTRACT(epoch FROM now() - COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND m.sender_type IN ('customer', 'buyer', 'client')),
+            c.waiting_since, c.created_at, c.updated_at, now()
+        ))::int,
+        EXTRACT(epoch FROM COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.created_at, c.updated_at, now()
+        ))::bigint * 1000,
+        c.needs_answer,
+        c.last_sender
+    FROM ozon_chats c
+    WHERE c.chat_status ILIKE 'OPENED'
+      AND (c.chat_type IS NULL OR upper(c.chat_type) LIKE '%BUYER%')
+      AND COALESCE(
+            (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.created_at, c.updated_at, now()
+          ) > now() - INTERVAL '30 days'
+      AND NOT (
+            lower(COALESCE(c.last_sender, '')) IN ('seller', 'courier')
+            AND COALESCE(
+              (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+              c.waiting_since, c.created_at, c.updated_at, now()
+            ) < now() - INTERVAL '2 days'
+          )
+      AND c.chat_id NOT IN
+          (SELECT item_id FROM cx_dismissed_items WHERE mp='ozon' AND item_type='chat')
+
+    UNION ALL
+
+    SELECT
+        c.chat_id, 'ym', 'chat',
+        COALESCE(
+            NULLIF(TRIM(c.context_article), ''),
+            (
+              SELECT o.supplier_article FROM ym_orders o
+              WHERE c.order_id IS NOT NULL
+                AND o.order_id::text = c.order_id
+                AND NULLIF(TRIM(o.supplier_article), '') IS NOT NULL
+              LIMIT 1
+            ),
+            (
+              SELECT r.supplier_article FROM ym_returns r
+              WHERE (
+                (c.return_id IS NOT NULL AND r.return_id::text = c.return_id)
+                OR (c.order_id IS NOT NULL AND r.order_id::text = c.order_id)
+              )
+              AND NULLIF(TRIM(r.supplier_article), '') IS NOT NULL
+              ORDER BY r.created_at DESC NULLS LAST
+              LIMIT 1
+            )
+        ),
+        NULL::text,
+        c.last_message, NULL::int, NULL::text, NULL::text,
+        NULL::text, c.order_id,
+        COALESCE(NULLIF(TRIM(c.customer_name), ''), 'Покупатель'),
+        COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND lower(COALESCE(m.sender_type, '')) IN ('customer', 'buyer', 'client', 'user')),
+            c.waiting_since, c.updated_at, c.created_at, now()
+        ),
+        EXTRACT(epoch FROM now()-COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m
+             WHERE m.chat_id = c.chat_id
+               AND lower(COALESCE(m.sender_type, '')) IN ('customer', 'buyer', 'client', 'user')),
+            c.waiting_since, c.updated_at, c.created_at, now()
+        ))::int,
+        EXTRACT(epoch FROM COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.updated_at, c.created_at, now()
+        ))::bigint * 1000,
+        c.needs_answer,
+        c.last_sender
+    FROM ym_chats c
+    WHERE COALESCE(
+            (SELECT MAX(m.created_at) FROM ym_chat_messages m WHERE m.chat_id = c.chat_id),
+            c.waiting_since, c.updated_at, c.created_at, now()
+          ) > now() - INTERVAL '30 days'
+      AND c.chat_id NOT IN
+          (SELECT item_id FROM cx_dismissed_items WHERE mp='ym' AND item_type='chat')
+"""
+
+CHATS_QUEUE_VIEW = "cx_chats_queue"
+
 
 def init_unified_queue_view(engine) -> None:
-    """Создаёт/обновляет cx_unified_queue — общий VIEW очереди обращений.
+    """Создаёт/обновляет cx_unified_queue и быстрый cx_chats_queue.
 
     Идемпотентно (CREATE OR REPLACE VIEW), вызывается при каждом старте
     приложения из backend/main.py, как и другие init_*_tables() модулей.
@@ -557,6 +706,7 @@ def init_unified_queue_view(engine) -> None:
     """
     with engine.connect() as conn:
         conn.execute(text(f"CREATE OR REPLACE VIEW {UNIFIED_QUEUE_VIEW} AS {_UNIFIED_QUEUE_VIEW_SQL}"))
+        conn.execute(text(f"CREATE OR REPLACE VIEW {CHATS_QUEUE_VIEW} AS {_CHATS_QUEUE_VIEW_SQL}"))
         conn.commit()
 
 
@@ -738,6 +888,104 @@ def get_queue(
         "items":  items,
         "counts": counts_d,
     }
+
+
+@router.get("/chats-queue")
+def get_chats_queue(
+    db: Session = Depends(get_db),
+    mp: str = Query("all"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Быстрая очередь только чатов (кэш + VIEW без отзывов/вопросов/претензий).
+
+    Все фильтры и функции раздела Чаты сохраняются — меняется только источник данных.
+    """
+    from .. import chat_realtime
+
+    _ = current_user
+    mp_key = (mp or "all").lower()
+    cached = chat_realtime.get_cached_chats_queue(mp_key)
+    if cached is not None:
+        out = dict(cached)
+        out["cached"] = True
+        return out
+
+    mp_filter = "" if mp_key == "all" else "AND q.mp = :mp"
+    mp_params = {} if mp_key == "all" else {"mp": mp_key}
+
+    with db.bind.connect() as conn:
+        counts = conn.execute(text(f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE mp='wb') AS wb,
+                COUNT(*) FILTER (WHERE mp='ym') AS ym,
+                COUNT(*) FILTER (WHERE mp='ozon') AS ozon,
+                COUNT(*) FILTER (WHERE needs_answer) AS pending
+            FROM {CHATS_QUEUE_VIEW} q WHERE 1=1 {mp_filter}
+        """), mp_params).mappings().first()
+
+        rows = conn.execute(text(f"""
+            SELECT q.*,
+                COALESCE(
+                    pp.photo_url,
+                    (SELECT wpp.photo_url
+                     FROM wb_product_photos wpp
+                     WHERE q.mp = 'wb' AND wpp.nm_id::text = q.nm_id
+                     LIMIT 1)
+                ) AS product_photo
+            FROM {CHATS_QUEUE_VIEW} q
+            LEFT JOIN product_photos pp ON pp.supplier_article = q.sku
+            WHERE 1=1 {mp_filter}
+            ORDER BY q.needs_answer DESC NULLS LAST, q.last_ts DESC NULLS LAST
+        """), mp_params).mappings().all()
+
+    def _row(r):
+        d = dict(r)
+        if d.get("created_at"):
+            d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+        d.pop("photos_raw", None)
+        d["photos"] = []
+        return d
+
+    items = [_row(r) for r in rows]
+
+    ym_ids = [str(i["id"]) for i in items if i.get("mp") == "ym" and i.get("id")]
+    ym_cab: dict[str, dict] = {}
+    if ym_ids:
+        with db.bind.connect() as conn:
+            try:
+                rows_cab = conn.execute(
+                    text("""
+                        SELECT chat_id, cabinet_chat_id, context_type
+                        FROM ym_chats WHERE chat_id IN :ids
+                    """).bindparams(bindparam("ids", expanding=True)),
+                    {"ids": ym_ids},
+                ).mappings().all()
+                ym_cab = {str(r["chat_id"]): dict(r) for r in rows_cab}
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+    for item in items:
+        if item.get("mp") == "ozon":
+            item["cabinet_url"] = _ozon_cabinet_chat_url(str(item.get("id") or ""))
+        elif item.get("mp") == "ym":
+            meta = ym_cab.get(str(item.get("id") or ""), {})
+            item["context_type"] = meta.get("context_type")
+            item["cabinet_chat_id"] = meta.get("cabinet_chat_id")
+            item["cabinet_url"] = _ym_cabinet_chat_url(
+                meta.get("cabinet_chat_id"), meta.get("context_type")
+            )
+
+    payload = {
+        "items": items,
+        "counts": dict(counts) if counts else {},
+        "cached": False,
+    }
+    chat_realtime.set_cached_chats_queue(mp_key, payload)
+    return payload
 
 
 # ── Уточнения у отдела качества по вопросам ──────────────────────────────────
@@ -1153,6 +1401,12 @@ def dismiss_item(
         """), {"it": payload.item_type, "iid": payload.item_id, "mp": payload.mp,
                "user": current_user["username"], "note": payload.note})
         conn.commit()
+    if payload.item_type == "chat":
+        try:
+            from .. import chat_realtime
+            chat_realtime.publish_chat_removed(payload.item_id, payload.mp)
+        except Exception:
+            pass
     return {"status": "ok"}
 
 
@@ -3310,6 +3564,23 @@ def _persist_confirmed_chat_step(
             "answer": value if kind == "text" else f"[Вложение] {value}",
         })
         conn.commit()
+    _publish_seller_replied(mp, chat_id, preview)
+
+
+def _publish_seller_replied(mp: str, chat_id: str, preview: str) -> None:
+    """После ответа менеджера — мгновенно обновить строку в списке чатов."""
+    try:
+        from .. import chat_realtime
+        chat_realtime.publish_chat_updated({
+            "chat_id": chat_id,
+            "mp": mp,
+            "last_message": (preview or "")[:500],
+            "last_sender": "seller",
+            "needs_answer": False,
+            "last_ts": int(time.time() * 1000),
+        })
+    except Exception:
+        pass
 
 
 async def _persist_or_stop_progress(
@@ -3713,6 +3984,7 @@ def send_ozon_chat_message(
         ), {"iid": chat_id, "user": current_user["username"], "ans": txt})
         conn.commit()
 
+    _publish_seller_replied("ozon", chat_id, txt)
     return {"status": "ok"}
 
 
@@ -3789,6 +4061,7 @@ def send_ym_chat_message(
         ), {"iid": chat_id, "user": current_user["username"], "ans": txt})
         conn.commit()
 
+    _publish_seller_replied("ym", chat_id, txt)
     return {"status": "ok"}
 
 
@@ -3929,6 +4202,7 @@ def send_wb_chat_message(
             """), {"cid": chat_id, "txt": txt[:1000], "ts": now_ms})
         conn.commit()
 
+    _publish_seller_replied("wb", chat_id, txt)
     return {"status": "ok"}
 
 
