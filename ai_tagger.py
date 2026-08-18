@@ -109,7 +109,7 @@ def _get_memory(text_sample: str) -> str:
     return "Опыта пока нет."
 
 
-async def _ask_qwen(session: aiohttp.ClientSession, batch: list, memory: str) -> list:
+async def _ask_qwen(session: aiohttp.ClientSession, batch: list, memory: str, model: str) -> tuple[list, str]:
     content = mask_pii("\n".join(f"ID {i['id']}: {i['text']}" for i in batch))
     prompt = (
         f"Ты эксперт контроля качества.\n"
@@ -120,26 +120,39 @@ async def _ask_qwen(session: aiohttp.ClientSession, batch: list, memory: str) ->
         f"ОТВЕТЬ СТРОГО JSON: {{\"results\": [{{\"id\": \"...\", \"category_ids\": [1, 5]}}]}}"
     )
     try:
-        raw = await QwenClient().chat(
+        raw = await QwenClient(model=model).chat(
             system=prompt,
             messages=[{"role": "user", "content": content}],
             response_format={"type": "json_object"},
             session=session,
             mask_user_text=False,
         )
-        return _parse_response(raw)
+        return _parse_response(raw), ""
     except QwenError as e:
-        log.warning(f"Qwen: {e}")
-        return []
+        log.warning(f"Qwen ({model}): {e}")
+        return [], str(e)
     except Exception as e:
-        log.error(f"Qwen ошибка: {e}")
-        return []
+        log.error(f"Qwen ошибка ({model}): {e}")
+        return [], str(e)
 
 
-async def _ask_llm(session: aiohttp.ClientSession, batch: list, memory: str) -> list:
+async def _ask_llm(session: aiohttp.ClientSession, batch: list, memory: str, model: str | None = None) -> tuple[list, str, str]:
+    """Возвращает (results, used_model, error)."""
     if is_yandex_lite(AI_PROVIDER):
-        return await _ask_yandex(session, batch, memory)
-    return await _ask_qwen(session, batch, memory)
+        return await _ask_yandex(session, batch, memory), "yandex-lite", ""
+    from backend.qwen_quota import is_quota_or_model_error, resolve_free_qwen_models
+    models = resolve_free_qwen_models(model or "qwen-free")
+    last_err = ""
+    for i, m in enumerate(models):
+        results, err = await _ask_qwen(session, batch, memory, m)
+        if results:
+            return results, m, ""
+        last_err = err
+        if is_quota_or_model_error(err) and i + 1 < len(models):
+            log.warning(f"{m} лимит → пробуем {models[i + 1]}")
+            continue
+        break
+    return [], models[-1] if models else "", last_err
 
 
 async def _ask_yandex(session: aiohttp.ClientSession, batch: list, memory: str) -> list:
@@ -265,10 +278,12 @@ async def _tag_platform(platform: str):
                     text_body = f"Артикул: {row[1]}. Текст: {row[2]}"
                 batch_data.append({"id": ref, "text": text_body})
 
-            results = await _ask_llm(session, batch_data, memory)
+            results, used_model, ask_err = await _ask_llm(session, batch_data, memory)
 
             saved = 0
             details = []
+            if ask_err and not results:
+                details.append(f"❌ {used_model}: {ask_err[:180]}")
             for res in results:
                 num = re.search(r'\d+', str(res.get('id', '')).upper())
                 if not num:
@@ -297,9 +312,14 @@ async def _tag_platform(platform: str):
             _log_db(
                 f"ИИ {label} пачка {i}",
                 "SUCCESS" if saved > 0 else "WARNING",
-                f"Сохранено {saved}/{len(chunk)}\n" + "\n".join(details[:30]),
+                f"{used_model}. Сохранено {saved}/{len(chunk)}\n" + "\n".join(details[:30]),
             )
-            log.info(f"{label} пачка {i}: сохранено {saved}/{len(chunk)}")
+            log.info(f"{label} пачка {i} ({used_model}): сохранено {saved}/{len(chunk)}")
+            if ask_err and not results:
+                from backend.qwen_quota import is_quota_or_model_error
+                if is_quota_or_model_error(ask_err):
+                    _log_db(f"ИИ Разметка {label}: STOP", "ERROR", "Бесплатный лимит моделей кончился — очередь не трогаем")
+                    return
             await asyncio.sleep(3)
 
     _log_db(f"ИИ Разметка {label}: Итог", "SUCCESS", f"Размечено {saved_total} из {total}")

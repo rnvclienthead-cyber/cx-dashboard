@@ -256,6 +256,33 @@ async def fetch_ai_tags(session: aiohttp.ClientSession, batch: List[Dict[str, An
     except Exception as e:
         return [{"error": str(e)}]
 
+
+async def fetch_ai_tags_rotating(
+    session: aiohttp.ClientSession,
+    batch: List[Dict[str, Any]],
+    memory_string: str,
+    model_key: str,
+) -> tuple[List[Dict[str, Any]], str]:
+    """Теги брака: при исчерпании free-quota сама берёт следующую модель."""
+    from ..qwen_quota import is_quota_or_model_error, resolve_free_qwen_models
+
+    models = resolve_free_qwen_models(model_key)
+    last: List[Dict[str, Any]] = []
+    current = models[0]
+    for i, current in enumerate(models):
+        last = await fetch_ai_tags(session, batch, memory_string, current)
+        has_ok = any(isinstance(r, dict) and "error" not in r for r in (last or []))
+        if has_ok:
+            return last, current
+        err = ""
+        if last and isinstance(last[0], dict):
+            err = str(last[0].get("error") or "")
+        if not is_quota_or_model_error(err):
+            return last, current
+        if i + 1 < len(models):
+            print(f"[AI] брак: {current} лимит/ошибка → {models[i + 1]}")
+    return last, current
+
 # ==========================================
 # НЕЙРОСЕТЬ: ОТПРАВКА ДЛЯ ОТЗЫВОВ (VOC)
 # ==========================================
@@ -325,7 +352,10 @@ async def process_tagging_task(model_key: str, batch_size: int):
         total_rows = len(rows)
         if total_rows == 0: return
 
-        add_system_log_db(db, "Бэкенд ИИ: Старт", "INFO", f"Запущено тегирование {total_rows} строк через {model_key}")
+        add_system_log_db(db, "Бэкенд ИИ: Старт", "INFO", f"Запущено тегирование {total_rows} строк через свободный лимит Qwen")
+
+        from ..qwen_quota import is_quota_or_model_error, resolve_free_qwen_models
+        start_model = resolve_free_qwen_models(model_key)[0]
 
         async with aiohttp.ClientSession() as session:
             for i in range(0, total_rows, batch_size):
@@ -344,14 +374,18 @@ async def process_tagging_task(model_key: str, batch_size: int):
                     srid_map[ref_id] = str(row[0])
                     batch_to_send.append({"id": ref_id, "text": f"Артикул: {row[1]}. Текст: {row[2]}"})
 
-                results = await fetch_ai_tags(session, batch_to_send, chunk_memory, model_key)
+                results, used_model = await fetch_ai_tags_rotating(session, batch_to_send, chunk_memory, start_model)
                 
                 if results:
                     saved_count = 0
                     batch_details = []
+                    quota_fail = False
                     for res in results:
                         if "error" in res:
-                            batch_details.append(f"❌ Ошибка ИИ: {res.get('error')}")
+                            err = str(res.get('error') or '')
+                            batch_details.append(f"❌ Ошибка ИИ: {err}")
+                            if is_quota_or_model_error(err):
+                                quota_fail = True
                             continue
                         
                         num_match = re.search(r'\d+', str(res.get('id', '')).upper())
@@ -372,13 +406,14 @@ async def process_tagging_task(model_key: str, batch_size: int):
                                 batch_details.append(f"⚠️ SRID {real_srid}: ИИ пропустил")
                     
                     db.commit()
-                    add_system_log_db(db, f"Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING", f"Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details))
+                    note = f"{used_model}. Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
+                    if quota_fail and saved_count == 0:
+                        add_system_log_db(db, f"Пачка {i}", "ERROR", note + "\nОчередь не трогаем — лимит моделей.")
+                        return
+                    add_system_log_db(db, f"Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING", note)
                     await asyncio.sleep(3)
                 else:
-                    for row in chunk:
-                        db.execute(text("UPDATE wb_claims SET audit_status = 'Пропущено ИИ' WHERE srid = :srid"), {"srid": str(row[0])})
-                    db.commit()
-                    add_system_log_db(db, f"Пачка {i}", "WARNING", f"ИИ вернул пустой ответ, пропущено {len(chunk)} записей")
+                    add_system_log_db(db, f"Пачка {i}", "WARNING", f"{used_model}: пустой ответ, пачку не помечаем пропуском")
                     await asyncio.sleep(5)
     except Exception as e: print(f"Ошибка тегирования: {e}")
     finally: db.close()
@@ -443,7 +478,7 @@ async def process_ym_tagging_task(model_key: str, batch_size: int):
                     text_to_ai = f"Артикул: {row[1]}. Комментарий к возврату: {row[2]}"
                     batch_to_send.append({"id": ref_id, "text": text_to_ai})
 
-                results = await fetch_ai_tags(session, batch_to_send, chunk_memory, model_key)
+                results, used_model = await fetch_ai_tags_rotating(session, batch_to_send, chunk_memory, model_key)
 
                 if results:
                     saved_count = 0
@@ -483,14 +518,11 @@ async def process_ym_tagging_task(model_key: str, batch_size: int):
                     db.commit()
                     add_system_log_db(
                         db, f"ЯМ Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING",
-                        f"Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
+                        f"{used_model}. Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
                     )
                     await asyncio.sleep(3)
                 else:
-                    for row in chunk:
-                        db.execute(text("UPDATE ym_returns SET audit_status = 'Пропущено ИИ' WHERE return_id = :rid"), {"rid": str(row[0])})
-                    db.commit()
-                    add_system_log_db(db, f"ЯМ Пачка {i}", "WARNING", f"ИИ вернул пустой ответ, пропущено {len(chunk)} записей")
+                    add_system_log_db(db, f"ЯМ Пачка {i}", "WARNING", f"{used_model}: пустой ответ, пачку не помечаем")
                     await asyncio.sleep(5)
 
     except Exception as e:
@@ -547,7 +579,7 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
                     product_info = row[3] or row[1]
                     batch_to_send.append({"id": ref_id, "text": f"Причина возврата: {row[2]}. Товар: {product_info}"})
 
-                results = await fetch_ai_tags(session, batch_to_send, chunk_memory, model_key)
+                results, used_model = await fetch_ai_tags_rotating(session, batch_to_send, chunk_memory, model_key)
 
                 if results:
                     saved_count = 0
@@ -587,14 +619,11 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
                     db.commit()
                     add_system_log_db(
                         db, f"OZON Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING",
-                        f"Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
+                        f"{used_model}. Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
                     )
                     await asyncio.sleep(3)
                 else:
-                    for row in chunk:
-                        db.execute(text("UPDATE ozon_returns SET audit_status = 'Пропущено ИИ' WHERE return_id = :rid"), {"rid": str(row[0])})
-                    db.commit()
-                    add_system_log_db(db, f"OZON Пачка {i}", "WARNING", f"ИИ вернул пустой ответ, пропущено {len(chunk)} записей")
+                    add_system_log_db(db, f"OZON Пачка {i}", "WARNING", f"{used_model}: пустой ответ, пачку не помечаем")
                     await asyncio.sleep(5)
 
     except Exception as e:

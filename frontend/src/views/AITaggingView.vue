@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, watch, onBeforeUnmount } from 'vue'
-import { Tag, Play, Loader2, Cpu, RefreshCw, MessageSquarePlus, Zap, Target } from 'lucide-vue-next'
+import { Tag, Play, Loader2, Cpu, RefreshCw, MessageSquarePlus, Zap } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
 
@@ -10,13 +10,13 @@ const activeTab = ref('tagging') // 'tagging' | 'feedback'
 
 // Настройки
 const batchSize = ref(20)
-const selectedModel = ref('qwen-plus')
+const selectedModel = ref('qwen-free')
 const CLAIM_MODELS = [
-  { key: 'qwen-plus',   label: 'Qwen Plus',      icon: Target, hint: 'Для брака · свой лимит', cost: 0.01, currency: '₽' },
+  { key: 'qwen-free',   label: 'Qwen (бесплатный лимит)', icon: Cpu, hint: 'Plus выгорел · ротация', cost: 0, currency: '₽' },
   { key: 'yandex-lite', label: 'YandexGPT Lite', icon: Zap,    hint: 'Запасной', cost: 0.08, currency: '₽' },
 ]
 const FEEDBACK_MODELS = [
-  { key: 'qwen-reviews', label: 'Qwen (бесплатный лимит)', icon: Cpu, hint: 'Сейчас не Plus', cost: 0, currency: '₽' },
+  { key: 'qwen-reviews', label: 'Qwen (бесплатный лимит)', icon: Cpu, hint: 'Ротация моделей', cost: 0, currency: '₽' },
   { key: 'yandex-lite',  label: 'YandexGPT Lite',          icon: Zap, hint: 'Запасной', cost: 0.08, currency: '₽' },
 ]
 const models = computed(() => activeTab.value === 'feedback' ? FEEDBACK_MODELS : CLAIM_MODELS)
@@ -103,7 +103,7 @@ watch(() => platformStore.platform, () => {
 watch(activeTab, (tab) => {
   if (isProcessing.value) return
   resultMessage.value = null
-  selectedModel.value = tab === 'feedback' ? 'qwen-reviews' : 'qwen-plus'
+  selectedModel.value = tab === 'feedback' ? 'qwen-reviews' : 'qwen-free'
 })
 
 onBeforeUnmount(() => {

@@ -1380,6 +1380,13 @@ if __name__ == "__main__":
             )
         except Exception as e:
             _log_db("ai_tagger_ym", "error", f"Сбой запуска: {e}")
+        # Автотегирование отзывов ЯМ (поиск идей)
+        try:
+            from backend.feedback_tagger_job import spawn_feedback_job
+            ok, msg = spawn_feedback_job("ym", "qwen-reviews", 20)
+            _log_db("ai_tagger_ym_feedbacks", "success" if ok else "info", msg)
+        except Exception as e:
+            _log_db("ai_tagger_ym_feedbacks", "error", f"Сбой запуска: {e}")
     elif task == "daily":
         run(sync_assortment)
         run(sync_prices)

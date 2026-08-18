@@ -12,57 +12,20 @@ from typing import Optional
 
 from sqlalchemy import text
 
-from backend.llm import is_yandex_lite
+from backend.qwen_quota import (
+    FREE_QWEN_MODELS,
+    is_quota_or_model_error,
+    resolve_free_qwen_models,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 TMP = ROOT / "tmp"
 EMPTY_TAGS = json.dumps({"processed": True, "tags": [], "suggestion": ""}, ensure_ascii=False)
 
-# Отзывы не трогают qwen-plus — его лимит оставляем браку.
-# Сначала модели с полным бесплатным лимитом; выработанные — в конце.
-FEEDBACK_FREE_MODELS = (
-    "qwen3.5-122b-a10b",
-    "qwen3-max",
-    "qwen-max",
-    "qwen3.5-plus-2026-02-15",
-    "qwen-plus-2025-07-28",
-    "qwen3.7-plus",
-)
-
-
-def resolve_feedback_models(model_key: str) -> list[str]:
-    if is_yandex_lite(model_key):
-        return [(model_key or "").strip() or "yandex-lite"]
-    k = (model_key or "").strip()
-    kl = k.lower()
-    chain = list(FEEDBACK_FREE_MODELS)
-    if kl in ("", "qwen-plus", "qwen-reviews", "qwen-feedback"):
-        return chain
-    if k in chain:
-        i = chain.index(k)
-        return chain[i:] + chain[:i]
-    return [k] + [m for m in chain if m != k]
-
-
-def should_rotate_feedback_model(err: str) -> bool:
-    e = (err or "").lower()
-    needles = (
-        "allocationquota",
-        "freetieronly",
-        "insufficient_quota",
-        "quota exceeded",
-        "free tier",
-        "invalidparameter.model",
-        "invalid_parameter",
-        "model_not_found",
-        "unknown model",
-        "model does not exist",
-        "model not exist",
-        "invalid model",
-        "http 403",
-        "http 404",
-    )
-    return any(n in e for n in needles)
+# Совместимость со старыми импортами/тестами
+FEEDBACK_FREE_MODELS = FREE_QWEN_MODELS
+resolve_feedback_models = resolve_free_qwen_models
+should_rotate_feedback_model = is_quota_or_model_error
 
 
 def _pid_path(platform: str) -> Path:

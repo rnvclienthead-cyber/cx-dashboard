@@ -1293,6 +1293,17 @@ if __name__ == "__main__":
         except Exception as e:
             log_to_system("AI-тегировщик WB", "ERROR", f"Сбой запуска: {e}")
 
+    def run_feedback_tagger_wb():
+        print("🤖 Запуск ИИ-тегирования WB-отзывов (поиск идей)...")
+        try:
+            from backend.feedback_tagger_job import spawn_feedback_job
+            ok, msg = spawn_feedback_job("wb", "qwen-reviews", 20)
+            log_to_system("AI-тегировщик отзывов WB", "SUCCESS" if ok else "INFO", msg)
+            print(f"   → {msg}")
+        except Exception as e:
+            log_to_system("AI-тегировщик отзывов WB", "ERROR", f"Сбой запуска: {e}")
+            print(f"❌ Ошибка запуска тегирования отзывов: {e}")
+
     if mode == "logistics":
         print("💰 СИНК ЛОГИСТИКИ ВБ (продажи + заказы)")
         log_to_system("Воркер Логистика", "INFO", "Синк продаж/заказов WB")
@@ -1399,6 +1410,7 @@ if __name__ == "__main__":
         log_to_system("Воркер WB (daily)", "SUCCESS", "Дневная синхронизация выполнена")
         print("🏁 WB daily завершён")
         run_ai_tagger_wb()
+        run_feedback_tagger_wb()
         sys.exit(0)
 
     if mode == "full":
@@ -1420,6 +1432,7 @@ if __name__ == "__main__":
         log_to_system("Воркер WB (full)", "SUCCESS", "Полный прогон завершён")
         print("🏁 WB full завершён")
         run_ai_tagger_wb()
+        run_feedback_tagger_wb()
         sys.exit(0)
 
     print(f"❌ Неизвестный режим запуска: '{mode}'. Используй: hourly | daily | full | logistics | logistics_backfill | report_detail | ratings")
