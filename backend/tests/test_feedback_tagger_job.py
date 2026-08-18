@@ -10,12 +10,12 @@ from backend.feedback_tagger_job import (
 class FeedbackModelRotationTests(unittest.TestCase):
     def test_plus_is_not_used_for_reviews(self):
         chain = resolve_feedback_models("qwen-plus")
-        self.assertEqual(chain[0], "qwen3.7-plus")
+        self.assertEqual(chain[0], "qwen3.5-122b-a10b")
         self.assertNotIn("qwen-plus", chain)
         self.assertEqual(tuple(chain), FEEDBACK_FREE_MODELS)
 
     def test_reviews_alias_uses_free_chain(self):
-        self.assertEqual(resolve_feedback_models("qwen-reviews")[0], "qwen3.7-plus")
+        self.assertEqual(resolve_feedback_models("qwen-reviews")[0], "qwen3.5-122b-a10b")
 
     def test_lite_stays_lite(self):
         self.assertEqual(resolve_feedback_models("yandex-lite"), ["yandex-lite"])

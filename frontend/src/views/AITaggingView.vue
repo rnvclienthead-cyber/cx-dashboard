@@ -16,7 +16,7 @@ const CLAIM_MODELS = [
   { key: 'yandex-lite', label: 'YandexGPT Lite', icon: Zap,    hint: 'Запасной', cost: 0.08, currency: '₽' },
 ]
 const FEEDBACK_MODELS = [
-  { key: 'qwen-reviews', label: 'Qwen (бесплатный лимит)', icon: Cpu, hint: 'Plus не трогаем', cost: 0, currency: '₽' },
+  { key: 'qwen-reviews', label: 'Qwen (бесплатный лимит)', icon: Cpu, hint: 'Сейчас не Plus', cost: 0, currency: '₽' },
   { key: 'yandex-lite',  label: 'YandexGPT Lite',          icon: Zap, hint: 'Запасной', cost: 0.08, currency: '₽' },
 ]
 const models = computed(() => activeTab.value === 'feedback' ? FEEDBACK_MODELS : CLAIM_MODELS)

@@ -19,14 +19,14 @@ TMP = ROOT / "tmp"
 EMPTY_TAGS = json.dumps({"processed": True, "tags": [], "suggestion": ""}, ensure_ascii=False)
 
 # Отзывы не трогают qwen-plus — его лимит оставляем браку.
-# Если бесплатный 1 млн на модели кончится, очередь сама берёт следующую.
+# Сначала модели с полным бесплатным лимитом; выработанные — в конце.
 FEEDBACK_FREE_MODELS = (
-    "qwen3.7-plus",
-    "qwen3.5-plus-2026-02-15",
-    "qwen-plus-2025-07-28",
+    "qwen3.5-122b-a10b",
     "qwen3-max",
     "qwen-max",
-    "qwen3.5-122b-a10b",
+    "qwen3.5-plus-2026-02-15",
+    "qwen-plus-2025-07-28",
+    "qwen3.7-plus",
 )
 
 
@@ -374,7 +374,7 @@ async def process_ym_feedback_tagging_task(model_key: str, batch_size: int) -> N
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--platform", default="wb", choices=("wb", "ym"))
-    parser.add_argument("--model", default="qwen3.7-plus")
+    parser.add_argument("--model", default="qwen3.5-122b-a10b")
     parser.add_argument("--batch", type=int, default=20)
     args = parser.parse_args(argv)
     _mark_pid(args.platform)
