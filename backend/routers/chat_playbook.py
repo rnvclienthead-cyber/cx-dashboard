@@ -7,7 +7,7 @@
   - что бот пишет клиенту и менеджеру при передаче в красной зоне;
   - уточняющий вопрос перед закрытием диалога.
 
-Таблицы: cx_chat_themes, cx_chat_variants, cx_chat_settings.
+Таблицы: cx_chat_themes, cx_chat_theme_zones, cx_chat_variants, cx_chat_settings.
 """
 import random
 from typing import List, Optional
@@ -1083,6 +1083,15 @@ def init_playbook_tables(engine):
                 updated_by TEXT    DEFAULT ''
             )"""))
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_chat_theme_zones (
+                theme_key  TEXT NOT NULL,
+                mp         TEXT NOT NULL,
+                zone       TEXT NOT NULL DEFAULT 'draft',
+                updated_at TIMESTAMP DEFAULT now(),
+                updated_by TEXT DEFAULT '',
+                PRIMARY KEY (theme_key, mp)
+            )"""))
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_variants (
                 id           SERIAL PRIMARY KEY,
                 theme_key    TEXT NOT NULL,
@@ -1148,9 +1157,39 @@ def init_playbook_tables(engine):
         conn.commit()
     # Дозасев новых тем (меню 1–5 и т.п.) без затирания правок из UI
     ensure_new_themes(engine)
+    ensure_theme_zones(engine)
     ensure_mp_control_settings(engine)
     ensure_ozon_variants(engine)
     ensure_ym_variants(engine)
+
+
+def ensure_theme_zones(engine) -> None:
+    """Режим темы (Авто/Согласование/Менеджер) — отдельно на WB / Ozon / ЯМ.
+
+    Первый запуск копирует текущий общий zone во все три площадки,
+    чтобы поведение не изменилось, пока режимы не разведут вручную.
+    """
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_chat_theme_zones (
+                theme_key  TEXT NOT NULL,
+                mp         TEXT NOT NULL,
+                zone       TEXT NOT NULL DEFAULT 'draft',
+                updated_at TIMESTAMP DEFAULT now(),
+                updated_by TEXT DEFAULT '',
+                PRIMARY KEY (theme_key, mp)
+            )
+        """))
+        for mp in BOT_MPS:
+            conn.execute(text("""
+                INSERT INTO cx_chat_theme_zones (theme_key, mp, zone, updated_by)
+                SELECT t.theme_key, :mp,
+                       CASE WHEN t.zone IN ('auto','draft','human') THEN t.zone ELSE 'draft' END,
+                       'system'
+                FROM cx_chat_themes t
+                ON CONFLICT (theme_key, mp) DO NOTHING
+            """), {"mp": mp})
+        conn.commit()
 
 
 def ensure_new_themes(engine):
@@ -1327,14 +1366,56 @@ def ensure_mp_control_settings(engine) -> None:
         conn.commit()
 
 
-def get_zone(db: Session, theme_key: str) -> str:
-    """Режим темы: auto — отправляем сами, draft — на согласование, human — менеджеру."""
+def get_zone(db: Session, theme_key: str, mp: str = "wb") -> str:
+    """Режим темы для площадки: auto / draft / human.
+
+    Читает cx_chat_theme_zones; если строки ещё нет — fallback на общий
+    cx_chat_themes.zone (legacy). Неактивная тема → human.
+    """
+    mp = (mp or "wb").lower()
+    if mp not in BOT_MPS:
+        mp = "wb"
     row = db.execute(text(
         "SELECT zone, active FROM cx_chat_themes WHERE theme_key = :k"
     ), {"k": theme_key}).fetchone()
     if not row or not row[1]:
         return "human"
-    return row[0] if row[0] in ZONES else "human"
+    legacy = row[0] if row[0] in ZONES else "human"
+    mp_row = db.execute(text(
+        "SELECT zone FROM cx_chat_theme_zones WHERE theme_key = :k AND mp = :mp"
+    ), {"k": theme_key, "mp": mp}).fetchone()
+    if mp_row and mp_row[0] in ZONES:
+        return mp_row[0]
+    return legacy
+
+
+def set_theme_zone(db: Session, theme_key: str, mp: str, zone: str,
+                   username: str = "system") -> None:
+    """Пишет режим темы для одной площадки (+ синк legacy-колонки для WB)."""
+    mp = (mp or "wb").lower()
+    if mp not in BOT_MPS:
+        raise HTTPException(400, f"mp должен быть одним из {BOT_MPS}")
+    if zone not in ZONES:
+        raise HTTPException(400, f"zone должен быть одним из {ZONES}")
+    exists = db.execute(text(
+        "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k"
+    ), {"k": theme_key}).scalar()
+    if not exists:
+        raise HTTPException(404, "Тема не найдена")
+    db.execute(text("""
+        INSERT INTO cx_chat_theme_zones (theme_key, mp, zone, updated_at, updated_by)
+        VALUES (:k, :mp, :z, now(), :u)
+        ON CONFLICT (theme_key, mp) DO UPDATE
+          SET zone = EXCLUDED.zone,
+              updated_at = now(),
+              updated_by = EXCLUDED.updated_by
+    """), {"k": theme_key, "mp": mp, "z": zone, "u": username})
+    if mp == "wb":
+        db.execute(text("""
+            UPDATE cx_chat_themes
+            SET zone = :z, updated_at = now(), updated_by = :u
+            WHERE theme_key = :k
+        """), {"k": theme_key, "z": zone, "u": username})
 
 
 def pick_variant(db: Session, theme_key: str, branch_key: str = "",
@@ -1374,6 +1455,8 @@ class ThemeUpdate(BaseModel):
     name: Optional[str] = None
     when_text: Optional[str] = None
     zone: Optional[str] = None
+    # Площадка для zone: wb|ozon|ym. Без mp — пишем во все три (legacy).
+    mp: Optional[str] = None
     note: Optional[str] = None
     active: Optional[bool] = None
 
@@ -1413,13 +1496,33 @@ def get_playbook(db: Session = Depends(get_db), current_user=Depends(get_current
     settings = db.execute(text(
         "SELECT key, value, descr FROM cx_chat_settings ORDER BY key"
     )).mappings().all()
+    zone_rows = db.execute(text("""
+        SELECT theme_key, mp, zone FROM cx_chat_theme_zones
+    """)).mappings().all()
+    zones_map: dict = {}
+    for zr in zone_rows:
+        zones_map.setdefault(zr["theme_key"], {})[zr["mp"]] = zr["zone"]
 
     by_theme = {}
     for v in variants:
         by_theme.setdefault(v["theme_key"], []).append(dict(v))
 
+    out_themes = []
+    for t in themes:
+        td = dict(t)
+        legacy = td.get("zone") if td.get("zone") in ZONES else "draft"
+        per = zones_map.get(td["theme_key"], {})
+        zones = {
+            mp: (per.get(mp) if per.get(mp) in ZONES else legacy)
+            for mp in BOT_MPS
+        }
+        td["zones"] = zones
+        td["zone"] = zones["wb"]
+        td["variants"] = by_theme.get(td["theme_key"], [])
+        out_themes.append(td)
+
     return {
-        "themes": [{**dict(t), "variants": by_theme.get(t["theme_key"], [])} for t in themes],
+        "themes": out_themes,
         "settings": [dict(s) for s in settings],
     }
 
@@ -1429,20 +1532,38 @@ def update_theme(theme_key: str, payload: ThemeUpdate, db: Session = Depends(get
                  current_user=Depends(get_current_user)):
     if payload.zone is not None and payload.zone not in ZONES:
         raise HTTPException(400, f"zone должен быть одним из {ZONES}")
-    fields, params = [], {"k": theme_key, "u": current_user["username"]}
-    for col in ("name", "when_text", "zone", "note", "active"):
+    username = current_user["username"]
+
+    if payload.zone is not None:
+        mp = (payload.mp or "").strip().lower() or None
+        if mp and mp not in BOT_MPS:
+            raise HTTPException(400, f"mp должен быть одним из {BOT_MPS}")
+        targets = (mp,) if mp else BOT_MPS
+        for target in targets:
+            set_theme_zone(db, theme_key, target, payload.zone, username)
+
+    fields, params = [], {"k": theme_key, "u": username}
+    for col in ("name", "when_text", "note", "active"):
         val = getattr(payload, col)
         if val is not None:
             fields.append(f"{col} = :{col}")
             params[col] = val
-    if not fields:
+    if fields:
+        res = db.execute(text(f"""
+            UPDATE cx_chat_themes SET {', '.join(fields)}, updated_at = now(), updated_by = :u
+            WHERE theme_key = :k
+        """), params)
+        if not res.rowcount:
+            raise HTTPException(404, "Тема не найдена")
+    elif payload.zone is None:
         return {"status": "noop"}
-    res = db.execute(text(f"""
-        UPDATE cx_chat_themes SET {', '.join(fields)}, updated_at = now(), updated_by = :u
-        WHERE theme_key = :k
-    """), params)
-    if not res.rowcount:
-        raise HTTPException(404, "Тема не найдена")
+    else:
+        exists = db.execute(text(
+            "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k"
+        ), {"k": theme_key}).scalar()
+        if not exists:
+            raise HTTPException(404, "Тема не найдена")
+
     db.commit()
     return {"status": "ok"}
 

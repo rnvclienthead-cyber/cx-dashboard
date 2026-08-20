@@ -2010,7 +2010,7 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
         if "ждём выбор" in (reason or ""):
             return None
 
-        zone = chat_playbook.get_zone(db, theme)
+        zone = chat_playbook.get_zone(db, theme, mp=mp)
         if need_human:
             zone = "human"
 
@@ -2251,7 +2251,7 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
     source_theme = theme
     theme, reason = _remap_theme_for_mp(theme, mp, reason, client_msg=msg)
 
-    zone = chat_playbook.get_zone(db, theme)
+    zone = chat_playbook.get_zone(db, theme, mp=mp)
     if need_human:
         zone = "human"
 

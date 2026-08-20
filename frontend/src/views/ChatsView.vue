@@ -1161,7 +1161,8 @@
               <template v-else-if="pbMp === 'ym'">
                 На ЯМ доотправку детали предлагаем в чате (как на WB).
               </template>
-              Режим темы (Авто / Согласование / Менеджер) общий для всех площадок.
+              Режим темы (Авто / Согласование / Менеджер) — <span class="font-medium text-gray-600">отдельно для {{ pbMpLabel }}</span>.
+              Переключите площадку в сайдбаре, чтобы настроить другую.
             </p>
             <div class="grid sm:grid-cols-3 gap-2">
               <div class="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
@@ -1182,8 +1183,8 @@
           <!-- Темы -->
           <div v-for="t in visiblePbThemes" :key="t.theme_key"
             :class="['bg-white rounded-2xl border overflow-hidden',
-              t.zone==='auto' ? 'border-l-4 border-l-emerald-400 border-gray-200'
-              : t.zone==='draft' ? 'border-l-4 border-l-amber-400 border-gray-200'
+              themeZone(t)==='auto' ? 'border-l-4 border-l-emerald-400 border-gray-200'
+              : themeZone(t)==='draft' ? 'border-l-4 border-l-amber-400 border-gray-200'
               : 'border-l-4 border-l-rose-400 border-gray-200']">
 
             <div class="px-5 py-4">
@@ -1199,7 +1200,7 @@
                   <button v-for="z in [['auto','Авто'],['draft','Согласование'],['human','Менеджер']]" :key="z[0]"
                     @click="setZone(t, z[0])"
                     :class="['px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors',
-                      t.zone === z[0]
+                      themeZone(t) === z[0]
                         ? (z[0]==='auto' ? 'bg-emerald-600 text-white' : z[0]==='draft' ? 'bg-amber-500 text-white' : 'bg-rose-600 text-white')
                         : 'text-gray-500 hover:text-gray-700']">
                     {{ z[1] }}
@@ -1207,8 +1208,8 @@
                 </div>
                 <div v-else class="shrink-0">
                   <span :class="['px-2.5 py-1 text-[11px] font-medium rounded-md',
-                    t.zone==='auto' ? 'bg-emerald-100 text-emerald-800' : t.zone==='draft' ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800']">
-                    {{ t.zone==='auto' ? 'Авто' : t.zone==='draft' ? 'Согласование' : 'Менеджер' }}
+                    themeZone(t)==='auto' ? 'bg-emerald-100 text-emerald-800' : themeZone(t)==='draft' ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800']">
+                    {{ themeZone(t)==='auto' ? 'Авто' : themeZone(t)==='draft' ? 'Согласование' : 'Менеджер' }}
                   </span>
                 </div>
               </div>
@@ -2216,10 +2217,11 @@ async function loadNonreturnableCats() {
 }
 
 function emptyVariantHint(theme) {
-  if (theme?.zone === 'human') {
+  const z = themeZone(theme)
+  if (z === 'human') {
     return `Для ${pbMpLabel.value} текст не обязателен: эта тема сразу уходит менеджеру.`
   }
-  if (theme?.zone === 'draft') {
+  if (z === 'draft') {
     return `Нет текста для ${pbMpLabel.value}. Менеджеру придётся писать ответ вручную или опираться на ИИ-черновик.`
   }
   return `Нет текста для ${pbMpLabel.value}. Добавьте вариант кнопкой ниже — иначе бот попробует запасной ответ (ИИ/FAQ, если он есть).`
@@ -2401,17 +2403,32 @@ function variantMpBadgeClass(mp) {
   return 'bg-purple-50 text-purple-700 border-purple-200'
 }
 
+function themeZone(theme) {
+  const mp = pbMp.value || 'wb'
+  const zones = theme?.zones
+  if (zones && zones[mp]) return zones[mp]
+  return theme?.zone || 'draft'
+}
+
 async function setZone(theme, zone) {
-  if (theme.zone === zone) return
-  const prev = theme.zone
-  theme.zone = zone
+  const mp = pbMp.value || 'wb'
+  const prev = themeZone(theme)
+  if (prev === zone) return
+  if (!theme.zones) {
+    const base = theme.zone || 'draft'
+    theme.zones = { wb: base, ozon: base, ym: base }
+  }
+  theme.zones[mp] = zone
+  if (mp === 'wb') theme.zone = zone
   try {
     await apiFetch(`${PB}/themes/${encodeURIComponent(theme.theme_key)}`, {
-      method: 'PUT', body: JSON.stringify({ zone }),
+      method: 'PUT', body: JSON.stringify({ zone, mp }),
     })
-    showToast(`«${theme.name}» — ${zone === 'auto' ? 'отвечает бот' : zone === 'draft' ? 'на согласование' : 'менеджеру'}`, 'ok')
+    const mode = zone === 'auto' ? 'отвечает бот' : zone === 'draft' ? 'на согласование' : 'менеджеру'
+    showToast(`«${theme.name}» · ${pbMpLabel.value} — ${mode}`, 'ok')
   } catch {
-    theme.zone = prev
+    theme.zones[mp] = prev
+    if (mp === 'wb') theme.zone = prev
     showToast('Не удалось сменить режим', 'error')
   }
 }
