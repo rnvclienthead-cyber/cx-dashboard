@@ -32,6 +32,7 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from backend import ym_client
+from backend.ym_returns_api import effective_refund_status, status_ru as ym_status_ru
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
@@ -392,8 +393,8 @@ def sync_returns():
                 continue
 
             photos_str    = " ".join(photo_urls) if photo_urls else None
-            refund_status = r.get("refundStatus") or r.get("shipmentStatus") or ""
-            status_ru     = YM_REFUND_STATUS_MAP.get(refund_status, "На рассмотрении")
+            refund_status = effective_refund_status(r) or r.get("refundStatus") or r.get("shipmentStatus") or ""
+            status_ru     = ym_status_ru(refund_status, YM_REFUND_STATUS_MAP.get(refund_status, "На рассмотрении"))
 
             try:
                 with engine.begin() as conn:
@@ -527,55 +528,91 @@ def sync_feedbacks():
 # ── 4. Вопросы ───────────────────────────────────────────────────────────────
 # Метод POST (не GET!)
 # questionIdentifiers.id и questionIdentifiers.offerId — не просто id и offerId
-# Ответы: questions[].answers[].text (если есть)
+# needAnswer=true — только вопросы, которые ждут ответа продавца (иначе API
+# отдаёт всю историю, синк идёт часами и свежие вопросы не попадают в очередь).
 def sync_questions():
-    log.info("Синхронизация вопросов ЯМ...")
+    log.info("Синхронизация вопросов ЯМ (только без ответа)...")
     page_token = None
     total = 0
+    open_ids: set[str] = set()
+    finished = False
 
-    while True:
-        body = {"pageSize": 100}
-        if page_token:
-            body["pageToken"] = page_token
+    try:
+        while True:
+            body = {"pageSize": 100, "needAnswer": True}
+            if page_token:
+                body["pageToken"] = page_token
 
-        data      = _post(f"/v1/businesses/{YM_BUSINESS_ID}/goods-questions", body)
-        result    = data.get("result", {})
-        questions = result.get("questions", [])
-        if not questions:
-            break
+            data = _post(f"/v1/businesses/{YM_BUSINESS_ID}/goods-questions", body)
+            result = data.get("result", {})
+            questions = result.get("questions", [])
+            if not questions:
+                finished = True
+                break
 
+            with engine.begin() as conn:
+                for q in questions:
+                    qid = q.get("questionIdentifiers") or {}
+                    question_id = str(qid.get("id") or "").strip()
+                    if not question_id:
+                        continue
+                    answers = q.get("answers") or []
+                    answer_text = answers[0].get("text") if answers else None
+                    open_ids.add(question_id)
+
+                    conn.execute(text("""
+                        INSERT INTO ym_questions
+                            (question_id, supplier_article, created_date, text,
+                             answer_text, state, synced_at)
+                        VALUES
+                            (:qid, :article, :created_date, :text,
+                             :answer, 'UNANSWERED', now())
+                        ON CONFLICT (question_id) DO UPDATE SET
+                            supplier_article = EXCLUDED.supplier_article,
+                            text             = EXCLUDED.text,
+                            answer_text      = COALESCE(EXCLUDED.answer_text, ym_questions.answer_text),
+                            state            = 'UNANSWERED',
+                            synced_at        = now()
+                    """), {
+                        "qid": question_id,
+                        "article": str(qid.get("offerId") or ""),
+                        "created_date": q.get("createdAt"),
+                        "text": q.get("text") or "",
+                        "answer": answer_text,
+                    })
+                    total += 1
+
+            page_token = result.get("paging", {}).get("nextPageToken")
+            if not page_token:
+                finished = True
+                break
+            time.sleep(0.5)
+    except Exception:
+        # Не закрываем очередь по частичному снимку — иначе живые вопросы
+        # пропадут из раздела, если API оборвался посередине.
+        raise
+
+    closed = 0
+    if finished:
         with engine.begin() as conn:
-            for q in questions:
-                qid     = q.get("questionIdentifiers", {})
-                answers = q.get("answers") or []
-                answer_text = answers[0].get("text") if answers else None
-                state   = "ANSWERED" if answer_text else "UNANSWERED"
+            if open_ids:
+                result = conn.execute(text("""
+                    UPDATE ym_questions
+                    SET state = 'ANSWERED', synced_at = now()
+                    WHERE state = 'UNANSWERED'
+                      AND NOT (question_id = ANY(:ids))
+                """), {"ids": list(open_ids)})
+            else:
+                result = conn.execute(text("""
+                    UPDATE ym_questions
+                    SET state = 'ANSWERED', synced_at = now()
+                    WHERE state = 'UNANSWERED'
+                """))
+            closed = result.rowcount or 0
 
-                conn.execute(text("""
-                    INSERT INTO ym_questions
-                        (question_id, supplier_article, created_date, text, answer_text, state)
-                    VALUES
-                        (:qid, :article, :created_date, :text, :answer, :state)
-                    ON CONFLICT (question_id) DO UPDATE SET
-                        answer_text = EXCLUDED.answer_text,
-                        state       = EXCLUDED.state
-                """), {
-                    "qid":         str(qid.get("id", "")),
-                    "article":     str(qid.get("offerId") or ""),
-                    "created_date": q.get("createdAt"),
-                    "text":        q.get("text", ""),
-                    "answer":      answer_text,
-                    "state":       state,
-                })
-                total += 1
-
-        page_token = result.get("paging", {}).get("nextPageToken")
-        if not page_token:
-            break
-        time.sleep(2)
-
-    log.info(f"Вопросы ЯМ: {total}")
-    _log_db("ym_sync_questions", "success", f"{total} вопросов")
+    summary = f"{total} без ответа, закрыто устаревших {closed}"
+    log.info(f"Вопросы ЯМ: {summary}")
+    _log_db("ym_sync_questions", "success", summary)
 
 
 # ── 5. Ассортимент ───────────────────────────────────────────────────────────
@@ -1064,12 +1101,14 @@ def _ym_login_get_session():
         sk_m = re.search(r'"sk":"(u[a-f0-9]+)"', content)
 
         if not sk_m and session_exists:
-            # Сессия протухла — пробуем свежий логин через логин/пароль
-            log.warning("Сохранённая сессия устарела, выполняем повторный логин...")
-            browser.close()
-            # Удаляем протухший файл и вызываем себя рекурсивно (один раз)
-            os.remove(SESSION_FILE)
-            return _ym_login_get_session()
+            # Сессия протухла. Повторный заход без пароля бессмысленный
+            # (откроется страница «Авторизация»), а вход по паролю почти
+            # всегда просит 2FA — это не может пройти в кроне.
+            log.warning("Сохранённая сессия ЯМ устарела — нужен новый вход в кабинет")
+            try:
+                os.remove(SESSION_FILE)
+            except OSError:
+                pass
 
         cookies = context.cookies()
         cookie_str = "; ".join(
@@ -1103,10 +1142,8 @@ def sync_business_rating_report():
     except Exception as e:
         log.error(f"Не удалось залогиниться в ЯМ: {e}")
         _log_db("ym_sync_ratings", "error", f"login failed: {e}")
-        # Переносим данные с предыдущего дня чтобы не было пропусков в дашборде
-        filled = _fill_missing_skus(today)
-        if filled:
-            log.info(f"Рейтинги ЯМ: перенесено {filled} SKU с предыдущего дня (логин недоступен)")
+        # Не копируем вчерашние цифры на сегодня: дашборд тогда выглядит
+        # «живым», а свежих рейтингов нет.
         return
 
     hdrs = {
@@ -1351,9 +1388,19 @@ if __name__ == "__main__":
         log.error("Не заданы YM_API_KEY / YM_CAMPAIGN_ID / YM_BUSINESS_ID в .env")
         sys.exit(1)
 
-    # Защита от повторного запуска: если предыдущий вызов ym_worker.py (любая
-    # задача) ещё не завершился, новый процесс тут же выходит — см. Фазу 5.
-    _lock_conn = cron_lock.acquire_or_exit(engine, "ym_worker", log_fn=log.info, log_db=_log_db)
+    # У каждой задачи свой замок: hourly может идти часами (отзывы),
+    # и не должен глушить ежедневные рейтинги / отчёты.
+    _YM_TASK_LOCKS = {
+        "hourly": "ym_worker",
+        "daily": "ym_worker_daily",
+        "ratings": "ym_worker_ratings",
+        "reports": "ym_worker_reports",
+        "backfill": "ym_worker_backfill",
+        "orders-backfill": "ym_worker_backfill",
+    }
+    _lock_conn = cron_lock.acquire_or_exit(
+        engine, _YM_TASK_LOCKS.get(task, "ym_worker"), log_fn=log.info, log_db=_log_db
+    )
 
     def run(fn):
         try:
