@@ -29,6 +29,9 @@ from weasyprint import HTML
 from weasyprint.text.fonts import FontConfiguration
 
 from ..database import get_db
+from ..invoice_suggestions import invoice_suggestions_sql, normalize_invoice_suggestions
+from ..invoice_match import article_key_sql, invoice_key_sql, is_real_supply_sql, supply_key_sql
+from ..ppm_defects import mark_ppm_defects, ym_not_plain_refusal_sql
 from .auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["PPM Analytics"], dependencies=[Depends(get_current_user)])
@@ -465,10 +468,11 @@ def _load_ym_claims(db: Session) -> pd.DataFrame:
 
     Связка через поставки ЯМ отключена: в API нет пути «возврат → поставка».
     Завод — только из ассортимента (manufacturer), иначе «Уточняется».
+    Статусы как на WB: не обычный отказ; отказ из‑за доотправки детали оставляем.
     """
     try:
         with db.bind.connect() as conn:
-            df = pd.read_sql(text("""
+            df = pd.read_sql(text(f"""
                 SELECT
                     r.return_id::text          AS srid,
                     r.created_at               AS created_dt,
@@ -506,7 +510,7 @@ def _load_ym_claims(db: Session) -> pd.DataFrame:
                 LEFT JOIN wb_assortment a
                     ON TRIM(a.supplier_article) = TRIM(r.supplier_article)
                 WHERE (r.return_type = 'RETURN' OR r.return_type IS NULL)
-                  AND r.status NOT IN ('NOT_RETURNED', 'FAILED', 'CANCELLED', 'REJECTED')
+                  AND {ym_not_plain_refusal_sql("r")}
                 ORDER BY r.created_at DESC
             """), conn)
         df = _normalize_claims_df(df)
@@ -698,14 +702,15 @@ def get_orders_by_factory(
         except Exception as e:
             print("Ошибка orders-by-factory YM:", e)
             return {"status": "success", "data": []}
-    TR = "translate(lower(trim({})),'авсенкмортху','abcehkmoptxy')"
+    art_o = article_key_sql("o.supplier_article")
     query = text(f"""
         SELECT art AS article, month_dt, factory_name, COUNT(*) AS orders
         FROM (
           SELECT TRIM(o.supplier_article) AS art,
                  DATE_TRUNC('month', CAST(o.dt AS TIMESTAMP)) AS month_dt,
                  o.srid,
-                 -- Приоритет: 1) завод через цепочку инвойс→wb_factories,
+                 -- Приоритет: 1) завод через цепочку поставка→инвойс→wb_factories
+                 --    (номер инвойса сравниваем без дефисов и пробелов),
                  -- 2) завод из ассортиментной матрицы — ТОЛЬКО если у артикула один завод.
                  -- Если в wb_factories несколько заводов — не используем assortment fallback,
                  -- чтобы заказы без цепочки оставались NULL (Уточняется) и во фронтенде
@@ -717,20 +722,24 @@ def get_orders_by_factory(
           FROM wb_orders o
           LEFT JOIN wb_logistics l ON l.srid = o.srid
           LEFT JOIN wb_invoices inv
-              ON split_part(l.income_id::text,'.',1) = split_part(inv.supply_id::text,'.',1)
-             AND {TR.format('inv.supplier_article')} = {TR.format('o.supplier_article')}
+              ON {is_real_supply_sql("l.income_id")}
+             AND {is_real_supply_sql("inv.supply_id")}
+             AND {supply_key_sql("l.income_id")} = {supply_key_sql("inv.supply_id")}
+             AND {article_key_sql("inv.supplier_article")} = {art_o}
           LEFT JOIN wb_factories f
-              ON trim(lower(f.invoice_num)) = trim(lower(inv.invoice_num))
-             AND {TR.format('f.supplier_article')} = {TR.format('o.supplier_article')}
+              ON {invoice_key_sql("f.invoice_num")} <> ''
+             AND {invoice_key_sql("inv.invoice_num")} <> ''
+             AND {invoice_key_sql("f.invoice_num")} = {invoice_key_sql("inv.invoice_num")}
+             AND {article_key_sql("f.supplier_article")} = {art_o}
           LEFT JOIN wb_assortment a
-              ON {TR.format('a.supplier_article')} = {TR.format('o.supplier_article')}
+              ON {article_key_sql("a.supplier_article")} = {art_o}
              AND a.manufacturer IS NOT NULL AND a.manufacturer <> ''
           LEFT JOIN (
-              SELECT {TR.format('supplier_article')} AS supplier_article
+              SELECT {article_key_sql("supplier_article")} AS supplier_article
               FROM wb_factories
-              GROUP BY {TR.format('supplier_article')}
+              GROUP BY {article_key_sql("supplier_article")}
               HAVING COUNT(DISTINCT factory_name) > 1
-          ) mf ON mf.supplier_article = {TR.format('o.supplier_article')}
+          ) mf ON mf.supplier_article = {art_o}
           WHERE o.cancel_dt IS NULL
           GROUP BY 1, 2, o.srid, mf.supplier_article
         ) s
@@ -886,29 +895,13 @@ def get_ppm_dataset(
             except: pass
         if not df_hist.empty: df_hist['month_dt'] = pd.to_datetime(df_hist['month_dt'])
 
-        def is_defect(val):
-            if val is True: return True
-            return str(val).strip().lower() in ['1', '1.0', '+', 'true', 'да', 't']
-
-        tag_cols = [f"cat_{i}" for i in range(1, 14) if f"cat_{i}" in df_sys.columns]
-        if platform == 'ozon' and not df_sys.empty:
-            # Числитель уже отфильтрован по quality reasons — считаем все дефектами
-            df_sys['is_defect_marked'] = True
-        elif platform == 'all' and not df_sys.empty:
-            # Ozon: все строки уже PPM-фильтр; WB/YM — по cat_*
-            mask = pd.Series(False, index=df_sys.index)
-            if 'platform' in df_sys.columns:
-                mask = mask | (df_sys['platform'].astype(str) == 'ozon')
-            if tag_cols:
-                for col in tag_cols:
-                    mask = mask | df_sys[col].apply(is_defect)
-            df_sys['is_defect_marked'] = mask
-        elif tag_cols and not df_sys.empty:
-            mask = False
-            for col in tag_cols: mask = mask | df_sys[col].apply(is_defect)
-            df_sys['is_defect_marked'] = mask
-        else:
-            if not df_sys.empty: df_sys['is_defect_marked'] = False
+        # WB: до августа 2026 любой тег 1–13, с августа — теги акта.
+        # ЯМ и Ozon: теги акта за все периоды.
+        if not df_sys.empty:
+            if platform in ('ozon', 'ym') and 'platform' not in df_sys.columns:
+                df_sys = df_sys.copy()
+                df_sys['platform'] = platform
+            df_sys['is_defect_marked'] = mark_ppm_defects(df_sys)
 
         sys_metrics = pd.DataFrame(columns=['article', 'month_dt', 'defects'])
 
@@ -1290,35 +1283,62 @@ def export_claim_pdf(payload: ClaimExportRequest = Body(...), db: Session = Depe
 
 
 @router.get("/claims-metadata")
-def get_claims_metadata(db: Session = Depends(get_db)):
+def get_claims_metadata(
+    invoice_q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
     """Уникальные заводы, инвойсы и контейнеры для автодополнения в ручных обращениях."""
     result = {"factories": [], "invoices": [], "containers": []}
+    search_q = (invoice_q or '').strip()
+    invoice_limit = 80 if search_q else 200
     try:
         with db.bind.connect() as conn:
+            if not search_q:
+                try:
+                    rows = conn.execute(text(
+                        "SELECT DISTINCT factory_name FROM wb_factories "
+                        "WHERE factory_name IS NOT NULL AND factory_name != '' ORDER BY factory_name"
+                    )).fetchall()
+                    result["factories"] = [r[0] for r in rows]
+                except Exception:
+                    pass
             try:
-                rows = conn.execute(text(
-                    "SELECT DISTINCT factory_name FROM wb_factories "
-                    "WHERE factory_name IS NOT NULL AND factory_name != '' ORDER BY factory_name"
-                )).fetchall()
-                result["factories"] = [r[0] for r in rows]
-            except Exception: pass
-            try:
-                rows = conn.execute(text(
-                    "SELECT DISTINCT invoice_num FROM wb_invoices "
-                    "WHERE invoice_num IS NOT NULL AND invoice_num NOT IN ('', '0') "
-                    "ORDER BY invoice_num DESC LIMIT 500"
-                )).fetchall()
-                result["invoices"] = [r[0] for r in rows]
-            except Exception: pass
-            try:
-                rows = conn.execute(text(
-                    "SELECT DISTINCT container_num FROM view_wb_claims_enriched "
-                    "WHERE container_num IS NOT NULL AND container_num NOT IN ('', 'None') "
-                    "ORDER BY container_num DESC LIMIT 500"
-                )).fetchall()
-                result["containers"] = [r[0] for r in rows]
-            except Exception: pass
-    except Exception: pass
+                sql, params = invoice_suggestions_sql(search_q, invoice_limit)
+                rows = conn.execute(text(sql), params).fetchall()
+                result["invoices"] = normalize_invoice_suggestions(
+                    [r[0] for r in rows], limit=invoice_limit
+                )
+            except Exception:
+                try:
+                    q = search_q.lower()
+                    rows = conn.execute(text(
+                        "SELECT DISTINCT TRIM(invoice_num) FROM wb_invoices "
+                        "WHERE invoice_num IS NOT NULL AND TRIM(invoice_num) <> '' "
+                        "AND LOWER(TRIM(invoice_num)) NOT LIKE '%не закрыт%' "
+                        "AND (:q = '' OR LOWER(TRIM(invoice_num)) LIKE :q_like) "
+                        "ORDER BY 1 DESC LIMIT :lim"
+                    ), {
+                        "q": search_q,
+                        "q_like": f"%{q}%" if q else "%",
+                        "lim": invoice_limit,
+                    }).fetchall()
+                    result["invoices"] = normalize_invoice_suggestions(
+                        [r[0] for r in rows], limit=invoice_limit
+                    )
+                except Exception:
+                    pass
+            if not search_q:
+                try:
+                    rows = conn.execute(text(
+                        "SELECT DISTINCT container_num FROM view_wb_claims_enriched "
+                        "WHERE container_num IS NOT NULL AND container_num NOT IN ('', 'None') "
+                        "ORDER BY container_num DESC LIMIT 500"
+                    )).fetchall()
+                    result["containers"] = [r[0] for r in rows]
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return {"status": "success", "data": result}
 
 

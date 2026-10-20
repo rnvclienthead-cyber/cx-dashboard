@@ -34,16 +34,23 @@
               class="px-2.5 py-1 rounded-full text-xs font-medium bg-yellow-50 text-yellow-700 border border-yellow-200">
               ЯМ {{ counts.ym }}
             </span>
-            <span v-if="(counts.ozon || 0) > 0"
+              <span v-if="(counts.ozon || 0) > 0"
               class="px-2.5 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
               Ozon {{ counts.ozon }}
             </span>
+            <button v-if="updatedCount > 0" type="button" @click="fKind = fKind === 'updated' ? '' : 'updated'"
+              :class="['px-2.5 py-1 rounded-full text-xs font-medium border transition-colors',
+                fKind === 'updated'
+                  ? 'bg-violet-600 text-white border-violet-600'
+                  : 'bg-violet-50 text-violet-700 border-violet-200 hover:bg-violet-100']">
+              Обновлённые {{ updatedCount }}
+            </button>
           </div>
         </div>
 
         <!-- Строка 2: вкладки секций -->
         <div class="flex -mb-px">
-          <button v-for="s in sections" :key="s.key"
+          <button v-for="s in visibleSections" :key="s.key"
             @click="switchSection(s.key)"
             :class="['px-4 py-2.5 text-sm font-medium border-b-2 transition-all',
               activeSection === s.key
@@ -68,6 +75,74 @@
     <!-- ══ ОЧЕРЕДЬ ════════════════════════════════════════════════════════ -->
     <div v-if="activeSection === 'queue'" class="max-w-[1600px] mx-auto px-4 py-4">
 
+      <!-- Фильтры — всегда на виду, даже при загрузке и пустой очереди -->
+      <div class="bg-white border border-gray-200 rounded-xl p-3 mb-3">
+        <div class="flex flex-wrap items-end gap-2">
+          <div class="flex-1 min-w-[180px]">
+            <label class="block text-xs text-gray-400 mb-0.5">Поиск</label>
+            <input v-model="fText" placeholder="Текст отзыва, артикул…"
+              class="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Артикул</label>
+            <input v-model="fSku" placeholder="Арт…"
+              class="w-28 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Текст</label>
+            <select v-model="fHasText"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400">
+              <option value="">С текстом и без</option>
+              <option value="with">Только с текстом</option>
+              <option value="without">Только без текста</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Оценка</label>
+            <div class="flex items-center gap-1">
+              <button v-for="n in [5,4,3,2,1]" :key="'q'+n" type="button" @click="toggleQueueRating(n)"
+                :class="['px-2 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                  fRatings.includes(n)
+                    ? 'bg-rose-600 text-white border-rose-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50']">
+                {{ n }}★
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Вид</label>
+            <select v-model="fKind"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400">
+              <option value="">Все</option>
+              <option value="updated">Обновлённые</option>
+              <option value="new">Новые</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Статус</label>
+            <select v-model="fStatus"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400">
+              <option value="">Все</option>
+              <option value="draft">Черновик</option>
+              <option value="check">Проверить</option>
+              <option value="none">Без ответа</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Дата с</label>
+            <input v-model="fDateFrom" type="date"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Дата по</label>
+            <input v-model="fDateTo" type="date"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <button @click="resetQueueFilters"
+            class="px-3 py-1.5 border border-gray-200 text-gray-500 rounded-lg text-sm hover:bg-gray-50">Сброс</button>
+        </div>
+      </div>
+
       <div v-if="queueLoading" class="flex items-center justify-center py-20">
         <div class="text-center">
           <div class="w-10 h-10 border-4 border-rose-500 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
@@ -89,24 +164,32 @@
         <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div class="flex items-center gap-2 flex-wrap">
             <button @click="generateSelectedTemplate" :disabled="selectedIds.length === 0 || bulkGenerating"
-              title="Собрать ответы из фирменных шаблонов"
+              title="Собрать шаблоны только для выбранных отзывов"
               :class="['inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition-all',
                 selectedIds.length && !bulkGenerating
                   ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
               <svg v-if="bulkGenerating === 'tpl'" class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
               <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-              Из шаблона{{ selectedIds.length ? ` (${selectedIds.length})` : '' }}
+              Шаблон для выбранных{{ selectedIds.length ? ` (${selectedIds.length})` : '' }}
             </button>
             <button @click="generateSelectedAI" :disabled="selectedIds.length === 0 || bulkGenerating"
-              title="Сгенерировать ответы ИИ"
+              title="Сгенерировать ИИ только для выбранных отзывов"
               :class="['inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition-all',
                 selectedIds.length && !bulkGenerating
                   ? 'bg-violet-600 hover:bg-violet-700 text-white'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed']">
               <svg v-if="bulkGenerating === 'ai'" class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
               <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z"/></svg>
-              ИИ{{ selectedIds.length ? ` (${selectedIds.length})` : '' }}
+              ИИ для выбранных{{ selectedIds.length ? ` (${selectedIds.length})` : '' }}
+            </button>
+            <button @click="clearSelectedDrafts" :disabled="selectedDraftIds.length === 0 || bulkGenerating || bulkSending"
+              title="Очистить текст ответа у выбранных"
+              :class="['inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition-all border',
+                selectedDraftIds.length
+                  ? 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                  : 'bg-gray-50 border-gray-200 text-gray-400 cursor-not-allowed']">
+              Очистить выбранные{{ selectedDraftIds.length ? ` (${selectedDraftIds.length})` : '' }}
             </button>
             <span class="w-px h-6 bg-gray-200"></span>
             <button @click="confirmSelected" :disabled="selectedDraftIds.length === 0 || bulkSending"
@@ -127,13 +210,8 @@
             </button>
           </div>
           <div class="flex items-center gap-2">
-            <button @click="loadQueue"
-              class="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 transition-colors">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
-              Обновить
-            </button>
             <select v-model.number="perPage" @change="currentPage = 1"
-              class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-600 focus:outline-none focus:ring-1 focus:ring-rose-400">
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm text-gray-600 bg-white focus:outline-none focus:ring-1 focus:ring-rose-400">
               <option v-for="n in [25,50,100]" :key="n" :value="n">{{ n }} на стр.</option>
             </select>
           </div>
@@ -153,6 +231,7 @@
                 <tr class="border-b border-gray-200">
                   <th class="w-10 px-2 py-2 text-center">
                     <input type="checkbox" :checked="allSelected" @change="toggleSelectAll"
+                      title="Выбрать отзывы на этой странице"
                       class="w-4 h-4 rounded accent-indigo-600 cursor-pointer" />
                   </th>
                   <th class="px-2 py-2 text-left font-medium whitespace-nowrap cursor-pointer select-none" @click="toggleSort">
@@ -167,53 +246,6 @@
                   <th class="px-2 py-2 text-center font-medium whitespace-nowrap">Статус</th>
                   <th class="px-2 py-2 text-center font-medium">Действия</th>
                 </tr>
-                <!-- Фильтры -->
-                <tr class="border-b border-gray-200 bg-white align-top">
-                  <th></th>
-                  <th class="px-2 py-1.5">
-                    <div class="flex flex-col gap-1">
-                      <input v-model="fDateFrom" type="date" title="Дата с"
-                        class="w-[130px] border border-gray-200 rounded px-1 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400" />
-                      <input v-model="fDateTo" type="date" title="Дата по"
-                        class="w-[130px] border border-gray-200 rounded px-1 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400" />
-                    </div>
-                  </th>
-                  <th class="px-2 py-1.5">
-                    <input v-model="fSku" placeholder="Арт…"
-                      class="w-24 border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400" />
-                  </th>
-                  <th class="px-2 py-1.5">
-                    <div class="flex flex-col gap-1">
-                      <input v-model="fText" placeholder="Поиск по тексту…"
-                        class="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400" />
-                      <select v-model="fHasText" class="w-full border border-gray-200 rounded px-1 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400">
-                        <option value="">С текстом и без</option>
-                        <option value="with">Только с текстом</option>
-                        <option value="without">Только без текста</option>
-                      </select>
-                    </div>
-                  </th>
-                  <th class="px-2 py-1.5">
-                    <select v-model="fRating" class="w-full border border-gray-200 rounded px-1 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400">
-                      <option value="">Все</option>
-                      <option v-for="n in [5,4,3,2,1]" :key="n" :value="String(n)">{{ n }}★</option>
-                    </select>
-                  </th>
-                  <th></th>
-                  <th></th>
-                  <th></th>
-                  <th class="px-2 py-1.5">
-                    <select v-model="fStatus" class="w-full border border-gray-200 rounded px-1 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400">
-                      <option value="">Все</option>
-                      <option value="draft">Черновик</option>
-                      <option value="none">Без ответа</option>
-                    </select>
-                  </th>
-                  <th class="px-2 py-1.5 text-center">
-                    <button @click="resetQueueFilters" title="Сбросить фильтры"
-                      class="text-xs text-gray-400 hover:text-rose-500 whitespace-nowrap">Сброс</button>
-                  </th>
-                </tr>
               </thead>
               <tbody>
                 <tr v-for="item in pagedItems" :key="item.mp + item.id"
@@ -221,7 +253,7 @@
                   class="border-b border-gray-100 last:border-0 hover:bg-rose-50/40 align-top cursor-pointer">
                   <!-- Чекбокс -->
                   <td class="px-2 py-3 text-center" @click.stop>
-                    <input type="checkbox" :value="item.id" v-model="selectedIds"
+                    <input type="checkbox" :value="rowKey(item)" v-model="selectedIds"
                       class="w-4 h-4 rounded accent-indigo-600 cursor-pointer" />
                   </td>
                   <!-- Дата -->
@@ -233,7 +265,7 @@
                   <td class="px-2 py-3">
                     <div class="flex items-start gap-2">
                       <div class="w-16 h-20 rounded-md overflow-hidden bg-gray-100 border border-gray-200 shrink-0">
-                        <img v-if="item.product_photo" :src="item.product_photo" class="w-full h-full object-cover" />
+                        <img v-if="reviewProductPhoto(item)" :src="reviewProductPhoto(item)" class="w-full h-full object-cover" />
                         <span v-else class="w-full h-full flex items-center justify-center text-gray-300">
                           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
                         </span>
@@ -251,6 +283,20 @@
                   <td class="px-2 py-3 text-gray-700 text-xs leading-relaxed">
                     <p class="line-clamp-4 cursor-help"
                       @mouseenter="showTip($event, item.body)" @mousemove="moveTip" @mouseleave="hideTip">{{ item.body }}</p>
+                    <span v-if="item.update_label"
+                      class="inline-block mt-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200">
+                      {{ item.update_label }}
+                      <span v-if="item.prev_valuation != null && item.rating != null && item.prev_valuation !== item.rating">
+                        · было {{ item.prev_valuation }}★
+                      </span>
+                    </span>
+                    <p v-if="item.prev_text && item.prev_text !== item.body"
+                      class="mt-1 text-[11px] text-gray-400 line-clamp-2">Было: {{ item.prev_text }}</p>
+                    <RouterLink v-if="item.reshipment_id" :to="`/reshipment?id=${item.reshipment_id}`"
+                      @click.stop
+                      class="mt-1 inline-block text-[11px] text-violet-600 hover:underline">
+                      Доотправка #{{ item.reshipment_id }}
+                    </RouterLink>
                     <div v-if="item.photos && item.photos.length" class="flex flex-wrap gap-1 mt-1.5">
                       <button v-for="(ph, i) in item.photos.slice(0, 4)" :key="i" @click.stop="openLightbox(item.photos, i)"
                         class="block w-8 h-8 rounded overflow-hidden border border-gray-200 hover:border-rose-400 transition-colors">
@@ -280,7 +326,13 @@
                   </td>
                   <!-- Сценарий -->
                   <td class="px-2 py-3 text-xs">
-                    <span v-if="item.pending_template" class="text-indigo-600 break-words">{{ item.pending_template }}</span>
+                    <button v-if="scenarioText(item)" type="button"
+                      class="text-left text-indigo-600 break-words hover:underline"
+                      :title="canEditReviewTemplates ? 'Нажмите, чтобы сменить сценарий. Двойной щелчок — править этот текст.' : 'Нажмите, чтобы сменить сценарий'"
+                      @click.stop="runUnlessDouble('sc-' + item.id, () => cycleScenario(item))"
+                      @dblclick.stop.prevent="cancelPendingClick('sc-' + item.id); openReviewScenarioEditor(item._topic)">
+                      {{ scenarioText(item) }}
+                    </button>
                     <span v-else class="text-gray-300">—</span>
                     <span v-if="item._manual_check"
                       @mouseenter="showTip($event, 'Требуется ручная проверка перед отправкой')" @mousemove="moveTip" @mouseleave="hideTip"
@@ -288,10 +340,27 @@
                   </td>
                   <!-- Текст ответа (редактируемый) -->
                   <td class="px-2 py-3" @click.stop>
-                    <textarea v-model="item._reply" rows="4" placeholder="Написать ответ…"
-                      class="w-full border border-gray-200 rounded px-2 py-1.5 text-xs resize-y focus:outline-none focus:ring-1 focus:ring-rose-400 min-h-[64px]"></textarea>
-                    <div v-if="relevantTemplates(item).length" class="mt-1 flex flex-wrap gap-1">
-                      <button v-for="t in relevantTemplates(item)" :key="t.id" @click="item._reply = t.body"
+                    <textarea v-model="item._reply" rows="4"
+                      :placeholder="isAiOnly(item) ? 'ИИ, шаблон или свой текст…' : 'Написать ответ…'"
+                      class="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs resize-y focus:outline-none focus:ring-1 focus:ring-rose-400 min-h-[64px]"></textarea>
+                    <p v-if="item._generating === 'ai'" class="mt-1 text-xs text-violet-500">ИИ пишет, обычно 10–20 секунд…</p>
+                    <div v-if="topicsFor(item).length" class="mt-1 flex flex-wrap gap-1">
+                      <button v-for="tp in topicsFor(item)" :key="tp.id" type="button"
+                        :title="canEditReviewTemplates ? 'Двойной щелчок — править этот сценарий' : ''"
+                        @click="runUnlessDouble('tp-' + item.id + '-' + tp.id, () => selectTopic(item, tp.id))"
+                        @dblclick.stop.prevent="cancelPendingClick('tp-' + item.id + '-' + tp.id); openReviewScenarioEditor(tp.id)"
+                        :class="['px-1.5 py-0.5 rounded text-xs border transition-colors',
+                          (item._topic || item.pending_topic) === tp.id
+                            ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                            : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-indigo-200 hover:text-indigo-700']">
+                        {{ tp.label }}
+                      </button>
+                    </div>
+                    <div v-if="quickReplyTemplates(item).length" class="mt-1 flex flex-wrap gap-1">
+                      <button v-for="t in quickReplyTemplates(item)" :key="t.id"
+                        :title="canEditReviewTemplates ? 'Двойной щелчок — править этот шаблон' : ''"
+                        @click="runUnlessDouble('qt-' + item.id + '-' + t.id, () => { item._reply = withReviewSignature(t.body) })"
+                        @dblclick.stop.prevent="cancelPendingClick('qt-' + item.id + '-' + t.id); openReviewQuickTemplate(t)"
                         class="px-1.5 py-0.5 bg-gray-50 hover:bg-rose-50 text-gray-500 hover:text-rose-600 border border-gray-200 rounded text-xs transition-colors">
                         {{ t.title }}
                       </button>
@@ -304,17 +373,22 @@
                   <!-- Действия -->
                   <td class="px-2 py-3" @click.stop>
                     <div class="flex items-center justify-center gap-1">
-                      <button @click="generateTemplate(item)" :disabled="!!item._generating"
-                        title="Из шаблона"
+                      <button @click.stop="generateTemplate(item)" :disabled="!!item._generating"
+                        title="Шаблон только для этого отзыва"
                         :class="['p-1.5 rounded transition-colors', item._generating ? 'text-gray-300 cursor-wait' : 'text-indigo-600 hover:bg-indigo-50']">
                         <svg v-if="item._generating === 'tpl'" class="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
                         <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
                       </button>
-                      <button @click="generateAI(item)" :disabled="!!item._generating"
-                        title="Сгенерировать ИИ"
+                      <button @click.stop="generateAI(item)" :disabled="!!item._generating"
+                        title="ИИ только для этого отзыва"
                         :class="['p-1.5 rounded transition-colors', item._generating ? 'text-gray-300 cursor-wait' : 'text-violet-600 hover:bg-violet-50']">
                         <svg v-if="item._generating === 'ai'" class="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
                         <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z"/></svg>
+                      </button>
+                      <button v-if="hasDraft(item)" @click.stop="clearDraft(item)"
+                        title="Очистить текст ответа"
+                        class="p-1.5 rounded text-gray-300 hover:text-gray-600 hover:bg-gray-50 transition-colors">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
                       </button>
                       <button @click="sendReply(item)" :disabled="!item._reply?.trim()"
                         title="Отправить ответ"
@@ -350,49 +424,70 @@
     <!-- ══ АРХИВ ══════════════════════════════════════════════════════════ -->
     <div v-if="activeSection === 'archive'" class="max-w-[1600px] mx-auto px-4 py-4">
       <p class="text-xs text-gray-500 mb-3">
-        В архив отзыв попадает после отправки ответа (<span class="text-green-700 font-medium">Отвечено</span>)
-        или если его закрыли кнопкой «в архив без ответа» (<span class="text-gray-500 font-medium">Закрыто без ответа</span>).
+        В архив отзыв попадает после отправки ответа (<span class="text-green-700 font-medium">Отвечено</span>),
+        если его закрыли кнопкой «в архив без ответа» (<span class="text-gray-500 font-medium">Закрыто без ответа</span>)
+        или если Wildberries сам убрал его из своей очереди, хотя продавец ничего не писал
+        (<span class="text-amber-700 font-medium">На WB без ответа</span> — так бывает у оценок без текста).
       </p>
 
-      <!-- Фильтры архива -->
-      <div class="flex flex-wrap items-end gap-2 mb-4">
-        <div>
-          <label class="block text-xs text-gray-400 mb-0.5">Артикул</label>
-          <input v-model="aSku" @keyup.enter="loadArchive(1)" placeholder="Арт…"
-            class="w-28 border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-rose-400" />
+      <!-- Фильтры архива — те же поля, что в очереди -->
+      <div class="bg-white border border-gray-200 rounded-xl p-3 mb-4">
+        <div class="flex flex-wrap items-end gap-2">
+          <div class="flex-1 min-w-[180px]">
+            <label class="block text-xs text-gray-400 mb-0.5">Поиск</label>
+            <input v-model="aText" @keyup.enter="loadArchive(1)" placeholder="Текст отзыва, артикул…"
+              class="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Артикул</label>
+            <input v-model="aSku" @keyup.enter="loadArchive(1)" placeholder="Арт…"
+              class="w-28 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Текст</label>
+            <select v-model="aHasText" @change="loadArchive(1)"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400">
+              <option value="">С текстом и без</option>
+              <option value="with">Только с текстом</option>
+              <option value="without">Только без текста</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Оценка</label>
+            <div class="flex items-center gap-1">
+              <button v-for="n in [5,4,3,2,1]" :key="'a'+n" type="button" @click="toggleArchiveRating(n)"
+                :class="['px-2 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                  aRatings.includes(n)
+                    ? 'bg-rose-600 text-white border-rose-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50']">
+                {{ n }}★
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Статус</label>
+            <select v-model="aStatus" @change="loadArchive(1)"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400">
+              <option value="">Все</option>
+              <option value="answered">Отвечено</option>
+              <option value="dismissed">Закрыто без ответа</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Дата с</label>
+            <input v-model="aDateFrom" @change="loadArchive(1)" type="date"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-0.5">Дата по</label>
+            <input v-model="aDateTo" @change="loadArchive(1)" type="date"
+              class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+          </div>
+          <button @click="loadArchive(1)"
+            class="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-medium">Найти</button>
+          <button @click="resetArchiveFilters"
+            class="px-3 py-1.5 border border-gray-200 text-gray-500 rounded-lg text-sm hover:bg-gray-50">Сброс</button>
         </div>
-        <div>
-          <label class="block text-xs text-gray-400 mb-0.5">Текст</label>
-          <select v-model="aHasText" @change="loadArchive(1)"
-            class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-rose-400">
-            <option value="">С текстом и без</option>
-            <option value="with">Только с текстом</option>
-            <option value="without">Только без текста</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs text-gray-400 mb-0.5">Статус</label>
-          <select v-model="aStatus" @change="loadArchive(1)"
-            class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-rose-400">
-            <option value="">Все</option>
-            <option value="answered">Отвечено</option>
-            <option value="dismissed">Закрыто без ответа</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs text-gray-400 mb-0.5">Дата с</label>
-          <input v-model="aDateFrom" @change="loadArchive(1)" type="date"
-            class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-rose-400" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-400 mb-0.5">Дата по</label>
-          <input v-model="aDateTo" @change="loadArchive(1)" type="date"
-            class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-rose-400" />
-        </div>
-        <button @click="loadArchive(1)"
-          class="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-medium">Найти</button>
-        <button @click="resetArchiveFilters"
-          class="px-3 py-1.5 border border-gray-200 text-gray-500 rounded-lg text-sm hover:bg-gray-50">Сброс</button>
       </div>
 
       <div v-if="archLoading" class="flex justify-center py-16">
@@ -423,7 +518,7 @@
                 <td class="px-2 py-3">
                   <div class="flex items-start gap-2">
                     <div class="w-14 h-[72px] rounded-md overflow-hidden bg-gray-100 border border-gray-200 shrink-0">
-                      <img v-if="item.product_photo" :src="item.product_photo" class="w-full h-full object-cover" />
+                      <img v-if="reviewProductPhoto(item)" :src="reviewProductPhoto(item)" class="w-full h-full object-cover" />
                       <span v-else class="w-full h-full flex items-center justify-center text-gray-300">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
                       </span>
@@ -450,11 +545,8 @@
                   <span v-else class="text-gray-300">—</span>
                 </td>
                 <td class="px-2 py-3 text-center whitespace-nowrap">
-                  <span :class="['text-xs px-2 py-0.5 rounded-full font-medium border',
-                    item.archive_reason === 'dismissed'
-                      ? 'bg-gray-100 text-gray-500 border-gray-200'
-                      : 'bg-green-50 text-green-700 border-green-200']">
-                    {{ item.archive_reason === 'dismissed' ? 'Закрыто без ответа' : 'Отвечено' }}
+                  <span :class="['text-xs px-2 py-0.5 rounded-full font-medium border', archiveStatusCls(item)]">
+                    {{ archiveStatusLabel(item) }}
                   </span>
                 </td>
                 <td class="px-2 py-3 text-xs text-gray-500 whitespace-nowrap">
@@ -491,15 +583,36 @@
 
     <!-- ══ ШАБЛОНЫ ══════════════════════════════════════════════════════════ -->
     <div v-if="activeSection === 'templates'" class="max-w-4xl mx-auto px-4 py-4">
-      <div class="flex justify-between items-center mb-4">
-        <h2 class="font-semibold text-gray-800">Шаблоны ответов</h2>
-        <button @click="openTplForm()" class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">
+      <div class="flex justify-between items-start gap-3 mb-4">
+        <div>
+          <h2 class="font-semibold text-gray-800">Шаблоны ответов</h2>
+          <p class="text-xs text-gray-500 mt-0.5 max-w-xl">
+            Кнопки под отзывом. Двойной щелчок по кнопке в очереди открывает её текст здесь.
+          </p>
+        </div>
+        <button v-if="!templatesReadOnly" @click="startNewQuickTemplate()" class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors shrink-0">
           + Создать шаблон
         </button>
       </div>
 
-      <div v-if="tplFormOpen" class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-4">
-        <h3 class="font-semibold text-gray-800 mb-4">{{ editTpl.id ? 'Редактировать' : 'Новый шаблон' }}</h3>
+      <h3 class="text-sm font-semibold text-gray-800 mb-2">Сценарии</h3>
+      <div class="space-y-2 mb-6">
+        <div v-for="card in scenarioCards" :key="card.key" :id="'review-scenario-' + card.key"
+          :class="['bg-white rounded-xl border px-4 py-3',
+            focusedTplKey === card.key ? 'border-indigo-400 ring-2 ring-indigo-100' : 'border-gray-200']">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="font-medium text-gray-800 text-sm">{{ card.label }}</p>
+              <p class="text-sm text-gray-500 line-clamp-2 mt-0.5">{{ card.body || 'Текст ещё не задан' }}</p>
+            </div>
+            <button v-if="!templatesReadOnly" type="button" @click="editScenarioCard(card)"
+              class="text-xs text-indigo-600 hover:underline shrink-0">Править</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="tplFormOpen" id="review-quick-template-form" class="bg-white border border-indigo-200 rounded-xl shadow-sm p-5 mb-4">
+        <h3 class="font-semibold text-gray-800 mb-4">{{ editTpl.title || (editTpl.id ? 'Редактировать' : 'Новый шаблон') }}</h3>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div class="md:col-span-2">
             <label class="block text-xs font-medium text-gray-600 mb-1">Название</label>
@@ -563,13 +676,15 @@
         </div>
       </div>
 
+      <h3 class="text-sm font-semibold text-gray-800 mb-2">Готовые ответы</h3>
       <div v-if="tplLoading" class="flex justify-center py-10">
         <div class="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
       </div>
-      <div v-else-if="templates.length === 0" class="text-center py-16 text-gray-400">Шаблоны не добавлены</div>
+      <div v-else-if="otherTemplates.length === 0" class="text-center py-10 text-gray-400 text-sm">Готовых ответов пока нет</div>
       <div v-else class="space-y-2">
-        <div v-for="t in templates" :key="t.id"
-          class="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3">
+        <div v-for="t in otherTemplates" :key="t.id" :id="'review-tpl-' + t.id"
+          :class="['bg-white rounded-xl border shadow-sm px-4 py-3',
+            focusedTplKey === ('tpl-' + t.id) ? 'border-indigo-400 ring-2 ring-indigo-100' : 'border-gray-200']">
           <div class="flex items-start justify-between gap-3">
             <div class="flex-1 min-w-0">
               <div class="flex flex-wrap items-center gap-2 mb-1">
@@ -581,8 +696,8 @@
               </div>
               <p class="text-sm text-gray-500 line-clamp-2">{{ t.body }}</p>
             </div>
-            <div class="flex gap-2 shrink-0">
-              <button @click="openTplForm(t)" class="text-xs text-indigo-600 hover:underline">Ред.</button>
+            <div v-if="!templatesReadOnly" class="flex gap-2 shrink-0">
+              <button @click="openReviewQuickTemplate(t)" class="text-xs text-indigo-600 hover:underline">Править</button>
               <button @click="deleteTpl(t.id)" class="text-xs text-red-500 hover:underline">Удалить</button>
             </div>
           </div>
@@ -595,11 +710,12 @@
       <div class="flex items-center gap-3 mb-4">
         <label class="text-sm text-gray-600">Период:</label>
         <select v-model.number="statsDays" @change="loadStats"
-          class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm">
+          class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white text-gray-700">
           <option :value="7">7 дней</option>
           <option :value="14">14 дней</option>
           <option :value="30">30 дней</option>
         </select>
+        <p class="text-xs text-gray-400">Цифры из журнала реальных отправок по отзывам</p>
       </div>
 
       <div v-if="statsLoading" class="flex justify-center py-10">
@@ -654,8 +770,93 @@
       </div>
     </div>
 
+    <!-- ══ АВТООТВЕТЫ ══════════════════════════════════════════════════════ -->
+    <div v-if="activeSection === 'settings' && permissionsStore.isAdmin" class="max-w-3xl mx-auto px-4 py-6 space-y-4">
+      <div class="bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100">
+          <h2 class="text-sm font-semibold text-gray-900">Площадки</h2>
+          <p class="text-[11px] text-gray-400 mt-0.5">
+            Если площадка выкл — система ничего не отправляет сама, даже при включённых сценариях.
+          </p>
+        </div>
+        <div class="divide-y divide-gray-100">
+          <div v-for="row in autoMpRows" :key="row.mp"
+            class="px-5 py-4 flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span :class="['px-2 py-0.5 rounded text-xs font-bold uppercase', mpBadgeCls[row.mp]]">{{ row.label }}</span>
+                <p class="text-xs font-medium text-gray-800">Автоотправка ответа</p>
+              </div>
+              <p class="text-[11px] text-gray-400 mt-1">{{ row.hint }}</p>
+            </div>
+            <button type="button" role="switch"
+              :aria-checked="!!autoEnabled[row.mp]"
+              :disabled="autoSaving"
+              @click="toggleAutoMp(row.mp)"
+              :class="['relative shrink-0 w-11 h-6 rounded-full transition-colors',
+                autoEnabled[row.mp] ? 'bg-rose-500' : 'bg-gray-200']">
+              <span :class="['absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                autoEnabled[row.mp] ? 'translate-x-5' : '']"/>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100">
+          <h2 class="text-sm font-semibold text-gray-900">Сценарии</h2>
+          <p class="text-[11px] text-gray-400 mt-0.5">
+            Можно включить все сразу или только нужные. С текстом или фото система сама не отвечает.
+          </p>
+        </div>
+        <div class="divide-y divide-gray-100">
+          <div class="px-5 py-4 flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <p class="text-xs font-medium text-gray-800">Все сценарии сразу</p>
+              <p class="text-[11px] text-gray-400 mt-1">5★, 4★ и 1–3★ без текста и фото</p>
+            </div>
+            <button type="button" role="switch"
+              :aria-checked="allAutoScenariosOn"
+              :disabled="autoSaving"
+              @click="toggleAllAutoScenarios"
+              :class="['relative shrink-0 w-11 h-6 rounded-full transition-colors',
+                allAutoScenariosOn ? 'bg-rose-500' : 'bg-gray-200']">
+              <span :class="['absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                allAutoScenariosOn ? 'translate-x-5' : '']"/>
+            </button>
+          </div>
+          <div v-for="row in autoScenarioRows" :key="row.key"
+            class="px-5 py-4 flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <p class="text-xs font-medium text-gray-800">{{ row.label }}</p>
+              <p class="text-[11px] text-gray-400 mt-1">{{ row.hint }}</p>
+            </div>
+            <button type="button" role="switch"
+              :aria-checked="!!autoScenarios[row.key]"
+              :disabled="autoSaving"
+              @click="toggleAutoScenario(row.key)"
+              :class="['relative shrink-0 w-11 h-6 rounded-full transition-colors',
+                autoScenarios[row.key] ? 'bg-rose-500' : 'bg-gray-200']">
+              <span :class="['absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                autoScenarios[row.key] ? 'translate-x-5' : '']"/>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white border border-gray-200 rounded-xl p-5">
+        <p class="text-sm text-gray-600 leading-relaxed">
+          Когда включите тумблер, само уйдёт только выбранный сценарий на включённой площадке.
+        </p>
+        <p class="text-sm text-gray-600 mt-3 leading-relaxed">
+          Сами не уходят: 4–5 с текстом или фото — черновик на одобрение;
+          1–3 с текстом или фото — пустое поле, ответ только через кнопку «ИИ».
+        </p>
+      </div>
+    </div>
+
     <!-- Карточка отзыва -->
-    <ReviewCard v-if="reviewCard.show" :mp="reviewCard.mp" :review-id="reviewCard.id" @close="reviewCard.show = false" />
+    <ReviewCard v-if="reviewCard.show" :mp="reviewCard.mp" :review-id="reviewCard.id" @close="closeReviewCard" />
 
     <!-- Всплывающая подсказка (полный текст) -->
     <div v-if="tip.show" class="fixed z-[60] pointer-events-none max-w-md px-3 py-2 rounded-lg bg-gray-900 text-white text-sm leading-snug shadow-xl whitespace-pre-wrap"
@@ -690,40 +891,50 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { apiFetch } from '../api'
+import { centrifugoUrl } from '../realtime'
 import { usePlatformStore } from '../stores/platform'
 import { usePermissionsStore } from '../stores/permissions'
 import KbConstructor from '../components/KbConstructor.vue'
 import ReviewCard from '../components/ReviewCard.vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { Centrifuge } from 'centrifuge'
 import { useToast } from '../composables/useToast'
 import { useCxTemplates } from '../composables/useCxTemplates'
 import { useCxQueueActions } from '../composables/useCxQueueActions'
-import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls, fmtDateTime } from '../utils/cx'
+import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls, fmtDateTime, withReviewSignature, reviewProductPhoto } from '../utils/cx'
 
 const platformStore = usePlatformStore()
 const permissionsStore = usePermissionsStore()
 const currentMp = computed(() => platformStore.platform || 'all')
-/** Менеджер КС — только просмотр шаблонов отзывов */
-const templatesReadOnly = computed(() => permissionsStore.role === 'cs_manager')
+/** Правка шаблонов — администратор и менеджер КС. Автоответы — только администратор. */
+const canEditReviewTemplates = computed(() =>
+  permissionsStore.isAdmin || permissionsStore.role === 'cs_manager'
+)
+const templatesReadOnly = computed(() => !canEditReviewTemplates.value)
 
 const { toast, showToast } = useToast()
 
 // ── Навигация ──────────────────────────────────────────────────────────────
-const sections = [
-  { key: 'queue',       label: 'Очередь'     },
-  { key: 'archive',     label: 'Архив'       },
-  { key: 'constructor', label: 'Шаблоны'    },
-  { key: 'stats',       label: 'Статистика' },
-]
+const visibleSections = computed(() => {
+  const list = [
+    { key: 'queue', label: 'Очередь' },
+    { key: 'archive', label: 'Архив' },
+    { key: 'constructor', label: 'Конструктор' },
+  ]
+  if (canEditReviewTemplates.value) list.push({ key: 'templates', label: 'Шаблоны' })
+  list.push({ key: 'stats', label: 'Статистика' })
+  if (permissionsStore.isAdmin) list.push({ key: 'settings', label: 'Автоответы' })
+  return list
+})
 const activeSection = ref('queue')
 
 function switchSection(key) {
   activeSection.value = key
   if (key === 'archive' && archItems.value.length === 0) loadArchive(1)
   if (key === 'stats' && !statsData.value.managers) loadStats()
+  if (key === 'settings') loadAutoSettings()
 }
 
 watch(currentMp, () => {
@@ -742,24 +953,39 @@ const sortDesc     = ref(true)
 // Фильтры по колонкам
 const fSku      = ref('')
 const fText     = ref('')
-const fRating   = ref('')
+const fRatings  = ref([])
 const fStatus   = ref('')
+const fKind     = ref('')   // '' | 'updated' | 'new'
 const fHasText  = ref('')   // '' | 'with' | 'without'
 const fDateFrom = ref('')
 const fDateTo   = ref('')
+const updatedCount = computed(() =>
+  (Array.isArray(queueItems.value) ? queueItems.value : [])
+    .filter(i => i.item_type === 'review' && i.update_kind).length
+)
 
 function _hasBodyText(i) {
   const b = (i.body || '').trim()
   return b !== '' && b !== '—'
 }
 
+function toggleQueueRating(n) {
+  const i = fRatings.value.indexOf(n)
+  if (i >= 0) fRatings.value = fRatings.value.filter(x => x !== n)
+  else fRatings.value = [...fRatings.value, n]
+}
+
 function resetQueueFilters() {
-  fSku.value = ''; fText.value = ''; fRating.value = ''; fStatus.value = ''
-  fHasText.value = ''; fDateFrom.value = ''; fDateTo.value = ''
+  fSku.value = ''; fText.value = ''; fRatings.value = []; fStatus.value = ''
+  fKind.value = ''; fHasText.value = ''; fDateFrom.value = ''; fDateTo.value = ''
 }
 
 // Выбор строк для массовых действий
 const selectedIds = ref([])
+
+function rowKey(item) {
+  return `${item.mp}:${item.id}`
+}
 
 function toggleSort() {
   sortDesc.value = !sortDesc.value
@@ -768,6 +994,24 @@ function toggleSort() {
 
 function hasDraft(item) {
   return !!(item._reply && item._reply.trim())
+}
+
+function clearDraft(item) {
+  item._reply = ''
+  item.pending_template = ''
+  item._manual_check = false
+}
+
+function clearSelectedDrafts() {
+  const keys = new Set(selectedIds.value)
+  let n = 0
+  for (const item of filteredItems.value) {
+    if (keys.has(rowKey(item)) && hasDraft(item)) {
+      clearDraft(item)
+      n++
+    }
+  }
+  if (n) showToast(`Очищено черновиков: ${n}`, 'ok')
 }
 
 const filteredItems = computed(() => {
@@ -780,14 +1024,21 @@ const filteredItems = computed(() => {
   }
   if (fText.value.trim()) {
     const q = fText.value.trim().toLowerCase()
-    list = list.filter(i => String(i.body || '').toLowerCase().includes(q))
+    list = list.filter(i => {
+      const hay = [i.body, i.pros, i.cons, i.sku, i.nm_id].map(x => String(x || '').toLowerCase()).join(' ')
+      return hay.includes(q)
+    })
   }
-  if (fRating.value) {
-    list = list.filter(i => String(i.rating) === fRating.value)
+  if (fRatings.value.length) {
+    const want = new Set(fRatings.value.map(String))
+    list = list.filter(i => want.has(String(i.rating)))
   }
   if (fHasText.value === 'with')    list = list.filter(_hasBodyText)
   if (fHasText.value === 'without') list = list.filter(i => !_hasBodyText(i))
+  if (fKind.value === 'updated') list = list.filter(i => !!i.update_kind)
+  if (fKind.value === 'new') list = list.filter(i => !i.update_kind)
   if (fStatus.value === 'draft') list = list.filter(i => hasDraft(i))
+  if (fStatus.value === 'check') list = list.filter(i => !!i._manual_check)
   if (fStatus.value === 'none')  list = list.filter(i => !hasDraft(i))
   if (fDateFrom.value) {
     const from = new Date(fDateFrom.value + 'T00:00:00')
@@ -811,19 +1062,24 @@ const pagedItems = computed(() => {
 // Черновики (строки с заполненным текстом ответа)
 const draftItems = computed(() => filteredItems.value.filter(hasDraft))
 const selectedDraftIds = computed(() =>
-  selectedIds.value.filter(id => draftItems.value.some(i => i.id === id))
+  selectedIds.value.filter(id => draftItems.value.some(i => rowKey(i) === id))
 )
 const allSelected = computed(() =>
-  filteredItems.value.length > 0 && filteredItems.value.every(i => selectedIds.value.includes(i.id))
+  pagedItems.value.length > 0 && pagedItems.value.every(i => selectedIds.value.includes(rowKey(i)))
 )
 
 function toggleSelectAll(e) {
-  if (e.target.checked) selectedIds.value = filteredItems.value.map(i => i.id)
-  else selectedIds.value = []
+  const keys = pagedItems.value.map(rowKey)
+  if (e.target.checked) {
+    selectedIds.value = [...new Set([...selectedIds.value, ...keys])]
+  } else {
+    const drop = new Set(keys)
+    selectedIds.value = selectedIds.value.filter(k => !drop.has(k))
+  }
 }
 
 // Сброс фильтров и страницы при их изменении
-watch([fSku, fText, fRating, fStatus, fHasText, fDateFrom, fDateTo], () => { currentPage.value = 1 })
+watch([fSku, fText, fRatings, fStatus, fKind, fHasText, fDateFrom, fDateTo], () => { currentPage.value = 1 })
 
 async function loadQueue() {
   queueLoading.value = true
@@ -833,7 +1089,13 @@ async function loadQueue() {
     const res = await apiFetch(`${BASE}/queue?mp=${currentMp.value}`)
     const data = await res.json()
     // Предзаполняем текст ответа черновиком с модерации, если он есть
-    queueItems.value = (data.items || []).map(i => ({ ...i, _reply: i.pending_draft || '', _generating: false, _manual_check: false }))
+    queueItems.value = (data.items || []).map(i => ({
+      ...i,
+      _reply: withReviewSignature(i.pending_draft || ''),
+      _generating: false,
+      _manual_check: !!i.manual_check,
+      _topic: i.pending_topic || '',
+    }))
     counts.value = data.counts || {}
   } catch {
     showToast('Ошибка загрузки очереди', 'error')
@@ -850,61 +1112,97 @@ function _fullText(item) {
 }
 
 // 📋 Из шаблонов (детерминированно, через базу знаний)
-async function generateTemplate(item) {
+function isAiOnly(item) {
+  return item.item_type === 'review' && item.reply_mode === 'ai_only'
+}
+
+async function generateTemplate(item, { quiet = false } = {}) {
   if (item._generating) return false
   item._generating = 'tpl'
   try {
     const res = await apiFetch('/api/v1/kb/build', {
       method: 'POST',
-      body: JSON.stringify({ supplier_article: item.sku || '', text: _fullText(item), rating: item.rating || 0 }),
+      body: JSON.stringify({
+        supplier_article: item.sku || '',
+        text: _fullText(item),
+        rating: item.rating || 0,
+        use_overlay: Boolean(item._topic),
+        avoid: item._reply || '',
+        topic: item._topic || '',
+      }),
     })
-    if (!res.ok) throw new Error('build failed')
     const data = await res.json()
     if (data.ok && data.answer) {
-      item._reply = data.answer.trim()
+      item._reply = withReviewSignature(data.answer.trim())
       item.pending_template = data.scenario || ''
       item._manual_check = !!data.manual_check
       return true
     }
     item.pending_template = data.scenario || 'Не подобрано'
+    if (!quiet) showToast(data.scenario || 'Шаблон не подобрался', 'error')
     return false
-  } catch {
+  } catch (e) {
+    if (!quiet) showToast(e.message || 'Не удалось собрать шаблон', 'error')
     return false
   } finally {
     item._generating = false
   }
 }
+
+const AI_DRAFT_TIMEOUT_MS = 120000
 
 // ✨ ИИ (Qwen Plus, с опорой на фирменные шаблоны)
-async function generateAI(item) {
+async function generateAI(item, { quiet = false } = {}) {
   if (item._generating) return false
   item._generating = 'ai'
+  item._aiError = ''
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), AI_DRAFT_TIMEOUT_MS)
   try {
-    const params = new URLSearchParams({
-      item_type: 'review', mp: item.mp || 'wb',
-      body: item.body === '—' ? '' : (item.body || ''),
-      rating: item.rating || 0, pros: item.pros || '', cons: item.cons || '', sku: item.sku || '',
+    const res = await apiFetch(`${BASE}/draft`, {
+      method: 'POST',
+      signal: ac.signal,
+      body: JSON.stringify({
+        item_type: 'review',
+        mp: item.mp || 'wb',
+        body: item.body === '—' ? '' : (item.body || ''),
+        rating: item.rating || 0,
+        pros: item.pros || '',
+        cons: item.cons || '',
+        sku: item.sku || '',
+        has_media: item.photos && item.photos.length ? '1' : '',
+      }),
     })
-    const res = await apiFetch(`${BASE}/draft?${params}`)
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.detail || 'ИИ недоступен')
-    }
     const data = await res.json()
-    item._reply = (data.draft || '').trim()
+    item._reply = withReviewSignature((data.draft || '').trim())
     item.pending_template = 'ИИ'
+    if (!quiet) showToast('Черновик ИИ готов', 'ok')
     return true
-  } catch (e) {
-    item._aiError = e.message
+    } catch (e) {
+    const raw = e.message || ''
+    const msg = e.name === 'AbortError'
+      ? 'ИИ не ответил за 2 минуты — нажмите ещё раз'
+      : /quota|free tier|403|лимит|паузе/i.test(raw)
+        ? 'Сейчас ИИ недоступен — закончился бесплатный лимит. Напишите ответ вручную или нажмите шаблон.'
+        : (raw || 'ИИ недоступен')
+    item._aiError = msg
+    if (!quiet) showToast(msg, 'error')
     return false
   } finally {
+    clearTimeout(timer)
     item._generating = false
   }
 }
 
-async function _bulkGenerate(mode, fn) {
-  const items = filteredItems.value.filter(i => selectedIds.value.includes(i.id))
+async function _bulkGenerate(mode, fn, allow = null) {
+  const items = filteredItems.value.filter(i =>
+    selectedIds.value.includes(rowKey(i)) && (!allow || allow(i))
+  )
   if (!items.length) return
+  if (items.length > 1) {
+    const label = mode === 'ai' ? 'ИИ' : 'шаблон'
+    if (!confirm(`Сгенерировать ${label} для ${items.length} выбранных отзывов?`)) return
+  }
   bulkGenerating.value = mode
   let ok = 0, fail = 0, lastErr = ''
   for (const item of items) {
@@ -915,40 +1213,62 @@ async function _bulkGenerate(mode, fn) {
   else showToast(fail ? `Готово ${ok}, ошибок ${fail}` : `Сгенерировано ответов: ${ok}`, fail ? 'error' : 'ok')
 }
 
-function generateSelectedTemplate() { _bulkGenerate('tpl', generateTemplate) }
-function generateSelectedAI() { _bulkGenerate('ai', generateAI) }
+function generateSelectedTemplate() {
+  _bulkGenerate('tpl', item => generateTemplate(item, { quiet: true }))
+}
+function generateSelectedAI() {
+  _bulkGenerate('ai', item => generateAI(item, { quiet: true }))
+}
 
 // ── Массовая отправка ────────────────────────────────────────────────────────
 const bulkSending = ref(false)
 
 async function _sendOne(item) {
   const txt = item._reply?.trim()
-  if (!txt) return false
+  if (!txt) return { ok: false, error: 'Пустой текст' }
   const path = replyEndpoint(item)
-  if (!path) return false
+  if (!path) return { ok: false, error: 'Этот отзыв нельзя отправить' }
   try {
-    await apiFetch(`${BASE}${path}`, { method: 'POST', body: JSON.stringify({ text: txt }) })
-    return true
-  } catch { return false }
+    const res = await apiFetch(`${BASE}${path}`, { method: 'POST', body: JSON.stringify({ text: txt }) })
+    const data = await res.json().catch(() => ({}))
+    return { ok: true, via: data?.via || '' }
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Ошибка отправки' }
+  }
 }
 
 async function _bulkSend(items) {
   if (!items.length) return
   bulkSending.value = true
-  let ok = 0, fail = 0
+  let sent = 0, queued = 0, fail = 0, lastErr = ''
+  const done = new Set()
   for (const item of items) {
-    if (await _sendOne(item)) ok++; else fail++
+    const result = await _sendOne(item)
+    if (!result.ok) {
+      fail++
+      lastErr = result.error || lastErr
+      continue
+    }
+    done.add(rowKey(item))
+    if (result.via === 'cabinet_bot') queued++
+    else sent++
   }
-  // Убираем отправленные из очереди
-  const sentIds = new Set(items.map(i => i.id))
-  queueItems.value = queueItems.value.filter(i => !sentIds.has(i.id))
-  selectedIds.value = []
+  queueItems.value = queueItems.value.filter(i => !done.has(rowKey(i)))
+  selectedIds.value = selectedIds.value.filter(k => !done.has(k))
   bulkSending.value = false
-  showToast(fail ? `Отправлено ${ok}, ошибок ${fail}` : `Отправлено ответов: ${ok}`, fail ? 'error' : 'ok')
+  if (fail && !sent && !queued) {
+    showToast(lastErr ? `Ошибка: ${lastErr}` : `Ошибок: ${fail}`, 'error')
+    return
+  }
+  const parts = []
+  if (sent) parts.push(`Отправлено ${sent}`)
+  if (queued) parts.push(`Бот отправит клиентам: ${queued}`)
+  if (fail) parts.push(`ошибок ${fail}${lastErr ? ` (${lastErr})` : ''}`)
+  showToast(parts.join(', '), fail ? 'error' : 'ok')
 }
 
 function confirmSelected() {
-  const items = draftItems.value.filter(i => selectedIds.value.includes(i.id))
+  const items = draftItems.value.filter(i => selectedIds.value.includes(rowKey(i)))
   _bulkSend(items)
 }
 
@@ -960,13 +1280,33 @@ function confirmAll() {
 // ── Статус строки ────────────────────────────────────────────────────────────
 function statusLabel(item) {
   if (item.pending_mod_id) return 'На модерации'
+  if (item._manual_check)  return 'Проверить'
   if (hasDraft(item))      return 'Черновик'
   return 'Не отправлено'
 }
 function statusCls(item) {
   if (item.pending_mod_id) return 'bg-amber-50 text-amber-700 border-amber-200'
+  if (item._manual_check)  return 'bg-amber-50 text-amber-700 border-amber-200'
   if (hasDraft(item))      return 'bg-blue-50 text-blue-700 border-blue-200'
   return 'bg-gray-100 text-gray-500 border-gray-200'
+}
+
+function archiveStatusKind(item) {
+  if (item.archive_reason === 'dismissed') return 'dismissed'
+  if ((item.answer_text || '').trim()) return 'answered'
+  return 'wb_empty'
+}
+function archiveStatusLabel(item) {
+  const kind = archiveStatusKind(item)
+  if (kind === 'dismissed') return 'Закрыто без ответа'
+  if (kind === 'wb_empty') return 'На WB без ответа'
+  return 'Отвечено'
+}
+function archiveStatusCls(item) {
+  const kind = archiveStatusKind(item)
+  if (kind === 'dismissed') return 'bg-gray-100 text-gray-500 border-gray-200'
+  if (kind === 'wb_empty') return 'bg-amber-50 text-amber-700 border-amber-200'
+  return 'bg-green-50 text-green-700 border-green-200'
 }
 
 // ── Отправка / модерация / dismiss (общая логика — см. composables/useCxQueueActions) ──
@@ -988,8 +1328,202 @@ function sendReply(item) { return _sendReply(item, replyEndpoint) }
 // ── Шаблоны (общая логика — см. composables/useCxTemplates) ─────────────────
 const {
   templates, tplLoading, tplFormOpen, editTpl,
-  loadTemplates, openTplForm, saveTpl, deleteTpl, relevantTemplates,
+  loadTemplates, openTplForm, saveTpl, deleteTpl, relevantTemplates, looksLikePaintHoles,
 } = useCxTemplates('review', showToast, { defaultMinRating: 1, defaultMaxRating: 5 })
+
+const reviewTopics = ref([
+  { id: 'incomplete', label: 'Некомплект' },
+  { id: 'defect', label: 'Брак' },
+  { id: 'delivery', label: 'Упаковка / доставка' },
+  { id: 'assembly', label: 'Сборка' },
+  { id: 'load', label: 'Нагрузка' },
+  { id: 'unsuitable', label: 'Не подошло' },
+  { id: 'size', label: 'Размеры' },
+  { id: 'already_returned', label: 'Уже возврат' },
+  { id: 'four_ask', label: '4★ уточнить' },
+  { id: 'paint_holes', label: 'Технологические отверстия' },
+])
+
+const THANKS_5 = [
+  { id: 'thanks_5_a', label: 'Спасибо' },
+  { id: 'thanks_5_b', label: 'Рады оценке' },
+  { id: 'thanks_5_c', label: 'Приятного пользования' },
+]
+const THANKS_5_TEXT = {
+  thanks_5_a: 'Здравствуйте! Спасибо за высокую оценку — нам очень приятно.',
+  thanks_5_b: 'Здравствуйте! Благодарим за пятёрку. Рады, что товар вам понравился.',
+  thanks_5_c: 'Здравствуйте! Спасибо, что поделились впечатлением. Приятного пользования!',
+}
+const SCENARIO_DEFAULT = {
+  incomplete: 'Здравствуйте! Очень жаль, что в комплекте не хватило деталей. Напишите, пожалуйста, в «Чат с продавцом» — разберёмся.',
+  defect: 'Здравствуйте. Очень жаль, что товар пришёл с браком. Оформите, пожалуйста, возврат по браку в личном кабинете. Если нужна помощь — напишите в «Чат с продавцом».',
+  delivery: 'Здравствуйте. Очень жаль, что товар приехал в помятой или порванной упаковке. Напишите, пожалуйста, в «Чат с продавцом» — разберёмся.',
+  assembly: 'Здравствуйте. Очень жаль, что со сборкой вышло неудобно. Если не получится — напишите в «Чат с продавцом», подскажем.',
+  load: 'Здравствуйте. Жаль, что товар не оправдал ожидания. Важно собрать по инструкции и не превышать допустимую нагрузку.',
+  unsuitable: 'Здравствуйте! Жаль, что товар не до конца подошёл. Спасибо, что выбрали нас — будем работать над ассортиментом.',
+  size: 'Здравствуйте! Спасибо за отзыв. Размеры указаны в карточке товара.',
+  already_returned: 'Здравствуйте. Очень жаль, что так вышло.',
+  four_ask: 'Здравствуйте! Спасибо за оценку! Подскажите, чего не хватило до «пятёрки»? Напишите в «Чат с продавцом» — это поможет нам стать лучше.',
+  paint_holes: 'Понимаем, выглядит необычно. Это технологические отверстия: за них деталь вешают на линии покраски. Собирать через них ничего не нужно, на устойчивость не влияют.',
+}
+const focusedTplKey = ref('')
+
+function topicLabel(item) {
+  const id = item?._topic || item?.pending_topic || ''
+  return (THANKS_5.find(t => t.id === id) || reviewTopics.value.find(t => t.id === id) || {}).label || ''
+}
+
+function scenarioText(item) {
+  return item?.pending_template || topicLabel(item) || ''
+}
+
+function topicsFor(item) {
+  const rating = Number(item?.rating) || 0
+  const problem = reviewTopics.value.filter(tp => {
+    if (tp.id !== 'paint_holes') return true
+    return looksLikePaintHoles(item) || item._topic === 'paint_holes'
+  })
+  if (rating >= 5) return [...THANKS_5, ...problem]
+  return problem
+}
+
+function scenarioTitle(topicId) {
+  const label = topicLabel({ _topic: topicId })
+  return label ? `Сценарий · ${label}` : ''
+}
+
+function scenarioTemplate(topicId) {
+  const title = scenarioTitle(topicId)
+  if (!title) return null
+  return (templates.value || []).find(t => t.title === title) || null
+}
+
+function scenarioBody(topicId) {
+  return scenarioTemplate(topicId)?.body || THANKS_5_TEXT[topicId] || SCENARIO_DEFAULT[topicId] || ''
+}
+
+const scenarioCards = computed(() => [...THANKS_5, ...reviewTopics.value].map(tp => ({
+  key: tp.id,
+  label: tp.label,
+  body: scenarioBody(tp.id),
+  saved: scenarioTemplate(tp.id),
+})))
+
+const otherTemplates = computed(() =>
+  (templates.value || []).filter(t => !String(t.title || '').startsWith('Сценарий ·'))
+)
+
+function quickReplyTemplates(item) {
+  return relevantTemplates(item).filter(t => !String(t.title || '').startsWith('Сценарий ·'))
+}
+
+function blankReviewTpl(over = {}) {
+  return {
+    title: '', body: '', mp: 'all', item_type: 'review', tone: 'neutral',
+    auto_reply: false, min_rating: 1, max_rating: 5, require_no_text: false,
+    stop_words: '', ignore_questions: false, requires_confirmation: false,
+    ...over,
+  }
+}
+
+async function scrollToReviewEditor() {
+  await nextTick()
+  document.getElementById('review-quick-template-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function startNewQuickTemplate() {
+  focusedTplKey.value = 'new'
+  openTplForm(blankReviewTpl())
+  scrollToReviewEditor()
+}
+
+function editScenarioCard(card) {
+  if (!canEditReviewTemplates.value || !card) return
+  focusedTplKey.value = card.key
+  const isThanks = Boolean(THANKS_5_TEXT[card.key])
+  if (card.saved) openTplForm({ ...card.saved })
+  else openTplForm(blankReviewTpl({
+    title: `Сценарий · ${card.label}`,
+    body: card.body,
+    min_rating: isThanks ? 5 : 1,
+    max_rating: 5,
+  }))
+  switchSection('templates')
+  scrollToReviewEditor()
+}
+
+function openReviewScenarioEditor(topicId) {
+  if (!canEditReviewTemplates.value) return
+  const card = scenarioCards.value.find(c => c.key === topicId)
+  if (card) {
+    editScenarioCard(card)
+    return
+  }
+  switchSection('templates')
+  scrollToReviewEditor()
+}
+
+async function openReviewQuickTemplate(tpl) {
+  if (!canEditReviewTemplates.value || !tpl) return
+  focusedTplKey.value = tpl.id ? `tpl-${tpl.id}` : 'new'
+  switchSection('templates')
+  openTplForm(tpl.id ? tpl : blankReviewTpl(tpl))
+  await scrollToReviewEditor()
+}
+
+const pendingClicks = new Map()
+function runUnlessDouble(key, fn) {
+  if (pendingClicks.has(key)) {
+    clearTimeout(pendingClicks.get(key))
+    pendingClicks.delete(key)
+    return
+  }
+  pendingClicks.set(key, setTimeout(() => {
+    pendingClicks.delete(key)
+    fn()
+  }, 250))
+}
+function cancelPendingClick(key) {
+  const timer = pendingClicks.get(key)
+  if (!timer) return
+  clearTimeout(timer)
+  pendingClicks.delete(key)
+}
+
+function cycleScenario(item) {
+  const list = topicsFor(item)
+  if (!list.length) return
+  const cur = item._topic || ''
+  const i = list.findIndex(t => t.id === cur)
+  selectTopic(item, list[(i + 1) % list.length].id)
+}
+
+async function loadReviewTopics() {
+  try {
+    const r = await apiFetch('/api/v1/kb/topics')
+    const d = await r.json()
+    if (Array.isArray(d) && d.length) reviewTopics.value = d
+  } catch { /* оставляем запасной список */ }
+}
+
+async function selectTopic(item, topicId) {
+  item._topic = item._topic === topicId ? '' : topicId
+  if (!item._topic) return
+  const savedScenario = scenarioTemplate(item._topic)
+  if (savedScenario?.body) {
+    item._reply = withReviewSignature(savedScenario.body)
+    item.pending_template = topicLabel(item)
+    item._manual_check = false
+    return
+  }
+  if (THANKS_5_TEXT[item._topic]) {
+    item._reply = withReviewSignature(THANKS_5_TEXT[item._topic])
+    item.pending_template = topicLabel(item)
+    item._manual_check = false
+    return
+  }
+  await generateTemplate(item)
+}
 
 // ── Архив ──────────────────────────────────────────────────────────────────
 const archItems      = ref([])
@@ -999,10 +1533,19 @@ const archTotalPages = ref(1)
 
 // Фильтры архива (серверные)
 const aSku      = ref('')
+const aText     = ref('')
+const aRatings  = ref([])
 const aHasText  = ref('')
 const aStatus   = ref('')
 const aDateFrom = ref('')
 const aDateTo   = ref('')
+
+function toggleArchiveRating(n) {
+  const i = aRatings.value.indexOf(n)
+  if (i >= 0) aRatings.value = aRatings.value.filter(x => x !== n)
+  else aRatings.value = [...aRatings.value, n]
+  loadArchive(1)
+}
 
 async function loadArchive(page = 1) {
   archLoading.value = true
@@ -1012,6 +1555,8 @@ async function loadArchive(page = 1) {
       mp: currentMp.value, item_type: 'review', page, per_page: 25,
     })
     if (aSku.value.trim()) params.set('sku', aSku.value.trim())
+    if (aText.value.trim()) params.set('q', aText.value.trim())
+    if (aRatings.value.length) params.set('ratings', aRatings.value.join(','))
     if (aHasText.value)    params.set('has_text', aHasText.value)
     if (aStatus.value)     params.set('status', aStatus.value)
     if (aDateFrom.value)   params.set('date_from', aDateFrom.value)
@@ -1026,9 +1571,18 @@ async function loadArchive(page = 1) {
 }
 
 function resetArchiveFilters() {
-  aSku.value = ''; aHasText.value = ''; aStatus.value = ''; aDateFrom.value = ''; aDateTo.value = ''
+  aSku.value = ''; aText.value = ''; aRatings.value = []
+  aHasText.value = ''; aStatus.value = ''; aDateFrom.value = ''; aDateTo.value = ''
+  clearTimeout(archFilterTimer)
   loadArchive(1)
 }
+
+let archFilterTimer = null
+watch([aText, aSku], () => {
+  if (activeSection.value !== 'archive') return
+  clearTimeout(archFilterTimer)
+  archFilterTimer = setTimeout(() => loadArchive(1), 400)
+})
 
 async function undismissItem(item) {
   await apiFetch(`${BASE}/dismiss/${item.mp}/${item.item_type}/${item.id}`, { method: 'DELETE' })
@@ -1048,11 +1602,86 @@ const statManual = computed(() => statTotal.value - statAuto.value)
 async function loadStats() {
   statsLoading.value = true
   try {
-    const r = await apiFetch(`${BASE}/stats?days=${statsDays.value}`)
+    const r = await apiFetch(`${BASE}/stats?days=${statsDays.value}&item_type=review`)
     statsData.value = await r.json()
   } finally {
     statsLoading.value = false
   }
+}
+
+// ── Автоответы по площадкам и сценариям ────────────────────────────────────
+const autoEnabled = ref({ wb: false, ym: false, ozon: false })
+const autoScenarios = ref({ thanks_5: true, thanks_4: true, sorry: true })
+const autoSaving = ref(false)
+const autoMpRows = [
+  { mp: 'wb',   label: 'WB',   hint: 'Ответы уходят в кабинет Wildberries' },
+  { mp: 'ym',   label: 'ЯМ',   hint: 'Ответы уходят в кабинет Яндекс Маркета' },
+  { mp: 'ozon', label: 'Ozon', hint: 'Ответы уходят в кабинет Ozon (или в очередь, если API закрыт)' },
+]
+const autoScenarioRows = [
+  { key: 'thanks_5', label: '5 звёзд без текста и фото', hint: 'Короткое спасибо' },
+  { key: 'thanks_4', label: '4 звезды без текста и фото', hint: 'Спасибо и вопрос, чего не хватило до пятёрки' },
+  { key: 'sorry',    label: '1–3 звезды без текста и фото', hint: 'Извинение и приглашение в чат' },
+]
+const allAutoScenariosOn = computed(() =>
+  !!autoScenarios.value.thanks_5 && !!autoScenarios.value.thanks_4 && !!autoScenarios.value.sorry
+)
+
+function applyAutoSettings(d) {
+  autoEnabled.value = { wb: false, ym: false, ozon: false, ...(d.enabled || {}) }
+  autoScenarios.value = { thanks_5: true, thanks_4: true, sorry: true, ...(d.scenarios || {}) }
+}
+
+async function loadAutoSettings() {
+  try {
+    const r = await apiFetch(`${BASE}/review-auto-settings`)
+    applyAutoSettings(await r.json())
+  } catch {
+    showToast('Не удалось загрузить настройки автоответов', 'error')
+  }
+  if (!templates.value.length) await loadTemplates()
+}
+
+async function saveAutoSettings(payload, revert) {
+  autoSaving.value = true
+  try {
+    const r = await apiFetch(`${BASE}/review-auto-settings`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+    applyAutoSettings(await r.json())
+  } catch {
+    if (revert) revert()
+    showToast('Не удалось сохранить настройку', 'error')
+  } finally {
+    autoSaving.value = false
+  }
+}
+
+async function toggleAutoMp(mp) {
+  const next = !autoEnabled.value[mp]
+  autoEnabled.value = { ...autoEnabled.value, [mp]: next }
+  await saveAutoSettings({ [mp]: next }, () => {
+    autoEnabled.value = { ...autoEnabled.value, [mp]: !next }
+  })
+}
+
+async function toggleAutoScenario(key) {
+  const next = !autoScenarios.value[key]
+  autoScenarios.value = { ...autoScenarios.value, [key]: next }
+  await saveAutoSettings({ [key]: next }, () => {
+    autoScenarios.value = { ...autoScenarios.value, [key]: !next }
+  })
+}
+
+async function toggleAllAutoScenarios() {
+  const next = !allAutoScenariosOn.value
+  const prev = { ...autoScenarios.value }
+  autoScenarios.value = { thanks_5: next, thanks_4: next, sorry: next }
+  await saveAutoSettings(
+    { thanks_5: next, thanks_4: next, sorry: next },
+    () => { autoScenarios.value = prev },
+  )
 }
 
 // ── Всплывающая подсказка ────────────────────────────────────────────────────
@@ -1094,7 +1723,7 @@ async function initCentrifugo() {
   try {
     const res = await apiFetch('/api/auth/centrifugo-token')
     const { token } = await res.json()
-    centrifuge = new Centrifuge('wss://cxvo.ru/connection/websocket', { token })
+    centrifuge = new Centrifuge(centrifugoUrl(), { token })
     const sub = centrifuge.newSubscription('reviews')
     sub.on('publication', ctx => {
       if (ctx.data?.type === 'reviews_updated') newReviews.value += (ctx.data.count || 1)
@@ -1115,13 +1744,26 @@ const reviewCard = ref({ show: false, mp: '', id: '' })
 function openReviewCard(item) {
   if (item.item_type && item.item_type !== 'review') return
   reviewCard.value = { show: true, mp: item.mp, id: String(item.id) }
+  const key = `${item.mp}:${item.id}`
+  if (String(route.query.review || '') !== key) {
+    router.replace({ query: { ...route.query, review: key } })
+  }
+}
+function closeReviewCard() {
+  reviewCard.value.show = false
+  if (route.query.review) {
+    const q = { ...route.query }
+    delete q.review
+    router.replace({ query: q })
+  }
 }
 function _openFromQuery() {
   const q = route.query.review   // формат "wb:<id>"
   if (q && typeof q === 'string' && q.includes(':')) {
     const [m, ...rest] = q.split(':')
     reviewCard.value = { show: true, mp: m, id: rest.join(':') }
-    router.replace({ query: {} })  // очищаем query, чтобы не открывалось повторно
+  } else if (reviewCard.value.show) {
+    reviewCard.value.show = false
   }
 }
 
@@ -1130,11 +1772,13 @@ onMounted(async () => {
   window.addEventListener('keydown', _lightboxKeys)
   _openFromQuery()
   initCentrifugo()
-  await Promise.all([loadQueue(), loadTemplates()])
+  await Promise.all([loadQueue(), loadTemplates(), loadReviewTopics()])
 })
+watch(() => route.query.review, () => { _openFromQuery() })
 onUnmounted(() => {
   window.removeEventListener('keydown', _lightboxKeys)
   centrifuge?.disconnect()
+  clearTimeout(archFilterTimer)
 })
 </script>
 

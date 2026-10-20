@@ -2,7 +2,7 @@ import datetime
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from backend.routers import reshipment
 
@@ -44,6 +44,27 @@ class YandexDispatchActsTests(unittest.TestCase):
                 data_uri = reshipment._get_yandex_act_stamp_data_uri()
 
         self.assertTrue(data_uri.startswith("data:image/png;base64,"))
+
+    def test_serialize_uses_yandex_operator_request_id(self):
+        rows = [{
+            "id": 212,
+            "updated_at": datetime.datetime(2026, 8, 12, 12, 0),
+            "customer_name": "Иван",
+            "customer_phone": "+79990000000",
+            "address_city": "Казань",
+            "client_pvz_city": "Казань",
+            "client_pvz_address": "",
+            "yandex_pvz_name": "ПВЗ",
+            "yandex_pvz_address": "ул. Ленина, 1",
+            "items_to_send": "крепление",
+            "track_number": "YANDEX-212",
+            "shipping_cost": 390.41,
+            "chat_token": "abc",
+            "confirmation_token": None,
+        }]
+        with patch("backend.yandex_ndd.get_operator_request_id", return_value="reship-212-realid12"):
+            payload = reshipment._serialize_yandex_dispatch_rows(rows)
+        self.assertEqual(payload[0]["customer_track_number"], "reship-212-realid12")
 
     def test_next_yandex_act_number_increments_daily_sequence(self):
         db = Mock()

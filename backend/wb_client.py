@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 import requests
 
+from . import http_client
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -71,9 +73,10 @@ def get_claims_page_raw(
         params["id"] = claim_id
     if nm_id:
         params["nm_id"] = int(nm_id) if str(nm_id).isdigit() else nm_id
-    return requests.get(
-        f"{RETURNS_BASE}/api/v1/claims", params=params,
-        headers=auth_headers(key), timeout=timeout,
+    # retry_on_429=False: вызывающий (wb_claims_api) сам держит свой график по 429.
+    return http_client.request(
+        "GET", f"{RETURNS_BASE}/api/v1/claims", params=params,
+        headers=auth_headers(key), timeout=timeout, retry_on_429=False,
     )
 
 
@@ -86,9 +89,11 @@ def patch_claim_raw(
     body: dict = {"id": str(claim_id), "action": action}
     if comment:
         body["comment"] = comment[:1000]
-    return requests.patch(
-        f"{RETURNS_BASE}/api/v1/claim", headers=auth_headers(key),
-        json=body, timeout=timeout,
+    # Решение по претензии идемпотентно (та же action → тот же итог), но 429
+    # оставляем вызывающему — у него свой разбор кодов для UI.
+    return http_client.request(
+        "PATCH", f"{RETURNS_BASE}/api/v1/claim", headers=auth_headers(key),
+        json=body, timeout=timeout, retry_on_429=False,
     )
 
 
@@ -101,9 +106,10 @@ def list_feedbacks_raw(
     params: dict = {"isAnswered": "true" if is_answered else "false", "take": take, "skip": skip, "order": order}
     if nm_id:
         params["nm"] = int(nm_id) if str(nm_id).isdigit() else nm_id
-    return requests.get(
-        f"{FEEDBACKS_BASE}/api/v1/feedbacks", params=params,
-        headers=auth_headers(key), timeout=timeout,
+    # 422 = конец пагинации (не ошибка) → не повторяем; 429 разбирает вызывающий.
+    return http_client.request(
+        "GET", f"{FEEDBACKS_BASE}/api/v1/feedbacks", params=params,
+        headers=auth_headers(key), timeout=timeout, retry_on_429=False,
     )
 
 
@@ -125,20 +131,31 @@ def list_feedbacks_archive_raw(
     *, take: int = 5000, skip: int = 0, order: str = "dateDesc",
     key: str | None = None, timeout: int = 30,
 ) -> requests.Response:
-    return requests.get(
-        f"{FEEDBACKS_BASE}/api/v1/feedbacks/archive",
+    return http_client.request(
+        "GET", f"{FEEDBACKS_BASE}/api/v1/feedbacks/archive",
         params={"isAnswered": "true", "take": take, "skip": skip, "order": order},
-        headers=auth_headers(key), timeout=timeout,
+        headers=auth_headers(key), timeout=timeout, retry_on_429=False,
     )
 
 
 def answer_feedback(feedback_id: str, text: str, *, key: str | None = None, timeout: int = 20) -> requests.Response:
-    """PATCH — опубликовать/обновить ответ на отзыв WB. Раньше был продублирован
-    3 раза в cx_responses.py (прямой ответ, подтверждение модерации, авто-ответ по шаблону)."""
-    r = requests.patch(
-        f"{FEEDBACKS_BASE}/api/v1/feedbacks",
-        headers=auth_headers(key), json={"id": feedback_id, "text": text}, timeout=timeout,
-    )
+    """Опубликовать ответ на отзыв WB.
+
+    Актуальный метод: POST /api/v1/feedbacks/answer.
+    Старый PATCH /api/v1/feedbacks WB отключил (405).
+    Если отзыв уже с ответом — правим через PATCH /api/v1/feedbacks/answer.
+    """
+    txt = (text or "").strip()
+    if len(txt) < 2:
+        raise ValueError("текст ответа должен быть от 2 символов")
+    payload = {"id": str(feedback_id), "text": txt[:5000]}
+    url = f"{FEEDBACKS_BASE}/api/v1/feedbacks/answer"
+    hdrs = auth_headers(key)
+    # Публикация ответа — отправка: idempotent=False, чтобы таймаут чтения не
+    # задвоил ответ. Повторяем только заведомо недошедшее (обрыв связи, 429).
+    r = http_client.request("POST", url, headers=hdrs, json=payload, timeout=timeout, idempotent=False)
+    if r.status_code in (400, 405, 409):
+        r = http_client.request("PATCH", url, headers=hdrs, json=payload, timeout=timeout, idempotent=False)
     r.raise_for_status()
     return r
 
@@ -150,9 +167,9 @@ def list_questions_raw(
     key: str | None = None, timeout: int = 30,
 ) -> requests.Response:
     params = {"isAnswered": "true" if is_answered else "false", "take": take, "skip": skip, "order": order}
-    return requests.get(
-        f"{FEEDBACKS_BASE}/api/v1/questions", params=params,
-        headers=auth_headers(key), timeout=timeout,
+    return http_client.request(
+        "GET", f"{FEEDBACKS_BASE}/api/v1/questions", params=params,
+        headers=auth_headers(key), timeout=timeout, retry_on_429=False,
     )
 
 
@@ -183,15 +200,17 @@ def answer_question(
     txt = (text or "").strip()
     if not txt:
         raise ValueError("пустой текст ответа")
-    r = requests.patch(
-        f"{FEEDBACKS_BASE}/api/v1/questions",
+    # Публикация ответа на вопрос — отправка: idempotent=False (не повторяем по
+    # таймауту чтения, иначе второй PATCH упрётся в «уже отвечено»).
+    r = http_client.request(
+        "PATCH", f"{FEEDBACKS_BASE}/api/v1/questions",
         headers=auth_headers(key),
         json={
             "id": question_id,
             "answer": {"text": txt},
             "state": "wbRu" if public else "none",
         },
-        timeout=timeout,
+        timeout=timeout, idempotent=False,
     )
     r.raise_for_status()
     return r
@@ -200,7 +219,7 @@ def answer_question(
 # ── Чаты (Buyer Chat API) ─────────────────────────────────────────────────────
 
 def get_chats(*, key: str | None = None, timeout: int = 90) -> list:
-    r = requests.get(f"{CHAT_BASE}/api/v1/seller/chats", headers=auth_headers(key), timeout=timeout)
+    r = http_client.request("GET", f"{CHAT_BASE}/api/v1/seller/chats", headers=auth_headers(key), timeout=timeout)
     r.raise_for_status()
     return (r.json() or {}).get("result") or []
 
@@ -208,12 +227,15 @@ def get_chats(*, key: str | None = None, timeout: int = 90) -> list:
 def get_chat_events_raw(next_ts: int = 0, *, key: str | None = None, timeout: int = 25) -> requests.Response:
     """Без raise_for_status: wb_chat_sync сам ретраит на 429 по своему графику."""
     params = {"next": next_ts} if next_ts else {}
-    return requests.get(f"{CHAT_BASE}/api/v1/seller/events", params=params, headers=auth_headers(key), timeout=timeout)
+    return http_client.request(
+        "GET", f"{CHAT_BASE}/api/v1/seller/events", params=params,
+        headers=auth_headers(key), timeout=timeout, retry_on_429=False,
+    )
 
 
 def get_chat_messages(chat_id: str, take: int = 30, *, key: str | None = None, timeout: int = 15) -> list:
-    r = requests.get(
-        f"{CHAT_BASE}/api/v1/seller/chat/messages",
+    r = http_client.request(
+        "GET", f"{CHAT_BASE}/api/v1/seller/chat/messages",
         headers=auth_headers(key), params={"chatID": chat_id, "take": take}, timeout=timeout,
     )
     r.raise_for_status()
@@ -246,19 +268,21 @@ def send_chat_message(
         ("file", (filename, content, content_type))
         for filename, content, content_type in items
     )
-    r = requests.post(
-        f"{CHAT_BASE}/api/v1/seller/message",
+    # Сообщение покупателю — отправка: idempotent=False, чтобы обрыв ответа не
+    # отправил одно и то же дважды. Повтор только если запрос заведомо не ушёл.
+    r = http_client.request(
+        "POST", f"{CHAT_BASE}/api/v1/seller/message",
         files=multipart,
         headers={"Authorization": key or api_key()},
-        timeout=timeout,
+        timeout=timeout, idempotent=False,
     )
     r.raise_for_status()
     return r
 
 
 def download_chat_file(file_id: str, *, key: str | None = None, timeout: int = 25) -> requests.Response:
-    r = requests.get(
-        f"{CHAT_BASE}/api/v1/seller/download/{file_id}",
+    r = http_client.request(
+        "GET", f"{CHAT_BASE}/api/v1/seller/download/{file_id}",
         headers={"Authorization": key or api_key()}, timeout=timeout,
     )
     r.raise_for_status()
@@ -271,7 +295,10 @@ def list_cards_page_raw(cursor: dict | None = None, limit: int = 100, *, key: st
     """Без raise_for_status: вызывающий (photo-sync) отдельно ловит 401 —
     «токен без права Контент» — и мягко останавливается вместо ошибки."""
     body = {"settings": {"cursor": {**{"limit": limit}, **(cursor or {})}, "filter": {"withPhoto": 1}}}
-    return requests.post(
-        f"{CONTENT_BASE}/content/v2/get/cards/list",
+    # POST здесь — это чтение (список карточек), поэтому idempotent=True: повтор
+    # по таймауту безопасен. 401 «нет права Контент» вызывающий ловит сам.
+    return http_client.request(
+        "POST", f"{CONTENT_BASE}/content/v2/get/cards/list",
         json=body, headers=auth_headers(key or content_key()), timeout=timeout,
+        idempotent=True,
     )

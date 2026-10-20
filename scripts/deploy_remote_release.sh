@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Пара к deploy_committed_release.sh. НЕ штатный деплой — см. docs/04_ДЕПЛОЙ.md.
 set -euo pipefail
 
 INCOMING_DIR="${1:?Укажите каталог входящего релиза}"

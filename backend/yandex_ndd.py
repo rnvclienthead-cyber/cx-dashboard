@@ -3,9 +3,9 @@
 Используется тот же YANDEX_DELIVERY_API_KEY, что и в yandex_delivery.py (Express/Cargo) —
 это другой продукт Яндекса, но авторизация общая для аккаунта.
 
-Источник отправки — наш ПВЗ в Казани (Тульская 40). Destination — ПВЗ получателя
-(platform_station).
-Поиск клиентских ПВЗ по-прежнему через available_for_dropoff / nearest pickup.
+Создание заказа и расчёт цены — с ПВЗ сдачи в Казани (YD_NDD_FROM_PVZ_* в .env;
+сейчас Тульская 40). Не склад с забором: иначе Яндекс требует слот отгрузки.
+Destination — ПВЗ получателя (platform_station).
 """
 import os
 import math
@@ -14,6 +14,8 @@ import uuid as _uuid
 from typing import Optional
 
 import requests as _req
+
+from . import http_client
 
 try:
     from dotenv import load_dotenv
@@ -26,11 +28,47 @@ logger = logging.getLogger(__name__)
 YD_API_KEY = os.getenv("YANDEX_DELIVERY_API_KEY", "")
 NDD_BASE   = "https://b2b.taxi.yandex.net/api/b2b/platform"
 
-# Наш ПВЗ-источник в Яндексе. Боевые значения можно переопределить через .env.
-FROM_ADDRESS     = os.getenv("YD_FROM_FULLNAME", "Казань, Тульская 40")
-FROM_PVZ_ADDRESS = os.getenv("YD_NDD_FROM_PVZ_ADDRESS", "Казань, Тульская 40")
-FROM_PVZ_ID      = os.getenv("YD_NDD_FROM_PVZ_ID", "019fdc1bbc7971e4b3a8459698fd9b5b")
+# ПВЗ сдачи (самопривоз). Не склад Техническая 17Б — у склада Яндекс требует забор.
+TULSKAYA_PVZ_ID = "019fdc1bbc7971e4b3a8459698fd9b5b"
+TULSKAYA_ADDRESS = "Казань, Тульская 40"
+WAREHOUSE_PVZ_ID = "019f3b915e357758b6b311a4aa67fd11"
+
+FROM_ADDRESS     = os.getenv("YD_FROM_FULLNAME", TULSKAYA_ADDRESS)
+FROM_PVZ_ADDRESS = os.getenv("YD_NDD_FROM_PVZ_ADDRESS", TULSKAYA_ADDRESS)
+FROM_PVZ_ID      = os.getenv("YD_NDD_FROM_PVZ_ID", TULSKAYA_PVZ_ID)
 WAREHOUSE_STATION_ID = FROM_PVZ_ID
+QUOTE_SOURCE_ADDRESS = (
+    os.getenv("YD_NDD_QUOTE_ADDRESS") or FROM_PVZ_ADDRESS or TULSKAYA_ADDRESS
+).strip() or TULSKAYA_ADDRESS
+
+# Известные точки сдачи (id Яндекса → человекочитаемый адрес для склада)
+SOURCE_STATION_LABELS = {
+    "019fdc1bbc7971e4b3a8459698fd9b5b": "Казань, Тульская 40",
+    "019f3b915e357758b6b311a4aa67fd11": "Казань, Техническая улица, 17Б",
+    "0198a9333dba717abd01f35f2ece4e22": "Казань, улица Четаева 14",
+}
+
+
+def source_station_label(platform_id: Optional[str] = None) -> str:
+    """Адрес точки сдачи по id станции или текущий ПВЗ сдачи (Тульская 40)."""
+    pid = (platform_id or "").strip() or _source_pvz_id()
+    if pid in SOURCE_STATION_LABELS:
+        return SOURCE_STATION_LABELS[pid]
+    return FROM_PVZ_ADDRESS or FROM_ADDRESS or pid or "—"
+
+
+def get_order_source_label(request_id: str) -> Optional[str]:
+    """Реальная точка сдачи заказа из ЛК Яндекса (не путать с текстом в UI)."""
+    if not request_id:
+        return None
+    sc, sd = _get("/request/info", {"request_id": request_id})
+    if sc != 200:
+        return None
+    src = ((sd.get("request") or {}).get("source") or {}).get("platform_station") or {}
+    pid = src.get("platform_id") or src.get("id")
+    if not pid:
+        return None
+    return source_station_label(str(pid))
 
 _BAD_GEO_WORDS = ("село", "деревня", "станица", "снт", "садоводческ", "посёлок", "кп ")
 
@@ -47,22 +85,35 @@ def _headers() -> dict:
     }
 
 
-def _post(path: str, body: dict, timeout: int = 15) -> tuple[int, dict]:
-    resp = _req.post(f"{NDD_BASE}{path}", json=body, headers=_headers(), timeout=timeout)
+# Повторы и таймауты — через общий http_client (единая политика на всех
+# площадках). Все наши POST идемпотентны (расчёт/геокод/список ПВЗ, подтверждение
+# по offer_id, отмена по request_id), поэтому idempotent=True: повтор безопасен
+# и по таймауту чтения, и по 5xx. При полном сбое возвращаем (0, {}) — вызывающий
+# код везде проверяет `sc != 200`.
+
+
+def _request(method: str, path: str, timeout: int, **kw) -> tuple[int, dict]:
+    try:
+        resp = http_client.request(
+            method, f"{NDD_BASE}{path}", headers=_headers(),
+            timeout=timeout, idempotent=True, **kw,
+        )
+    except _req.RequestException as e:
+        logger.warning("Yandex NDD %s %s не удалось: %s", method, path, e)
+        return 0, {}
     try:
         data = resp.json()
     except ValueError:
         data = {}
     return resp.status_code, data
+
+
+def _post(path: str, body: dict, timeout: int = 15) -> tuple[int, dict]:
+    return _request("POST", path, timeout, json=body)
 
 
 def _get(path: str, params: dict, timeout: int = 15) -> tuple[int, dict]:
-    resp = _req.get(f"{NDD_BASE}{path}", params=params, headers=_headers(), timeout=timeout)
-    try:
-        data = resp.json()
-    except ValueError:
-        data = {}
-    return resp.status_code, data
+    return _request("GET", path, timeout, params=params)
 
 
 def detect_geo_id(location: str) -> Optional[dict]:
@@ -238,18 +289,112 @@ def nearest_pickup_point_across_geos(
     return min(all_points, key=lambda p: _dist(ref_lat, ref_lon, p["lat"], p["lng"]))
 
 
+def list_nearby_pickup_points(
+    location: str,
+    target_lat: Optional[float] = None,
+    target_lon: Optional[float] = None,
+    delta: float = 0.15,
+    dropoff_only: bool = False,
+    limit: int = 20,
+    max_km: float = 35.0,
+) -> list[dict]:
+    """ПВЗ Яндекса вокруг адреса, от ближайшего. Для витрины: список + карта."""
+    geo_variants = detect_all_geo_ids(location)
+    if not geo_variants:
+        return []
+
+    ref_lat = target_lat
+    ref_lon = target_lon
+    if ref_lat is None or ref_lon is None:
+        for geo in geo_variants:
+            if geo.get("lat") is not None and geo.get("lon") is not None:
+                ref_lat = geo["lat"]
+                ref_lon = geo["lon"]
+                break
+
+    if target_lat is not None and target_lon is not None:
+        with_coords = [g for g in geo_variants if g.get("lat") is not None and g.get("lon") is not None]
+        filtered = [g for g in with_coords if _dist(target_lat, target_lon, g["lat"], g["lon"]) <= 80]
+        if filtered:
+            geo_variants = filtered
+        elif with_coords:
+            geo_variants = [min(with_coords, key=lambda g: _dist(target_lat, target_lon, g["lat"], g["lon"]))]
+
+    seen_geo_ids: set = set()
+    seen_pvz_ids: set = set()
+    all_points: list = []
+
+    def _collect(delta_val: float, use_bbox: bool):
+        for geo in geo_variants:
+            geo_id = geo.get("geo_id")
+            if geo_id is None or geo_id in seen_geo_ids:
+                continue
+            lat_arg = ref_lat if use_bbox else None
+            lon_arg = ref_lon if use_bbox else None
+            pts = list_pickup_points(
+                geo_id, lat_arg, lon_arg, delta=delta_val, dropoff_only=dropoff_only,
+            )
+            if not pts and use_bbox:
+                continue
+            seen_geo_ids.add(geo_id)
+            for p in pts:
+                if p["id"] not in seen_pvz_ids and p["lat"] is not None and p["lng"] is not None:
+                    seen_pvz_ids.add(p["id"])
+                    all_points.append(p)
+
+    for d in (delta, 0.3, 0.5, 0.8):
+        seen_geo_ids.clear()
+        _collect(d, use_bbox=True)
+        if all_points:
+            break
+    if not all_points:
+        seen_geo_ids.clear()
+        _collect(delta, use_bbox=False)
+
+    if ref_lat is not None and ref_lon is not None:
+        for p in all_points:
+            p["distance_km"] = round(_dist(ref_lat, ref_lon, p["lat"], p["lng"]), 1)
+        all_points = [p for p in all_points if (p.get("distance_km") or 0) <= max_km]
+        all_points.sort(key=lambda p: p.get("distance_km") or 1e9)
+    return all_points[: max(1, int(limit))]
+
+
+def _source_pvz_id(source_pvz_id: Optional[str] = None) -> str:
+    """ПВЗ сдачи. Склад Техническая не используем — только Тульская 40."""
+    pid = (source_pvz_id or FROM_PVZ_ID or TULSKAYA_PVZ_ID).strip()
+    if pid == WAREHOUSE_PVZ_ID:
+        return TULSKAYA_PVZ_ID
+    return pid or TULSKAYA_PVZ_ID
+
+
+def _quote_source_address(source_address: Optional[str] = None) -> str:
+    """Адрес ПВЗ сдачи для калькулятора. Склад Техническая Яндекс не считает без забора."""
+    addr = (source_address or QUOTE_SOURCE_ADDRESS or FROM_PVZ_ADDRESS or TULSKAYA_ADDRESS).strip()
+    if "техническая" in addr.lower():
+        return TULSKAYA_ADDRESS
+    return addr or TULSKAYA_ADDRESS
+
+
+def _quote_source_payload(source_address: Optional[str] = None) -> dict:
+    return {"platform_station_id": _source_pvz_id()}
+
+
 def calculate_price(destination_platform_station_id: str, total_weight_g: int = 300,
-                     declared_cost: float = 500.0, source_address: str = FROM_PVZ_ADDRESS) -> Optional[float]:
-    """Цена доставки ПВЗ->ПВЗ (для предварительного сравнения с СДЭК). Возвращает рубли или None."""
-    sc, sd = _post("/pricing-calculator", {
+                     declared_cost: float = 500.0, source_address: Optional[str] = None) -> Optional[float]:
+    """Цена доставки с нашего ПВЗ сдачи до ПВЗ клиента. Возвращает рубли или None."""
+    body = {
         "client_price": 0,
         "destination": {"platform_station_id": destination_platform_station_id},
         "payment_method": "already_paid",
-        "source": {"address": source_address},
+        "source": _quote_source_payload(source_address),
         "tariff": "time_interval",
         "total_assessed_price": declared_cost,
         "total_weight": total_weight_g,
-    })
+    }
+    sc, sd = _post("/pricing-calculator", body)
+    if sc != 200 and body["source"].get("platform_station_id"):
+        body["source"] = {"address": _quote_source_address(source_address)}
+        sc, sd = _post("/pricing-calculator", body)
     if sc != 200:
         logger.info("NDD pricing-calculator failed: %s %s", sc, sd)
         return None
@@ -268,13 +413,15 @@ def create_order(
     items_description: str = "Комплектующие мебели",
     weight_g: int = 300,
     declared_cost: float = 1.0,
-    source_pvz_id: str = FROM_PVZ_ID,
+    source_pvz_id: Optional[str] = None,
+    note: str = "",
 ) -> dict:
     """
     Полное автосоздание заказа: offers/create -> offers/confirm.
-    Источник — наш ПВЗ (platform_station = WAREHOUSE_STATION_ID), назначение — ПВЗ клиента.
+    Источник — ПВЗ сдачи (Тульская 40), назначение — ПВЗ клиента.
     Возвращает {'request_id': ..., 'price': float|None}. Бросает исключение при ошибке API.
     """
+    source_pvz_id = _source_pvz_id(source_pvz_id)
     name_parts = (customer_name or "Клиент").strip().split(maxsplit=1)
     first_name = name_parts[0] if name_parts else "Клиент"
     last_name  = name_parts[1] if len(name_parts) > 1 else "-"
@@ -285,7 +432,7 @@ def create_order(
     body = {
         "info": {
             "operator_request_id": f"reship-{req_id}-{_uuid.uuid4().hex[:8]}",
-            "comment": f"Доотправка #{req_id}: {' '.join(items_description.split())[:150]}",
+            "comment": f"{(note or f'Доотправка #{req_id}').strip()}: {' '.join(items_description.split())[:150]}",
         },
         "last_mile_policy": 0,
         "source": {"platform_station": {"platform_id": source_pvz_id}},
@@ -362,6 +509,18 @@ STATUS_MAP = {
 }
 
 
+def get_operator_request_id(request_id: str) -> Optional[str]:
+    """Номер заказа в нашей системе, как его видит Яндекс (operator_request_id)."""
+    if not request_id:
+        return None
+    sc, sd = _get("/request/info", {"request_id": request_id})
+    if sc != 200:
+        return None
+    info = ((sd.get("request") or {}).get("info") or {})
+    value = (info.get("operator_request_id") or "").strip()
+    return value or None
+
+
 def get_order_place_barcode(request_id: str) -> Optional[str]:
     """Возвращает place_barcode заказа (штрих-код для этикетки)."""
     sc, sd = _get("/request/info", {"request_id": request_id})
@@ -389,7 +548,12 @@ def get_order_status(request_id: str) -> dict:
         "description": description,
         "courier_order_id": sd.get("courier_order_id"),
         "sharing_url": sd.get("sharing_url"),
+        "eta_raw": "",
     }
+    req = sd.get("request") or {}
+    dest = req.get("destination") or {}
+    interval = dest.get("interval_utc") or dest.get("interval") or {}
+    result["eta_raw"] = interval.get("from") or (req.get("delivery_policy") or {}).get("min") or ""
     if raw in STATUS_MAP:
         return result
 

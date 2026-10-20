@@ -1,8 +1,8 @@
 <template>
-  <div class="min-h-screen bg-gray-50 flex flex-col">
+  <div :class="['bg-gray-50 flex flex-col', isMiniApp ? 'h-full min-h-0' : 'min-h-screen']">
 
     <!-- ══ ШАПКА ══════════════════════════════════════════════════════════ -->
-    <div class="bg-white border-b border-gray-200 sticky top-0 z-20">
+    <div v-if="!isMiniApp" class="bg-white border-b border-gray-200 sticky top-0 z-20">
       <div class="max-w-full px-5 py-3 flex items-center justify-between gap-4">
         <div class="flex items-center gap-3">
           <div :class="['w-9 h-9 rounded-xl flex items-center justify-center shrink-0', mpUi.iconBg]">
@@ -16,8 +16,8 @@
           </div>
 
           <!-- Переключатель: переписка / настройка автоответов -->
-          <div class="flex items-center gap-1 ml-3 bg-gray-100 rounded-lg p-0.5">
-            <button @click="tab = 'chats'"
+          <div v-if="!isMiniApp" class="flex items-center gap-1 ml-3 bg-gray-100 rounded-lg p-0.5">
+            <button @click="openChatsTab"
               :class="['px-3 py-1 text-xs font-medium rounded-md transition-colors',
                 tab === 'chats' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700']">
               Переписка
@@ -35,16 +35,20 @@
             <button v-if="canViewChatTemplates" @click="openPlaybook"
               :class="['px-3 py-1 text-xs font-medium rounded-md transition-colors',
                 tab === 'playbook' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700']">
-              {{ canEditChatTemplates ? 'Автоответы' : 'Шаблоны' }}
+              {{ canEditBotSettings ? 'Автоответы' : 'Шаблоны' }}
             </button>
           </div>
 
-          <!-- Подразделы автоответов: менеджеру КС — только просмотр шаблонов -->
+          <!-- Подразделы: админ — всё; КС — только шаблоны -->
           <div v-if="tab === 'playbook' && canEditChatTemplates" class="flex items-center gap-1 ml-1 bg-gray-100 rounded-lg p-0.5">
-            <button v-for="s in pbSections" :key="s.id" @click="pbSection = s.id"
+            <button v-for="s in visiblePbSections" :key="s.id" @click="pbSection = s.id"
               :class="['px-2.5 py-1 text-xs font-medium rounded-md transition-colors',
                 pbSection === s.id ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700']">
               {{ s.label }}
+              <span v-if="s.id === 'review' && pendingTemplateCount > 0"
+                class="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full text-[10px] font-semibold bg-amber-500 text-white">
+                {{ pendingTemplateCount }}
+              </span>
             </button>
           </div>
           <div v-else-if="tab === 'playbook' && canViewChatTemplates" class="ml-2 text-[11px] text-gray-400">
@@ -53,7 +57,7 @@
         </div>
 
         <!-- Счётчики + кнопки -->
-        <div v-if="tab === 'chats'" class="flex items-center gap-2 flex-wrap justify-end">
+        <div v-if="tab === 'chats' && !isMiniApp" class="flex items-center gap-2 flex-wrap justify-end">
           <span v-if="pendingChatCount > 0"
             class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200">
             Ждёт ответа: {{ pendingChatCount }}
@@ -77,10 +81,12 @@
     </div>
 
     <!-- ══ SPLIT ПАНЕЛЬ ════════════════════════════════════════════════════ -->
-    <div v-if="tab === 'chats'" class="flex border-t border-gray-200 overflow-hidden" style="height: calc(100vh - 110px)">
+    <div v-if="tab === 'chats'" class="flex border-t border-gray-200 overflow-hidden"
+      :class="isMiniApp ? 'flex-1 min-h-0' : ''"
+      :style="isMiniApp ? '' : 'height: calc(100vh - 110px)'">
 
       <!-- ── Левая панель: список чатов ─────────────────────────────────── -->
-      <div class="w-80 shrink-0 flex flex-col border-r border-gray-200 bg-white">
+      <div v-if="!isMiniApp" class="w-80 shrink-0 flex flex-col border-r border-gray-200 bg-white">
 
         <!-- контролы -->
         <div class="px-3 py-2 border-b border-gray-100 flex items-center gap-1.5 shrink-0 bg-gray-50/50 flex-wrap">
@@ -91,7 +97,7 @@
             <span :class="['px-1 rounded-full font-bold text-xs',
               chatFilter === 'pending' ? 'bg-white/20 text-white' : 'bg-orange-100 text-orange-700']">{{ pendingChatCount }}</span>
           </button>
-          <button v-if="isAdmin" @click="setChatFilter('review')"
+          <button @click="setChatFilter('review')"
             :class="['inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border font-medium transition-all',
               chatFilter === 'review' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300']">
             На проверку
@@ -116,13 +122,14 @@
               </template>
               <template v-else>Клиент ждёт ответа: {{ pendingChatCount }}</template>
             </template>
+            <template v-else-if="chatSearchHits">Поиск: {{ chatSearchHits.length }}</template>
             <template v-else>Все чаты · нажмите фильтр выше</template>
           </p>
           <div class="flex gap-1.5 w-full basis-full">
             <input
               v-model="chatFindQ"
               @keydown.enter.prevent="findChatByPaste"
-              placeholder="chatId или ссылка WB…"
+              placeholder="Имя, текст, артикул или заказ…"
               class="flex-1 min-w-0 text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-violet-400"
             />
             <button type="button" @click="findChatByPaste"
@@ -142,25 +149,27 @@
 
         <!-- список -->
         <div class="flex-1 overflow-y-auto">
-          <div v-if="queueLoading" class="flex justify-center py-10">
+          <div v-if="queueLoading || chatSearchLoading" class="flex justify-center py-10">
             <div :class="['w-6 h-6 border-4 border-t-transparent rounded-full animate-spin', mpUi.spin]"></div>
           </div>
           <div v-else-if="filteredItems.length === 0"
             class="flex flex-col items-center justify-center py-12 px-4 text-center">
             <p class="text-sm text-gray-500 font-medium">
-              {{ chatFilter === 'new' ? 'Нет новых от клиентов'
+              {{ chatSearchHits ? 'Ничего не найдено'
+                : chatFilter === 'new' ? 'Нет новых от клиентов'
                 : chatFilter === 'review' ? 'Нет чатов на проверку'
                 : chatFilter === 'pending' ? 'Нет ожидающих ответа'
                 : 'Чатов нет' }}
             </p>
           </div>
           <div v-else>
-            <div v-for="item in pagedItems" :key="item.id"
-              @click="selectChat(item)"
-              :class="['flex gap-2.5 px-3 py-3 cursor-pointer border-b border-gray-100 transition-colors',
+            <a v-for="item in pagedItems" :key="(item.mp || 'wb') + ':' + item.id"
+              :href="chatItemHref(item)"
+              @click="onAppClick($event, () => selectChat(item))"
+              :class="['flex gap-2.5 px-3 py-3 cursor-pointer border-b border-gray-100 transition-colors no-underline text-inherit',
                 chatItem?.id === item.id
                   ? mpUi.selected
-                  : item.needs_answer
+                  : chatNeedsReply(item)
                     ? 'hover:bg-orange-50/40 border-l-[3px] border-l-orange-400'
                     : 'hover:bg-gray-50 border-l-[3px] border-l-transparent opacity-60']">
 
@@ -174,7 +183,7 @@
 
               <div class="flex-1 min-w-0">
                 <div class="flex items-start justify-between gap-1 mb-0.5">
-                  <span :class="['text-xs font-semibold truncate', item.needs_answer ? 'text-gray-900' : 'text-gray-500']">
+                  <span :class="['text-xs font-semibold truncate', chatNeedsReply(item) ? 'text-gray-900' : 'text-gray-500']">
                     {{ item.contact || 'Покупатель' }}
                   </span>
                   <div class="flex items-center gap-1 shrink-0">
@@ -186,9 +195,14 @@
                       class="text-[10px] uppercase font-semibold px-1 py-0.5 rounded bg-gray-100 text-gray-500">
                       {{ item.mp }}
                     </span>
+                    <span v-if="item.is_archive"
+                      class="text-[10px] font-medium px-1 py-0.5 rounded bg-gray-50 text-gray-400">архив</span>
                     <span v-if="hasNewMsg(item)" class="w-2 h-2 rounded-full bg-blue-500 animate-pulse block"></span>
-                    <span v-if="item.needs_answer" class="text-xs text-orange-600 font-semibold">Ждёт</span>
-                    <template v-if="item.needs_answer && chatMp(item) === 'ozon'">
+                    <span v-if="isWbPrePurchase(item)"
+                      class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-50 text-violet-800 border border-violet-100"
+                      title="Нет в списке чатов WB API — гипотеза: раздел «До покупки»">До покупки</span>
+                    <span v-if="chatNeedsReply(item)" class="text-xs text-orange-600 font-semibold">Ждёт</span>
+                    <template v-if="chatNeedsReply(item) && chatMp(item) === 'ozon'">
                       <span v-if="senderKind(item) === 'system'"
                         class="text-[10px] font-medium px-1 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200"
                         title="Последнее сообщение — оповещение Ozon, не клиент">Ozon</span>
@@ -205,11 +219,11 @@
                 <p class="text-xs text-gray-400 truncate leading-tight">
                   {{ listSubtitle(item) }}
                 </p>
-                <p :class="['text-xs truncate mt-0.5 leading-tight', item.needs_answer ? 'text-gray-700' : 'text-gray-400']">
+                <p :class="['text-xs truncate mt-0.5 leading-tight', chatNeedsReply(item) ? 'text-gray-700' : 'text-gray-400']">
                   {{ previewBody(item.body) }}
                 </p>
               </div>
-            </div>
+            </a>
           </div>
         </div>
 
@@ -244,9 +258,12 @@
 
         <template v-else>
           <!-- Шапка правой панели -->
-          <div class="bg-white border-b border-gray-200 px-5 py-3 shrink-0">
+          <div class="bg-white border-b border-gray-200 shrink-0" :class="isMiniApp ? 'px-3 py-2' : 'px-5 py-3'">
             <div class="flex items-center gap-3">
-              <div class="w-[72px] h-24 rounded-xl overflow-hidden bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center">
+              <div :class="[
+                'overflow-hidden bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center',
+                isMiniApp ? 'w-11 h-11 rounded-lg' : 'w-[72px] h-24 rounded-xl'
+              ]">
                 <img v-if="chatItem.product_photo || (chatMp(chatItem) === 'wb' && chatItem.nm_id)"
                   :src="chatItem.product_photo || wbPhotoUrl(chatItem.nm_id)"
                   class="w-full h-full object-cover"
@@ -263,12 +280,20 @@
                   <span v-else class="text-sm font-semibold text-gray-700 truncate max-w-md">
                     {{ chatHeaderTitle(chatItem) }}
                   </span>
+                  <span v-if="isWbPrePurchase(chatItem)"
+                    class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-50 text-violet-800 border border-violet-100"
+                    title="Нет в списке чатов WB API — гипотеза: раздел «До покупки»">До покупки</span>
                   <span v-if="ymChatType(chatItem)"
                     class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">
                     {{ ymChatTypeLabel(chatItem) }}
                   </span>
                   <span :class="['text-xs px-2 py-0.5 rounded-full font-medium', ageCls(chatAgeSec(chatItem))]">
                     чат {{ fmtAge(chatAgeSec(chatItem)) }}
+                  </span>
+                  <span v-if="chatFulfillmentCode(chatItem)"
+                    :class="['text-xs px-2 py-0.5 rounded-full font-medium border', chatFulfillmentCls(chatItem)]"
+                    :title="chatFulfillmentHint(chatItem)">
+                    {{ chatFulfillmentCode(chatItem) }}
                   </span>
                 </div>
                 <p class="text-xs text-gray-400 mt-0.5">
@@ -288,12 +313,22 @@
                     <template v-if="chatMp(chatItem) === 'wb'"> · нм {{ chatItem.nm_id || '—' }}</template>
                   </template>
                 </p>
+                <p v-if="chatOrder(chatItem)" class="text-xs mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                  <span :class="['font-semibold px-1.5 py-0.5 rounded', chatOrderToneCls(chatOrder(chatItem))]">
+                    {{ chatOrder(chatItem).status_label }}
+                  </span>
+                  <span v-if="chatOrder(chatItem).date_label" class="text-gray-500">{{ chatOrder(chatItem).date_label }}</span>
+                  <span v-if="chatOrderPrice(chatOrder(chatItem))" class="text-emerald-700 font-medium">{{ chatOrderPrice(chatOrder(chatItem)) }}</span>
+                  <span v-if="chatOrder(chatItem).warehouse" class="text-gray-500 truncate max-w-[220px]">{{ chatOrder(chatItem).warehouse }}</span>
+                  <span v-if="chatOrder(chatItem).region" class="text-gray-500 truncate max-w-[180px]">{{ chatOrder(chatItem).region }}</span>
+                </p>
               </div>
-              <a v-if="marketplaceChatUrl(chatItem)" :href="marketplaceChatUrl(chatItem)" target="_blank" rel="noopener"
+              <a v-if="marketplaceChatUrl(chatItem) && !isMiniApp"
+                :href="marketplaceChatUrl(chatItem)" target="_blank" rel="noopener"
                 :class="['shrink-0 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg font-medium transition-colors', mpUi.btn]">
                 {{ marketplaceChatLabel(chatItem) }}
               </a>
-              <button v-if="productCardRequest" type="button" @click="toggleProductCard"
+              <button v-if="productCardRequest && !isMiniApp" type="button" @click="toggleProductCard"
                 :aria-expanded="productCardOpen"
                 :class="[
                   'shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-lg border bg-white transition-colors',
@@ -308,7 +343,7 @@
                   <path d="M8 7h8M8 10h8M8 13h5" />
                 </svg>
               </button>
-              <button type="button" @click="copyCxChatLink"
+              <button v-if="!isMiniApp" type="button" @click="copyCxChatLink"
                 class="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-violet-300 hover:text-violet-700 hover:bg-violet-50 transition-colors"
                 title="Ссылка для коллеги в CX">
                 <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -316,7 +351,7 @@
                   <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L14 20" />
                 </svg>
               </button>
-              <button @click="dismissChatItem"
+              <button v-if="!isMiniApp" @click="dismissChatItem"
                 class="shrink-0 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-600 hover:border-rose-300 hover:text-rose-700 hover:bg-rose-50 font-medium transition-colors">
                 Закрыть чат
               </button>
@@ -341,33 +376,50 @@
               </div>
               <div class="pt-2 text-xs text-slate-700">
                 <p v-if="productCardLoading" class="text-gray-400">Загружаем карточку товара…</p>
-                <template v-else-if="productCard?.status === 'ok'">
-                  <p v-if="productDimensionsLine(productCard.product.dimensions)" class="mt-1">
-                    Габариты упаковки: <span class="font-medium">{{ productDimensionsLine(productCard.product.dimensions) }} см</span>
+                <template v-else>
+                  <p v-if="productFastenersLine(productCard)" class="mt-1">
+                    Винты: <span class="font-medium">{{ productFastenersLine(productCard) }}</span>
                   </p>
-                  <p v-if="productCard.product.dimensions?.weight != null" class="mt-1">
-                    Вес: <span class="font-medium">{{ productCard.product.dimensions.weight }} кг</span>
+                  <template v-if="productCard?.status === 'ok'">
+                    <p v-if="productDimensionsLine(productCard.product.dimensions)" class="mt-1">
+                      Габариты упаковки: <span class="font-medium">{{ productDimensionsLine(productCard.product.dimensions) }} см</span>
+                    </p>
+                    <p v-if="productCard.product.dimensions?.weight != null" class="mt-1">
+                      Вес: <span class="font-medium">{{ productCard.product.dimensions.weight }} кг</span>
+                    </p>
+                    <dl v-if="productCard.product.params?.length" class="mt-2 grid gap-x-4 gap-y-1.5 sm:grid-cols-[minmax(140px,200px)_1fr]">
+                      <template v-for="param in productCard.product.params" :key="`${param.name}:${param.value}`">
+                        <dt class="text-slate-500">{{ param.name }}</dt>
+                        <dd class="font-medium break-words">{{ param.value }}</dd>
+                      </template>
+                    </dl>
+                    <p v-if="productCard.cached" class="mt-2 text-[10px] text-slate-400">Загружено из локальной базы</p>
+                  </template>
+                  <p v-else-if="!productFastenersLine(productCard) && productCard?.status === 'not_found'" class="text-slate-500">
+                    Для этого товара карточка пока не найдена.
                   </p>
-                  <dl v-if="productCard.product.params?.length" class="mt-2 grid gap-x-4 gap-y-1.5 sm:grid-cols-[minmax(140px,200px)_1fr]">
-                    <template v-for="param in productCard.product.params" :key="`${param.name}:${param.value}`">
-                      <dt class="text-slate-500">{{ param.name }}</dt>
-                      <dd class="font-medium break-words">{{ param.value }}</dd>
-                    </template>
-                  </dl>
-                  <p v-if="productCard.cached" class="mt-2 text-[10px] text-slate-400">Загружено из локальной базы</p>
+                  <p v-else-if="!productFastenersLine(productCard)" class="text-slate-500">Карточка товара сейчас недоступна. Попробуйте позже.</p>
                 </template>
-                <p v-else-if="productCard?.status === 'not_found'" class="text-slate-500">
-                  Для этого товара карточка пока не найдена.
-                </p>
-                <p v-else class="text-slate-500">Карточка товара сейчас недоступна. Попробуйте позже.</p>
               </div>
             </div>
 
             <!-- Контекст клиента -->
             <div v-if="chatContextLoading" class="mt-2 text-xs text-gray-400">Загружаем…</div>
             <template v-else-if="chatContext">
-              <div v-if="chatContext.specific?.claim || chatContext.specific?.review || chatContext.specific?.reshipment"
+              <div v-if="chatContext.specific?.order || chatContext.specific?.claim || chatContext.specific?.review || chatContext.specific?.reshipment"
                 class="mt-2 flex flex-wrap gap-1.5">
+
+                <button v-if="chatContext.specific.order"
+                  @click="orderOpen = !orderOpen"
+                  :class="['inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors',
+                    orderOpen
+                      ? 'bg-sky-100 border-sky-400 text-sky-900'
+                      : 'bg-sky-50 border-sky-300 text-sky-800 hover:bg-sky-100']">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+                  Заказ
+                  <span class="opacity-80">· {{ chatContext.specific.order.status_label }}</span>
+                  <span v-if="chatContext.specific.order.date_label" class="opacity-70">· {{ chatContext.specific.order.date_label }}</span>
+                </button>
 
                 <button v-if="chatContext.specific.claim"
                   @click="expandedClaimId = expandedClaimId === chatContext.specific.claim.claim_id ? '' : chatContext.specific.claim.claim_id"
@@ -376,7 +428,8 @@
                       ? 'bg-orange-100 border-orange-400 text-orange-800'
                       : 'bg-orange-50 border-orange-300 text-orange-700 hover:bg-orange-100']">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.93"/></svg>
-                  Возврат от {{ chatContext.specific.claim.claim_date }}
+                  Возврат № {{ chatContext.specific.claim.return_number || chatContext.specific.claim.claim_id }}
+                  <span v-if="chatContext.specific.claim.claim_date" class="opacity-70">· {{ chatContext.specific.claim.claim_date }}</span>
                 </button>
 
                 <button v-if="chatContext.specific.review" @click="openReviewCard(chatContext.specific.review.id)"
@@ -397,6 +450,41 @@
                   <span v-if="chatContext.specific.reshipment.created_date">от {{ chatContext.specific.reshipment.created_date }}</span>
                   <span class="opacity-80">· {{ chatContext.specific.reshipment.status_label }}</span>
                 </button>
+                <button v-if="showOzonPickupGuide"
+                  type="button"
+                  :disabled="ozonGuideLoading"
+                  @click="insertOzonPickupGuide()"
+                  class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-xs font-medium hover:bg-amber-100 disabled:opacity-60">
+                  {{ ozonGuideLoading ? 'Собираем инструкцию…' : 'Как забрать и проверить' }}
+                </button>
+              </div>
+
+              <!-- Сводка по заказу -->
+              <div v-if="orderOpen && chatContext.specific?.order"
+                class="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5">
+                <div class="flex items-center justify-between mb-1.5">
+                  <div class="flex items-center gap-2 text-xs font-semibold text-sky-900">
+                    <span>Заказ</span>
+                    <span class="text-sky-300">·</span>
+                    <span>{{ chatContext.specific.order.status_label }}</span>
+                  </div>
+                  <button @click="orderOpen=false" class="text-gray-300 hover:text-gray-500 text-lg leading-none">×</button>
+                </div>
+                <div class="space-y-1 text-xs text-slate-700">
+                  <p v-if="chatContext.specific.order.order_id">
+                    Номер: <span class="font-medium font-mono">{{ chatContext.specific.order.order_id }}</span>
+                  </p>
+                  <p v-if="chatContext.specific.order.posting_number && chatContext.specific.order.posting_number !== chatContext.specific.order.order_id">
+                    Отправление: <span class="font-medium font-mono">{{ chatContext.specific.order.posting_number }}</span>
+                  </p>
+                  <p v-if="chatContext.specific.order.article">
+                    Артикул: <span class="font-medium">{{ chatContext.specific.order.article }}</span>
+                  </p>
+                  <p v-if="chatContext.specific.order.date_label">Дата: {{ chatContext.specific.order.date_label }}</p>
+                  <p v-if="chatOrderPrice(chatContext.specific.order)">Сумма: <span class="font-semibold text-emerald-700">{{ chatOrderPrice(chatContext.specific.order) }}</span></p>
+                  <p v-if="chatContext.specific.order.warehouse">Склад: {{ chatContext.specific.order.warehouse }}</p>
+                  <p v-if="chatContext.specific.order.region">Регион: {{ chatContext.specific.order.region }}</p>
+                </div>
               </div>
 
               <!-- Сводка по отправке деталей -->
@@ -411,20 +499,27 @@
                   <button @click="expandedReshipId=null" class="text-gray-300 hover:text-gray-500 text-lg leading-none">×</button>
                 </div>
                 <div class="space-y-1 text-xs text-slate-700">
-                  <p v-if="chatContext.specific.reshipment.track_number">
+                  <p v-if="chatContext.specific.reshipment.order_number">
+                    Номер заказа: <span class="font-medium">{{ chatContext.specific.reshipment.order_number }}</span>
+                    <span class="text-slate-400"> · Ozon</span>
+                  </p>
+                  <p v-else-if="chatContext.specific.reshipment.track_number">
                     Трек: <span class="font-medium">{{ chatContext.specific.reshipment.track_number }}</span>
                     <span v-if="chatContext.specific.reshipment.delivery_method" class="text-slate-400">
-                      · {{ chatContext.specific.reshipment.delivery_method === 'yandex' ? 'Яндекс' : 'СДЭК' }}
+                      · {{ chatContext.specific.reshipment.delivery_method === 'ozon' ? 'Ozon' : chatContext.specific.reshipment.delivery_method === 'yandex' ? 'Яндекс' : 'СДЭК' }}
                     </span>
                   </p>
+                  <p v-if="chatContext.specific.reshipment.eta_label" class="text-slate-700">
+                    Ориентировочно: <span class="font-medium">{{ chatContext.specific.reshipment.eta_label }}</span>
+                  </p>
                   <p v-if="chatContext.specific.reshipment.pvz" class="text-slate-600">ПВЗ: {{ chatContext.specific.reshipment.pvz }}</p>
-                  <p v-if="chatContext.specific.reshipment.matched_srid" class="text-slate-500">Заказ: {{ chatContext.specific.reshipment.matched_srid }}</p>
+                  <p v-if="chatContext.specific.reshipment.matched_srid" class="text-slate-500">Заказ {{ chatContext.specific.reshipment.marketplace === 'ym' ? 'Маркета' : 'WB' }}: {{ chatContext.specific.reshipment.matched_srid }}</p>
                 </div>
-                <button type="button"
-                  @click="openReshipmentFromChat(chatContext.specific.reshipment.id)"
+                <RouterLink
+                  :to="reshipmentFromChatTo"
                   class="mt-2 text-[11px] font-semibold text-emerald-800 hover:text-emerald-950 underline underline-offset-2">
                   Открыть карточку отправки →
-                </button>
+                </RouterLink>
               </div>
 
               <!-- Сводка по возврату + решение (WB/ЯМ) прямо из чата -->
@@ -432,6 +527,8 @@
                 class="mt-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2.5">
                 <div class="flex items-center justify-between mb-1.5">
                   <div class="flex items-center gap-2 text-xs font-semibold text-orange-800">
+                    <span class="font-mono">№ {{ chatContext.specific.claim.return_number || chatContext.specific.claim.claim_id }}</span>
+                    <span class="text-orange-300">·</span>
                     <span>{{ chatContext.specific.claim.claim_type_label || 'Возврат' }}</span>
                     <span class="text-orange-300">·</span>
                     <span :class="claimStatusClass(chatContext.specific.claim.status_label)">
@@ -464,9 +561,19 @@
                       <option value="">Причина отказа</option>
                       <option v-for="r in claimRejectReasons" :key="r.value" :value="r.value">{{ r.label }}</option>
                     </select>
-                    <textarea v-model="claimRejectComment" rows="2"
-                      placeholder="Причина отказа для покупателя"
-                      class="w-full text-[11px] border border-rose-200 rounded-lg px-2 py-1.5"></textarea>
+                    <textarea
+                      v-if="chatClaimMp !== 'wb'"
+                      ref="claimRejectCommentEl"
+                      v-model="claimRejectComment"
+                      rows="2"
+                      :maxlength="chatClaimMp === 'ym' ? 250 : 1000"
+                      :placeholder="chatClaimMp === 'ym' ? 'Причина отказа (до 250 символов)' : 'Причина отказа для покупателя'"
+                      @input="autoGrowClaimReject"
+                      class="w-full text-[11px] border border-rose-200 rounded-lg px-2 py-1.5 resize-none overflow-hidden min-h-[52px] max-h-40"
+                    ></textarea>
+                    <div v-if="chatClaimMp === 'ym'" class="text-[10px] text-slate-400 text-right">
+                      {{ (claimRejectComment || '').length }} / 250
+                    </div>
                     <div class="flex gap-1.5">
                       <button :disabled="claimDeciding" @click="submitChatReject"
                         class="flex-1 text-[11px] font-semibold px-2 py-1.5 rounded-lg bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50">
@@ -479,23 +586,23 @@
                 </div>
                 <p v-else-if="claimDetail?.decision_note" class="mt-2 text-[11px] text-slate-500">{{ claimDetail.decision_note }}</p>
 
-                <button
+                <RouterLink
                   v-if="chatContext.specific.claim.claim_id"
-                  @click="openReturnFromChat(chatContext.specific.claim.claim_id)"
-                  class="mt-2.5 w-full text-[11px] font-semibold px-2.5 py-1.5 rounded-lg bg-orange-600 text-white hover:bg-orange-700 text-center transition-colors"
-                >Открыть в возвратах →</button>
+                  :to="returnFromChatTo"
+                  class="mt-2.5 w-full text-[11px] font-semibold px-2.5 py-1.5 rounded-lg bg-orange-600 text-white hover:bg-orange-700 text-center transition-colors no-underline block"
+                >Открыть в возвратах →</RouterLink>
               </div>
             </template>
           </div>
 
           <!-- Лента сообщений -->
-          <div ref="chatScroll" class="flex-1 overflow-y-auto px-5 py-4 space-y-3 bg-gray-50">
+          <div ref="chatScroll" class="flex-1 overflow-y-auto space-y-3 bg-gray-50" :class="isMiniApp ? 'px-3 py-3' : 'px-5 py-4'">
             <div v-if="chatLoading" class="flex justify-center py-8">
               <div :class="['w-7 h-7 border-4 border-t-transparent rounded-full animate-spin', mpUi.spin]"></div>
             </div>
             <div v-else-if="!chatMsgs.length" class="text-center text-gray-400 text-sm py-8">Сообщений нет</div>
             <template v-else>
-              <template v-for="(msg, idx) in chatMsgs" :key="msg.id || idx">
+              <template v-for="(msg, idx) in chatMsgs" :key="msg.messageId || msg.id || idx">
                 <!-- Разделитель дня -->
                 <div v-if="isNewDay(idx)" class="flex justify-center my-2">
                   <span class="text-xs font-medium text-gray-500 bg-gray-200/70 rounded-full px-3 py-1">
@@ -506,6 +613,11 @@
                   <div :class="['max-w-[75%] rounded-2xl px-3.5 py-2',
                   isSystem(msg) ? 'bg-gray-100 text-gray-600 rounded-xl text-center'
                     : isSeller(msg) ? (mpUi.bubble + ' rounded-br-md') : 'bg-white border border-gray-200 text-gray-800 rounded-bl-md']">
+                  <div v-if="msgVideos(msg).length" class="mb-1.5 space-y-1.5">
+                    <video v-for="(attachment, i) in msgVideos(msg)" :key="'v'+i"
+                      :src="attachment.url" controls playsinline preload="metadata"
+                      class="rounded-lg max-w-[260px] max-h-[280px] bg-black" />
+                  </div>
                   <div v-if="msgImages(msg).length" class="mb-1.5 space-y-1.5">
                     <a v-for="(attachment, i) in msgImages(msg)" :key="i" :href="attachment.url" target="_blank" rel="noopener" class="block">
                       <img :src="attachment.url" :alt="attachment.name || 'Изображение из чата'" class="rounded-lg max-w-[220px] max-h-[260px] object-cover" />
@@ -525,6 +637,7 @@
                   <p v-if="msg.text" class="text-sm whitespace-pre-wrap break-words">{{ msg.text }}</p>
                     <p :class="['text-xs mt-0.5', isSeller(msg) ? 'text-white/60' : 'text-gray-400']">
                       {{ fmtTs(msg.createdAt) }}
+                      <span v-if="isSeller(msg) && msg.repliedByName"> · {{ msg.repliedByName }}</span>
                     </p>
                   </div>
                 </div>
@@ -533,7 +646,8 @@
           </div>
 
           <!-- Поле ввода -->
-          <div class="border-t border-gray-200 bg-white px-4 py-3 shrink-0">
+          <div class="border-t border-gray-200 bg-white shrink-0" :class="isMiniApp ? 'px-3 py-2' : 'px-4 py-3'"
+            :style="isMiniApp ? { paddingBottom: 'calc(0.5rem + var(--tg-safe-area-inset-bottom, 0px))' } : {}">
             <div v-if="chatSuggest && chatSuggest.reply_text"
               :class="['mb-2 rounded-xl border px-3 py-2 flex items-start justify-between gap-2', mpUi.softBorder]">
               <div class="min-w-0">
@@ -545,25 +659,20 @@
                   <span v-if="chatSuggest.confidence != null" class="font-normal opacity-70">
                     · {{ Math.round((chatSuggest.confidence || 0) * 100) }}%
                   </span>
+                  <span v-if="chatSuggest.auto_held" class="ml-1 text-amber-700">· на согласование</span>
                   <span v-if="chatSuggest.need_human" class="ml-1 text-rose-600">· лучше проверить</span>
                   <span v-if="chatSuggest.from_cache" :class="['ml-1 font-normal', mpUi.textMuted]">· из кэша</span>
                 </p>
                 <p :class="['text-[10px] mt-0.5', mpUi.textMuted]">Можно править и отправить. Автоотправки нет.</p>
               </div>
-              <div class="flex flex-col items-stretch gap-1.5 shrink-0">
-                <button @click="generateSuggestAi" :disabled="chatSuggestGenerating"
-                  class="text-xs font-medium px-3 py-1.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-800 hover:bg-violet-100 disabled:opacity-60">
-                  {{ chatSuggestGenerating ? 'Генерируем…' : 'Сгенерировать' }}
-                </button>
-                <button @click="clearSuggest"
-                  class="text-xs font-medium px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50">
-                  Очистить
-                </button>
-              </div>
+              <button @click="clearSuggest"
+                class="shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50">
+                Очистить
+              </button>
             </div>
             <div v-else-if="chatSuggestLoading" class="mb-2 text-[10px] text-gray-400">Подбираем шаблон…</div>
             <div v-else-if="chatSuggestMiss"
-              class="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 flex items-center justify-between gap-3">
+              class="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
               <div class="min-w-0">
                 <p class="text-xs font-semibold text-amber-900">
                   {{ chatSuggestMiss.need_human ? 'Нужен менеджер' : 'Ответ не подобран' }}
@@ -574,11 +683,6 @@
                     : 'Нет подходящего шаблона для этого сообщения.') }}
                 </p>
               </div>
-              <button v-if="!chatSuggestMiss.need_human && chatSuggestMiss.can_generate !== false"
-                @click="generateSuggestAi" :disabled="chatSuggestGenerating"
-                class="shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-60">
-                {{ chatSuggestGenerating ? 'Генерируем…' : 'Сгенерировать черновик' }}
-              </button>
             </div>
             <div v-if="chatTemplatesLoading || chatTemplateGroups.length" class="relative mb-2">
               <div class="flex min-w-0 items-center gap-1.5">
@@ -588,9 +692,10 @@
                   <div class="flex min-w-0 flex-1 gap-1.5 overflow-hidden">
                     <button v-for="group in compactChatTemplateGroups" :key="group.theme_key"
                       type="button"
-                      :title="group.theme_name"
-                      @click="onChatThemeChip(group)"
-                      :class="['min-w-0 max-w-44 truncate rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
+                      :title="canEditChatTemplates ? compactChatThemeHint(group) + ' · двойной щелчок — править шаблон' : compactChatThemeHint(group)"
+                      @click="onCompactChatThemeChip(group)"
+                      @dblclick.stop.prevent="openChatTemplateEditor(group.theme_key)"
+                      :class="['min-w-0 max-w-52 truncate rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
                         isChatThemeActive(group)
                           ? mpUi.chipOn
                           : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50']">
@@ -638,7 +743,9 @@
                 <div v-if="!chatTemplatesFocusTheme" class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                   <button v-for="group in chatTemplateGroups" :key="group.theme_key"
                     type="button"
+                    :title="canEditChatTemplates ? 'Двойной щелчок — открыть шаблон для правки' : ''"
                     @click="onChatThemeChip(group)"
+                    @dblclick.stop.prevent="openChatTemplateEditor(group.theme_key)"
                     :class="['min-h-[44px] rounded-lg border px-3 py-2 text-left text-xs font-medium leading-snug transition-colors',
                       isChatThemeActive(group)
                         ? mpUi.chipOn
@@ -654,13 +761,18 @@
                 <div v-else class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                   <button v-for="template in (focusedChatTemplateGroup?.templates || [])" :key="template.id"
                     type="button"
-                    :title="templateVariantLabel(template)"
+                    :title="(templatePreviewText(template) || templateVariantLabel(template)) + (canEditChatTemplates ? ' · двойной щелчок — править' : '')"
                     @click="applyChatTemplate(template)"
+                    @dblclick.stop.prevent="openChatTemplateEditor(template.theme_key)"
                     :class="['min-h-[44px] rounded-lg border px-3 py-2 text-left text-xs font-medium leading-snug transition-colors',
                       isChatTemplateActive(template)
                         ? mpUi.chipOn
                         : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50']">
-                    {{ templateVariantLabel(template) }}
+                    <span class="block font-semibold">{{ templateVariantLabel(template) }}</span>
+                    <span v-if="templatePreviewText(template)"
+                      class="mt-0.5 block text-[11px] font-normal leading-snug line-clamp-2 opacity-80">
+                      {{ templatePreviewText(template) }}
+                    </span>
                   </button>
                 </div>
               </div>
@@ -700,6 +812,27 @@
                 </button>
               </div>
             </div>
+            <div v-if="isWbPrePurchase(chatItem)"
+              class="mb-2 text-[11px] leading-snug px-2.5 py-2 rounded-lg bg-violet-50 text-violet-900 border border-violet-100">
+              Похоже на чат «До покупки» в ЛК WB: его нет в API-списке с ключом отправки.
+              Если сообщение не уйдёт — ответьте в кабинете WB, раздел «До покупки».
+            </div>
+            <div v-if="canEditChatTemplates && chatReply.trim() && !isMiniApp"
+              class="mb-2 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+              <label class="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                <input type="checkbox" v-model="saveReplyAsTemplate"
+                  :class="['w-3.5 h-3.5 rounded', mpUi.accent]" />
+                Сделать шаблоном
+              </label>
+              <select v-if="saveReplyAsTemplate" v-model="saveReplyThemeKey"
+                class="border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-sky-400 max-w-[16rem]">
+                <option value="">Группа ответов…</option>
+                <option value="__unassigned__">Без темы</option>
+                <option v-for="th in saveAsTemplateThemes" :key="th.theme_key" :value="th.theme_key">
+                  {{ th.name || th.theme_key }}
+                </option>
+              </select>
+            </div>
             <div class="flex items-end gap-2">
               <input ref="chatAttachmentInput" type="file" multiple class="hidden"
                 accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
@@ -722,6 +855,33 @@
                 placeholder="Сообщение… (Enter — отправить, Shift+Enter — новая строка)"
                 rows="1"
                 :class="['flex-1 border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm leading-5 text-gray-900 bg-white resize-none overflow-y-auto focus:outline-none focus:ring-2 min-h-[44px] max-h-40', mpUi.ring]"></textarea>
+              <button type="button" @click="insertChatPlaybookTemplate"
+                :disabled="chatSuggestGenerating || chatSending"
+                title="Подставить шаблон"
+                :class="['w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border transition-colors focus:outline-none focus:ring-2',
+                  chatSuggestGenerating || chatSending
+                    ? 'border-gray-200 bg-gray-100 text-gray-300 cursor-wait'
+                    : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100']">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M4 6h16M4 12h16M4 18h10"/>
+                </svg>
+                <span class="sr-only">Подставить шаблон</span>
+              </button>
+              <button type="button" @click="generateSuggestAi"
+                :disabled="chatSuggestGenerating || chatSending"
+                title="Сгенерировать ответ ИИ"
+                :class="['w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border transition-colors focus:outline-none focus:ring-2',
+                  chatSuggestGenerating || chatSending
+                    ? 'border-gray-200 bg-gray-100 text-gray-300 cursor-wait'
+                    : 'border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100']">
+                <svg v-if="chatSuggestGenerating" class="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                </svg>
+                <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z"/>
+                </svg>
+                <span class="sr-only">Сгенерировать ответ ИИ</span>
+              </button>
               <button @click="sendChatMessage" :disabled="!chatCanSend"
                 aria-label="Отправить сообщение"
                 :class="['w-11 h-11 rounded-xl flex items-center justify-center shrink-0 transition-all focus:outline-none focus:ring-2',
@@ -870,7 +1030,7 @@
 
         <template v-else>
           <!-- ── Настройки ─────────────────────────────────────────────── -->
-          <template v-if="pbSection === 'settings' && canEditChatTemplates">
+          <template v-if="pbSection === 'settings' && canEditBotSettings">
           <!-- Общие настройки -->
           <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
             <div class="px-5 py-3 border-b border-gray-100">
@@ -942,8 +1102,8 @@
 
                 <label class="flex items-start justify-between gap-4 cursor-pointer">
                   <div class="min-w-0">
-                    <p class="text-xs font-medium text-gray-800">ИИ-черновик, если нет шаблона</p>
-                    <p class="text-[11px] text-gray-400 mt-0.5">Клиенту сам не отправит — только черновик менеджеру. Модель ИИ общая (ниже).</p>
+                    <p class="text-xs font-medium text-gray-800">ИИ-черновик автобота, если нет шаблона</p>
+                    <p class="text-[11px] text-gray-400 mt-0.5">Только для автобота. Кнопки шаблона и ИИ в чате всегда на месте, клиенту сами не уходят.</p>
                   </div>
                   <button type="button" role="switch"
                     :aria-checked="mpSettingOn('bot_ai_draft')"
@@ -967,18 +1127,32 @@
                     </div>
                   </div>
                   <div>
-                    <label class="text-xs font-medium text-gray-700 block mb-1">Мин. уверенность</label>
+                    <label class="text-xs font-medium text-gray-700 block mb-1">Мин. уверенность для шаблона</label>
                     <div class="flex items-center gap-2">
-                      <input type="range" min="30" max="95" step="5"
-                        :value="Math.round(mpSettingNum('bot_confidence_min') * 100)"
+                      <input type="range" min="50" max="95" step="5"
+                        :value="Math.round(mpSettingNum('bot_confidence_min', 0.65) * 100)"
                         @input="setMpSettingNum('bot_confidence_min', ($event.target.value / 100).toFixed(2), false)"
                         @change="setMpSettingNum('bot_confidence_min', ($event.target.value / 100).toFixed(2))"
                         :class="['flex-1', mpUi.accent]" />
                       <span class="text-xs font-semibold text-gray-700 w-10 text-right">
-                        {{ Math.round(mpSettingNum('bot_confidence_min') * 100) }}%
+                        {{ Math.round(mpSettingNum('bot_confidence_min', 0.65) * 100) }}%
                       </span>
                     </div>
-                    <p class="text-[11px] text-gray-400 mt-1">Ниже — меню уточнения 1–5, а не сразу менеджеру.</p>
+                    <p class="text-[11px] text-gray-400 mt-1">Ниже порога окно ответа не заполняем — менеджер сам выбирает шаблон или пишет. По умолчанию 65%.</p>
+                  </div>
+                  <div>
+                    <label class="text-xs font-medium text-gray-700 block mb-1">Автоответ от</label>
+                    <div class="flex items-center gap-2">
+                      <input type="range" min="70" max="95" step="5"
+                        :value="Math.round(mpSettingNum('bot_auto_confidence_min', 0.9) * 100)"
+                        @input="setMpSettingNum('bot_auto_confidence_min', ($event.target.value / 100).toFixed(2), false)"
+                        @change="setMpSettingNum('bot_auto_confidence_min', ($event.target.value / 100).toFixed(2))"
+                        :class="['flex-1', mpUi.accent]" />
+                      <span class="text-xs font-semibold text-gray-700 w-10 text-right">
+                        {{ Math.round(mpSettingNum('bot_auto_confidence_min', 0.9) * 100) }}%
+                      </span>
+                    </div>
+                    <p class="text-[11px] text-gray-400 mt-1">Ниже порога тема «Авто» уходит на согласование. Сейчас по умолчанию 90%.</p>
                   </div>
                 </div>
 
@@ -1040,7 +1214,7 @@
                 <div class="grid sm:grid-cols-2 gap-3">
                   <div>
                     <label class="text-xs font-medium text-gray-700 block mb-1">Приветствие</label>
-                    <p class="text-[11px] text-gray-400 mb-1">Добавляется автоматически 1 раз в календарный день (МСК). В текстах шаблонов «Здравствуйте» не дублируйте.</p>
+                    <p class="text-[11px] text-gray-400 mb-1">Ставим снова, если с нашего последнего «здравствуйте» прошло 12 часов. Если клиент сам поздоровался — мы всё равно здороваемся. В шаблонах «Здравствуйте» не дублируйте.</p>
                     <input type="text"
                       :value="settingVal('greeting_text')"
                       @change="setSettingVal('greeting_text', $event.target.value)"
@@ -1048,7 +1222,7 @@
                   </div>
                   <div>
                     <label class="text-xs font-medium text-gray-700 block mb-1">Подпись</label>
-                    <p class="text-[11px] text-gray-400 mb-1">Под содержательным ответом</p>
+                    <p class="text-[11px] text-gray-400 mb-1">Один раз за чат. Если уже «Александр, команда Видовито» — не дублируем.</p>
                     <textarea rows="2"
                       :value="settingVal('signature')"
                       @change="setSettingVal('signature', $event.target.value)"
@@ -1072,6 +1246,47 @@
                       settingOn('nasadki_in_stock') ? 'translate-x-5' : '']"/>
                   </button>
                 </label>
+
+                <div v-if="pbMp === 'ym'" class="pt-3 space-y-3 border-t border-gray-100">
+                  <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">ЯМ · деталь за 1 ₽</p>
+                  <p class="text-[11px] text-gray-500 leading-relaxed">
+                    Маркет не умеет выдавать новый промокод из CX. Нужен <strong>один скрытый</strong> промокод в кабинете (Продвижение → Акции): скидка, «покупатель использует один раз», товары — только эти 9 карточек деталей 2-СБ. Один и тот же код уходит в чат; на чужой товар он не сработает.
+                  </p>
+                  <div class="grid sm:grid-cols-2 gap-3">
+                    <div>
+                      <label class="text-xs font-medium text-gray-700 block mb-1">Промокод</label>
+                      <input type="text"
+                        :value="settingVal('ym_parts_promo_code')"
+                        @change="setSettingVal('ym_parts_promo_code', $event.target.value)"
+                        placeholder="из кабинета ЯМ"
+                        :class="['w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2', mpUi.ring]" />
+                    </div>
+                    <div>
+                      <label class="text-xs font-medium text-gray-700 block mb-1">Скидка, %</label>
+                      <input type="number" min="1" max="50" step="1"
+                        :value="settingNum('ym_parts_promo_pct', 50)"
+                        @change="setSettingNum('ym_parts_promo_pct', $event.target.value)"
+                        :class="['w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2', mpUi.ring]" />
+                    </div>
+                  </div>
+                  <div>
+                    <label class="text-xs font-medium text-gray-700 block mb-1">ID акции (необязательно)</label>
+                    <p class="text-[11px] text-gray-400 mb-1">Если указать — CX попробует добавить карточку детали в эту акцию. Пусто — только текст в чат.</p>
+                    <input type="text"
+                      :value="settingVal('ym_parts_promo_id')"
+                      @change="setSettingVal('ym_parts_promo_id', $event.target.value)"
+                      placeholder="числовой id акции"
+                      :class="['w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2', mpUi.ring]" />
+                  </div>
+                  <div>
+                    <label class="text-xs font-medium text-gray-700 block mb-1">Справочник деталей 2-СБ</label>
+                    <p class="text-[11px] text-gray-400 mb-1">Только вешалка 2-СБ. Строка: артикул карточки на ЯМ, название, слова из чата клиента (таб).</p>
+                    <textarea rows="10"
+                      :value="settingVal('ym_parts_catalog')"
+                      @change="setSettingVal('ym_parts_catalog', $event.target.value)"
+                      :class="['w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono resize-y focus:outline-none focus:ring-2 leading-relaxed', mpUi.ring]"></textarea>
+                  </div>
+                </div>
               </div>
 
               <!-- Красная зона -->
@@ -1102,7 +1317,7 @@
                 </div>
                 <div>
                   <label class="text-xs font-medium text-gray-700 block mb-1">Текст в Telegram менеджеру</label>
-                  <p class="text-[11px] text-gray-400 mb-1">Плейсхолдеры: {reason} {client} {sku} {message} {link}</p>
+                  <p class="text-[11px] text-gray-400 mb-1">Плейсхолдеры: {mp} {reason} {client} {sku} {message} {link}</p>
                   <textarea rows="3"
                     :value="settingVal('red_zone_manager_text')"
                     @change="setSettingVal('red_zone_manager_text', $event.target.value)"
@@ -1151,19 +1366,45 @@
           <template v-else-if="pbSection === 'templates'">
           <!-- Как это работает -->
           <div class="bg-white rounded-2xl border border-gray-200 p-5">
-            <h2 class="text-sm font-semibold text-gray-900 mb-2">Шаблоны автоответов</h2>
+            <div class="flex flex-wrap items-start justify-between gap-3 mb-2">
+              <h2 class="text-sm font-semibold text-gray-900">Шаблоны автоответов</h2>
+              <button v-if="canEditChatTemplates" type="button" @click="openNewThemeForm"
+                :class="['text-xs font-medium px-3 py-1.5 rounded-lg text-white', mpUi.btn]">
+                + Новая группа
+              </button>
+            </div>
             <p class="text-xs text-gray-500 leading-relaxed mb-3">
               Сейчас показаны шаблоны для
               <span class="font-medium text-gray-600">{{ pbMpLabel }}</span>.
               <template v-if="pbMp === 'ozon'">
-                Темы доотправки детали на Ozon скрыты — бот ведёт на возврат.
+                Если товар в списке — предлагаем бесплатно выслать деталь и даём форму.
+                Если товара нет в списке — возврат через «Заказы».
               </template>
               <template v-else-if="pbMp === 'ym'">
-                На ЯМ доотправку детали предлагаем в чате (как на WB).
+                На ЯМ сначала предлагаем купить недостающую деталь в нашем магазине за 1 ₽ с промокодом.
+                Если клиент отказался — бесплатную доотправку (дольше) и форму.
+                Если снова отказался — возврат, без передачи менеджеру.
               </template>
-              Режим темы (Авто / Согласование / Менеджер) — <span class="font-medium text-gray-600">отдельно для {{ pbMpLabel }}</span>.
-              Переключите площадку в сайдбаре, чтобы настроить другую.
+              Режим темы (Авто / Согласование / Менеджер) —
+              <span class="font-medium text-gray-600">{{ canEditChatZones ? `настраиваете для ${pbMpLabel}` : 'настраивает администратор' }}</span>.
             </p>
+            <div v-if="newThemeOpen && canEditChatTemplates"
+              class="mb-3 rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-2">
+              <input v-model="newThemeName" placeholder="Название группы"
+                class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400" />
+              <input v-model="newThemeWhen" placeholder="Когда использовать (кратко)"
+                class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400" />
+              <div class="flex gap-2">
+                <button type="button" @click="createTheme" :disabled="!newThemeName.trim() || newThemeSaving"
+                  :class="['text-xs font-medium px-3 py-1.5 rounded-lg text-white disabled:opacity-50', mpUi.btn]">
+                  {{ newThemeSaving ? '…' : 'Создать' }}
+                </button>
+                <button type="button" @click="newThemeOpen = false"
+                  class="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-white">
+                  Отмена
+                </button>
+              </div>
+            </div>
             <div class="grid sm:grid-cols-3 gap-2">
               <div class="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
                 <p class="text-xs font-semibold text-emerald-800">Авто</p>
@@ -1181,7 +1422,7 @@
           </div>
 
           <!-- Темы -->
-          <div v-for="t in visiblePbThemes" :key="t.theme_key"
+          <div v-for="t in visiblePbThemes" :key="t.theme_key" :id="'pb-theme-' + t.theme_key"
             :class="['bg-white rounded-2xl border overflow-hidden',
               themeZone(t)==='auto' ? 'border-l-4 border-l-emerald-400 border-gray-200'
               : themeZone(t)==='draft' ? 'border-l-4 border-l-amber-400 border-gray-200'
@@ -1190,13 +1431,21 @@
             <div class="px-5 py-4">
               <div class="flex items-start justify-between gap-3 flex-wrap">
                 <div class="min-w-0 flex-1">
-                  <h3 class="text-sm font-semibold text-gray-900">{{ themeDisplayName(t) }}</h3>
-                  <p class="text-xs text-gray-500 mt-0.5 leading-relaxed">{{ themeDisplayWhen(t) }}</p>
+                  <template v-if="canEditChatTemplates">
+                    <input v-model="t.name" @blur="saveThemeMeta(t)"
+                      class="w-full text-sm font-semibold text-gray-900 bg-transparent border-0 p-0 focus:outline-none focus:ring-0" />
+                    <textarea v-model="t.when_text" rows="2" @blur="saveThemeMeta(t)"
+                      class="w-full text-xs text-gray-500 mt-1 leading-relaxed bg-transparent border-0 p-0 resize-y focus:outline-none"></textarea>
+                  </template>
+                  <template v-else>
+                    <h3 class="text-sm font-semibold text-gray-900">{{ themeDisplayName(t) }}</h3>
+                    <p class="text-xs text-gray-500 mt-0.5 leading-relaxed">{{ themeDisplayWhen(t) }}</p>
+                  </template>
                   <p v-if="themeDisplayNote(t)" :class="['text-[11px] rounded-lg px-2.5 py-1.5 mt-2 leading-snug', mpUi.note]">
                     {{ themeDisplayNote(t) }}
                   </p>
                 </div>
-                <div v-if="canEditChatTemplates" class="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5 shrink-0">
+                <div v-if="canEditChatZones" class="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5 shrink-0">
                   <button v-for="z in [['auto','Авто'],['draft','Согласование'],['human','Менеджер']]" :key="z[0]"
                     @click="setZone(t, z[0])"
                     :class="['px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors',
@@ -1237,6 +1486,10 @@
                         <span :class="['text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded border', variantMpBadgeClass(v.mp)]">
                           {{ variantMpLabel(v.mp) }}
                         </span>
+                        <span v-if="v.review_status === 'pending'"
+                          class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200">
+                          на проверке
+                        </span>
                         <label v-if="canEditChatTemplates" class="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer">
                           <input type="checkbox" v-model="v.active" @change="saveVariant(v)"
                             :class="['w-3.5 h-3.5 rounded', mpUi.accent]" />
@@ -1263,8 +1516,91 @@
           </div>
           </template>
 
+          <!-- ── Новые шаблоны (проверка админом) ───────────────────────── -->
+          <template v-else-if="pbSection === 'review' && canReviewNewTemplates">
+          <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+            <div class="px-5 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 class="text-sm font-semibold text-gray-900">Новые шаблоны</h2>
+                <p class="text-xs text-gray-500 mt-1 leading-relaxed max-w-2xl">
+                  Добавлены менеджером КС. Уже работают в чатах — проверьте текст и нажмите «Проверено» или удалите.
+                </p>
+              </div>
+              <button type="button" @click="loadPendingTemplates"
+                class="text-xs px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50">
+                Обновить
+              </button>
+            </div>
+            <div v-if="pendingLoading" class="px-5 py-10 text-center text-xs text-gray-400">Загрузка…</div>
+            <div v-else-if="!pendingTemplates.length" class="px-5 py-10 text-center text-sm text-gray-400">
+              Нет шаблонов на проверке
+            </div>
+            <div v-else class="divide-y divide-gray-100">
+              <div v-for="p in pendingTemplates" :key="p.id" class="px-5 py-4 space-y-2">
+                <div class="flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
+                  <span class="font-medium text-gray-700">
+                    {{ p.needs_theme || p.theme_key === '__unassigned__' ? 'Без темы' : (p.theme_name || p.theme_key) }}
+                  </span>
+                  <span v-if="p.needs_theme || p.theme_key === '__unassigned__'"
+                    class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                    нужна тема
+                  </span>
+                  <span :class="['uppercase tracking-wide px-1.5 py-0.5 rounded border', variantMpBadgeClass(p.mp)]">
+                    {{ variantMpLabel(p.mp) }}
+                  </span>
+                  <span v-if="p.created_by">{{ p.created_by }}</span>
+                  <span v-if="p.created_at">{{ fmtPendingAt(p.created_at) }}</span>
+                  <button v-if="p.source_chat_id" type="button"
+                    @click="openPendingSourceChat(p)"
+                    class="text-sky-600 hover:underline">
+                    Открыть чат
+                  </button>
+                </div>
+                <div class="flex flex-wrap items-end gap-2">
+                  <label class="text-[11px] text-gray-500">
+                    Тема
+                    <select v-model="p._assignMode"
+                      class="mt-0.5 block border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white max-w-[16rem]">
+                      <option value="keep" v-if="p.theme_key && p.theme_key !== '__unassigned__'">
+                        Оставить: {{ p.theme_name || p.theme_key }}
+                      </option>
+                      <option value="existing">Выбрать из списка…</option>
+                      <option value="new">Создать новую тему…</option>
+                    </select>
+                  </label>
+                  <select v-if="p._assignMode === 'existing'" v-model="p._assignThemeKey"
+                    class="border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white max-w-[16rem]">
+                    <option value="">Тема…</option>
+                    <option v-for="th in saveAsTemplateThemes" :key="th.theme_key" :value="th.theme_key">
+                      {{ th.name || th.theme_key }}
+                    </option>
+                  </select>
+                  <template v-if="p._assignMode === 'new'">
+                    <input v-model="p._newThemeName" type="text" placeholder="Название новой темы"
+                      class="border border-gray-200 rounded-lg px-2 py-1.5 text-xs min-w-[12rem] focus:outline-none focus:ring-2 focus:ring-sky-400" />
+                    <input v-model="p._newThemeWhen" type="text" placeholder="Когда использовать (необяз.)"
+                      class="border border-gray-200 rounded-lg px-2 py-1.5 text-xs min-w-[12rem] focus:outline-none focus:ring-2 focus:ring-sky-400" />
+                  </template>
+                </div>
+                <textarea v-model="p.body" rows="4"
+                  class="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs text-gray-700 resize-y focus:outline-none focus:ring-2 focus:ring-sky-400"></textarea>
+                <div class="flex flex-wrap gap-2">
+                  <button type="button" @click="approvePending(p)" :disabled="p._busy"
+                    class="text-xs font-medium px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                    Проверено
+                  </button>
+                  <button type="button" @click="deletePending(p)" :disabled="p._busy"
+                    class="text-xs font-medium px-3 py-1.5 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 disabled:opacity-50">
+                    Удалить
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          </template>
+
           <!-- ── Проверка ──────────────────────────────────────────────── -->
-          <template v-else-if="pbSection === 'check' && canEditChatTemplates">
+          <template v-else-if="pbSection === 'check' && canEditBotSettings">
           <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
             <div class="px-5 py-4 border-b border-gray-100">
               <h2 class="text-sm font-semibold text-gray-900">Проверка автоответов</h2>
@@ -1387,14 +1723,17 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { RouterLink, useRouter, useRoute } from 'vue-router'
 import { Centrifuge } from 'centrifuge'
 import { apiFetch } from '../api'
+import { centrifugoUrl } from '../realtime'
 import { usePlatformStore } from '../stores/platform'
 import { usePermissionsStore } from '../stores/permissions'
+import { isTelegramMiniApp } from '../telegramWebApp'
 import { useToast } from '../composables/useToast'
 import { CX_BASE, fmtAge, ageCls } from '../utils/cx'
-import { groupTemplatesByTheme, templateVariantLabel } from '../utils/templateGroups'
+import { onAppClick } from '../utils/nav'
+import { compactThemeGroups, groupTemplatesByTheme, pickThemeTemplate, templateVariantLabel, templatePreviewText } from '../utils/templateGroups'
 import ReviewCard from '../components/ReviewCard.vue'
 import {
   canSendChatContent,
@@ -1410,15 +1749,24 @@ const { toast, showToast } = useToast()
 const router = useRouter()
 const route  = useRoute()
 const permissionsStore = usePermissionsStore()
+const isMiniApp = computed(() => isTelegramMiniApp())
 const isAdmin = computed(() => permissionsStore.isAdmin)
 const isCsManager = computed(() => permissionsStore.role === 'cs_manager')
 /** Просмотр шаблонов чатов: админ и менеджер КС */
 const canViewChatTemplates = computed(() => isAdmin.value || isCsManager.value)
-/** Редактирование плейбука / настроек бота — только админ */
-const canEditChatTemplates = computed(() => isAdmin.value)
+/** Правка текстов и групп шаблонов */
+const canEditChatTemplates = computed(() => isAdmin.value || isCsManager.value)
+/** Режимы Авто/Согласование/Менеджер — только админ */
+const canEditChatZones = computed(() => isAdmin.value)
+/** Настройки бота и прогон проверки — только админ */
+const canEditBotSettings = computed(() => isAdmin.value)
+/** Очередь новых шаблонов — только админ */
+const canReviewNewTemplates = computed(() => isAdmin.value)
 
 const reviewCard = ref({ show: false, mp: 'wb', id: '' })
 const chatFindQ = ref('')
+const chatSearchHits = ref(null)
+const chatSearchLoading = ref(false)
 
 function openReviewCard(reviewId) {
   if (!reviewId) return
@@ -1474,34 +1822,105 @@ async function copyCxChatLink() {
   }
 }
 
-async function findChatByPaste() {
-  const id = extractChatId(chatFindQ.value)
-  if (!id) {
-    showToast('Вставьте chatId или ссылку из ЛК WB', 'error')
-    return
-  }
-  let mp = 'wb'
-  const raw = chatFindQ.value || ''
-  if (/ozon/i.test(raw)) mp = 'ozon'
-  else if (/yandex|market\.yandex/i.test(raw)) mp = 'ym'
-  await router.replace({ query: { ...route.query, chat: id, mp } })
-  await openChatFromQuery(id)
-  showToast('Чат открыт', 'ok')
+/** Ссылка ЛК / uuid чата — открываем напрямую. Иначе ищем по имени и словам. */
+function looksLikeChatRef(raw) {
+  const s = String(raw || '').trim()
+  if (!s) return false
+  if (/chatId=/i.test(s)) return true
+  if (/https?:\/\//i.test(s)) return true
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return true
+  if (/^1:[0-9a-f-]{8,}$/i.test(s)) return true
+  return false
 }
 
-function openReturnFromChat(claimId) {
-  if (!claimId) return
+async function findChatByPaste() {
+  const raw = String(chatFindQ.value || '').trim()
+  if (!raw) {
+    chatSearchHits.value = null
+    return
+  }
+  if (looksLikeChatRef(raw)) {
+    const id = extractChatId(raw)
+    let mp = currentMp.value === 'all' ? 'wb' : currentMp.value
+    if (/ozon/i.test(raw)) mp = 'ozon'
+    else if (/yandex|market\.yandex/i.test(raw)) mp = 'ym'
+    await router.replace({ query: { ...route.query, chat: id, mp } })
+    await openChatFromQuery(id)
+    showToast('Чат открыт', 'ok')
+    return
+  }
+  chatSearchLoading.value = true
+  try {
+    const mp = currentMp.value || 'all'
+    const r = await apiFetch(`${BASE}/chats-search?q=${encodeURIComponent(raw)}&mp=${encodeURIComponent(mp)}`)
+    const d = await r.json()
+    chatSearchHits.value = d.items || []
+    currentPage.value = 1
+    if (!chatSearchHits.value.length) showToast('Ничего не найдено', 'error')
+    else showToast(`Найдено: ${chatSearchHits.value.length}`, 'ok')
+  } catch {
+    showToast('Не удалось найти', 'error')
+  } finally {
+    chatSearchLoading.value = false
+  }
+}
+
+function returnFromChatQuery(claimId) {
   const d = chatContext.value?.specific?.claim
   const mp = (d?.mp || chatMp(chatItem.value) || currentMp.value || 'wb')
   const q = { claim: claimId, mp }
   if (d?.claim_id === claimId && d?.is_archive) q.tab = 'archive'
   else if (['Одобрено', 'Отказ', 'Закрыта', 'Нет в API WB', 'Отклонено', 'Отменено', 'Отменена'].includes(d?.status_label)) q.tab = 'archive'
-  router.push({ path: '/returns', query: q })
+  return q
 }
 
-function openReshipmentFromChat(reqId) {
-  if (!reqId) return
-  router.push({ path: '/reshipment', query: { id: String(reqId) } })
+const returnFromChatTo = computed(() => {
+  const claimId = chatContext.value?.specific?.claim?.claim_id
+  if (!claimId) return { path: '/returns' }
+  return { path: '/returns', query: returnFromChatQuery(claimId) }
+})
+
+const reshipmentFromChatTo = computed(() => {
+  const reqId = chatContext.value?.specific?.reshipment?.id
+  if (!reqId) return { path: '/reshipment' }
+  return { path: '/reshipment', query: { id: String(reqId) } }
+})
+
+function chatItemTo(item) {
+  return {
+    path: '/chats',
+    query: { ...route.query, chat: String(item.id), mp: chatMp(item) },
+  }
+}
+
+function chatItemHref(item) {
+  return router.resolve(chatItemTo(item)).href
+}
+
+function syncChatListQuery() {
+  const q = { ...route.query }
+  if (chatFilter.value) q.filter = chatFilter.value
+  else delete q.filter
+  if (tab.value && tab.value !== 'chats') q.view = tab.value
+  else delete q.view
+  if (sameChatListQuery(q, route.query)) return
+  router.replace({ query: q })
+}
+
+function sameChatListQuery(a, b) {
+  return String(a.filter || '') === String(b.filter || '')
+    && String(a.view || '') === String(b.view || '')
+    && String(a.chat || '') === String(b.chat || '')
+    && String(a.mp || '') === String(b.mp || '')
+}
+
+function applyChatListQuery() {
+  const view = String(route.query.view || '')
+  if (view === 'archive') tab.value = 'archive'
+  else if (view === 'triage') tab.value = 'triage'
+  else if (view === 'playbook') tab.value = 'playbook'
+  const f = String(route.query.filter || '')
+  if (['pending', 'review', 'new'].includes(f)) chatFilter.value = f
 }
 
 function claimStatusClass(label) {
@@ -1518,13 +1937,35 @@ const claimRejectComment = ref('')
 const claimRejectReason = ref('')
 const claimRejectAction = ref('')
 const claimDecisionError = ref('')
+const claimRejectCommentEl = ref(null)
+
+const chatClaimMp = computed(() =>
+  (chatContext.value?.specific?.claim?.mp || chatMp(chatItem.value) || currentMp.value || 'wb')
+)
+
+function autoGrowClaimReject() {
+  const el = claimRejectCommentEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+}
 
 const claimPrimaryActions = computed(() =>
   (claimDetail.value?.actions || []).filter(a => a.primary)
 )
+const WB_CLAIM_REJECT_REASONS = [
+  { value: 'not_confirmed', label: 'Проблема с товаром не подтверждена' },
+  { value: 'proper_quality', label: 'Товар надлежащего качества / не подошёл' },
+  { value: 'used', label: 'Товар был в использовании' },
+  { value: 'appearance', label: 'Нарушен товарный вид или комплектация' },
+  { value: 'nonreturnable', label: 'По правилам WB категория не подлежит возврату' },
+]
+
 const claimRejectReasons = computed(() => {
   const a = claimPrimaryActions.value.find(x => x.action === claimRejectAction.value || x.kind === 'reject')
-  return a?.reason_types || []
+  const fromApi = a?.reason_types || []
+  if (fromApi.length) return fromApi
+  return chatClaimMp.value === 'wb' ? WB_CLAIM_REJECT_REASONS : []
 })
 
 async function loadClaimDetailForChat(claimId) {
@@ -1552,6 +1993,7 @@ function onChatClaimAction(a) {
     claimRejectOpen.value = true
     claimRejectAction.value = a.action
     claimRejectReason.value = (a.reason_types || [])[0]?.value || ''
+    nextTick(() => autoGrowClaimReject())
     return
   }
   const mp = claimDetail.value?.mp || chatContext.value?.specific?.claim?.mp || 'wb'
@@ -1563,7 +2005,15 @@ function onChatClaimAction(a) {
 function submitChatReject() {
   const mp = claimDetail.value?.mp || chatContext.value?.specific?.claim?.mp || 'wb'
   const action = claimRejectAction.value || (mp === 'wb' ? 'rejectcustom' : 'DECLINE_REFUND')
-  const minLen = mp === 'wb' ? 10 : 5
+  if (mp === 'wb') {
+    if (!claimRejectReason.value) {
+      claimDecisionError.value = 'Выберите причину отказа'
+      return
+    }
+    submitChatClaimDecision(action, '', claimRejectReason.value)
+    return
+  }
+  const minLen = 5
   if (String(claimRejectComment.value || '').trim().length < minLen) {
     claimDecisionError.value = `Укажите причину отказа (от ${minLen} символов)`
     return
@@ -1667,6 +2117,51 @@ function marketplaceChatLabel(item) {
   if (mp === 'ym') return 'Чат ЯМ'
   return 'Чат WB'
 }
+function chatFulfillmentLabel(item) {
+  const f = item?.fulfillment
+  return String(f?.label || f?.code || '').trim()
+}
+function chatFulfillmentCode(item) {
+  const f = item?.fulfillment
+  return String(f?.code || '').trim().toUpperCase()
+}
+function chatFulfillmentCls(item) {
+  const code = chatFulfillmentCode(item)
+  if (code === 'FBS') return 'bg-teal-50 text-teal-800 border-teal-200'
+  if (code === 'FBO') return 'bg-sky-50 text-sky-800 border-sky-200'
+  if (code === 'DBW') return 'bg-violet-50 text-violet-800 border-violet-200'
+  if (code === 'FBY') return 'bg-orange-50 text-orange-800 border-orange-200'
+  if (code === 'DBS') return 'bg-slate-50 text-slate-700 border-slate-200'
+  return 'bg-slate-50 text-slate-700 border-slate-200'
+}
+function chatFulfillmentHint(item) {
+  const f = item?.fulfillment
+  const hint = String(f?.hint || '').trim()
+  const label = chatFulfillmentLabel(item)
+  if (hint && label) return `${label} · ${hint}`
+  return hint || label
+}
+function applyChatFulfillment(payload) {
+  if (!chatItem.value || !payload || typeof payload !== 'object') return
+  if (payload.fulfillment) chatItem.value.fulfillment = payload.fulfillment
+  if (payload.order) chatItem.value.order = payload.order
+}
+function chatOrder(item) {
+  return item?.order || chatContext.value?.specific?.order || null
+}
+function chatOrderPrice(order) {
+  const n = Number(order?.price)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  return `${new Intl.NumberFormat('ru-RU').format(Math.round(n))} ₽`
+}
+function chatOrderToneCls(order) {
+  const tone = String(order?.tone || '')
+  if (tone === 'ok') return 'bg-emerald-50 text-emerald-800'
+  if (tone === 'bad') return 'bg-rose-50 text-rose-800'
+  if (tone === 'warn') return 'bg-orange-50 text-orange-800'
+  if (tone === 'info') return 'bg-sky-50 text-sky-800'
+  return 'bg-slate-100 text-slate-700'
+}
 function marketplaceChatUrl(item) {
   const mp = chatMp(item)
   if (mp === 'wb') return wbChatUrl(item.id)
@@ -1685,7 +2180,11 @@ function marketplaceChatUrl(item) {
     const q = new URLSearchParams({ campaignId: camp, chatGroup: group })
     // Только внутренний id кабинета (0/43/uuid). Числовой API-id ломает страницу.
     const cab = String(item?.cabinet_chat_id || '').trim()
-    if (cab.includes('/')) q.set('chatId', cab)
+    if (cab.includes('/')) {
+      return `https://partner.market.yandex.ru/business/${biz}/arbiter?${q}&chatId=${cab}`
+    }
+    const search = String(item?.return_id || item?.order_number || '').trim()
+    if (search) q.set('search', search)
     return `https://partner.market.yandex.ru/business/${biz}/arbiter?${q}`
   }
   return ''
@@ -1697,10 +2196,10 @@ async function openChatFromQuery(chatId) {
   tab.value = 'chats'
   const mpQ = String(route.query.mp || '').toLowerCase()
   const mp = ['wb', 'ozon', 'ym'].includes(mpQ) ? mpQ : 'wb'
-  if (mp !== 'wb' && currentMp.value !== mp && currentMp.value !== 'all') {
+  if (mp !== currentMp.value) {
     platformStore.setPlatform(mp)
   }
-  if (!queueItems.value.length) await loadQueue()
+  await loadQueue()
   const found = queueItems.value.find(i => chatIdMatches(i.id, id))
   if (found) {
     await selectChat(found)
@@ -1739,6 +2238,9 @@ const chatsMpLabel = computed(() => {
 function chatMp(item) {
   return (item?.mp || 'wb').toLowerCase()
 }
+function isWbPrePurchase(item) {
+  return chatMp(item) === 'wb' && !!item?.pre_purchase
+}
 function chatMessagesPath(item) {
   const mp = chatMp(item)
   return `${BASE}/chat-messages/${mp}/${encodeURIComponent(item.id)}`
@@ -1755,12 +2257,17 @@ function chatSendFilesPath(item) {
 // ── Вкладки: переписка / настройка автоответов ──────────────────────────────
 const tab        = ref('chats')
 const pbThemes   = ref([])
-/** Темы доотправки WB/ЯМ — на Ozon бот их не использует (→ возврат). */
+/** Покупка детали и промокоды — только ЯМ. Невозвратность сушилок — только WB.
+ *  Согласие, ссылка и статус заявки на Ozon нужны: детали теперь отправляем. */
 const OZON_HIDDEN_THEME_KEYS = new Set([
-  'nekomplekt', 'soglasie', 'ssylka', 'status_zayavki', 'otkaz_dootpravki',
-  'nevozvratny',
+  'nevozvratny', 'kupit_detal', 'promokody',
 ])
 const OZON_THEME_UI = {
+  nekomplekt: {
+    name: 'Не хватает детали',
+    when: 'Нет детали в коробке: трубки, болты, колёса, ножки и т.п. «Некомплект», «доотправьте».',
+    note: 'Если товар в списке — предлагаем бесплатно выслать деталь и даём форму. Иначе возврат через «Заказы» → «Вернуть». Трубки сначала просим разложить по длине.',
+  },
   dengi: {
     note: 'Деньгами управляет Ozon и банк. Бот не обещает сроки от продавца.',
   },
@@ -1780,7 +2287,7 @@ const OZON_THEME_UI = {
     note: 'Техсбой на стороне Ozon — в поддержку площадки.',
   },
   vozvrat: {
-    note: 'На Ozon: раздел «Заказы» → «Вернуть». Доотправки деталей нет.',
+    note: 'На Ozon возврат: «Заказы» → «Вернуть». Нехватку детали, если товар в списке, закрываем темой «Согласие» и формой.',
   },
   brak: {
     note: 'На Ozon: «Заказы» → «Вернуть» → причина «брак», лучше с фото.',
@@ -1800,6 +2307,16 @@ const OZON_THEME_UI = {
   },
 }
 const YM_THEME_UI = {
+  nekomplekt: {
+    name: 'Не хватает детали',
+    when: 'Нет детали в коробке. Сначала предлагаем купить её в нашем магазине на Маркете за 1 ₽ с промокодом, если отказались — бесплатную доотправку (дольше), если снова нет — возврат.',
+    note: 'Не сразу форма. Только вешалка 2-СБ: купить за 1 ₽ (артикул из справочника) → бесплатно, но дольше → возврат. Один скрытый промокод в кабинете ЯМ, не новый на каждый чат.',
+  },
+  kupit_detal: {
+    name: 'Купить деталь за 1 ₽',
+    when: 'Клиент согласился докупить недостающую деталь в нашем магазине на Яндекс Маркете.',
+    note: 'В первое сообщение сразу идут цена 1 ₽ и промокод. Форму доотправки на этом шаге не шлём.',
+  },
   dengi: {
     note: 'Деньгами управляет Яндекс Маркет и банк. Бот не обещает сроки от продавца.',
   },
@@ -1819,7 +2336,7 @@ const YM_THEME_UI = {
     note: 'Техсбой на стороне Яндекс Маркета — в поддержку площадки.',
   },
   vozvrat: {
-    note: 'На ЯМ: заказ в кабинете → оформить возврат. Доотправку детали предлагаем в чате.',
+    note: 'На ЯМ: заказ в кабинете → оформить возврат. По детали сначала покупка за 1 ₽ с промокодом, потом бесплатная доотправка.',
   },
   brak: {
     note: 'На ЯМ: можно предложить замену детали (если товар в списке) или возврат через заказ.',
@@ -1854,12 +2371,15 @@ const WB_THEME_UI = {
   },
 }
 const visiblePbThemes = computed(() => {
-  const list = pbThemes.value || []
+  const list = (pbThemes.value || []).filter(t => t.theme_key !== '__unassigned__')
   if (pbMp.value === 'ozon') {
     return list.filter(t => !OZON_HIDDEN_THEME_KEYS.has(t.theme_key))
   }
-  // WB и ЯМ: доотправка в чатах; невозвратность сушилок — только WB
-  return list.filter(t => t.theme_key !== 'nevozvratny')
+  if (pbMp.value === 'wb') {
+    return list.filter(t => t.theme_key !== 'nevozvratny' && t.theme_key !== 'kupit_detal')
+  }
+  // ЯМ: доотправка в чатах; невозвратность сушилок и промокоды WB — только WB
+  return list.filter(t => t.theme_key !== 'nevozvratny' && t.theme_key !== 'promokody')
 })
 
 function hiddenTheme(themeKey) {
@@ -1918,13 +2438,29 @@ function themeDisplayNote(t) {
 }
 const pbSettings = ref([])
 const pbLoading  = ref(false)
-const pbSection  = ref('settings')
+const pbSection  = ref('templates')
 const nonreturnableCats = ref([])
+const pendingTemplateCount = ref(0)
+const pendingTemplates = ref([])
+const pendingLoading = ref(false)
+const newThemeOpen = ref(false)
+const newThemeName = ref('')
+const newThemeWhen = ref('')
+const newThemeSaving = ref(false)
+const saveReplyAsTemplate = ref(false)
+const saveReplyThemeKey = ref('')
 const pbSections = [
-  { id: 'settings', label: 'Настройки' },
-  { id: 'templates', label: 'Шаблоны' },
-  { id: 'check', label: 'Проверка' },
+  { id: 'settings', label: 'Настройки', adminOnly: true },
+  { id: 'templates', label: 'Шаблоны', adminOnly: false },
+  { id: 'review', label: 'Новые шаблоны', adminOnly: true, review: true },
+  { id: 'check', label: 'Проверка', adminOnly: true },
 ]
+const visiblePbSections = computed(() =>
+  pbSections.filter(s => !s.adminOnly || canEditBotSettings.value || (s.review && canReviewNewTemplates.value))
+)
+const saveAsTemplateThemes = computed(() =>
+  (pbThemes.value || []).filter(t => t.active !== false && t.theme_key !== '__unassigned__')
+)
 /** Площадка для per-mp настроек — из главного сайдбара */
 const pbMp = computed(() => {
   const m = (currentMp.value || 'wb').toLowerCase()
@@ -2192,9 +2728,10 @@ async function loadPlaybook() {
     const d = await r.json()
     pbThemes.value   = d.themes   || []
     pbSettings.value = d.settings || []
+    pendingTemplateCount.value = d.pending_count || 0
     await loadNonreturnableCats()
-    // Журнал бота нужен только админу (вкладка «Проверка»)
-    if (canEditChatTemplates.value) await loadBotLog()
+    if (canEditBotSettings.value) await loadBotLog()
+    if (canReviewNewTemplates.value && pbSection.value === 'review') await loadPendingTemplates()
   } catch { showToast('Не удалось загрузить автоответы', 'error') }
   finally { pbLoading.value = false }
 }
@@ -2227,12 +2764,202 @@ function emptyVariantHint(theme) {
   return `Нет текста для ${pbMpLabel.value}. Добавьте вариант кнопкой ниже — иначе бот попробует запасной ответ (ИИ/FAQ, если он есть).`
 }
 
+async function openChatTemplateEditor(themeKey) {
+  if (!canEditChatTemplates.value || !themeKey) return
+  openPlaybook()
+  if (!pbThemes.value.length) await loadPlaybook()
+  await nextTick()
+  document.getElementById('pb-theme-' + themeKey)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 function openPlaybook() {
   if (!canViewChatTemplates.value) return
   tab.value = 'playbook'
-  if (!canEditChatTemplates.value) pbSection.value = 'templates'
+  // КС видит только шаблоны; админ — все разделы
+  if (!canEditBotSettings.value) pbSection.value = 'templates'
   if (!pbThemes.value.length) loadPlaybook()
-  else if (canEditChatTemplates.value) loadBotLog()
+  else {
+    if (canEditBotSettings.value) loadBotLog()
+    if (canReviewNewTemplates.value) loadPendingTemplates(true)
+  }
+  syncChatListQuery()
+}
+
+function openNewThemeForm() {
+  newThemeOpen.value = true
+  newThemeName.value = ''
+  newThemeWhen.value = ''
+}
+
+async function createTheme() {
+  const name = newThemeName.value.trim()
+  if (!name || newThemeSaving.value) return
+  newThemeSaving.value = true
+  try {
+    const r = await apiFetch(`${PB}/themes`, {
+      method: 'POST',
+      body: JSON.stringify({ name, when_text: newThemeWhen.value.trim() }),
+    })
+    const d = await r.json()
+    newThemeOpen.value = false
+    await loadPlaybook()
+    showToast(`Группа создана${d.theme_key ? `: ${d.theme_key}` : ''}`, 'ok')
+  } catch {
+    showToast('Не удалось создать группу', 'error')
+  } finally {
+    newThemeSaving.value = false
+  }
+}
+
+async function saveThemeMeta(theme) {
+  if (!canEditChatTemplates.value || !theme?.theme_key) return
+  try {
+    await apiFetch(`${PB}/themes/${encodeURIComponent(theme.theme_key)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: theme.name,
+        when_text: theme.when_text || '',
+      }),
+    })
+  } catch {
+    showToast('Не удалось сохранить группу', 'error')
+  }
+}
+
+async function loadPendingTemplates(silent = false) {
+  if (!canReviewNewTemplates.value) return
+  pendingLoading.value = true
+  try {
+    const r = await apiFetch(`${PB}/variants/pending`)
+    const d = await r.json()
+    pendingTemplates.value = (d.items || []).map(x => {
+      const needs = !!(x.needs_theme || x.theme_key === '__unassigned__')
+      return {
+        ...x,
+        _busy: false,
+        _assignMode: needs ? 'existing' : 'keep',
+        _assignThemeKey: needs ? '' : (x.theme_key || ''),
+        _newThemeName: '',
+        _newThemeWhen: '',
+      }
+    })
+    pendingTemplateCount.value = d.count ?? pendingTemplates.value.length
+  } catch {
+    if (!silent) showToast('Не удалось загрузить новые шаблоны', 'error')
+  } finally {
+    pendingLoading.value = false
+  }
+}
+
+function fmtPendingAt(iso) {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleString('ru', {
+      day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+    })
+  } catch { return String(iso) }
+}
+
+async function openPendingSourceChat(p) {
+  const id = p?.source_chat_id
+  if (!id) return
+  const mp = (p.source_mp || p.mp || 'wb').toLowerCase()
+  await router.replace({ query: { ...route.query, chat: id, mp } })
+  tab.value = 'chats'
+  await openChatFromQuery(id)
+}
+
+function pendingReviewPayload(p) {
+  const body = { status: 'approved', body: p.body }
+  if (p._assignMode === 'new') {
+    const name = (p._newThemeName || '').trim()
+    if (!name) return { error: 'Укажите название новой темы' }
+    body.new_theme_name = name
+    body.new_theme_when = (p._newThemeWhen || '').trim()
+  } else if (p._assignMode === 'existing') {
+    const key = (p._assignThemeKey || '').trim()
+    if (!key || key === '__unassigned__') return { error: 'Выберите тему' }
+    body.theme_key = key
+  } else if (p.needs_theme || p.theme_key === '__unassigned__') {
+    return { error: 'Выберите или создайте тему' }
+  }
+  return { body }
+}
+
+async function approvePending(p) {
+  if (!p?.id || p._busy) return
+  const prepared = pendingReviewPayload(p)
+  if (prepared.error) {
+    showToast(prepared.error, 'error')
+    return
+  }
+  p._busy = true
+  try {
+    await apiFetch(`${PB}/variants/${p.id}/review`, {
+      method: 'PUT',
+      body: JSON.stringify(prepared.body),
+    })
+    pendingTemplates.value = pendingTemplates.value.filter(x => x.id !== p.id)
+    pendingTemplateCount.value = Math.max(0, pendingTemplateCount.value - 1)
+    showToast('Шаблон проверен', 'ok')
+    await loadPlaybook()
+  } catch {
+    showToast('Не удалось сохранить', 'error')
+  } finally {
+    p._busy = false
+  }
+}
+
+async function deletePending(p) {
+  if (!p?.id || p._busy) return
+  if (!confirm('Удалить этот шаблон?')) return
+  p._busy = true
+  try {
+    await apiFetch(`${PB}/variants/${p.id}`, { method: 'DELETE' })
+    pendingTemplates.value = pendingTemplates.value.filter(x => x.id !== p.id)
+    pendingTemplateCount.value = Math.max(0, pendingTemplateCount.value - 1)
+    showToast('Шаблон удалён', 'ok')
+    await loadPlaybook()
+  } catch {
+    showToast('Не удалось удалить', 'error')
+  } finally {
+    p._busy = false
+  }
+}
+
+async function saveReplyAsTemplateIfNeeded(text, item) {
+  if (!canEditChatTemplates.value || !saveReplyAsTemplate.value) return
+  const themeKey = saveReplyThemeKey.value
+  const body = (text || '').trim()
+  if (!themeKey || !body) {
+    if (saveReplyAsTemplate.value && !themeKey) {
+      showToast('Выберите группу для шаблона', 'error')
+    }
+    return
+  }
+  try {
+    await apiFetch(`${PB}/variants/from-chat`, {
+      method: 'POST',
+      body: JSON.stringify({
+        theme_key: themeKey,
+        body,
+        mp: chatMp(item) || currentMp.value || 'wb',
+        chat_id: String(item?.id || ''),
+      }),
+    })
+    saveReplyAsTemplate.value = false
+    saveReplyThemeKey.value = ''
+    pendingTemplateCount.value += 1
+    showToast(
+      themeKey === '__unassigned__'
+        ? 'Шаблон без темы — админ назначит группу при проверке'
+        : 'Ответ сохранён как шаблон (на проверке)',
+      'ok',
+    )
+    if (pbThemes.value.length) loadPlaybook()
+  } catch {
+    showToast('Сообщение ушло, но шаблон не сохранился', 'error')
+  }
 }
 
 // ── Разбор очереди по корзинам ──────────────────────────────────────────────
@@ -2281,6 +3008,7 @@ function openTriage() {
   if (!isAdmin.value) return
   tab.value = 'triage'
   if (!trSummary.value.length) loadTriage()
+  syncChatListQuery()
 }
 
 async function closeSafe() {
@@ -2348,7 +3076,16 @@ async function loadArchive() {
   finally { arLoading.value = false }
 }
 
-function openArchive() { tab.value = 'archive'; loadArchive() }
+function openChatsTab() {
+  tab.value = 'chats'
+  syncChatListQuery()
+}
+
+function openArchive() {
+  tab.value = 'archive'
+  loadArchive()
+  syncChatListQuery()
+}
 
 async function restoreChat(a) {
   try {
@@ -2411,6 +3148,7 @@ function themeZone(theme) {
 }
 
 async function setZone(theme, zone) {
+  if (!canEditChatZones.value) return
   const mp = pbMp.value || 'wb'
   const prev = themeZone(theme)
   if (prev === zone) return
@@ -2469,22 +3207,14 @@ async function deleteVariant(theme, v) {
   } catch { showToast('Не удалось удалить', 'error') }
 }
 
-// ── «Непрочитанные» чаты ────────────────────────────────────────────────────
-const VIEWED_KEY = 'cx_chat_viewed_ts'
-const chatLastViewed = ref({})
-
-function _loadViewed() {
-  try { chatLastViewed.value = JSON.parse(localStorage.getItem(VIEWED_KEY) || '{}') } catch { chatLastViewed.value = {} }
-}
-function _saveViewed() {
-  try { localStorage.setItem(VIEWED_KEY, JSON.stringify(chatLastViewed.value)) } catch {}
-}
+// ── «Непрочитанные» чаты: общее на команду (кто открыл — уже не новое) ─────
 function hasNewMsg(item) {
   // «Новые» = новое сообщение именно клиента (ждёт ответа), не наш ответ / не system МП
   if (item.item_type !== 'chat') return false
-  if (!item.needs_answer) return false
   if (senderKind(item) === 'system') return false
-  const lastView = chatLastViewed.value[item.id] || 0
+  if (Number(item.unread_count || 0) > 0) return true
+  if (!chatNeedsReply(item)) return false
+  const lastView = Number(item.seen_ts || 0)
   return (item.last_ts || 0) > lastView
 }
 
@@ -2497,12 +3227,37 @@ function senderKind(item) {
   return 'unknown'
 }
 
-function markAllRead() {
+function chatNeedsReply(item) {
+  if (Number(item.unread_count || 0) > 0 && senderKind(item) !== 'system') return true
+  if (!item?.needs_answer) return false
+  // ЯМ после нашей ссылки оставляет WAITING_FOR_PARTNER — очередь не должна врать
+  return senderKind(item) !== 'seller'
+}
+
+async function markAllRead() {
   const chats = queueItems.value.filter(i => i.item_type === 'chat')
   if (!chats.length) return
-  chats.forEach(i => { chatLastViewed.value[i.id] = (i.last_ts || Date.now()) })
-  _saveViewed()
-  showToast(`Отмечено прочитанными: ${chats.length} чатов`, 'ok')
+  chats.forEach(i => { i.seen_ts = i.last_ts || Date.now() })
+  try {
+    await apiFetch(`${BASE}/chats/mark-all-seen?mp=${encodeURIComponent(currentMp.value || 'all')}`, { method: 'POST' })
+    showToast(`Отмечено прочитанными: ${chats.length} чатов`, 'ok')
+  } catch {
+    showToast('Не удалось отметить прочитанными', 'error')
+  }
+}
+
+async function markChatSeen(item) {
+  if (!item?.id) return
+  const ts = Number(item.last_ts || Date.now())
+  item.seen_ts = ts
+  const inQueue = queueItems.value.find(i => String(i.id) === String(item.id) && chatMp(i) === chatMp(item))
+  if (inQueue) inQueue.seen_ts = ts
+  try {
+    await apiFetch(`${BASE}/chats/seen`, {
+      method: 'POST',
+      body: JSON.stringify({ mp: chatMp(item), chat_id: String(item.id), seen_ts: ts }),
+    })
+  } catch { /* очередь всё равно обновится с сервера */ }
 }
 
 function wbPhotoUrl(nmId) {
@@ -2536,9 +3291,8 @@ async function loadChatContext(item, requestId) {
     const r = await apiFetch(`${BASE}/chat-context/${mp}/${encodeURIComponent(item.id)}`)
     const d = await r.json()
     if (!isCurrentChatSelection(requestId, item.id)) return
-    if (d.specific?.claim || d.specific?.review || d.reviews?.length || d.questions?.length || d.claims?.length) {
-      chatContext.value = d
-    }
+    chatContext.value = d
+    if (d.specific?.order && chatItem.value) chatItem.value.order = d.specific.order
   } catch { /* silent */ } finally {
     if (isCurrentChatSelection(requestId, item.id)) chatContextLoading.value = false
   }
@@ -2550,6 +3304,7 @@ const senderFilter    = ref('all') // all | customer | system | unknown
 // Раскрытие карточки возврата — подтягиваем живые actions с площадки
 const expandedClaimId = ref('')
 const expandedReshipId = ref(null)
+const orderOpen = ref(false)
 watch(expandedClaimId, (id) => {
   claimRejectOpen.value = false
   claimDecisionError.value = ''
@@ -2561,16 +3316,16 @@ const unreadChatCount = computed(() =>
   queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && hasNewMsg(i)).length
 )
 const pendingChatCount = computed(() =>
-  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && i.needs_answer).length
+  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && chatNeedsReply(i)).length
 )
 const pendingCustomerCount = computed(() =>
-  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && i.needs_answer && senderKind(i) === 'customer').length
+  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && chatNeedsReply(i) && senderKind(i) === 'customer').length
 )
 const pendingSystemCount = computed(() =>
-  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && i.needs_answer && senderKind(i) === 'system').length
+  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && chatNeedsReply(i) && senderKind(i) === 'system').length
 )
 const pendingUnknownCount = computed(() =>
-  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && i.needs_answer && senderKind(i) === 'unknown').length
+  queueItems.value.filter(i => i.item_type === 'chat' && (currentMp.value === 'all' || chatMp(i) === currentMp.value) && chatNeedsReply(i) && senderKind(i) === 'unknown').length
 )
 const senderFilters = computed(() => [
   { key: 'all', label: 'Все', count: pendingChatCount.value },
@@ -2585,6 +3340,7 @@ function setChatFilter(key) {
   if (next !== 'pending' || currentMp.value !== 'ozon') senderFilter.value = 'all'
   currentPage.value = 1
   if (next === 'review') loadReviewQueue(true)
+  syncChatListQuery()
 }
 
 // ── Очередь ──────────────────────────────────────────────────────────────────
@@ -2595,6 +3351,9 @@ const currentPage  = ref(1)
 
 const filteredItems = computed(() => {
   const mp = (currentMp.value || 'all').toLowerCase()
+  if (chatSearchHits.value) {
+    return [...chatSearchHits.value]
+  }
   let list = (Array.isArray(queueItems.value) ? queueItems.value : [])
     .filter(i => i.item_type === 'chat')
   // Жёстко держим площадку: иначе после закрытия/«На проверку» всплывают чужие МП
@@ -2603,7 +3362,7 @@ const filteredItems = computed(() => {
   }
 
   if (chatFilter.value === 'pending') {
-    list = list.filter(i => i.needs_answer)
+    list = list.filter(i => chatNeedsReply(i))
     // Фильтр клиент/Ozon-оповещение — только для Ozon
     if (currentMp.value === 'ozon' && senderFilter.value !== 'all') {
       list = list.filter(i => senderKind(i) === senderFilter.value)
@@ -2636,8 +3395,8 @@ const filteredItems = computed(() => {
   }
 
   return [...list].sort((a, b) => {
-    const aPend = a.needs_answer ? 1 : 0
-    const bPend = b.needs_answer ? 1 : 0
+    const aPend = chatNeedsReply(a) ? 1 : 0
+    const bPend = chatNeedsReply(b) ? 1 : 0
     if (aPend !== bPend) return bPend - aPend
     return (b.last_ts || 0) - (a.last_ts || 0)
   })
@@ -2666,13 +3425,17 @@ async function loadQueue() {
 
 watch(currentMp, () => {
   senderFilter.value = 'all'
+  chatSearchHits.value = null
   loadQueue()
-  if (isAdmin.value) loadReviewQueue(true)
+  loadReviewQueue(true)
   if (tab.value === 'archive') loadArchive()
   if (tab.value === 'playbook') loadNonreturnableCats()
 })
 
 watch(chatFilter, () => { currentPage.value = 1 })
+watch(chatFindQ, (q) => {
+  if (!String(q || '').trim()) chatSearchHits.value = null
+})
 
 // ── Чат: выбор и сообщения ───────────────────────────────────────────────────
 const chatItem    = ref(null)
@@ -2689,16 +3452,19 @@ const chatSuggest = ref(null)
 const chatSuggestMiss = ref(null)
 const chatSuggestLoading = ref(false)
 const chatSuggestGenerating = ref(false)
+const lastAppliedChatTemplate = ref(null)
 const chatTemplates = ref([])
 const chatTemplatesLoading = ref(false)
 const chatTemplatesExpanded = ref(false)
 const chatTemplatesFocusTheme = ref('')
 const chatTemplateGreeting = ref('Здравствуйте!')
 const chatTemplateSignature = ref('')
+const chatNekomplektBranch = ref('')
 const productCardOpen = ref(false)
 const productCardLoading = ref(false)
 const productCard = ref(null)
 let chatPollTimer = null
+let chatReloadTimer = null
 let chatSelectionRequest = 0
 
 const productCardRequest = computed(() => {
@@ -2720,6 +3486,11 @@ const productCardRequest = computed(() => {
 function productDimensionsLine(dimensions) {
   if (!dimensions || dimensions.length == null || dimensions.width == null || dimensions.height == null) return ''
   return `${dimensions.length} × ${dimensions.width} × ${dimensions.height}`
+}
+
+function productFastenersLine(card) {
+  const items = card?.fasteners || card?.product?.fasteners || []
+  return items.map(item => item.label || item.code).filter(Boolean).join('; ')
 }
 
 async function toggleProductCard() {
@@ -2822,21 +3593,16 @@ const visibleChatTemplates = computed(() => {
   if (mp === 'ozon') {
     templates = templates.filter(template => !OZON_HIDDEN_THEME_KEYS.has(template.theme_key))
   } else if (mp === 'ym') {
-    templates = templates.filter(template => template.theme_key !== 'nevozvratny')
+    templates = templates.filter(template =>
+      template.theme_key !== 'nevozvratny' && template.theme_key !== 'promokody')
+  } else {
+    templates = templates.filter(template => template.theme_key !== 'kupit_detal')
   }
-  const suggestedTheme = chatSuggest.value?.theme || chatSuggestMiss.value?.theme || ''
-  return [...templates].sort((a, b) => {
-    if (suggestedTheme && a.theme_key === suggestedTheme && b.theme_key !== suggestedTheme) return -1
-    if (suggestedTheme && b.theme_key === suggestedTheme && a.theme_key !== suggestedTheme) return 1
-    return 0
-  })
+  return templates
 })
 
-const chatTemplateGroups = computed(() => {
-  const suggestedTheme = chatSuggest.value?.theme || chatSuggestMiss.value?.theme || ''
-  return groupTemplatesByTheme(visibleChatTemplates.value, suggestedTheme)
-})
-const compactChatTemplateGroups = computed(() => chatTemplateGroups.value.slice(0, 3))
+const chatTemplateGroups = computed(() => groupTemplatesByTheme(visibleChatTemplates.value))
+const compactChatTemplateGroups = computed(() => compactThemeGroups(chatTemplateGroups.value))
 const hasMoreChatTemplateGroups = computed(() => chatTemplateGroups.value.length > 0)
 const focusedChatTemplateGroup = computed(() =>
   chatTemplateGroups.value.find(g => g.theme_key === chatTemplatesFocusTheme.value) || null
@@ -2857,6 +3623,38 @@ function onChatThemeChip(group) {
   chatTemplatesExpanded.value = true
 }
 
+function onCompactChatThemeChip(group) {
+  if (!group) return
+  const picked = pickThemeTemplate(group, chatFulfillmentCode(chatItem.value), {
+    nekomplektBranch: chatNekomplektBranch.value,
+  })
+  if (picked) {
+    applyChatTemplate(picked)
+    return
+  }
+  onChatThemeChip(group)
+}
+
+function compactChatThemeHint(group) {
+  const name = group?.theme_name || ''
+  if (group?.theme_key === 'dostavka_wb') {
+    const code = chatFulfillmentCode(chatItem.value)
+    if (code === 'FBS' || code === 'DBS') return `${name} · наша задержка (${code})`
+    if (code === 'FBO' || code === 'FBY' || code === 'DBW') return `${name} · доставка площадки (${code})`
+    return `${name} · выберите вариант`
+  }
+  if (group?.theme_key === 'nekomplekt') {
+    if (chatNekomplektBranch.value === 'sku_allowed' || chatNekomplektBranch.value === 'offer_buy') {
+      return `${name} · можно отправить деталь`
+    }
+    if (chatNekomplektBranch.value === 'sku_denied') {
+      return `${name} · детали нет в списке`
+    }
+    return `${name} · выберите вариант`
+  }
+  return name
+}
+
 function isChatThemeActive(group) {
   return (group?.templates || []).some(template => isChatTemplateActive(template))
 }
@@ -2871,17 +3669,32 @@ function stripChatGreeting(value) {
     .trim()
 }
 
-function moscowDateKey(value) {
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(date)
+function lastSellerGreetingAt() {
+  let latest = 0
+  for (const msg of chatMsgs.value || []) {
+    if (!isSeller(msg)) continue
+    if (!/^\s*(здравствуйте|добрый\s+(день|вечер|утро)|привет)[!.,]?\s*/i.test(String(msg.text || ''))) continue
+    const t = new Date(msg.createdAt).getTime()
+    if (!Number.isNaN(t) && t > latest) latest = t
+  }
+  return latest
 }
 
 function chatNeedsGreeting() {
-  const today = moscowDateKey(new Date())
-  return !chatMsgs.value.some(msg => isSeller(msg) && moscowDateKey(msg.createdAt) === today)
+  const last = lastSellerGreetingAt()
+  if (last && (Date.now() - last) < 12 * 60 * 60 * 1000) return false
+  return true
+}
+
+function chatAlreadySigned() {
+  const signature = String(chatTemplateSignature.value || '').trim()
+  const mark = /команда\s+видовито|из\s+команды\s+видовито/i
+  return (chatMsgs.value || []).some(msg => {
+    if (!isSeller(msg)) return false
+    const text = String(msg.text || '')
+    if (signature && text.includes(signature)) return true
+    return mark.test(text)
+  })
 }
 
 function polishChatTemplate(body) {
@@ -2895,7 +3708,13 @@ function polishChatTemplate(body) {
 
   const signature = String(chatTemplateSignature.value || '').trim()
   const shortWithoutSignature = /^(спасибо|благодар|ок|окей|хорошо|пожалуйста|рад\s+помочь|понял|принято)[\s!.❤🙏👍]*$/i.test(text)
-  if (signature && text.length > 40 && !shortWithoutSignature && !result.includes(signature)) {
+  if (
+    signature
+    && text.length > 40
+    && !shortWithoutSignature
+    && !result.includes(signature)
+    && !chatAlreadySigned()
+  ) {
     result = `${result}\n\n${signature}`
   }
   return result
@@ -2909,11 +3728,147 @@ function isChatTemplateActive(template) {
   return reply.includes(sample)
 }
 
-function applyChatTemplate(template) {
+const OZON_PICKUP_GUIDE_STATUSES = new Set([
+  'approved', 'packed', 'shipped', 'in_transit', 'ready_for_pickup', 'delivered', 'returned',
+])
+const ozonGuideLoading = ref(false)
+const showOzonPickupGuide = computed(() => {
+  const row = chatContext.value?.specific?.reshipment
+  return row?.delivery_method === 'ozon' && OZON_PICKUP_GUIDE_STATUSES.has(row.status)
+})
+
+async function insertOzonPickupGuide(body = '') {
+  if (ozonGuideLoading.value) return
+  ozonGuideLoading.value = true
   chatTemplatesExpanded.value = false
   chatTemplatesFocusTheme.value = ''
-  chatReply.value = polishChatTemplate(template.body)
+  try {
+    const response = await apiFetch('/api/v1/chat-bot/ozon-pickup-guide')
+    const data = await response.json()
+    const text = String(body || data.text || '').trim()
+    if (!text) throw new Error('пустая инструкция')
+    chatReply.value = polishChatTemplate(text)
+    const images = Array.isArray(data.images) ? data.images : []
+    if (!chatAttachmentsAvailable.value || !images.length) {
+      showToast('Текст инструкции вставлен', 'ok')
+      nextTick(autoGrowReply)
+      return
+    }
+    clearChatAttachments()
+    for (const image of images) {
+      const fileResponse = await apiFetch(image.url)
+      const blob = await fileResponse.blob()
+      const file = new File([blob], image.name || 'shag.png', { type: 'image/png' })
+      chatAttachments.value.push({
+        id: chatAttachmentKey(file),
+        file,
+        previewUrl: URL.createObjectURL(file),
+      })
+    }
+    showToast('Инструкция с сайта вставлена — проверьте и отправьте', 'ok')
+    nextTick(autoGrowReply)
+  } catch {
+    showToast('Не удалось собрать инструкцию', 'error')
+  } finally {
+    ozonGuideLoading.value = false
+  }
+}
+
+function applyChatTemplate(template) {
+  if (template?.theme_key === 'ozon_pickup') {
+    insertOzonPickupGuide(template.body)
+    return
+  }
+  chatTemplatesExpanded.value = false
+  chatTemplatesFocusTheme.value = ''
+  const raw = String(template?.body || '')
+  if (template?.needs_form_url || raw.includes('{form_url}')) {
+    fillFormLinkTemplate(template)
+    return
+  }
+  chatReply.value = polishChatTemplate(raw)
+  lastAppliedChatTemplate.value = template
   nextTick(autoGrowReply)
+}
+
+async function fillFormLinkTemplate(template = null) {
+  const item = chatItem.value
+  if (!item?.id) {
+    showToast('Сначала откройте чат', 'error')
+    return
+  }
+  const requestId = chatSelectionRequest
+  const chatId = item.id
+  const mp = chatMp(item)
+  try {
+    const r = await apiFetch(`${BOT}/form-link`, {
+      method: 'POST',
+      body: JSON.stringify({
+        chat_id: chatId,
+        mp,
+        body: template?.body || '',
+      }),
+    })
+    const d = await r.json().catch(() => ({}))
+    if (!isCurrentChatSelection(requestId, chatId)) return
+    if (!r.ok) throw new Error(d.detail || d.error || 'Не удалось создать ссылку')
+    chatReply.value = polishChatTemplate(d.reply_text || '')
+    if (template) lastAppliedChatTemplate.value = template
+    nextTick(autoGrowReply)
+    showToast('Ссылка на форму вставлена', 'ok')
+  } catch (e) {
+    if (!isCurrentChatSelection(requestId, chatId)) return
+    showToast(e.message || 'Ошибка ссылки', 'error')
+  }
+}
+
+function isMarketplaceNudge(text) {
+  const s = String(text || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim()
+  return /^(здравствуйте|добрый\s+(день|вечер|утро))[!.,]?\s+пожалуйста,?\s+посмотрите\s+мо[её]\s+сообщен/i.test(s)
+}
+
+function lastClientMessageText() {
+  const msgs = [...(chatMsgs.value || [])].reverse()
+  const fromHistory = msgs.find(msg => !isSeller(msg) && String(msg.text || '').trim() && !isMarketplaceNudge(msg.text))
+    || msgs.find(msg => !isSeller(msg) && String(msg.text || '').trim())
+  return String(fromHistory?.text || chatItem.value?.last_message || chatItem.value?.body || '').trim()
+}
+
+function recordTemplateCorrection(template, { silent = false } = {}) {
+  const suggest = chatSuggest.value
+  const item = chatItem.value
+  if (!template || !item) return
+  const suggestedTheme = String(suggest?.theme || '').trim()
+  const suggestedBranch = String(suggest?.branch_key || '').trim()
+  const chosenTheme = String(template.theme_key || '').trim()
+  const chosenBranch = String(template.branch_key || '').trim()
+  if (!chosenTheme) return
+  if (suggestedTheme && suggestedTheme === chosenTheme && suggestedBranch === chosenBranch) return
+  const rawId = String(template.id || '').replace(/^(qp|chat)-/, '')
+  const variantId = /^\d+$/.test(rawId) ? Number(rawId) : null
+  apiFetch('/api/v1/chat-bot/correction', {
+    method: 'POST',
+    body: JSON.stringify({
+      chat_id: item.id,
+      mp: chatMp(item),
+      client_message: lastClientMessageText(),
+      suggested_theme: suggestedTheme,
+      suggested_branch: suggestedBranch,
+      chosen_theme: chosenTheme,
+      chosen_branch: chosenBranch,
+      chosen_variant_id: variantId,
+    }),
+  }).then(async (r) => {
+    const d = await r.json().catch(() => ({}))
+    if (d?.saved && !silent) showToast('Запомнил другой шаблон — в следующий раз учтём', 'ok')
+  }).catch(() => {})
+}
+
+function rememberSentTemplate(item) {
+  const template = lastAppliedChatTemplate.value
+  if (!template || !item) return
+  recordTemplateCorrection(template, { silent: true })
+  lastAppliedChatTemplate.value = null
 }
 
 async function loadChatTemplates(mp = 'wb', theme = '', requestId = chatSelectionRequest, chatId = chatItem.value?.id) {
@@ -2922,6 +3877,7 @@ async function loadChatTemplates(mp = 'wb', theme = '', requestId = chatSelectio
   try {
     const query = new URLSearchParams({ mp: mp || 'wb' })
     if (theme) query.set('theme', theme)
+    if (chatId) query.set('chat_id', chatId)
     const response = await apiFetch(`${BOT}/chat-templates?${query}`)
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const data = await response.json()
@@ -2929,6 +3885,7 @@ async function loadChatTemplates(mp = 'wb', theme = '', requestId = chatSelectio
     chatTemplates.value = data.templates || []
     chatTemplateGreeting.value = String(data.greeting_text || '').trim()
     chatTemplateSignature.value = String(data.signature || '').trim()
+    chatNekomplektBranch.value = String(data.nekomplekt_branch || '').trim()
   } catch {
     if (isCurrentChatSelection(requestId, chatId)) chatTemplates.value = []
   } finally {
@@ -2940,6 +3897,7 @@ function clearSuggest() {
   chatSuggest.value = null
   chatSuggestMiss.value = null
   chatReply.value = ''
+  lastAppliedChatTemplate.value = null
   nextTick(autoGrowReply)
 }
 
@@ -2965,12 +3923,16 @@ async function loadSuggest(chatId, mp = 'wb', requestId = chatSelectionRequest) 
       nextTick(autoGrowReply)
     } else if (d?.ok) {
       chatSuggest.value = null
+      const low = d.low_confidence === true || /шаблон не подставляем|без автозаполнения/i.test(d.reason || '')
       chatSuggestMiss.value = {
-        reason: d.reason || 'Нет подходящего шаблона',
-        can_generate: d.can_generate !== false,
+        reason: low
+          ? (d.reason || 'Уверенность низкая — выберите шаблон или напишите сами')
+          : (d.reason || 'Нет подходящего шаблона'),
+        can_generate: low ? false : d.can_generate !== false,
         theme: d.theme,
         theme_name: d.theme_name,
-        need_human: d.need_human === true,
+        need_human: d.need_human === true || low,
+        low_confidence: low,
       }
     } else {
       chatSuggestMiss.value = {
@@ -2989,6 +3951,31 @@ async function loadSuggest(chatId, mp = 'wb', requestId = chatSelectionRequest) 
   } finally {
     if (isCurrentChatSelection(requestId, chatId)) chatSuggestLoading.value = false
   }
+}
+
+function insertChatPlaybookTemplate() {
+  if (chatSuggestGenerating.value || chatSending.value) return
+  const suggested = String(chatSuggest.value?.reply_text || '').replace(/^\s+/, '')
+  if (suggested) {
+    chatReply.value = suggested
+    nextTick(autoGrowReply)
+    showToast('Шаблон подставлен', 'ok')
+    return
+  }
+  const theme = chatSuggest.value?.theme || chatSuggestMiss.value?.theme || ''
+  const group = theme
+    ? chatTemplateGroups.value.find(g => g.theme_key === theme)
+    : null
+  if (group && (group.templates || []).length) {
+    onCompactChatThemeChip(group)
+    return
+  }
+  if (!chatTemplateGroups.value.length) {
+    showToast('Нет шаблона — нажмите звезду, чтобы сгенерировать', 'error')
+    return
+  }
+  chatTemplatesExpanded.value = true
+  chatTemplatesFocusTheme.value = ''
 }
 
 async function generateSuggestAi() {
@@ -3040,8 +4027,12 @@ function msgImages(msg) {
   return msgAttachments(msg).filter(item => item.type === 'image')
 }
 
+function msgVideos(msg) {
+  return msgAttachments(msg).filter(item => item.type === 'video')
+}
+
 function msgDocuments(msg) {
-  return msgAttachments(msg).filter(item => item.type !== 'image')
+  return msgAttachments(msg).filter(item => item.type !== 'image' && item.type !== 'video')
 }
 
 function msgAttachments(msg) {
@@ -3051,43 +4042,94 @@ function msgAttachments(msg) {
   }))
 }
 
+function isChatNearBottom(el, px = 120) {
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight < px
+}
+
+function keepChatScroll(el, prevHeight, prevTop) {
+  if (!el) return
+  el.scrollTop = el.scrollHeight - prevHeight + prevTop
+}
+
+function chatMsgsFingerprint(msgs) {
+  return (msgs || []).map(m => [
+    m.messageId || m.id || '',
+    m.createdAt || '',
+    m.senderType || '',
+    m.text || '',
+    Array.isArray(m.images) ? m.images.length : 0,
+    Array.isArray(m.attachments) ? m.attachments.length : 0,
+  ].join('|')).join('\n')
+}
+
 function scrollChatBottom() {
   requestAnimationFrame(() => {
     if (chatScroll.value) chatScroll.value.scrollTop = chatScroll.value.scrollHeight
   })
 }
 
-async function fetchChatMsgs(scroll = false, requestId = chatSelectionRequest) {
+function stopChatLiveReload() {
+  clearInterval(chatPollTimer)
+  chatPollTimer = null
+  if (chatReloadTimer) {
+    clearTimeout(chatReloadTimer)
+    chatReloadTimer = null
+  }
+}
+
+function scheduleOpenChatReload() {
+  if (chatReloadTimer) return
+  chatReloadTimer = setTimeout(() => {
+    chatReloadTimer = null
+    fetchChatMsgs(false)
+  }, 400)
+}
+
+async function fetchChatMsgs(forceScroll = false, requestId = chatSelectionRequest) {
   const item = chatItem.value
   if (!item || !isCurrentChatSelection(requestId, item.id)) return
+  const el = chatScroll.value
+  const stick = forceScroll || isChatNearBottom(el)
+  const prevHeight = el?.scrollHeight || 0
+  const prevTop = el?.scrollTop || 0
   try {
     const r = await apiFetch(chatMessagesPath(item))
     const d = await r.json()
     if (!isCurrentChatSelection(requestId, item.id)) return
     const msgs = (d.messages || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-    // Всегда подменяем ленту с сервера (иначе local+API дубли остаются на экране)
-    chatMsgs.value = msgs
-    if (scroll) scrollChatBottom()
+    const changed = chatMsgsFingerprint(msgs) !== chatMsgsFingerprint(chatMsgs.value)
+    // Подменяем ленту с сервера, но не трогаем DOM, если ничего не изменилось
+    if (changed) chatMsgs.value = msgs
+    applyChatFulfillment(d)
+    if (!changed && !forceScroll) return
+    await nextTick()
+    requestAnimationFrame(() => {
+      const box = chatScroll.value
+      if (!box) return
+      if (forceScroll || stick) box.scrollTop = box.scrollHeight
+      else keepChatScroll(box, prevHeight, prevTop)
+    })
   } catch { /* тихо */ }
 }
 
 async function selectChat(item) {
   const requestId = ++chatSelectionRequest
-  clearInterval(chatPollTimer)
-  chatPollTimer = null
+  stopChatLiveReload()
   clearChatAttachments()
   chatSendWarning.value = null
-  chatLastViewed.value[item.id] = item.last_ts || Date.now()
-  _saveViewed()
   expandedClaimId.value = ''
   expandedReshipId.value = null
+  orderOpen.value = false
   reviewCard.value.show = false
   chatItem.value    = item
   chatMsgs.value    = []
   chatReply.value   = ''
   chatSuggest.value = null
   chatSuggestMiss.value = null
+  lastAppliedChatTemplate.value = null
   chatTemplates.value = []
+  chatNekomplektBranch.value = ''
   chatSuggestLoading.value = false
   chatSuggestGenerating.value = false
   chatTemplatesLoading.value = false
@@ -3107,6 +4149,11 @@ async function selectChat(item) {
     const d = await r.json()
     if (!isCurrentChatSelection(requestId, item.id)) return
     chatMsgs.value = (d.messages || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    applyChatFulfillment(d)
+    const lastMsgTs = Math.max(0, ...chatMsgs.value.map(m => Number(m.createdAt || 0)))
+    if (lastMsgTs) item.last_ts = lastMsgTs
+    item.unread_count = 0
+    markChatSeen(item)
     scrollChatBottom()
   } catch {
     if (isCurrentChatSelection(requestId, item.id)) chatMsgs.value = []
@@ -3114,15 +4161,10 @@ async function selectChat(item) {
     if (isCurrentChatSelection(requestId, item.id)) chatLoading.value = false
   }
   if (!isCurrentChatSelection(requestId, item.id)) return
-  chatPollTimer = setInterval(() => fetchChatMsgs(true, requestId), 8000)
+  chatPollTimer = setInterval(() => fetchChatMsgs(false, requestId), 8000)
   await loadSuggest(item.id, mp, requestId)
   if (!isCurrentChatSelection(requestId, item.id)) return
-  await loadChatTemplates(
-    mp,
-    chatSuggest.value?.theme || chatSuggestMiss.value?.theme || '',
-    requestId,
-    item.id,
-  )
+  await loadChatTemplates(mp, '', requestId, item.id)
 }
 
 async function dismissChatItem() {
@@ -3158,10 +4200,16 @@ async function sendChatMessage() {
     showToast('Вложения для этой площадки недоступны', 'error')
     return
   }
+  if (saveReplyAsTemplate.value && !saveReplyThemeKey.value) {
+    showToast('Выберите группу для шаблона', 'error')
+    return
+  }
   const item = chatItem.value
   const requestId = chatSelectionRequest
   const attachments = [...chatAttachments.value]
   const sentSummary = txt || `Файлы: ${attachments.map(entry => entry.file.name).join(', ')}`
+  const wantTemplate = saveReplyAsTemplate.value && !!txt
+  const templateTheme = saveReplyThemeKey.value
   chatSending.value = true
   try {
     if (attachments.length) {
@@ -3224,6 +4272,12 @@ async function sendChatMessage() {
 
       if (reconciliation.complete) {
         queueItems.value = queueItems.value.filter(i => i !== item)
+        if (progress.text?.state === 'confirmed') rememberSentTemplate(item)
+        if (wantTemplate && progress.text?.state === 'confirmed') {
+          saveReplyAsTemplate.value = true
+          saveReplyThemeKey.value = templateTheme
+          await saveReplyAsTemplateIfNeeded(txt, item)
+        }
         showToast('Сообщение и вложения отправлены', 'ok')
       } else if (progress.status === 'failed') {
         showToast('Вложения не отправлены; выбор сохранён', 'error')
@@ -3251,6 +4305,12 @@ async function sendChatMessage() {
     scrollChatBottom()
     await fetchChatMsgs(true, requestId)
     queueItems.value = queueItems.value.filter(i => i !== item)
+    rememberSentTemplate(item)
+    if (wantTemplate) {
+      saveReplyAsTemplate.value = true
+      saveReplyThemeKey.value = templateTheme
+      await saveReplyAsTemplateIfNeeded(txt, item)
+    }
     showToast('Сообщение отправлено', 'ok')
   } catch (e) {
     if (attachments.length && !e?.status && isCurrentChatSelection(requestId, item.id)) {
@@ -3311,6 +4371,19 @@ function _applyRealtimeRemoved(chatId, mp) {
   queueItems.value = queueItems.value.filter(i => _chatListKey(i.id, chatMp(i)) !== key)
 }
 
+function _applyRealtimeSeen(chatId, mp, seenTs) {
+  const ts = Number(seenTs || 0)
+  const item = queueItems.value.find(i => String(i.id) === String(chatId) && chatMp(i) === (mp || 'wb').toLowerCase())
+  if (item && ts >= Number(item.seen_ts || 0)) item.seen_ts = ts
+}
+
+function _applyRealtimeSeenAll(mp) {
+  const key = (mp || 'all').toLowerCase()
+  queueItems.value.forEach(i => {
+    if (key === 'all' || chatMp(i) === key) i.seen_ts = i.last_ts || Date.now()
+  })
+}
+
 function _applyRealtimeChat(chatData) {
   const chatId = String(chatData.chat_id || '')
   const mp = (chatData.mp || 'wb').toLowerCase()
@@ -3331,6 +4404,7 @@ function _applyRealtimeChat(chatData) {
       nm_id: chatData.nm_id ?? (idx >= 0 ? queueItems.value[idx].nm_id : null),
       product_photo: chatData.product_photo ?? (idx >= 0 ? queueItems.value[idx].product_photo : null),
       cabinet_url: chatData.cabinet_url ?? (idx >= 0 ? queueItems.value[idx].cabinet_url : null),
+      seen_ts: chatData.seen_ts ?? (idx >= 0 ? queueItems.value[idx].seen_ts : 0),
       age_sec: Math.floor((Date.now() - (lastTs || Date.now())) / 1000),
       item_type: 'chat',
       mp,
@@ -3344,15 +4418,15 @@ function _applyRealtimeChat(chatData) {
     }
     // Как на бэке: сначала «ждёт», потом свежее сверху
     queueItems.value = [...queueItems.value].sort((a, b) => {
-      const na = a.needs_answer ? 1 : 0
-      const nb = b.needs_answer ? 1 : 0
+      const na = chatNeedsReply(a) ? 1 : 0
+      const nb = chatNeedsReply(b) ? 1 : 0
       if (na !== nb) return nb - na
       return (b.last_ts || 0) - (a.last_ts || 0)
     })
   }
 
   if (chatItem.value && String(chatItem.value.id) === chatId && chatMp(chatItem.value) === mp) {
-    fetchChatMsgs(true)
+    scheduleOpenChatReload()
   }
 }
 
@@ -3363,13 +4437,15 @@ async function initCentrifugo() {
     const token = data.token
     if (!token) return
 
-    centrifuge = new Centrifuge('wss://cxvo.ru/connection/websocket', { token })
+    centrifuge = new Centrifuge(centrifugoUrl(), { token })
 
     const sub = centrifuge.newSubscription('chats')
     sub.on('publication', ctx => {
-      const { type, chat, chat_id, mp } = ctx.data || {}
+      const { type, chat, chat_id, mp, seen_ts } = ctx.data || {}
       if (type === 'chat_updated' && chat) _applyRealtimeChat(chat)
       else if (type === 'chat_removed' && chat_id) _applyRealtimeRemoved(chat_id, mp)
+      else if (type === 'chat_seen' && chat_id) _applyRealtimeSeen(chat_id, mp, seen_ts)
+      else if (type === 'chats_seen_all') _applyRealtimeSeenAll(mp)
     })
     sub.subscribe()
     centrifuge.connect()
@@ -3381,12 +4457,17 @@ async function initCentrifugo() {
 // ── Init / Cleanup ─────────────────────────────────────────────────────────
 onMounted(async () => {
   if (!permissionsStore.loaded) await permissionsStore.load()
+  applyChatListQuery()
   if (!canViewChatTemplates.value && tab.value === 'playbook') tab.value = 'chats'
   if (!isAdmin.value && tab.value === 'triage') tab.value = 'chats'
   if (tab.value === 'playbook' && !canEditChatTemplates.value) pbSection.value = 'templates'
-  _loadViewed()
   await loadQueue()
-  if (isAdmin.value) loadReviewQueue(true)
+  if (tab.value === 'archive') loadArchive()
+  else if (tab.value === 'triage' && isAdmin.value) loadTriage()
+  else if (tab.value === 'playbook' && canViewChatTemplates.value) {
+    if (!pbThemes.value.length) loadPlaybook()
+  }
+  loadReviewQueue(true)
   initCentrifugo()
   const qChat = route.query.chat
   if (qChat) await openChatFromQuery(String(qChat))
@@ -3394,10 +4475,7 @@ onMounted(async () => {
 
 watch([isAdmin, canViewChatTemplates], () => {
   if (!canViewChatTemplates.value && tab.value === 'playbook') tab.value = 'chats'
-  if (!isAdmin.value && (tab.value === 'triage' || chatFilter.value === 'review')) {
-    if (tab.value === 'triage') tab.value = 'chats'
-    if (chatFilter.value === 'review') chatFilter.value = 'pending'
-  }
+  if (!isAdmin.value && tab.value === 'triage') tab.value = 'chats'
   if (tab.value === 'playbook' && !canEditChatTemplates.value) pbSection.value = 'templates'
 })
 
@@ -3408,9 +4486,17 @@ watch(() => route.query.chat, async (chatId) => {
   await openChatFromQuery(id)
 })
 
+watch(pbSection, (s) => {
+  if (s === 'review' && canReviewNewTemplates.value) loadPendingTemplates()
+})
+
+watch(saveReplyAsTemplate, (on) => {
+  if (on && canEditChatTemplates.value && !pbThemes.value.length) loadPlaybook()
+})
+
 onUnmounted(() => {
   chatSelectionRequest += 1
-  clearInterval(chatPollTimer)
+  stopChatLiveReload()
   clearChatAttachments()
   centrifuge?.disconnect()
 })

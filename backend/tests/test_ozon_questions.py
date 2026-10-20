@@ -137,7 +137,10 @@ class OzonQuestionTests(unittest.TestCase):
         self.assertIn("END AS question_market_sku", source)
         self.assertIn("FROM wb_logistics wl", source)
         self.assertIn("LEFT JOIN ozon_questions oq", source)
+        self.assertIn("LEFT JOIN ym_questions yq", source)
         self.assertIn("LEFT JOIN ym_assortment ya", source)
+        self.assertIn("LEFT JOIN ym_assortment yb", source)
+        self.assertIn("yq.market_sku::text, ya.market_sku::text, yb.market_sku::text", source)
         self.assertIn("q.supplier_article, q.nm_id::text", cx_responses._UNIFIED_QUEUE_VIEW_SQL)
 
 

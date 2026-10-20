@@ -2,12 +2,14 @@
 ИИ-бот автоответов в WB-чатах.
 
 Архитектура (согласована с Рустамом 2026-07-22/23, дополнена 2026-07-24):
-  1. Диспетчер (Qwen Plus + жёсткие правила) → тема / уверенность / нужен человек
+  1. Диспетчер: жёсткие правила и правки менеджеров (без Qwen на каждый чат/вопрос)
   2. Плейбук → текст + действие (форма, статус, передача менеджеру)
-  3. Нет шаблона → ИИ-черновик (lite + портрет + похожие ответы менеджеров),
-     зона принудительно draft (клиенту сам не шлём)
+    3. Нет шаблона → кнопка «Сгенерировать» у менеджера (клиенту само не уходит).
+       Тумблер bot_ai_draft — только автобот, не прячет кнопки в чате.
   4. Светофор темы (auto / draft / human)
-  5. Сборка: [приветствие?] + суть + [подпись?]  (приветствие — раз в календарный день МСК)
+  5. Сборка: [приветствие?] + суть + [подпись?]
+     (приветствие — раз в 12 часов с нашего последнего «здравствуйте»;
+      подпись — один раз за чат, если уже представлялись)
   6. Shadow-режим: пишем «в стол», клиенту не отправляем
 
 Воркер крутится рядом с синком чатов. Включается настройками:
@@ -24,29 +26,54 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import requests
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
-from . import cx_alert
+from . import cx_alert, telegram_proxy, telegram_webapp
 from .routers import chat_playbook, reshipment_skus, nonreturnable_cats, question_playbook
 from . import wb_chat
+from .database import db_session
 from . import chat_faq
+from . import chat_fulfillment
+from .review_policy import is_paint_hole_question
 
 logger = logging.getLogger("chat_bot")
 
 MSK = ZoneInfo("Europe/Moscow")
 BOT_INTERVAL_SEC = 15  # было 90; для диалога 1/2/3 нужна быстрая реакция
 BOT_BATCH_LIMIT = 25
-MIN_CONFIDENCE = 0.55
+MIN_CONFIDENCE = 0.65
+AUTO_SEND_MIN_CONF = 0.90
+def _quota_paused() -> bool:
+    from .qwen_quota import all_qwen_models_exhausted
+    return all_qwen_models_exhausted()
+
+
+def _quota_wait_sec() -> float:
+    from .qwen_quota import qwen_wait_sec
+    return qwen_wait_sec()
+
+
+def _mark_quota_pause(err: str) -> None:
+    from .qwen_quota import is_quota_or_model_error
+    if not is_quota_or_model_error(err):
+        return
+    # complete_sync уже переключил модели и пометил лимиты.
+    # Общую паузу на 30 мин не ставим — как в отзывах, берём следующую свободную.
+    logger.warning("[ChatBot] Qwen лимит: %s", (err or "")[:200])
 # Ждём пачку сообщений клиента (фото + текст), не отвечаем мгновенно на первое фото
 BOT_DEBOUNCE_SEC = 90
 
 FORM_BASE = "https://box.vidovito.com/reshipment/form"
+FORM_TOKEN_RE = re.compile(
+    r"(?:https?://)?box\.vidovito\.com(?:/reshipment/form)?\?t=([\w\-]+)",
+    re.IGNORECASE,
+)
 
 # Жёсткая красная зона — без ИИ (суд, угрозы, здоровье). «Деньги» — отдельно:
 # если клиент просит деталь и лишь упоминает деньги как запасной вариант — это некомплект.
@@ -73,6 +100,7 @@ _NEKOMPLEKT_RE = re.compile(
     r"болт\w*\s+для|креплен|"
     r"в\s+комп?лекте\s+нет|в\s+комп?лекте\s+нету|нет\s+в\s+комп?лект|"
     r"болтик\w*\s+нет|нет\s+болт|нет\s+труб|нет\s+колес|нет\s+крепеж|"
+    r"нет\s+шуруп|нет\s+винт|нет\s+заглуш|нет\s+гаек|"
     r"нет\s+в\s+наличии|не\s+достающ|недостающ|"
     r"можно\s+просто\s+прислать|есть\s+возможность\s+до\s*отправ|"
     r"только\s+два\s+колес|прислали\s+\d|"
@@ -81,11 +109,20 @@ _NEKOMPLEKT_RE = re.compile(
 )
 
 _AGREE_RE = re.compile(
-    r"^(да|даа+|ок|окей|хорошо|отправляйте|отправляй|отправьте|"
-    r"буду\s+благодар|актуально|согласен|согласна|нужно|"
+    r"^(?:(?:здравствуйте|добрый\s+(?:день|вечер|утро))[!.]?\s+)?"
+    r"(?:да|даа+|ок|окей|хорошо|отправляйте|отправляй|отправьте|"
+    r"буду\s+благодар|будем\s+благодар|актуально|согласен|согласна|нужно|"
     r"давайте|давай|конечно|ждём|ждем|"
     r"заполнила|заполнил|заполнили|"
-    r"да[,\s]+актуальн\w*|да[,\s]+давайте|здравствуйте[!.]?\s*да)[\s!.]*$",
+    r"да[,\s]+актуальн\w*|да[,\s]+давайте)[\s!.]*$",
+    re.IGNORECASE,
+)
+
+# Согласие внутри фразы («Здравствуйте. Конечно актуально, будем благодарны»)
+_AGREE_HINT_RE = re.compile(
+    r"(актуальн\w*|согласен|согласна|конечно(\s+актуальн)?|"
+    r"давайте\s+отправ|отправляйте|отправьте\s+детал|"
+    r"буду\s+благодар|будем\s+очень\s+благодар|будем\s+благодар)",
     re.IGNORECASE,
 )
 
@@ -96,12 +133,7 @@ _DECLINE_RE = re.compile(
 )
 
 _THANKS_RE = re.compile(
-    r"^(аа+)?\s*(спасибо|благодарю|большое\s+(вам\s+)?спасибо|"
-    r"спасибо\s+большое|спасибо\s+за\s+\w+|"
-    r"все\s+(нормально|отлично|супер|хорошо|подошло)|"
-    r"всё\s+(нормально|отлично|супер|хорошо|подошло)|"
-    r"разобрал(ись|ась|ся)|все\s+нашла|всё\s+нашла|"
-    r"вопросов\s+нет|принято|понял[а]?)[\s!.❤🙏👍)]*$",
+    r"^(аа+)?\s*(спасибо|благодарю|спс|ок|окей)[\s!.❤🙏👍)]*$",
     re.IGNORECASE,
 )
 
@@ -142,15 +174,24 @@ def _has_return_reason(msg: str) -> bool:
 
 
 def _apply_return_flow(theme: str, msg: str, stage: str, need_human: bool,
-                       reason: str) -> Tuple[str, bool, str]:
+                       reason: str, mp: str = "wb") -> Tuple[str, bool, str]:
     """Применяет двухшаговый поток только к обычному ``vozvrat``.
 
     ``nevozvratny`` сюда не попадает: WB-правило категории остаётся отдельным.
+    ЯМ: сразу ветка возврата, без вопроса «почему», кроме срока >14 дней.
     """
     if theme != "vozvrat":
         return theme, need_human, reason
     if need_human:
         return theme, True, reason
+    mp = (mp or "wb").lower()
+    late = bool(re.search(
+        r"(14\s*дн|более\s+четырнадцати|больше\s+(двух\s+)?недель|месяц\s+назад)",
+        msg or "", re.I,
+    ))
+    if mp == "ym" and not late and stage != "awaiting_return_reason" and not _has_return_reason(msg):
+        note = "ЯМ: возврат без уточнения причины"
+        return theme, False, f"{reason}; {note}".strip("; ")
     if stage == "awaiting_return_reason" or _has_return_reason(msg):
         note = "причина возврата получена → менеджер"
         return theme, True, f"{reason}; {note}".strip("; ")
@@ -208,8 +249,20 @@ _DOSTAVKA_RE = re.compile(
 )
 
 _CANCEL_RE = re.compile(
-    r"(отменить\s+заказ|отмена\s+заказ|отмените\s+(заказ|доставк)|"
-    r"хочу\s+отменить\s+заказ|отмените\s+пожалуйста\s+заказ)",
+    r"(отмен\w*\s+(заказ|доставк)|отмена\s+заказ|"
+    r"отмените\s+(пожалуйста\s+)?(заказ|доставк)|"
+    r"хочу\s+отменить\s+заказ|"
+    r"отметите\s+заказ|отметить\s+заказ|"
+    r"нет\s+в\s+надобност|не\s+надо\s+(его\s+)?привозить|"
+    r"если\s+(ещ[её]\s+)?не\s+отправил)",
+    re.IGNORECASE,
+)
+
+# Шаблон WB «посмотрите моё сообщение — жду ответа» — не тема и не обучение.
+_MARKETPLACE_NUDGE_RE = re.compile(
+    r"^(?:здравствуйте|добрый\s+(?:день|вечер|утро))[!.,]?\s+"
+    r"пожалуйста,?\s+посмотрите\s+мо[её]\s+сообщен\w*"
+    r"(?:\s*[—\-–]\s*жду\s+ответа)?[\s!.]*$",
     re.IGNORECASE,
 )
 
@@ -265,6 +318,19 @@ _TUBE_CHECK_RE = re.compile(
     r"не\s+хвата\w*\s+\w*\s*труб|труб\w*\s+не\s+хвата)",
     re.IGNORECASE,
 )
+_WHEEL_MISS_RE = re.compile(
+    r"(не\s+хвата\w*.{0,24}кол[её]с|нет\s+кол[её]с|без\s+кол[её]с|кол[её]с\w*\s+не\s+(пришл|хвата|долож))",
+    re.IGNORECASE | re.DOTALL,
+)
+_BOLT_MISS_RE = re.compile(
+    r"(не\s+хвата\w*.{0,24}(болт|винт|крепёж|крепеж|гайк)|"
+    r"нет\s+(болт|винт|крепёж|крепеж)|без\s+(болт|винт|крепеж|крепёж))",
+    re.IGNORECASE | re.DOTALL,
+)
+_LEG_MISS_RE = re.compile(
+    r"(не\s+хвата\w*.{0,24}нож|нет\s+нож|без\s+нож|ножк\w*\s+не\s+(пришл|хвата|долож))",
+    re.IGNORECASE | re.DOTALL,
+)
 _KEPT_ANYWAY_RE = re.compile(
     r"(остав(лю|или|им|ляю)\s+(товар|сушилку|стеллаж|обувниц)|"
     r"буду\s+пользова|пользуюсь|оставила?\s+себе)",
@@ -291,6 +357,67 @@ _SHORT_NO_SIGN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Уже представлялись в чате («Александр, команда Видовито» и варианты)
+_SIGN_MARK_RE = re.compile(
+    r"(команда\s+видовито|из\s+команды\s+видовито)",
+    re.IGNORECASE,
+)
+
+# Ozon: «Здравствуйте! У меня вопрос по вашему товару "…", артикул X. …»
+# ЯМ DIRECT: «Здравствуйте, у меня вопрос по товару Стеллаж …, 173×43×30 см.»
+# Название карточки общее — без срезки «полок/хранения/вешалка» путается с некомплектом.
+_OZON_PRODUCT_QUESTION_RE = re.compile(
+    r"^\s*(?:(?:здравствуйте|добрый\s+(?:день|вечер|утро)|привет)[!.,]?\s+)?"
+    r"у\s+меня\s+вопрос\s+по\s+вашему\s+товару\s+"
+    r"(?:«[^»]{1,400}»|\"[^\"]{1,400}\"|“[^”]{1,400}”)\s*"
+    r"(?:,?\s*артикул\s*:?\s*[A-Za-z0-9._\-]+)?\s*[.!]?\s*",
+    re.IGNORECASE,
+)
+_YM_PRODUCT_QUESTION_RE = re.compile(
+    r"^\s*(?:(?:здравствуйте|добрый\s+(?:день|вечер|утро)|привет)[!.,]?\s+)?"
+    r"у\s+меня\s+вопрос\s+по\s+товару\s+"
+    r"(?!«|\"|“)"
+    r".+?"
+    r"(?:[.!](?:\s|$)|$)",
+    re.IGNORECASE,
+)
+_PRODUCT_QUESTION_HEAD_RE = re.compile(
+    r"у\s+меня\s+вопрос\s+по\s+(?:вашему\s+)?товару\b",
+    re.IGNORECASE,
+)
+_PRODUCT_QUESTION_LLM_NOTE = (
+    "Шаблон площадки «у меня вопрос по товару {название карточки}» "
+    "без своего вопроса — это не некомплект и не запрос детали. "
+    "Тема utochnenie: спроси, что именно нужно."
+)
+
+_SKIDKA_RE = re.compile(
+    r"(как\s+(мне\s+)?(получить|взять)\s+скидк|получить\s+скидк|"
+    r"есть\s+(ли\s+)?скидк|какая\s+скидк|сделайте\s+скидк|"
+    r"можете\s+скидк|скидк\w*\s+(пожалуйста|на\s+(этот\s+)?товар)|"
+    r"промокод|купон\s+на\s+скидк)",
+    re.IGNORECASE,
+)
+
+
+def _unwrap_client_question(msg: str) -> str:
+    """Оставляет вопрос клиента, без шапки Ozon/ЯМ с названием карточки."""
+    raw = (msg or "").strip()
+    if not raw:
+        return ""
+    stripped = _OZON_PRODUCT_QUESTION_RE.sub("", raw, count=1).strip()
+    if stripped == raw:
+        stripped = _YM_PRODUCT_QUESTION_RE.sub("", raw, count=1).strip()
+    return stripped
+
+
+def _is_product_question_wrapper_only(msg: str) -> bool:
+    """Шаблон площадки «вопрос по товару {карточка}» без своей сути."""
+    raw = (msg or "").strip()
+    if not raw or not _PRODUCT_QUESTION_HEAD_RE.search(raw):
+        return False
+    return not _unwrap_client_question(raw)
+
 
 # ── Инициализация ────────────────────────────────────────────────────────────
 
@@ -313,9 +440,12 @@ EXTRA_SETTINGS = [
     ("bot_shadow", "false",
      "Устарело: теневой журнал. Оставьте false. Подсказки при открытии чата не требуют тени."),
     ("greeting_text", "Здравствуйте!",
-     "Приветствие. Ставится раз в календарный день (по Москве)."),
-    ("bot_confidence_min", "0.55",
-     "Минимальная уверенность диспетчера. Ниже — передаём менеджеру."),
+     "Приветствие. Ставится, если с нашего последнего приветствия прошло 12 часов."),
+    ("bot_confidence_min", "0.65",
+     "Минимальная уверенность для подстановки шаблона в окно ответа. Ниже — поле пустое, менеджер выбирает сам (без меню 1–5 и без ИИ-заполнения)."),
+    ("bot_auto_confidence_min", "0.90",
+     "Автоответ клиенту только при уверенности не ниже этого порога. Иначе — черновик на согласование. "
+     "Похожий выбор менеджера в прошлом чате автоответ не даёт — только черновик."),
     ("bot_only_days", "2",
      "Брать только чаты за последние N дней (0 = без ограничения). Экономит токены на старом бэклоге."),
     ("bot_only_no_manager", "true",
@@ -323,8 +453,8 @@ EXTRA_SETTINGS = [
      "Чаты, которые бот уже вёл, продолжает."),
     ("bot_model", "qwen-plus",
      "Модель для классификации темы: qwen-plus (основная) или yandexgpt-lite (запасной)."),
-    ("bot_ai_draft", "true",
-     "Если нет шаблона — ИИ пишет черновик менеджеру (true/false). Клиенту сам не отправляет."),
+    ("bot_ai_draft", "false",
+     "Кнопка «Сгенерировать»: ИИ пишет черновик, если нет шаблона. Выкл — Qwen не вызываем."),
     ("bot_ai_draft_model", "qwen-plus",
      "Модель для черновика без шаблона: qwen-plus (основная) или yandexgpt-lite (запасной)."),
     ("bot_persona", DEFAULT_PERSONA,
@@ -337,7 +467,7 @@ EXTRA_SETTINGS = [
 
 # Ключи, которые хранятся отдельно на каждую площадку (см. get_setting_mp).
 BOT_MP_CONTROL_KEYS = {
-    "bot_enabled", "bot_confidence_min", "bot_only_days",
+    "bot_enabled", "bot_confidence_min", "bot_auto_confidence_min", "bot_only_days",
     "bot_only_no_manager", "bot_suggest_on_open", "bot_ai_draft",
     "bot_test_chat_ids",
 }
@@ -383,14 +513,17 @@ def init_bot_tables(engine):
                 "ALTER TABLE cx_chat_bot_log ADD COLUMN IF NOT EXISTS mp TEXT DEFAULT 'wb'"
             ))
         except Exception:
-            pass
+            conn.rollback()
         # Fast handoff check after a sent auto-reply.  Do not put COALESCE(mp,
         # 'wb') in the predicate: old WB rows with mp=NULL must stay covered.
-        conn.execute(text("""
+        try:
+            conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_chat_bot_log_sent_auto_lookup
             ON cx_chat_bot_log (chat_id, mp, created_at DESC, id DESC)
             WHERE sent = true AND zone = 'auto'
         """))
+        except Exception:
+            conn.rollback()
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_bot_suggest_cache (
                 chat_id         TEXT PRIMARY KEY,
@@ -406,7 +539,40 @@ def init_bot_tables(engine):
                 "ALTER TABLE cx_chat_bot_state ADD COLUMN IF NOT EXISTS pending_menu TEXT"
             ))
         except Exception:
-            pass
+            conn.rollback()
+        try:
+            conn.execute(text(
+                "ALTER TABLE cx_chat_bot_state "
+                "ADD COLUMN IF NOT EXISTS bot_disabled BOOLEAN DEFAULT false"
+            ))
+        except Exception:
+            conn.rollback()
+        try:
+            conn.execute(text(
+                "ALTER TABLE cx_chat_bot_state "
+                "ADD COLUMN IF NOT EXISTS last_greeted_at TIMESTAMP"
+            ))
+        except Exception:
+            conn.rollback()
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cx_chat_bot_corrections (
+                id                SERIAL PRIMARY KEY,
+                chat_id           TEXT NOT NULL,
+                mp                TEXT NOT NULL DEFAULT 'wb',
+                client_message    TEXT NOT NULL DEFAULT '',
+                suggested_theme   TEXT NOT NULL DEFAULT '',
+                suggested_branch  TEXT NOT NULL DEFAULT '',
+                chosen_theme      TEXT NOT NULL,
+                chosen_branch     TEXT NOT NULL DEFAULT '',
+                chosen_variant_id INTEGER,
+                created_by        TEXT NOT NULL DEFAULT '',
+                created_at        TIMESTAMP DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_chat_bot_corrections_mp
+            ON cx_chat_bot_corrections (mp, created_at DESC)
+        """))
         for k, v, d in EXTRA_SETTINGS:
             conn.execute(text("""
                 INSERT INTO cx_chat_settings (key, value, descr, updated_by)
@@ -421,6 +587,10 @@ def init_bot_tables(engine):
                     'yandexgpt-lite', 'yandexgpt', 'yandex-lite', 'yandex-pro',
                     'claude-haiku', 'claude-sonnet'
                )
+        """))
+        conn.execute(text("""
+            DELETE FROM cx_chat_bot_corrections
+            WHERE client_message ~* 'посмотрите[[:space:]]+мо[её][[:space:]]+сообщен'
         """))
         conn.commit()
     from .routers.chat_playbook import ensure_mp_control_settings
@@ -447,7 +617,7 @@ def _ts_to_msk_date(ts_ms: Optional[int]):
 
 def _remap_theme_for_mp(theme: str, mp: str, reason: str = "",
                         client_msg: str = "") -> Tuple[str, str]:
-    """На Ozon доотправки деталей нет. На ЯМ доотправка есть — пишем в чатах как на WB."""
+    """На Ozon и ЯМ доотправка есть. Невозвратность сушилок — только WB."""
     mp = (mp or "wb").lower()
     msg = client_msg or ""
     # ИИ часто путает «заглушки» с темой насадок — не шлём ссылку на насадки
@@ -462,20 +632,32 @@ def _remap_theme_for_mp(theme: str, mp: str, reason: str = "",
         note = f"→vozvrat ({mp}: nevozvratny только WB)"
         reason = f"{reason}; {note}".strip("; ") if reason else note
         return "vozvrat", reason
-    # Только Ozon: согласие/ссылка/статус WB-доотправки → некомплект без досылки
-    if mp == "ozon" and theme in ("soglasie", "ssylka", "status_zayavki"):
-        note = f"→nekomplekt ({mp}: без доотправки)"
+    # На Ozon доотправка есть: согласие, ссылка и статус заявки остаются своими темами.
+    if mp != "ym" and theme == "kupit_detal":
+        note = "→nekomplekt (покупка детали только ЯМ)"
         reason = f"{reason}; {note}".strip("; ") if reason else note
         return "nekomplekt", reason
     return theme, reason
 
 
 _MOP_ARTICLE_RE = re.compile(r"^mop[\-_]", re.I)
+# Высокие вёдра 2S — другое изделие, видео «товар не работает» туда не подходит.
+_TWO_S_BUCKET_RE = re.compile(
+    r"(?:^|[\s\-_/])2s(?:$|[\s\-_/])|2-s\b|2сб|высок\w*\s+ведр|ведр\w*\s+высок",
+    re.I,
+)
+
+
+def _is_two_s_or_high_bucket(article: str = "", name: str = "") -> bool:
+    blob = f"{article or ''} {name or ''}"
+    return bool(_TWO_S_BUCKET_RE.search(blob))
 
 
 def _is_mop_or_bucket(db: Session, *, article: str = "", nm_id=None) -> bool:
-    """Тема ekspluataciya (видео швабры) — только артикулы Mop-* / категория швабры|вёдра."""
+    """Тема ekspluataciya — швабры/вёдра 1S. Высокие 2S сюда не идут."""
     art = (article or "").strip()
+    if _is_two_s_or_high_bucket(art):
+        return False
     if art and _MOP_ARTICLE_RE.match(art):
         return True
     cat = ""
@@ -484,10 +666,14 @@ def _is_mop_or_bucket(db: Session, *, article: str = "", nm_id=None) -> bool:
     except Exception:
         cat = ""
     cl = cat.lower()
+    if _is_two_s_or_high_bucket(art, cat):
+        return False
     if any(x in cl for x in ("швабр", "ведр", "ведер")):
         return True
     if not art and nm_id is not None:
         resolved = _get_article(db, nm_id)
+        if resolved and _is_two_s_or_high_bucket(resolved):
+            return False
         if resolved and _MOP_ARTICLE_RE.match(resolved.strip()):
             return True
     return False
@@ -501,7 +687,10 @@ _PARTS_REQ_RE = re.compile(
 
 
 def _looks_like_missing_parts(msg: str = "", reason: str = "") -> bool:
-    return bool(_PARTS_REQ_RE.search(f"{msg or ''} {reason or ''}"))
+    if _is_product_question_wrapper_only(msg):
+        return False
+    s = _unwrap_client_question(msg or "")
+    return bool(_PARTS_REQ_RE.search(f"{s} {reason or ''}"))
 
 
 def _clarify_menu_text(mp: str = "wb") -> str:
@@ -546,6 +735,33 @@ def _return_only_text(mp: str) -> str:
         f"Рекомендуем оформить возврат {where}. "
         "Окончательное решение и дальнейшие инструкции предоставит маркетплейс."
     )
+
+
+def _article_for_chat(db: Session, chat: Optional[dict], mp: str) -> str:
+    """WB: артикул по nm_id. Название карточки («Сушилка…») в список SKU не подходит."""
+    chat = chat or {}
+    mp = (mp or "wb").lower()
+    if mp in ("ozon", "ym"):
+        return (chat.get("good_name") or "").strip()
+    article = _get_article(db, chat.get("nm_id"))
+    if article:
+        return article
+    reship = _get_reshipment(db, chat.get("chat_id") or "") if mp == "wb" else None
+    if reship and reship.get("wb_nm_id"):
+        return _get_article(db, reship.get("wb_nm_id"))
+    return ""
+
+
+def _plain_client_text(msg: str) -> str:
+    s = _unwrap_client_question(msg or "")
+    return re.sub(r"[\u00a0\u202f]+", " ", s).strip()
+
+
+def _is_marketplace_nudge(msg: str) -> bool:
+    s = _plain_client_text(msg)
+    if not s:
+        return False
+    return bool(_MARKETPLACE_NUDGE_RE.match(s))
 
 
 def _get_article(db: Session, nm_id) -> str:
@@ -688,7 +904,7 @@ def _get_reshipment(db: Session, chat_id: str) -> Optional[dict]:
             SELECT id, status, cdek_number, track_number, delivery_method,
                    client_pvz_address, customer_name, wb_nm_id
             FROM reshipment_requests
-            WHERE wb_chat_id = :cid
+            WHERE wb_chat_id = :cid OR ym_chat_id = :cid OR ozon_chat_id = :cid
             ORDER BY id DESC LIMIT 1
         """), {"cid": chat_id}).mappings().fetchone()
         return dict(row) if row else None
@@ -766,6 +982,20 @@ def _last_seller_ts(db: Session, chat_id: str, mp: str = "wb"):
     return row[0] if row else None
 
 
+def set_bot_disabled(conn, chat_id: str, disabled: bool = True) -> None:
+    """После архива чата автоответы больше не пишут, даже если клиент снова написал."""
+    cid = (chat_id or "").strip()
+    if not cid:
+        return
+    conn.execute(text("""
+        INSERT INTO cx_chat_bot_state (chat_id, stage, bot_disabled, updated_at)
+        VALUES (:cid, 'new', :off, now())
+        ON CONFLICT (chat_id) DO UPDATE SET
+            bot_disabled = EXCLUDED.bot_disabled,
+            updated_at = now()
+    """), {"cid": cid, "off": bool(disabled)})
+
+
 def _bot_state(db: Session, chat_id: str) -> dict:
     row = db.execute(text(
         "SELECT * FROM cx_chat_bot_state WHERE chat_id = :cid"
@@ -778,7 +1008,9 @@ def _bot_state(db: Session, chat_id: str) -> dict:
     """), {"cid": chat_id})
     db.commit()
     return {"chat_id": chat_id, "stage": "new", "last_theme": None,
-            "last_greeted_date": None, "last_bot_at": None, "closing_asked_at": None}
+            "last_greeted_date": None, "last_greeted_at": None,
+            "last_bot_at": None, "closing_asked_at": None,
+            "bot_disabled": False}
 
 
 _POST_AUTO_REPLY_HANDOFF_REASON = (
@@ -858,11 +1090,28 @@ def _parse_menu_choice(msg: str) -> Optional[str]:
     return None
 
 
-def _rule_classify(msg: str, stage: str) -> Optional[Tuple[str, float, bool, str]]:
+def _ym_parts_dialog_open(mp: str, stage: str) -> bool:
+    """ЯМ: после предложения купить / бесплатной доотправки ждём да/нет, не менеджера."""
+    return (mp or "").lower() == "ym" and (stage or "") in ("awaiting_buy", "awaiting_client")
+
+
+def _wants_return(msg: str) -> bool:
+    s = msg or ""
+    return bool(_VOZVRAT_RE.search(s) or re.search(r"хочу\s+вернуть", s, re.I))
+
+
+def _rule_classify(msg: str, stage: str, mp: str = "wb") -> Optional[Tuple[str, float, bool, str]]:
     """Жёсткие правила до ИИ. Возвращает (theme, conf, need_human, reason) или None."""
     s = (msg or "").strip()
+    mp = (mp or "wb").lower()
     if not s:
         return ("blagodarnost", 0.4, True, "пустое сообщение")
+    if _is_product_question_wrapper_only(s):
+        return ("utochnenie", 0.9, False, "шапка площадки «вопрос по товару», без сути")
+
+    # Отмена заказа — раньше handoff и согласия (опечатки «отметите заказ»).
+    if _CANCEL_RE.search(s):
+        return ("otmena_zakaza", 0.9, False, "отмена заказа (правило)")
 
     # Уже передано менеджеру — не предлагаем снова меню 1–5
     if stage == "handoff":
@@ -873,7 +1122,10 @@ def _rule_classify(msg: str, stage: str) -> Optional[Tuple[str, float, bool, str
         return ("vozvrat", 0.95, True, "получен ответ с причиной возврата")
 
     # Клиент закрыл тему / отменил обращение (не заказ)
-    if _CANCEL_BOT_RE.match(s) or (_RESOLVED_RE.search(s) and len(s) < 180):
+    # Но «будем благодарны» + «актуально» — это согласие на доотправку, не закрытие.
+    if _CANCEL_BOT_RE.match(s) or (
+        _RESOLVED_RE.search(s) and len(s) < 180 and not _AGREE_HINT_RE.search(s)
+    ):
         return ("blagodarnost", 0.9, False, "клиент закрыл вопрос")
 
     # Ответ на меню уточнения
@@ -891,17 +1143,42 @@ def _rule_classify(msg: str, stage: str) -> Optional[Tuple[str, float, bool, str
             return ("utochnenie", 0.4, False, "меню: ждём выбор (шаблонное приветствие)")
         return ("utochnenie", 0.85, False, "меню: повтор")
 
+    # ЯМ: ветка «купить со скидкой → бесплатно дольше → возврат»
+    agreed = (
+        (_AGREE_RE.match(s) or _AGREE_HINT_RE.search(s))
+        and not _DECLINE_RE.search(s)
+    )
+    if mp == "ym" and stage == "awaiting_buy":
+        if _wants_return(s):
+            return ("nekomplekt", 0.93, False, "ЯМ: сразу возврат")
+        if agreed:
+            return ("kupit_detal", 0.93, False, "ЯМ: согласие купить деталь")
+        if _DECLINE_RE.search(s):
+            return ("nekomplekt", 0.92, False, "ЯМ: отказ от покупки → бесплатная доотправка")
+    if mp == "ym" and stage == "awaiting_client":
+        if agreed:
+            return ("soglasie", 0.93, False, "ЯМ: согласие на бесплатную доотправку")
+        if _DECLINE_RE.search(s) or _wants_return(s):
+            return ("nekomplekt", 0.93, False, "ЯМ: отказ от доотправки → возврат")
+    if mp == "ym" and stage == "form_sent" and (_DECLINE_RE.search(s) or _wants_return(s)):
+        return ("nekomplekt", 0.9, False, "ЯМ: отказ после формы → возврат")
+
     # «Другое» вне меню (клиент отвечает словами после меню, а stage уже сменился)
     if _OTHER_SHORT_RE.match(s):
         return ("dengi", 0.9, True, "другое → менеджер")
 
-    # Заглушки/крепёж — до насадок (иначе ИИ путает с zapchasti→насадки)
-    if _KREPEZH_RE.search(s):
+    # Заглушки/крепёж — до насадок (иначе ИИ путает с zapchasti→насадки).
+    # Но «не положили заглушки/шурупы» — это некомплект, не «купите в магазине».
+    if _KREPEZH_RE.search(s) and not _NEKOMPLEKT_RE.search(s):
         return ("krepezh", 0.93, False, "заглушки/крепёж (правило)")
 
     # Только явный запрос насадок/тряпок
     if _NASADKI_RE.search(s):
         return ("zapchasti", 0.92, False, "насадки (правило)")
+
+    # Дырки на полке/подносе — линия покраски, не некомплект и не брак
+    if is_paint_hole_question(s):
+        return ("tech_otverstiya", 0.93, False, "технологические отверстия (правило)")
 
     # 1) Реальная красная зона (суд/угрозы) — всегда человеку
     if _HARD_RED_RE.search(s):
@@ -923,15 +1200,26 @@ def _rule_classify(msg: str, stage: str) -> Optional[Tuple[str, float, bool, str
     if _MONEY_RE.search(s):
         return ("dengi", 0.9, True, "красная зона: деньги")
 
+    if _SKIDKA_RE.search(s):
+        return ("dengi", 0.9, True, "скидка/акция → менеджер")
+
     # Короткие согласия/отказы зависят от стадии
-    if stage in ("awaiting_client", "form_sent", "new") and len(s) < 100:
-        if _AGREE_RE.match(s) and not _DECLINE_RE.search(s):
-            # «да» без контекста доотправки на стадии new — пусть решает ИИ
+    if stage in ("awaiting_client", "form_sent", "new") and len(s) < 120:
+        # «актуально / конечно / будем благодарны» — согласие на доотправку,
+        # даже если фраза начинается с «Здравствуйте» (иначе уходит в благодарность).
+        if (
+            (_AGREE_RE.match(s) or _AGREE_HINT_RE.search(s))
+            and not _DECLINE_RE.search(s)
+        ):
             if stage == "new" and re.match(r"^да[\s!.]*$", s, re.I):
                 pass
             else:
-                return ("soglasie", 0.92, False, "согласие по стадии")
-        if stage in ("awaiting_client", "form_sent") and _DECLINE_RE.search(s):
+                return ("soglasie", 0.92, False, "согласие на доотправку")
+        if (
+            mp != "ym"
+            and stage in ("awaiting_client", "form_sent")
+            and _DECLINE_RE.search(s)
+        ):
             return ("otkaz_dootpravki", 0.9, True, "отказ от доотправки")
 
     if _THANKS_RE.match(s):
@@ -939,6 +1227,10 @@ def _rule_classify(msg: str, stage: str) -> Optional[Tuple[str, float, bool, str
 
     if _SSYLKA_RE.search(s):
         return ("ssylka", 0.88, False, "ссылка")
+
+    if re.search(r"(что\s+с\s+мо(им|ей)\s+заказ|где\s+(мой\s+)?заказ|где\s+посылк)", s, re.I) \
+            and not re.search(r"(заявк|детал)", s, re.I):
+        return ("dostavka_wb", 0.86, False, "статус заказа, не заявки на деталь")
 
     if _STATUS_RE.search(s):
         return ("status_zayavki", 0.82, False, "статус заявки (правило)")
@@ -951,9 +1243,6 @@ def _rule_classify(msg: str, stage: str) -> Optional[Tuple[str, float, bool, str
 
     if _TECH_RE.search(s):
         return ("teh_sboi", 0.85, False, "техсбой МП (правило)")
-
-    if _CANCEL_RE.search(s):
-        return ("otmena_zakaza", 0.88, False, "отмена заказа (правило)")
 
     if _DOSTAVKA_RE.search(s):
         return ("dostavka_wb", 0.85, False, "доставка WB (правило)")
@@ -981,15 +1270,220 @@ def _themes_for_prompt(db: Session) -> List[dict]:
     return [dict(r) for r in rows]
 
 
+def _msg_tokens(msg: str) -> set:
+    return set(re.findall(r"[а-яёa-z0-9]{4,}", (msg or "").lower()))
+
+
+def _correction_overlap(msg: str, sample: str) -> int:
+    a, b = _msg_tokens(msg), _msg_tokens(sample)
+    if not a or not b:
+        return 0
+    return len(a & b)
+
+
+def _correction_jaccard(msg: str, sample: str) -> float:
+    a, b = _msg_tokens(msg), _msg_tokens(sample)
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if inter < 2:
+        return 0.0
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+
+_MANAGER_CORRECTION_REASON = "исправление менеджера"
+
+
+def _is_manager_correction_reason(reason: str) -> bool:
+    return _MANAGER_CORRECTION_REASON in (reason or "")
+
+
+def _best_correction(db: Session, msg: str, mp: str, chat_id: str = "") -> Optional[dict]:
+    """Похожее исправление менеджера → тема для черновика (не для автоотправки)."""
+    text_msg = _unwrap_client_question(msg)
+    if (
+        len(text_msg) < 8
+        or _is_marketplace_nudge(text_msg)
+        or _is_product_question_wrapper_only(msg)
+    ):
+        return None
+    skip_chat = (chat_id or "").strip()
+    try:
+        rows = db.execute(text("""
+            SELECT chosen_theme, chosen_branch, client_message, chat_id
+            FROM cx_chat_bot_corrections
+            WHERE coalesce(mp, 'wb') = :mp
+              AND chosen_theme <> ''
+            ORDER BY created_at DESC
+            LIMIT 400
+        """), {"mp": (mp or "wb").lower()}).mappings().all()
+    except Exception:
+        return None
+    best = None
+    best_score = 0.0
+    for row in rows:
+        if skip_chat and (row.get("chat_id") or "").strip() == skip_chat:
+            continue
+        sample = _unwrap_client_question(row.get("client_message") or "")
+        if (
+            len(sample) < 8
+            or _is_marketplace_nudge(sample)
+            or _is_product_question_wrapper_only(row.get("client_message") or "")
+        ):
+            continue
+        score = _correction_jaccard(text_msg, sample)
+        if score > best_score:
+            best_score = score
+            best = dict(row)
+    if best and best_score >= 0.38:
+        return best
+    return None
+
+
+def _correction_hints_for_prompt(db: Session, mp: str) -> str:
+    try:
+        rows = db.execute(text("""
+            SELECT client_message, chosen_theme
+            FROM cx_chat_bot_corrections
+            WHERE coalesce(mp, 'wb') = :mp
+              AND chosen_theme <> ''
+            ORDER BY created_at DESC
+            LIMIT 8
+        """), {"mp": (mp or "wb").lower()}).mappings().all()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = []
+    for row in rows:
+        sample = _unwrap_client_question(row.get("client_message") or "")
+        sample = re.sub(r"\s+", " ", sample).strip()[:120]
+        theme = row.get("chosen_theme") or ""
+        if sample and theme:
+            lines.append(f"- «{sample}» → {theme}")
+    if not lines:
+        return ""
+    return (
+        "Исправления менеджеров (если похоже — выбирай ту же тему):\n"
+        + "\n".join(lines) + "\n\n"
+    )
+
+
+def record_correction(
+    db: Session, *,
+    chat_id: str,
+    mp: str,
+    client_message: str,
+    suggested_theme: str = "",
+    suggested_branch: str = "",
+    chosen_theme: str,
+    chosen_branch: str = "",
+    chosen_variant_id: Optional[int] = None,
+    created_by: str = "",
+) -> dict:
+    chosen = (chosen_theme or "").strip()
+    if not chosen:
+        return {"ok": False, "reason": "нет выбранной темы"}
+    suggested = (suggested_theme or "").strip()
+    sug_branch = (suggested_branch or "").strip()
+    ch_branch = (chosen_branch or "").strip()
+    msg = _unwrap_client_question(client_message)[:2000]
+    if (
+        not msg
+        or _is_marketplace_nudge(msg)
+        or _is_product_question_wrapper_only(client_message)
+    ):
+        return {"ok": True, "saved": False, "learned": False, "reason": "шаблон площадки, не учим"}
+    mp_key = (mp or "wb").lower()
+    differs = suggested != chosen or sug_branch != ch_branch
+    try:
+        dup = db.execute(text("""
+            SELECT 1 FROM cx_chat_bot_corrections
+            WHERE coalesce(mp, 'wb') = :mp
+              AND chosen_theme = :chosen
+              AND coalesce(chosen_branch, '') = :branch
+              AND client_message = :msg
+              AND created_at > now() - interval '7 days'
+            LIMIT 1
+        """), {
+            "mp": mp_key, "chosen": chosen, "branch": ch_branch, "msg": msg,
+        }).fetchone()
+    except Exception:
+        dup = None
+    if dup:
+        return {"ok": True, "saved": False, "learned": False, "reason": "уже есть такой пример"}
+    db.execute(text("""
+        INSERT INTO cx_chat_bot_corrections (
+            chat_id, mp, client_message, suggested_theme, suggested_branch,
+            chosen_theme, chosen_branch, chosen_variant_id, created_by
+        ) VALUES (
+            :chat_id, :mp, :client_message, :suggested_theme, :suggested_branch,
+            :chosen_theme, :chosen_branch, :chosen_variant_id, :created_by
+        )
+    """), {
+        "chat_id": (chat_id or "").strip(),
+        "mp": mp_key,
+        "client_message": msg,
+        "suggested_theme": suggested,
+        "suggested_branch": sug_branch,
+        "chosen_theme": chosen,
+        "chosen_branch": ch_branch,
+        "chosen_variant_id": chosen_variant_id,
+        "created_by": (created_by or "").strip()[:120],
+    })
+    db.commit()
+    return {"ok": True, "saved": differs, "learned": True}
+
+
+def _auto_min_confidence(db: Session, mp: str) -> float:
+    raw = chat_playbook.get_setting_mp(
+        db, "bot_auto_confidence_min", mp or "wb", str(AUTO_SEND_MIN_CONF),
+    )
+    try:
+        val = float(raw or AUTO_SEND_MIN_CONF)
+    except (TypeError, ValueError):
+        val = AUTO_SEND_MIN_CONF
+    return min(0.99, max(0.5, val))
+
+
+def gate_auto_by_confidence(
+    zone: str, theme: str, conf: float, reason: str, db: Session, mp: str,
+) -> Tuple[str, str, bool]:
+    """Тема «Авто» уходит клиенту только при высокой уверенности. Иначе — согласование.
+
+    Выбор шаблона менеджером — подтверждение для человека, не автоотправка.
+    """
+    if (zone or "") != "auto" or (theme or "") == "utochnenie":
+        return zone, reason, False
+    if _is_manager_correction_reason(reason):
+        note = "выбор менеджера — черновик, без автоотправки"
+        return "draft", f"{reason}; {note}".strip("; "), True
+    min_auto = _auto_min_confidence(db, mp)
+    try:
+        score = float(conf or 0)
+    except (TypeError, ValueError):
+        score = 0.0
+    if score >= min_auto:
+        return zone, reason, False
+    note = f"уверенность {score:.0%} < {min_auto:.0%} → согласование"
+    return "draft", f"{reason}; {note}".strip("; "), True
+
+
 def _llm_classify(msg: str, history: List[dict], themes: List[dict],
-                  article: str, stage: str, *, model: str = "qwen-plus") -> Optional[dict]:
+                  article: str, stage: str, *, model: str = "qwen-plus",
+                  correction_hints: str = "") -> Optional[dict]:
     from .llm import complete_sync, is_yandex_lite
+
+    if _quota_paused():
+        return None
 
     theme_lines = "\n".join(
         f"- {t['theme_key']}: {t['name']} — {t['when_text']}" for t in themes
     )
     hist_lines = "\n".join(
-        f"{'Клиент' if h['sender']=='client' else 'Мы'}: {(h.get('text') or '')[:200]}"
+        f"{'Клиент' if h['sender']=='client' else 'Мы'}: "
+        f"{(_unwrap_client_question(h.get('text') or '') or h.get('text') or '')[:200]}"
         for h in history[-6:]
     ) or "(пусто)"
 
@@ -997,15 +1491,18 @@ def _llm_classify(msg: str, history: List[dict], themes: List[dict],
         "Ты диспетчер чата продавца маркетплейса. "
         "Выбери ОДНУ тему из списка. Не пиши ответ клиенту. "
         "Если это деньги/суд/угрозы/травма — need_human=true. "
+        f"{_PRODUCT_QUESTION_LLM_NOTE} "
         "Ответь ТОЛЬКО JSON: "
         '{"theme":"theme_key","confidence":0.0,"need_human":false,"reason":"..."}'
     )
+    shown = _unwrap_client_question(msg) or msg
     user = (
         f"Стадия диалога: {stage}\n"
         f"Артикул: {article or 'неизвестен'}\n"
         f"Темы:\n{theme_lines}\n\n"
+        f"{correction_hints}"
         f"История:\n{hist_lines}\n\n"
-        f"Новое сообщение клиента:\n{msg}\n"
+        f"Новое сообщение клиента:\n{shown}\n"
     )
     try:
         raw = complete_sync(
@@ -1022,29 +1519,66 @@ def _llm_classify(msg: str, history: List[dict], themes: List[dict],
         return json.loads(m.group(0))
     except Exception as e:
         logger.warning("[ChatBot] classify error: %s", e)
+        _mark_quota_pause(str(e))
         return None
 
 
+def _branch_or_correction(db: Session, theme: str, article: str, reship,
+                          msg: str, *, mp: str, stage: str, last_theme: str) -> str:
+    """Если менеджер уже правил похожий случай — берём его ветку, иначе обычный подбор."""
+    forced = getattr(classify, "_forced_branch", None)
+    if forced is not None:
+        return forced
+    return _resolve_branch(
+        db, theme, article, reship, msg,
+        mp=mp, stage=stage, last_theme=last_theme or "",
+    )
+
+
+def _dostavka_branch_from_fulfillment(db: Session, theme: str, branch: str,
+                                      mp: str, chat_id: str) -> str:
+    """FBS → «Наша задержка», FBO → обычный шаблон площадки.
+
+    Тип заказа важнее похожего прошлого чата: иначе старые правки «ведите в WB»
+    продолжат уходить на FBS.
+    """
+    if (theme or "") != "dostavka_wb":
+        return branch
+    try:
+        with db.bind.connect() as conn:
+            payload = chat_fulfillment.resolve_chat_fulfillment(conn, mp, chat_id) or {}
+        mapped = chat_fulfillment.dostavka_branch_for_fulfillment(payload.get("code"))
+        if mapped is None:
+            return branch
+        return mapped
+    except Exception:
+        return branch
+
+
 def classify(db: Session, msg: str, stage: str, history: List[dict],
-             article: str, nm_id=None, mp: str = "wb") -> Tuple[str, float, bool, str]:
-    ruled = _rule_classify(msg, stage)
-    if ruled:
-        theme, conf, need, reason = ruled
+             article: str, nm_id=None, mp: str = "wb",
+             chat_id: str = "") -> Tuple[str, float, bool, str]:
+    classify._forced_branch = None
+    raw = msg or ""
+    if _is_product_question_wrapper_only(raw):
+        return ("utochnenie", 0.9, False, "шапка площадки «вопрос по товару», без сути")
+    msg = _unwrap_client_question(raw)
+    hit = _best_correction(db, msg, mp or "wb", chat_id=chat_id)
+    if hit:
+        theme = hit["chosen_theme"]
+        classify._forced_branch = (hit.get("chosen_branch") or "").strip()
+        conf, need, reason = 0.95, False, f"{_MANAGER_CORRECTION_REASON} → {theme}"
     else:
-        themes = _themes_for_prompt(db)
-        model = chat_playbook.get_setting(db, "bot_model", "qwen-plus")
-        ai = _llm_classify(msg, history, themes, article, stage, model=model)
-        if not ai:
-            return ("utochnenie", 0.55, False, "ИИ недоступен → меню уточнения")
+        ruled = _rule_classify(msg, stage, mp=mp or "wb")
+        if ruled:
+            theme, conf, need, reason = ruled
+        else:
+            # Классификация через Qwen жрала лимит на каждом открытии чата/страницы
+            # вопросов. Тема — только правилами и правками менеджеров.
+            # ИИ остаётся на кнопке «Сгенерировать» (generate_ai_draft).
+            return ("utochnenie", 0.55, False, "без ИИ → шаблон или кнопка «Сгенерировать»")
 
-        keys = {t["theme_key"] for t in themes}
-        theme = ai.get("theme") or ""
-        if theme not in keys:
-            return ("utochnenie", 0.55, False, f"неизвестная тема ИИ → меню ({theme})")
-
-        conf = float(ai.get("confidence") or 0.5)
-        need = bool(ai.get("need_human"))
-        reason = str(ai.get("reason") or "ИИ")
+    chosen_from_correction = theme if hit else None
 
     # Ассортимент: сушилки и др. невозвратные — только WB
     if (mp or "wb").lower() == "wb" and theme in ("vozvrat", "nevozvratny") and not need:
@@ -1056,18 +1590,22 @@ def classify(db: Session, msg: str, stage: str, history: List[dict],
         reason = ((reason or "") + "; nevozvratny только WB → vozvrat").strip("; ")
 
     # Только после WB-проверки невозвратной категории: nevozvratny не меняем.
-    theme, need, reason = _apply_return_flow(theme, msg, stage, need, reason)
+    theme, need, reason = _apply_return_flow(theme, msg, stage, need, reason, mp=mp or "wb")
 
-    # «Товар не работает» — только швабры/вёдра (Mop-*), иначе меню уточнения
+    # «Товар не работает» — швабры/вёдра 1S; высокие 2S → меню уточнения
     if theme == "ekspluataciya" and not _is_mop_or_bucket(db, article=article, nm_id=nm_id):
         theme, conf = "utochnenie", max(conf, 0.7)
-        reason = ((reason or "") + "; ekspluataciya только швабры/вёдра → меню").strip("; ")
+        reason = ((reason or "") + "; ekspluataciya только швабры/вёдра 1S → меню").strip("; ")
 
     min_conf = float(chat_playbook.get_setting_mp(db, "bot_confidence_min", mp or "wb", str(MIN_CONFIDENCE))
                      or MIN_CONFIDENCE)
+    # Низкая уверенность: тему оставляем как подсказку для чипов, но не уводим в меню 1–5.
+    # Подстановку текста в окно режет suggest_for_chat / process по этому же порогу.
     if conf < min_conf and not need and theme != "utochnenie":
-        reason = f"уточнение: низкая уверенность ({conf:.2f}) → меню; было: {reason}"
-        theme, conf, need = "utochnenie", 0.7, False
+        reason = f"низкая уверенность ({conf:.2f}) — без автоподстановки; было: {reason}"
+
+    if chosen_from_correction is not None and theme != chosen_from_correction:
+        classify._forced_branch = None
 
     return theme, conf, need, reason
 
@@ -1101,11 +1639,13 @@ def _keywords(msg: str, limit: int = 6) -> List[str]:
 
 
 def _similar_seller_replies(db: Session, *, nm_id, client_msg: str,
-                            limit: int = 5, mp: str = "wb") -> List[str]:
+                            limit: int = 5, mp: str = "wb",
+                            skip_keywords: bool = False) -> List[str]:
     """Дешёвый поиск похожих ответов менеджеров по площадке."""
-    keys = _keywords(client_msg)
+    keys = [] if skip_keywords else _keywords(client_msg)
     rows: List[str] = []
     mp = (mp or "wb").lower()
+    recent_limit = 8 if skip_keywords else 40
 
     if mp == "ozon":
         found = db.execute(text("""
@@ -1115,8 +1655,8 @@ def _similar_seller_replies(db: Session, *, nm_id, client_msg: str,
               AND m.text IS NOT NULL
               AND length(trim(m.text)) BETWEEN 40 AND 700
             ORDER BY m.created_at DESC NULLS LAST
-            LIMIT 40
-        """)).fetchall()
+            LIMIT :lim
+        """), {"lim": recent_limit}).fetchall()
         rows.extend(r[0] for r in found if r and r[0])
         if keys and len(rows) < limit * 2:
             for kw in keys[:2]:
@@ -1140,8 +1680,8 @@ def _similar_seller_replies(db: Session, *, nm_id, client_msg: str,
               AND m.text IS NOT NULL
               AND length(trim(m.text)) BETWEEN 40 AND 700
             ORDER BY m.created_at DESC NULLS LAST
-            LIMIT 40
-        """)).fetchall()
+            LIMIT :lim
+        """), {"lim": recent_limit}).fetchall()
         rows.extend(r[0] for r in found if r and r[0])
     else:
         if nm_id:
@@ -1155,8 +1695,8 @@ def _similar_seller_replies(db: Session, *, nm_id, client_msg: str,
                   AND length(trim(m.text)) BETWEEN 40 AND 700
                   AND m.text NOT ILIKE '%box.vidovito.com%'
                 ORDER BY m.add_ts DESC NULLS LAST
-                LIMIT 30
-            """), {"nm": nm_id}).fetchall()
+                LIMIT :lim
+            """), {"nm": nm_id, "lim": 8 if skip_keywords else 30}).fetchall()
             rows.extend(r[0] for r in found if r and r[0])
 
         if keys and len(rows) < limit:
@@ -1188,9 +1728,13 @@ def _similar_seller_replies(db: Session, *, nm_id, client_msg: str,
 
 
 def _llm_complete(*, system: str, user: str, model: str = "qwen-plus",
-                  temperature: float = 0.3, max_tokens: int = 450) -> Optional[str]:
+                  temperature: float = 0.3, max_tokens: int = 450,
+                  timeout: Optional[float] = None,
+                  max_models: int = 0) -> Optional[str]:
     from .llm import complete_sync
 
+    if _quota_paused():
+        return None
     try:
         raw = complete_sync(
             system=system,
@@ -1198,23 +1742,35 @@ def _llm_complete(*, system: str, user: str, model: str = "qwen-plus",
             model_key=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=timeout,
+            max_models=max_models,
         )
         return (raw or "").strip() or None
     except Exception as e:
         logger.warning("[ChatBot] draft error: %s", e)
+        _mark_quota_pause(str(e))
         return None
 
 
 def generate_ai_draft(db: Session, *, client_msg: str, theme: str, article: str,
                       history: List[dict], nm_id=None,
-                      reship: Optional[dict] = None, mp: str = "wb") -> Optional[str]:
-    """Черновик ответа, когда в плейбуке нет шаблона. Клиенту не отправляется сам."""
-    if chat_playbook.get_setting_mp(db, "bot_ai_draft", mp or "wb", "true").lower() != "true":
+                      reship: Optional[dict] = None, mp: str = "wb",
+                      for_manager: bool = False) -> Optional[str]:
+    """Черновик ответа, когда в плейбуке нет шаблона. Клиенту не отправляется сам.
+
+    for_manager=True — кнопка в чате/вопросе: работает даже если тумблер
+    bot_ai_draft выключен (он только для автобота).
+    """
+    if not for_manager and chat_playbook.get_setting_mp(db, "bot_ai_draft", mp or "wb", "false").lower() != "true":
         return None
 
     persona = chat_playbook.get_setting(db, "bot_persona", DEFAULT_PERSONA) or DEFAULT_PERSONA
     model = chat_playbook.get_setting(db, "bot_ai_draft_model", "qwen-plus")
-    examples = _similar_seller_replies(db, nm_id=nm_id, client_msg=client_msg, mp=mp)
+    examples = _similar_seller_replies(
+        db, nm_id=nm_id, client_msg=_unwrap_client_question(client_msg), mp=mp,
+        skip_keywords=for_manager, limit=5,
+    )
+    hints = _correction_hints_for_prompt(db, mp or "wb")
 
     theme_name = ""
     row = db.execute(text(
@@ -1224,7 +1780,8 @@ def generate_ai_draft(db: Session, *, client_msg: str, theme: str, article: str,
         theme_name = f"{row['name']} ({row['when_text']})"
 
     hist_lines = "\n".join(
-        f"{'Клиент' if h['sender']=='client' else 'Мы'}: {(h.get('text') or '')[:220]}"
+        f"{'Клиент' if h['sender']=='client' else 'Мы'}: "
+        f"{(_unwrap_client_question(h.get('text') or '') or h.get('text') or '')[:220]}"
         for h in history[-6:]
     ) or "(пусто)"
 
@@ -1254,17 +1811,28 @@ def generate_ai_draft(db: Session, *, client_msg: str, theme: str, article: str,
             f"Важно: на этой площадке доотправка деталей НЕ делается — "
             f"предлагай только возврат ({orders}), без формы досылки.\n"
             f"По доставке/срокам/деньгам направляй в поддержку площадки: {support}. "
-            f"Не пиши про WB, «Покупки» WB или «Задать вопрос» WB.\n\n"
+            f"Не пиши про WB, «Покупки» WB или «Задать вопрос» WB.\n"
+            f"{_PRODUCT_QUESTION_LLM_NOTE}\n\n"
         )
     else:
         user += "\n"
+    if hints:
+        user += hints
+    shown_msg = _unwrap_client_question(client_msg)
+    if _is_product_question_wrapper_only(client_msg):
+        shown_msg = "(клиент прислал только шапку площадки «вопрос по товару», своей сути нет)"
+    elif not shown_msg:
+        shown_msg = client_msg
     user += (
         f"Примеры ответов менеджеров (стиль, не копируй слепо):\n{ex_block}\n\n"
         f"История чата:\n{hist_lines}\n\n"
-        f"Новое сообщение клиента:\n{client_msg}\n"
+        f"Новое сообщение клиента:\n{shown_msg}\n"
     )
-    raw = _llm_complete(system=persona, user=user, model=model,
-                           temperature=0.35, max_tokens=450)
+    llm_kw = dict(system=persona, user=user, model=model,
+                  temperature=0.35, max_tokens=450)
+    if for_manager:
+        llm_kw.update(timeout=20, max_models=2, max_tokens=280)
+    raw = _llm_complete(**llm_kw)
     if not raw:
         return None
     # убрать возможные обёртки «Ответ:» / кавычки
@@ -1276,41 +1844,286 @@ def generate_ai_draft(db: Session, *, client_msg: str, theme: str, article: str,
     return raw[:900]
 
 
+def _text_has_signature(text: str, signature: str = "") -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    sig = (signature or "").strip()
+    if sig and sig in raw:
+        return True
+    return bool(_SIGN_MARK_RE.search(raw))
+
+
+def _seller_already_signed(db: Session, chat_id: str, mp: str = "wb",
+                           signature: str = "") -> bool:
+    """В этом чате мы уже представлялись — повторная подпись не нужна."""
+    if not chat_id:
+        return False
+    # Берём шире обычной истории подсказки: представление могло быть раньше
+    for h in _history(db, chat_id, limit=40, mp=mp):
+        sender = (h.get("sender") or "").lower()
+        if sender not in ("seller", "partner", "merchant", "courier"):
+            continue
+        if _text_has_signature(h.get("text") or "", signature):
+            return True
+    return False
+
+
 def _polish_reply(db: Session, body: str, state: dict,
                   last_seller_ts: Optional[int],
-                  *, force_signature: bool = False) -> str:
+                  *, force_signature: bool = False,
+                  client_msg: str = "",
+                  chat_id: str = "",
+                  mp: str = "wb") -> str:
     """Приветствие + подпись вокруг готового тела ответа."""
     body = _strip_greeting(body or "").strip()
     if not body:
         return ""
     parts = []
-    if _needs_greeting(state, last_seller_ts):
+    if _needs_greeting(
+        state, last_seller_ts, client_msg=client_msg,
+        last_seller_greeting_ts=_last_seller_greeting_ts(db, chat_id, mp) if chat_id else None,
+    ):
         greet = chat_playbook.get_setting(db, "greeting_text", "Здравствуйте!").strip()
         if greet:
             parts.append(greet)
     parts.append(body)
     text_out = "\n\n".join(p for p in parts if p).strip()
+    sig = chat_playbook.get_setting(db, "signature", "").strip()
+    already = False
+    if not force_signature and chat_id:
+        already = _seller_already_signed(db, chat_id, mp, sig)
     add_sig = force_signature or (
-        body and not _SHORT_NO_SIGN_RE.match(body) and len(body) > 40
+        body and not _SHORT_NO_SIGN_RE.match(body) and len(body) > 40 and not already
     )
-    if add_sig:
-        sig = chat_playbook.get_setting(db, "signature", "").strip()
-        if sig and sig not in text_out:
-            text_out = f"{text_out}{sig if sig.startswith(chr(10)) else chr(10)+chr(10)+sig}"
+    if add_sig and sig and not _text_has_signature(text_out, sig):
+        text_out = f"{text_out}{sig if sig.startswith(chr(10)) else chr(10)+chr(10)+sig}"
     # На копирование/отправку — без ведущих пустых строк
     return text_out.lstrip(" \t\r\n")[:1000]
 
 
 # ── Ветки и сборка ответа ────────────────────────────────────────────────────
 
-def _make_form_url(db: Session, chat_id: str) -> str:
+def extract_form_tokens(text_msg: str) -> list[str]:
+    return FORM_TOKEN_RE.findall(text_msg or "")
+
+
+def bind_form_tokens_to_chat(db, text_msg: str, chat_id: str, mp: str = "") -> int:
+    """Привязать токен формы к чату, куда ссылку реально отправили.
+
+    Ссылка могла быть создана в другом чате (черновик / гонка при переключении),
+    а уйти клиенту уже здесь — иначе заявка цепляется не туда.
+    """
+    cid = str(chat_id or "").strip()
+    tokens = extract_form_tokens(text_msg)
+    if not cid or not tokens:
+        return 0
+    mp_val = (mp or "").strip().lower() or None
+    n = 0
+    for tok in tokens:
+        db.execute(text("""
+            UPDATE reshipment_chat_tokens
+            SET chat_id = :cid,
+                mp = COALESCE(:mp, mp)
+            WHERE token = :token
+              AND used_at IS NULL
+              AND COALESCE(expired, FALSE) IS NOT TRUE
+        """), {"cid": cid, "mp": mp_val, "token": tok})
+        n += 1
+    return n
+
+
+def chat_id_for_form_token(db, token: str) -> str | None:
+    """Чат, где ссылку с этим токеном реально отправили — не тот, где её создали."""
+    tok = (token or "").strip()
+    if not tok:
+        return None
+    pat = f"%t={tok}%"
+    row = db.execute(text("""
+        SELECT chat_id
+        FROM ym_chat_messages
+        WHERE text ILIKE :pat
+        ORDER BY CASE
+                   WHEN lower(COALESCE(sender_type, '')) IN ('seller', 'partner', 'merchant')
+                   THEN 0 ELSE 1
+                 END,
+                 created_at DESC NULLS LAST
+        LIMIT 1
+    """), {"pat": pat}).mappings().first()
+    if row and row.get("chat_id"):
+        return str(row["chat_id"])
+    row = db.execute(text("""
+        SELECT chat_id
+        FROM ozon_chat_messages
+        WHERE text ILIKE :pat
+        ORDER BY CASE
+                   WHEN lower(COALESCE(sender_type, '')) IN ('seller', 'partner')
+                   THEN 0 ELSE 1
+                 END,
+                 created_at DESC NULLS LAST
+        LIMIT 1
+    """), {"pat": pat}).mappings().first()
+    if row and row.get("chat_id"):
+        return str(row["chat_id"])
+    row = db.execute(text("""
+        SELECT chat_id
+        FROM wb_chat_messages
+        WHERE text ILIKE :pat
+        ORDER BY CASE WHEN lower(COALESCE(sender, '')) = 'seller' THEN 0 ELSE 1 END,
+                 add_ts DESC NULLS LAST
+        LIMIT 1
+    """), {"pat": pat}).mappings().first()
+    if row and row.get("chat_id"):
+        return str(row["chat_id"])
+    return None
+
+
+def chat_has_approved_return(db, chat_id: str | None) -> bool:
+    """По чату уже одобрен возврат WB/ЯМ — форму доотправки закрываем."""
+    cid = str(chat_id or "").strip()
+    if not cid:
+        return False
+    row = db.execute(text("""
+        SELECT 1
+        FROM wb_claims cl
+        WHERE cl.status = 'Одобрено'
+          AND lower(cl.srid) IN (
+            SELECT lower(order_rid) FROM wb_chats
+             WHERE chat_id = :cid AND coalesce(order_rid, '') <> ''
+            UNION
+            SELECT lower(rid) FROM wb_chat_pending
+             WHERE chat_id = :cid AND coalesce(rid, '') <> ''
+            UNION
+            SELECT lower(matched_srid) FROM reshipment_requests
+             WHERE wb_chat_id = :cid AND coalesce(matched_srid, '') <> ''
+          )
+        LIMIT 1
+    """), {"cid": cid}).first()
+    if row:
+        return True
+    row = db.execute(text("""
+        SELECT 1
+        FROM ym_returns r
+        JOIN ym_chats y ON (
+            r.return_id::text = y.return_id::text
+            OR r.order_id::text = y.order_id::text
+        )
+        WHERE y.chat_id = :cid
+          AND (
+            r.status_ru = 'Одобрено'
+            OR r.status IN ('REFUNDED', 'REFUND_IN_PROGRESS')
+          )
+        LIMIT 1
+    """), {"cid": cid}).first()
+    return bool(row)
+
+
+def form_token_block_reason(db, token: str | None, chat_id: str | None = None) -> str | None:
+    """Почему ссылка формы уже не действует. None — можно заполнять."""
+    cid = str(chat_id or "").strip() or None
+    tok = str(token or "").strip()
+    if not cid and tok:
+        row = db.execute(text("""
+            SELECT chat_id FROM reshipment_chat_tokens WHERE token = :t
+        """), {"t": tok}).mappings().first()
+        cid = str((row or {}).get("chat_id") or "").strip() or None
+    if not cid and tok:
+        cid = chat_id_for_form_token(db, tok)
+    if chat_has_approved_return(db, cid):
+        return "return_approved"
+    return None
+
+
+def expire_form_tokens_for_approved_return(
+    db,
+    *,
+    chat_id: str | None = None,
+    srid: str | None = None,
+    ym_return_id: str | None = None,
+    ym_order_id: str | None = None,
+) -> int:
+    """Погасить неиспользованные ссылки формы, когда возврат уже одобрен."""
+    chats = set()
+    cid = str(chat_id or "").strip()
+    if cid:
+        chats.add(cid)
+    rid = str(srid or "").strip()
+    if rid:
+        for row in db.execute(text("""
+            SELECT chat_id FROM wb_chats
+             WHERE order_rid = :s AND coalesce(chat_id, '') <> ''
+            UNION
+            SELECT chat_id FROM wb_chat_pending
+             WHERE rid = :s AND coalesce(chat_id, '') <> ''
+            UNION
+            SELECT wb_chat_id FROM reshipment_requests
+             WHERE lower(matched_srid) = lower(:s)
+               AND coalesce(wb_chat_id, '') <> ''
+        """), {"s": rid}).fetchall():
+            if row and row[0]:
+                chats.add(str(row[0]))
+    ym_rid = str(ym_return_id or "").strip()
+    ym_oid = str(ym_order_id or "").strip()
+    if ym_rid or ym_oid:
+        for row in db.execute(text("""
+            SELECT chat_id FROM ym_chats
+            WHERE coalesce(chat_id, '') <> ''
+              AND (
+                (:rid <> '' AND return_id::text = :rid)
+                OR (:oid <> '' AND order_id::text = :oid)
+              )
+        """), {"rid": ym_rid, "oid": ym_oid}).fetchall():
+            if row and row[0]:
+                chats.add(str(row[0]))
+    if not chats:
+        return 0
+    result = db.execute(text("""
+        UPDATE reshipment_chat_tokens
+        SET expired = TRUE
+        WHERE used_at IS NULL
+          AND COALESCE(expired, FALSE) IS NOT TRUE
+          AND chat_id IN :chats
+    """).bindparams(bindparam("chats", expanding=True)), {"chats": list(chats)})
+    return int(result.rowcount or 0)
+
+
+def expire_unused_form_tokens_in_text(db: Session, text_msg: str) -> int:
+    """Черновик / сбой отправки: токен не должен считаться «ссылка ушла»."""
+    tokens = extract_form_tokens(text_msg or "")
+    if not tokens:
+        return 0
+    n = 0
+    for tok in tokens:
+        result = db.execute(text("""
+            UPDATE reshipment_chat_tokens
+            SET expired = TRUE
+            WHERE token = :token
+              AND used_at IS NULL
+              AND COALESCE(expired, FALSE) IS NOT TRUE
+        """), {"token": tok})
+        n += int(result.rowcount or 0)
+    if n:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+    return n
+
+
+def _make_form_url(db: Session, chat_id: str, mp: str = "", *, persist: bool = True) -> str:
     # Тот же формат, что кнопка «Сформировать ссылку» в разделе доотправки.
+    # persist=False — черновик: клиенту ссылку ещё не даём, токен не пишем.
+    if chat_has_approved_return(db, chat_id):
+        return ""
+    if not persist:
+        return ""
     token = secrets.token_urlsafe(12)
+    mp_val = (mp or "").strip().lower() or None
     try:
         db.execute(text("""
-            INSERT INTO reshipment_chat_tokens (token, chat_id, created_by, expires_at)
-            VALUES (:token, :cid, 'chat_bot', NOW() + INTERVAL '7 days')
-        """), {"token": token, "cid": chat_id})
+            INSERT INTO reshipment_chat_tokens (token, chat_id, created_by, expires_at, mp)
+            VALUES (:token, :cid, 'chat_bot', NOW() + INTERVAL '7 days', :mp)
+        """), {"token": token, "cid": chat_id, "mp": mp_val})
         db.commit()
     except Exception as e:
         logger.warning("[ChatBot] token error: %s", e)
@@ -1328,6 +2141,12 @@ def _resolve_branch_ozon(theme: str, msg: str, stage: str = "new",
             if _RESOLVED_RE.search(s) or _KEPT_ANYWAY_RE.search(s):
                 return ""  # blagodarnost handled elsewhere
             return "no_reship_return"
+        if _WHEEL_MISS_RE.search(s):
+            return "wheels"
+        if _BOLT_MISS_RE.search(s):
+            return "bolts"
+        if _LEG_MISS_RE.search(s):
+            return "legs"
         # Трубки/перекладины — сначала «разложите по длине»
         if _TUBE_CHECK_RE.search(s):
             return "check_tubes"
@@ -1359,11 +2178,37 @@ def _resolve_branch(db: Session, theme: str, article: str,
                     last_theme: str = "") -> str:
     mp = (mp or "wb").lower()
     if theme == "vozvrat" and stage != "awaiting_return_reason" and not _has_return_reason(msg):
+        if mp == "ym":
+            late = bool(re.search(
+                r"(14\s*дн|более\s+четырнадцати|больше\s+(двух\s+)?недель|месяц\s+назад)",
+                msg or "", re.I,
+            ))
+            return "ask_reason" if late else ""
         return "ask_reason"
     if mp == "ozon":
-        return _resolve_branch_ozon(theme, msg, stage=stage, last_theme=last_theme)
+        branch = _resolve_branch_ozon(theme, msg, stage=stage, last_theme=last_theme)
+        if theme == "nekomplekt" and branch != "check_tubes":
+            if reshipment_skus.is_allowed(db, article):
+                return "sku_allowed"
+            return branch or "sku_denied"
+        if theme == "brak" and branch != "wrong_item" and reshipment_skus.is_allowed(db, article):
+            return "fixable_by_part"
+        return branch
     if theme == "nekomplekt":
-        return "sku_allowed" if reshipment_skus.is_allowed(db, article) else "sku_denied"
+        if mp == "ym":
+            from . import ym_parts
+            if ym_parts.is_2sb_hanger(article):
+                if stage == "awaiting_client":
+                    return "to_return"
+                if stage == "awaiting_buy":
+                    return "to_return" if _wants_return(msg) else "offer_free_slow"
+                return "offer_buy"
+            if not reshipment_skus.is_allowed(db, article):
+                return "sku_denied"
+            return "sku_allowed"
+        if not reshipment_skus.is_allowed(db, article):
+            return "sku_denied"
+        return "sku_allowed"
     if theme == "zapchasti":
         in_stock = chat_playbook.get_setting(db, "nasadki_in_stock", "true").lower() == "true"
         return "in_stock" if in_stock else "out_of_stock"
@@ -1393,6 +2238,24 @@ def _resolve_branch(db: Session, theme: str, article: str,
     return ""
 
 
+def nekomplekt_chip_branch(db: Session, mp: str, article: str) -> str:
+    """Ветка «отправить деталь» для быстрой кнопки: по списку SKU, без ручного выбора."""
+    art = (article or "").strip()
+    mp = (mp or "wb").lower()
+    if mp == "ozon":
+        if not art:
+            return ""
+        return "sku_allowed" if reshipment_skus.is_allowed(db, art) else "sku_denied"
+    if not art:
+        return ""
+    if mp == "ym":
+        from . import ym_parts
+        if ym_parts.is_2sb_hanger(art):
+            return "offer_buy"
+        return "sku_allowed" if reshipment_skus.is_allowed(db, art) else "sku_denied"
+    return "sku_allowed" if reshipment_skus.is_allowed(db, art) else "sku_denied"
+
+
 def _fill_placeholders(body: str, *, form_url: str = "", reship: Optional[dict] = None) -> str:
     carrier = "СДЭК"
     track = ""
@@ -1400,28 +2263,85 @@ def _fill_placeholders(body: str, *, form_url: str = "", reship: Optional[dict] 
         if (reship.get("delivery_method") or "") == "yandex":
             carrier = "Яндекс Доставка"
         track = reship.get("cdek_number") or reship.get("track_number") or ""
+    if form_url:
+        body = body.replace("{form_url}", form_url)
     return (
-        body.replace("{form_url}", form_url or FORM_BASE)
-            .replace("{carrier}", carrier)
+        body.replace("{carrier}", carrier)
             .replace("{track}", track or "—")
             .replace("{storage_until}", "указанного срока")
     )
 
 
-def _needs_greeting(state: dict, last_seller_ts: Optional[int]) -> bool:
-    today = _msk_date()
-    last_g = state.get("last_greeted_date")
-    if last_g:
-        if hasattr(last_g, "isoformat"):
-            if last_g == today:
-                return False
-        elif str(last_g)[:10] == str(today):
-            return False
-    # Если сегодня уже писали мы (по last_ts продавца) — тоже без приветствия
-    if last_seller_ts:
-        if _ts_to_msk_date(last_seller_ts) == today:
-            return False
-    return True
+GREETING_GAP = timedelta(hours=12)
+
+
+def _aware_utc(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, date):
+        noon = datetime(value.year, value.month, value.day, 12, 0, tzinfo=MSK)
+        return noon.astimezone(timezone.utc)
+    try:
+        d = date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+    noon = datetime(d.year, d.month, d.day, 12, 0, tzinfo=MSK)
+    return noon.astimezone(timezone.utc)
+
+
+def _last_seller_greeting_ts(db: Session, chat_id: str, mp: str = "wb") -> Optional[int]:
+    if not chat_id:
+        return None
+    try:
+        for h in reversed(_history(db, chat_id, limit=40, mp=mp)):
+            sender = (h.get("sender") or "").lower()
+            if sender not in ("seller", "partner", "merchant", "courier"):
+                continue
+            if not _GREETING_RE.match((h.get("text") or "").strip()):
+                continue
+            ts = h.get("add_ts")
+            try:
+                return int(ts) if ts else None
+            except (TypeError, ValueError):
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def _needs_greeting(state: dict, last_seller_ts: Optional[int] = None,
+                    client_msg: str = "",
+                    last_seller_greeting_ts: Optional[int] = None) -> bool:
+    """Здороваемся, если с нашего последнего приветствия прошло ≥ 12 часов.
+
+    «Здравствуйте» клиента не отменяет наше. last_seller_ts / client_msg
+    оставлены, чтобы старые вызовы не ломались.
+    """
+    del last_seller_ts, client_msg
+    candidates = []
+    state = state or {}
+    at = _aware_utc(state.get("last_greeted_at"))
+    if at:
+        candidates.append(at)
+    elif state.get("last_greeted_date") is not None:
+        fallback = _aware_utc(state.get("last_greeted_date"))
+        if fallback:
+            candidates.append(fallback)
+    if last_seller_greeting_ts:
+        try:
+            candidates.append(
+                datetime.fromtimestamp(int(last_seller_greeting_ts) / 1000, tz=timezone.utc)
+            )
+        except (TypeError, ValueError, OSError):
+            pass
+    if not candidates:
+        return True
+    last = max(candidates)
+    return datetime.now(timezone.utc) - last >= GREETING_GAP
 
 
 def _strip_greeting(body: str) -> str:
@@ -1445,8 +2365,14 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
                    mp: str = "wb",
                    source_theme: str = "",
                    client_msg: str = "",
-                   reason: str = "") -> Tuple[str, str]:
-    """Возвращает (текст, action). Пустой текст — шаблона нет (тогда возможен ИИ-черновик)."""
+                   reason: str = "",
+                   article: str = "",
+                   commit_form: bool = False) -> Tuple[str, str]:
+    """Возвращает (текст, action). Пустой текст — шаблона нет (тогда возможен ИИ-черновик).
+
+    commit_form=True только когда сообщение реально уходит клиенту.
+    Иначе токен формы не создаём — иначе возврат думает, что ссылка уже ушла.
+    """
     mp = (mp or "wb").lower()
     source_theme = (source_theme or theme or "").lower()
     action_row = db.execute(text(
@@ -1459,60 +2385,73 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
         body = chat_playbook.pick_variant(db, theme, branch, mp=mp)
         if not body:
             body = _return_reason_text(mp)
-        return _polish_reply(db, body, state, last_seller_ts), "ask_reason"
+        return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "ask_reason"
 
-    # Ozon: некомплект — ветки Альфреда (check_tubes / no_reship_return). ЯМ — как WB.
+    # Ozon: некомплект. Разрешённый товар — предложить деталь, остальные ветки — проверка или возврат.
     if mp == "ozon" and theme == "nekomplekt":
+        if branch == "sku_allowed":
+            body = chat_playbook.pick_variant(db, theme, "sku_allowed", mp=mp)
+            if body:
+                return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "offer_reshipment"
         body = (
             chat_playbook.pick_variant(db, theme, branch, mp=mp)
             if branch else None
         )
+        if not body and branch == "sku_denied":
+            body = chat_playbook.pick_variant(db, theme, "no_reship_return", mp=mp)
         if not body:
             body = chat_playbook.pick_variant(db, theme, "no_reship_return", mp=mp)
         if body:
             action = "check_tubes" if branch == "check_tubes" else "explain_return"
-            return _polish_reply(db, body, state, last_seller_ts), action
-        return _polish_reply(db, _return_only_text(mp), state, last_seller_ts), "explain_return"
+            return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), action
+        return _polish_reply(db, _return_only_text(mp), state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_return"
 
     # Ozon/ЯМ: не тот товар
     if mp in ("ozon", "ym") and theme == "wrong_item":
         body = chat_playbook.pick_variant(db, theme, "", mp=mp)
         if body:
-            return _polish_reply(db, body, state, last_seller_ts), "explain_return"
+            return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_return"
         return "", action
 
     # Ozon/ЯМ: срок возврата истёк
     if mp in ("ozon", "ym") and theme == "return_expired":
         body = chat_playbook.pick_variant(db, theme, "", mp=mp)
         if body:
-            return _polish_reply(db, body, state, last_seller_ts), "explain_support"
+            return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_support"
         return "", action
 
-    # Legacy: remap раньше уводил некомплект в vozvrat — оставляем фолбэк только для Ozon
+    # Некомплект, который классификатор назвал возвратом: разрешённый товар — предложить деталь.
     if mp == "ozon" and theme == "vozvrat":
         from_parts = (
-            source_theme in ("nekomplekt", "soglasie", "ssylka", "status_zayavki")
-            or "без доотправки" in (reason or "")
+            source_theme == "nekomplekt"
             or _looks_like_missing_parts(client_msg, reason)
         )
+        if from_parts and reshipment_skus.is_allowed(db, article):
+            body = chat_playbook.pick_variant(db, "nekomplekt", "sku_allowed", mp=mp)
+            if body:
+                return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "offer_reshipment"
         if from_parts:
             body = chat_playbook.pick_variant(db, "nekomplekt", "no_reship_return", mp=mp)
             if body:
-                return _polish_reply(db, body, state, last_seller_ts), "explain_return"
+                return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_return"
             return (
-                _polish_reply(db, _return_only_text(mp), state, last_seller_ts),
+                _polish_reply(db, _return_only_text(mp), state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp),
                 "explain_return",
             )
         body = chat_playbook.pick_variant(db, theme, "", mp=mp)
         if body:
-            return _polish_reply(db, body, state, last_seller_ts), "explain_return"
-        return _polish_reply(db, _return_only_text(mp), state, last_seller_ts), "explain_return"
+            return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_return"
+        return _polish_reply(db, _return_only_text(mp), state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_return"
     if mp in ("ozon", "ym") and theme == "utochnenie":
         body = chat_playbook.pick_variant(db, theme, "", mp=mp)
         if not body:
             body = _clarify_menu_text(mp)
-        return _polish_reply(db, body, state, last_seller_ts), "ask_menu"
+        return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "ask_menu"
     if mp == "ozon" and theme == "brak":
+        if branch == "fixable_by_part":
+            body = chat_playbook.pick_variant(db, theme, "fixable_by_part", mp=mp)
+            if body:
+                return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "offer_reshipment"
         br = branch or "needs_return"
         if br == "wrong_item":
             body = (
@@ -1525,8 +2464,8 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
                 or chat_playbook.pick_variant(db, theme, "", mp=mp)
             )
         if body:
-            return _polish_reply(db, body, state, last_seller_ts), "explain_return"
-        return _polish_reply(db, _return_only_text(mp), state, last_seller_ts), "explain_return"
+            return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_return"
+        return _polish_reply(db, _return_only_text(mp), state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), "explain_return"
 
     body = chat_playbook.pick_variant(db, theme, branch, mp=mp)
     if not body and branch:
@@ -1536,28 +2475,57 @@ def assemble_reply(db: Session, theme: str, branch: str, chat_id: str,
     if not body:
         return "", action
 
+    if mp == "ym" and theme == "nekomplekt":
+        if branch == "offer_buy":
+            action = "offer_buy"
+        elif branch == "offer_free_slow":
+            action = "offer_free_slow"
+        elif branch == "to_return":
+            action = "explain_return"
+    elif mp == "ym" and theme == "kupit_detal":
+        action = "send_buy_link"
+
+    ym_no_form = mp == "ym" and (
+        theme == "kupit_detal"
+        or branch in ("offer_buy", "offer_free_slow", "to_return", "sku_denied")
+    )
+    if mp == "ym" and (
+        theme == "kupit_detal"
+        or "{promo_code}" in body
+        or "{promo_pct}" in body
+        or "{part_article}" in body
+        or "{part_name}" in body
+        or "{part_list}" in body
+    ):
+        from . import ym_parts
+        if theme == "kupit_detal":
+            body = ym_parts.prepare_buy_reply(
+                db, body, article or "", client_msg=client_msg or "",
+            )
+        else:
+            body = ym_parts.fill_part_placeholders(
+                body, product_article=article or "",
+                client_msg=client_msg or "", db=db,
+            )
+
     form_url = ""
-    # Форма доотправки — WB и ЯМ (в чате); Ozon без доотправки
-    if mp in ("wb", "ym") and (
+    # Форма доотправки — WB, ЯМ и Ozon.
+    # На ЯМ форма только после согласия на бесплатную доотправку, не на шаге покупки.
+    if (not ym_no_form) and mp in ("wb", "ym", "ozon") and (
         action in ("offer_reshipment", "send_form_link", "resend_form_link", "ask_menu")
         or "{form_url}" in body
     ):
         if "{form_url}" in body or action in ("offer_reshipment", "send_form_link", "resend_form_link"):
-            form_url = _make_form_url(db, chat_id)
+            form_url = _make_form_url(db, chat_id, mp=mp, persist=commit_form)
 
-    # На Ozon не подставляем ссылку формы и не предлагаем досылку из шаблона
-    if mp == "ozon":
-        if "{form_url}" in (body or "") or action in (
-            "offer_reshipment", "send_form_link", "resend_form_link"
-        ):
-            return _polish_reply(db, _return_only_text(mp), state, last_seller_ts), "explain_return"
-        body = body.replace("{form_url}", "").strip()
-
-    body = _fill_placeholders(_strip_greeting(body), form_url=form_url, reship=reship if mp in ("wb", "ym") else None)
-    return _polish_reply(db, body, state, last_seller_ts), action
+    body = _fill_placeholders(
+        _strip_greeting(body), form_url=form_url,
+        reship=reship if mp in ("wb", "ym", "ozon") else None,
+    )
+    return _polish_reply(db, body, state, last_seller_ts, client_msg=client_msg, chat_id=chat_id, mp=mp), action
 
 
-def _next_stage(theme: str, action: str, current: str) -> str:
+def _next_stage(theme: str, action: str, current: str, branch: str = "") -> str:
     if action == "handoff_to_manager":
         return "handoff"
     if theme == "utochnenie" or action == "ask_menu":
@@ -1566,6 +2534,14 @@ def _next_stage(theme: str, action: str, current: str) -> str:
         return "awaiting_return_reason"
     if theme == "soglasie" or action == "send_form_link":
         return "form_sent"
+    if theme == "kupit_detal" or action == "send_buy_link":
+        return "buy_sent"
+    if theme == "nekomplekt" and (branch == "offer_buy" or action == "offer_buy"):
+        return "awaiting_buy"
+    if theme == "nekomplekt" and (branch == "offer_free_slow" or action == "offer_free_slow"):
+        return "awaiting_client"
+    if theme == "nekomplekt" and branch == "to_return":
+        return "closing"
     if theme == "nekomplekt" and action == "offer_reshipment":
         return "awaiting_client"
     if theme == "nekomplekt" and action == "check_tubes":
@@ -1581,6 +2557,8 @@ def _next_stage(theme: str, action: str, current: str) -> str:
     # После выбора из меню — сбрасываем awaiting_menu
     if current == "awaiting_menu" and theme != "utochnenie":
         if theme == "nekomplekt":
+            if branch == "offer_buy" or action == "offer_buy":
+                return "awaiting_buy"
             return "awaiting_client"
         return "new"
     return current or "new"
@@ -1671,26 +2649,47 @@ def _send_to_client(db: Session, chat_id: str, text_msg: str, *,
         INSERT INTO cx_response_log (item_type, item_id, mp, answered_by, answer_text)
         VALUES ('chat', :iid, :mp, 'chat_bot', :ans)
     """), {"iid": chat_id, "mp": mp, "ans": txt})
+    bind_form_tokens_to_chat(db, txt, chat_id, mp)
     db.commit()
     return True
 
 
 def _notify_manager(db: Session, reason: str, client: str, sku: str,
-                    message: str, chat_id: str):
+                    message: str, chat_id: str, mp: str = "wb"):
     if chat_playbook.get_setting(db, "red_zone_notify_tg", "true").lower() != "true":
         return
     tmpl = chat_playbook.get_setting(db, "red_zone_manager_text", "")
-    from urllib.parse import quote
-    link = f"https://cxvo.ru/chats?chat={quote(str(chat_id), safe='')}"
-    text_msg = (tmpl or "🔴 Чат {client}: {reason}\n{message}\n{link}").format(
-        reason=reason or "—",
-        client=client or "—",
-        sku=sku or "—",
-        message=(message or "")[:300],
-        link=link,
+    mp_key = (mp or "wb").lower()
+    mp_label = {"wb": "WB", "ozon": "Ozon", "ym": "Яндекс Маркет"}.get(mp_key, mp_key.upper())
+    dest = (os.getenv("TG_ALERT_CHAT_ID") or "").strip()
+    link = telegram_webapp.mini_app_link(mp_key, chat_id)
+    default = (
+        "🔴 [{mp}] Чат требует менеджера\n"
+        "Причина: {reason}\nКлиент: {client}\nТовар: {sku}\n"
+        "Сообщение: {message}"
     )
+    values = {
+        "reason": reason or "—",
+        "client": client or "—",
+        "sku": sku or "—",
+        "message": (message or "")[:300],
+        "link": link,
+        "mp": mp_label,
+    }
     try:
-        cx_alert.send_tg(text_msg)
+        text_msg = (tmpl or default).format(**values)
+    except (KeyError, ValueError, IndexError):
+        text_msg = default.format(**values)
+    # Старый шаблон без {mp} — всё равно помечаем площадку в начале
+    if "{mp}" not in (tmpl or "") and f"[{mp_label}]" not in text_msg:
+        text_msg = f"[{mp_label}] {text_msg}"
+    markup = telegram_webapp.chat_open_markup(mp_key, chat_id, dest)
+    try:
+        sent = False
+        if dest:
+            sent = telegram_proxy.send_text(dest, text_msg, reply_markup=markup)
+        if not sent:
+            cx_alert.send_tg(text_msg)
     except Exception as e:
         logger.warning("[ChatBot] TG notify: %s", e)
 
@@ -1811,29 +2810,31 @@ def _best_client_text(db: Session, chat_id: str, mp: str, fallback: str) -> str:
             break
         tail.append(h)
     tail.reverse()
-    ozon_hello = re.compile(
-        r"^здравствуйте!\s*у меня вопрос по вашему товару",
-        re.IGNORECASE,
-    )
     candidates = []
     for h in tail:
-        t = (h.get("text") or "").strip()
+        t = _unwrap_client_question(h.get("text") or "")
         if not t or t.startswith("![") or t.startswith("📷"):
             continue
-        if ozon_hello.match(t) and len(t) < 220:
+        if _is_marketplace_nudge(t):
             continue
         candidates.append(t)
     if candidates:
-        # Цифра меню / короткое решение важнее длинного шума
+        # Цифра меню / короткое решение / отмена заказа важнее пинга «жду ответа»
         for t in reversed(candidates):
             if _MENU_CHOICE_RE.match(t) or _OTHER_SHORT_RE.match(t) or _CANCEL_BOT_RE.match(t):
+                return t
+            if _CANCEL_RE.search(t):
                 return t
             if _RESOLVED_RE.search(t) and len(t) < 160:
                 return t
         return candidates[-1]
-    fb = (fallback or "").strip()
-    if fb.startswith("📷") or fb.startswith("!["):
+    fb = _unwrap_client_question(fallback or "")
+    if fb.startswith("📷") or fb.startswith("![") or _is_marketplace_nudge(fb):
         return ""
+    if fb:
+        return fb
+    if _is_product_question_wrapper_only(fallback or ""):
+        return (fallback or "").strip()
     return fb
 
 
@@ -1872,9 +2873,11 @@ def _fetch_allowlist_extras(
             FROM ozon_chats c
             LEFT JOIN cx_dismissed_items d
                    ON d.item_id = c.chat_id AND d.mp = 'ozon' AND d.item_type = 'chat'
+            LEFT JOIN cx_chat_bot_state s ON s.chat_id = c.chat_id
             WHERE c.chat_id = ANY(:ids)
               AND c.needs_answer = true
               AND d.item_id IS NULL
+              AND COALESCE(s.bot_disabled, false) = false
         """)
     elif mp == "ym":
         q = text("""
@@ -1905,9 +2908,11 @@ def _fetch_allowlist_extras(
             FROM ym_chats c
             LEFT JOIN cx_dismissed_items d
                    ON d.item_id = c.chat_id AND d.mp = 'ym' AND d.item_type = 'chat'
+            LEFT JOIN cx_chat_bot_state s ON s.chat_id = c.chat_id
             WHERE c.chat_id = ANY(:ids)
               AND c.needs_answer = true
               AND d.item_id IS NULL
+              AND COALESCE(s.bot_disabled, false) = false
         """)
     else:
         q = text("""
@@ -1916,9 +2921,11 @@ def _fetch_allowlist_extras(
             FROM wb_chats c
             LEFT JOIN cx_dismissed_items d
                    ON d.item_id = c.chat_id AND d.mp = 'wb' AND d.item_type = 'chat'
+            LEFT JOIN cx_chat_bot_state s ON s.chat_id = c.chat_id
             WHERE c.chat_id = ANY(:ids)
               AND c.needs_answer = true
               AND d.item_id IS NULL
+              AND COALESCE(s.bot_disabled, false) = false
               AND (CAST(:shadow AS boolean) = true OR c.reply_sign IS NOT NULL)
         """)
         return db.execute(q, {"ids": chat_ids, "shadow": shadow}).mappings().all()
@@ -1935,6 +2942,12 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
     if allowlist and str(chat_id) not in set(allowlist):
         return None
 
+    state_early = db.execute(text(
+        "SELECT bot_disabled FROM cx_chat_bot_state WHERE chat_id = :cid"
+    ), {"cid": chat_id}).fetchone()
+    if state_early and state_early[0]:
+        return None
+
     # Ручной ответ менеджера (ЛК / не bot) — бот в этот чат больше не пишет
     only_no_mgr = chat_playbook.get_setting_mp(db, "bot_only_no_manager", mp, "true").lower() == "true"
     if only_no_mgr and _has_human_seller_reply(db, chat_id, mp=mp):
@@ -1946,14 +2959,14 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
 
     msg = _best_client_text(db, chat_id, mp, chat.get("last_message") or "")
     if not msg:
-        msg = (chat.get("last_message") or "").strip()
+        msg = _unwrap_client_question(chat.get("last_message") or "")
     if not msg:
         return None
     # Превью-фото без текста — не шлём меню, ждём текст (debounce уже выше)
     if mp in ("ozon", "ym") and (msg.startswith("📷") or msg.startswith("![")):
         hist = _history(db, chat_id, limit=15, mp=mp)
         for h in reversed(hist):
-            t = (h.get("text") or "").strip()
+            t = _unwrap_client_question(h.get("text") or "")
             if t and h.get("sender") == "client" and not t.startswith("![") and not t.startswith("📷"):
                 msg = t
                 break
@@ -1977,15 +2990,16 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
     if only_no_mgr and not last_bot and _has_seller_reply(db, chat_id, mp=mp):
         return None
 
-    article = (chat.get("good_name") or "").strip() if mp in ("ozon", "ym") else ""
-    if not article:
-        article = _get_article(db, chat.get("nm_id"))
+    article = _article_for_chat(db, chat, mp)
     reship = _get_reshipment(db, chat_id) if mp == "wb" else None
     if reship and reship.get("wb_nm_id") and not article:
         article = _get_article(db, reship.get("wb_nm_id"))
 
     stage = state.get("stage") or "new"
-    replied_after_auto = _client_replied_after_sent_auto(db, chat_id, last_ts, mp)
+    replied_after_auto = (
+        _client_replied_after_sent_auto(db, chat_id, last_ts, mp)
+        and not _ym_parts_dialog_open(mp, stage)
+    )
     if replied_after_auto:
         # Второе сообщение после реально отправленного ответа всегда берёт человек.
         # В частности, это сохраняет поток возврата: причина -> менеджер.
@@ -2002,6 +3016,7 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
             db, msg, stage, history, article,
             nm_id=chat.get("nm_id") if mp == "wb" else None,
             mp=mp,
+            chat_id=chat_id,
         )
         source_theme = theme
         theme, reason = _remap_theme_for_mp(theme, mp, reason, client_msg=msg)
@@ -2014,14 +3029,41 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
         if need_human:
             zone = "human"
 
-        branch = _resolve_branch(
+        branch = _branch_or_correction(
             db, theme, article, reship, msg,
             mp=mp, stage=stage, last_theme=state.get("last_theme") or "",
         )
+        branch = _dostavka_branch_from_fulfillment(db, theme, branch, mp, chat_id)
     last_seller_ts = _last_seller_ts(db, chat_id, mp=mp)
-    need_greet = _needs_greeting(state, last_seller_ts)
+    greet_ts = _last_seller_greeting_ts(db, chat_id, mp=mp)
+    zone, reason, auto_held = gate_auto_by_confidence(zone, theme, conf, reason, db, mp)
+    need_greet = _needs_greeting(
+        state, last_seller_ts, client_msg=msg, last_seller_greeting_ts=greet_ts,
+    )
 
-    if zone == "human":
+    try:
+        min_fill = float(
+            chat_playbook.get_setting_mp(db, "bot_confidence_min", mp, str(MIN_CONFIDENCE))
+            or MIN_CONFIDENCE
+        )
+    except (TypeError, ValueError):
+        min_fill = MIN_CONFIDENCE
+    try:
+        conf_score = float(conf or 0)
+    except (TypeError, ValueError):
+        conf_score = 0.0
+    low_confidence = (not replied_after_auto) and conf_score < min_fill
+
+    if low_confidence:
+        # Не тратим шаблон/ИИ при низкой уверенности — чат ждёт менеджера.
+        reply = ""
+        action = "low_confidence"
+        zone = "human"
+        reason = (
+            f"{reason}; уверенность {conf_score:.0%} < {min_fill:.0%} — без автозаполнения"
+        ).strip("; ")
+        need_human = True
+    elif zone == "human":
         client_text = chat_playbook.get_setting(db, "red_zone_client_text", "")
         reply = client_text.strip()
         action = "handoff_to_manager"
@@ -2033,6 +3075,7 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
         reply, action = assemble_reply(
             db, theme, branch, chat_id, state, reship, last_seller_ts,
             mp=mp, source_theme=source_theme, client_msg=msg, reason=reason,
+            article=article, commit_form=(zone == "auto" and not shadow),
         )
         if not reply:
             draft = generate_ai_draft(
@@ -2046,12 +3089,15 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
                 mp=mp,
             )
             if draft:
-                reply = _polish_reply(db, draft, state, last_seller_ts)
+                reply = _polish_reply(db, draft, state, last_seller_ts, client_msg=msg, chat_id=chat_id, mp=mp)
                 action = "ai_draft"
                 zone = "draft"
                 reason = ((reason or "") + "; ИИ-черновик без шаблона").strip("; ")
 
     sent = False
+    if zone == "auto" and reply and "{form_url}" in reply:
+        zone = "draft"
+        reason = ((reason or "") + "; ссылка формы не создана — черновик, без автоотправки").strip("; ")
     if zone == "auto" and reply and not shadow:
         if mp == "wb":
             sign = chat.get("reply_sign")
@@ -2068,6 +3114,8 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
                     (reason or "")
                     + "; Ozon не принял отправку (окно ответа истекло?) — на проверку менеджеру"
                 ).strip("; ")
+        if not sent:
+            expire_unused_form_tokens_in_text(db, reply)
 
     if zone == "human" or need_human:
         _notify_manager(
@@ -2076,9 +3124,10 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
             sku=article,
             message=msg,
             chat_id=chat_id,
+            mp=mp,
         )
 
-    new_stage = _next_stage(theme, action, stage)
+    new_stage = _next_stage(theme, action, stage, branch=branch)
     state_update = {
         "stage": new_stage,
         "last_theme": theme,
@@ -2089,8 +3138,10 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
     elif stage == "awaiting_menu" and theme != "utochnenie":
         state_update["pending_menu"] = None
     if reply and need_greet and sent:
-        # Только если реально ушло клиенту — иначе shadow/suggest «съедает» приветствие на весь день
+        # Только если реально ушло клиенту — иначе shadow/suggest «съедает» слот приветствия
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         state_update["last_greeted_date"] = _msk_date()
+        state_update["last_greeted_at"] = now_utc
 
     _set_state(db, chat_id, **state_update)
 
@@ -2137,6 +3188,7 @@ def process_one(db: Session, chat: dict, *, shadow: bool, mp: str = "wb") -> Opt
             "can_generate": not bool(reply),
             "from_cache": False,
             "from_worker": True,
+            "auto_held": auto_held,
         }
         db.execute(text("""
             INSERT INTO cx_chat_bot_suggest_cache (chat_id, client_last_ts, payload, updated_at)
@@ -2184,23 +3236,39 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
     if not chat:
         return {"ok": False, "reason": "чат не найден", "can_generate": False}
 
-    msg = (chat.get("last_message") or "").strip()
+    msg = _best_client_text(db, chat_id, mp, chat.get("last_message") or "")
     last_ts = int(chat.get("last_ts") or 0)
 
-    if not msg:
-        return {"ok": True, "reply_text": "", "theme": "", "confidence": 0,
-                "reason": "нет текста клиента", "need_human": False,
-                "can_generate": False, "skip": False, "from_cache": False}
+    if force_ai and (not msg or chat.get("last_sender") == "seller"):
+        for h in reversed(_history(db, chat_id, limit=20, mp=mp)):
+            if h.get("sender") != "client":
+                continue
+            t = _unwrap_client_question(h.get("text") or "")
+            if t and not t.startswith("![") and not t.startswith("📷"):
+                msg = t
+                break
 
-    if chat.get("last_sender") == "seller" or not chat.get("needs_answer"):
-        return {
-            "ok": True, "reply_text": "", "theme": "", "confidence": 0,
-            "reason": "чат не ждёт ответа", "need_human": False,
-            "skip": True, "can_generate": False, "from_cache": False,
-        }
+    if not force_ai:
+        if not msg:
+            return {"ok": True, "reply_text": "", "theme": "", "confidence": 0,
+                    "reason": "нет текста клиента", "need_human": False,
+                    "can_generate": False, "skip": False, "from_cache": False}
+
+        if chat.get("last_sender") == "seller" or not chat.get("needs_answer"):
+            return {
+                "ok": True, "reply_text": "", "theme": "", "confidence": 0,
+                "reason": "чат не ждёт ответа", "need_human": False,
+                "skip": True, "can_generate": False, "from_cache": False,
+            }
+    elif not msg:
+        return {"ok": False, "reason": "нет текста клиента для генерации", "can_generate": False}
 
     state = _bot_state(db, chat_id)
-    if _client_replied_after_sent_auto(db, chat_id, last_ts, mp):
+    if (
+        not force_ai
+        and _client_replied_after_sent_auto(db, chat_id, last_ts, mp)
+        and not _ym_parts_dialog_open(mp, state.get("stage") or "")
+    ):
         # Не показываем новый шаблон после автоответа: чат уже ждёт человека.
         return {
             "ok": True,
@@ -2231,12 +3299,40 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
             payload = dict(payload or {})
             payload["from_cache"] = True
             payload["ok"] = True
+            zone, reason, held = gate_auto_by_confidence(
+                payload.get("zone") or "",
+                payload.get("theme") or "",
+                payload.get("confidence") or 0,
+                payload.get("reason") or "",
+                db,
+                mp,
+            )
+            payload["zone"] = zone
+            payload["reason"] = reason
+            payload["auto_held"] = held
+            try:
+                min_fill = float(
+                    chat_playbook.get_setting_mp(db, "bot_confidence_min", mp, str(MIN_CONFIDENCE))
+                    or MIN_CONFIDENCE
+                )
+            except (TypeError, ValueError):
+                min_fill = MIN_CONFIDENCE
+            try:
+                conf_score = float(payload.get("confidence") or 0)
+            except (TypeError, ValueError):
+                conf_score = 0.0
+            if conf_score < min_fill:
+                payload["reply_text"] = ""
+                payload["can_generate"] = False
+                payload["low_confidence"] = True
+                payload["need_human"] = True
+                payload["action"] = "low_confidence"
+                payload["reason"] = (
+                    f"{reason}; уверенность {conf_score:.0%} < {min_fill:.0%} — шаблон не подставляем"
+                ).strip("; ")
             return payload
 
-    # Артикул: у Ozon/ЯМ уже в good_name; у WB — через nm_id
-    article = (chat.get("good_name") or "").strip() if mp in ("ozon", "ym") else ""
-    if not article:
-        article = _get_article(db, chat.get("nm_id"))
+    article = _article_for_chat(db, chat, mp)
     reship = _get_reshipment(db, chat_id) if mp == "wb" else None
     if reship and reship.get("wb_nm_id") and not article:
         article = _get_article(db, reship.get("wb_nm_id"))
@@ -2247,6 +3343,7 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
         db, msg, stage, history, article,
         nm_id=chat.get("nm_id") if mp == "wb" else None,
         mp=mp,
+        chat_id=chat_id,
     )
     source_theme = theme
     theme, reason = _remap_theme_for_mp(theme, mp, reason, client_msg=msg)
@@ -2255,18 +3352,42 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
     if need_human:
         zone = "human"
 
-    branch = _resolve_branch(
+    branch = _branch_or_correction(
         db, theme, article, reship, msg,
         mp=mp, stage=stage, last_theme=state.get("last_theme") or "",
     )
+    branch = _dostavka_branch_from_fulfillment(db, theme, branch, mp, chat_id)
     last_seller_ts = _last_seller_ts(db, chat_id, mp=mp)
+    greet_ts = _last_seller_greeting_ts(db, chat_id, mp=mp)
+    zone, reason, auto_held = gate_auto_by_confidence(zone, theme, conf, reason, db, mp)
+
+    try:
+        min_fill = float(
+            chat_playbook.get_setting_mp(db, "bot_confidence_min", mp, str(MIN_CONFIDENCE))
+            or MIN_CONFIDENCE
+        )
+    except (TypeError, ValueError):
+        min_fill = MIN_CONFIDENCE
+    try:
+        conf_score = float(conf or 0)
+    except (TypeError, ValueError):
+        conf_score = 0.0
+    # Ниже порога не собираем шаблон и не тратим ИИ на заполнение окна.
+    low_confidence = (not force_ai) and conf_score < min_fill
 
     reply = ""
     action = ""
-    if zone == "human" and not force_ai:
+    if low_confidence:
+        reason = (
+            f"{reason}; уверенность {conf_score:.0%} < {min_fill:.0%} — шаблон не подставляем"
+        ).strip("; ")
+        action = "low_confidence"
+    elif zone == "human" and not force_ai:
         reply = (chat_playbook.get_setting(db, "red_zone_client_text", "") or "").strip()
         action = "handoff_to_manager"
-        if reply and _needs_greeting(state, last_seller_ts):
+        if reply and _needs_greeting(
+            state, last_seller_ts, client_msg=msg, last_seller_greeting_ts=greet_ts,
+        ):
             greet = chat_playbook.get_setting(db, "greeting_text", "Здравствуйте!").strip()
             if greet and not _GREETING_RE.match(reply):
                 reply = f"{greet}\n\n{reply}"
@@ -2274,6 +3395,7 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
         reply, action = assemble_reply(
             db, theme, branch, chat_id, state, reship, last_seller_ts,
             mp=mp, source_theme=source_theme, client_msg=msg, reason=reason,
+            article=article,
         )
 
     # ИИ только по кнопке «Сгенерировать» — не при каждом открытии
@@ -2281,10 +3403,10 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
         draft = generate_ai_draft(
             db, client_msg=msg, theme=theme, article=article or "",
             history=history, nm_id=chat.get("nm_id") if mp == "wb" else None,
-            reship=reship, mp=mp,
+            reship=reship, mp=mp, for_manager=True,
         )
         if draft:
-            reply = _polish_reply(db, draft, state, last_seller_ts)
+            reply = _polish_reply(db, draft, state, last_seller_ts, client_msg=msg, chat_id=chat_id, mp=mp)
             action = "ai_draft"
             reason = ((reason or "") + "; ИИ-черновик по запросу").strip("; ")
         else:
@@ -2302,8 +3424,10 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
     if mp == "ozon":
         if theme == "nekomplekt" and branch == "check_tubes":
             theme_name = "Некомплект → проверить трубки"
-        elif theme == "nekomplekt" and branch == "no_reship_return":
-            theme_name = "Некомплект → возврат (без досылки)"
+        elif theme == "nekomplekt" and branch == "sku_allowed":
+            theme_name = "Некомплект → выслать деталь"
+        elif theme == "nekomplekt" and branch in ("sku_denied", "no_reship_return"):
+            theme_name = "Некомплект → возврат"
         elif theme == "wrong_item":
             theme_name = theme_name or "Прислали не тот товар"
         elif theme == "return_expired":
@@ -2317,15 +3441,26 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
         ):
             theme_name = "Некомплект → возврат (без досылки)"
     elif mp == "ym":
-        if theme == "wrong_item":
+        if theme == "kupit_detal":
+            theme_name = "Купить деталь за 1 ₽"
+        elif theme == "nekomplekt" and branch == "offer_buy":
+            theme_name = "Некомплект → купить деталь за 1 ₽"
+        elif theme == "nekomplekt" and branch == "offer_free_slow":
+            theme_name = "Некомплект → бесплатная доотправка (дольше)"
+        elif theme == "nekomplekt" and branch == "to_return":
+            theme_name = "Некомплект → возврат"
+        elif theme == "wrong_item":
             theme_name = theme_name or "Прислали не тот товар"
         elif theme == "return_expired":
             theme_name = theme_name or "Срок возврата истёк"
 
-    can_generate = (not reply) and bool(msg) and zone != "human"
+    can_generate = (not reply) and bool(msg) and zone != "human" and not low_confidence
     # human тоже можно сгенерировать черновик менеджеру, если красный текст пустой
-    if not reply and zone == "human":
+    if not reply and zone == "human" and not low_confidence:
         can_generate = True
+    # Ниже порога — без ИИ-кнопки: менеджер сам выбирает шаблон или пишет
+    if low_confidence:
+        can_generate = False
 
     if not reply and not force_ai:
         reason = reason or "шаблон не подобран"
@@ -2341,11 +3476,13 @@ def suggest_for_chat(db: Session, chat_id: str, *, force_ai: bool = False,
         "branch_key": branch or "",
         "action": action or "",
         "reply_text": reply or "",
-        "need_human": need_human or zone == "human",
+        "need_human": need_human or zone == "human" or low_confidence,
         "reason": reason or "",
         "skip": False,
         "can_generate": can_generate,
         "from_cache": False,
+        "auto_held": auto_held,
+        "low_confidence": low_confidence,
     }
 
     # Кэшируем результат (в т.ч. «не подобран» — чтобы не жечь токены на classify снова)
@@ -2400,11 +3537,21 @@ def suggest_for_question(
     )
     source_theme = theme
     theme, reason = _remap_theme_for_mp(theme, mp, reason, client_msg=msg)
+    # Меню 1–5 только для чатов; в вопросах шаблона utochnenie нет.
+    if theme == "utochnenie" and not force_ai:
+        return {
+            "ok": True, "mp": mp, "theme": "", "theme_name": "",
+            "confidence": conf, "zone": "draft", "branch_key": "",
+            "action": "", "reply_text": "", "need_human": False,
+            "reason": "Нет подходящего шаблона",
+            "skip": False, "can_generate": True, "from_cache": False,
+            "source_theme": source_theme or "",
+        }
     zone = question_playbook.get_zone(db, theme) if theme else "human"
     if need_human:
         zone = "human"
 
-    branch = _resolve_branch(
+    branch = _branch_or_correction(
         db, theme, article or "", None, msg,
         mp=mp, stage="new", last_theme="",
     )
@@ -2436,7 +3583,7 @@ def suggest_for_question(
         draft = generate_ai_draft(
             db, client_msg=msg, theme=theme, article=article or "",
             history=[], nm_id=nm_id if mp == "wb" else None,
-            reship=None, mp=mp,
+            reship=None, mp=mp, for_manager=True,
         )
         if draft:
             reply = _polish_reply(db, draft, fake_state, None, force_signature=True)
@@ -2530,6 +3677,7 @@ def process_batch(db: Session, limit: int = BOT_BATCH_LIMIT, *,
             WHERE c.needs_answer = true
               AND lower(COALESCE(c.last_sender, '')) IN ('customer', 'buyer', 'client')
               AND d.item_id IS NULL
+              AND COALESCE(s.bot_disabled, false) = false
               AND COALESCE(
                     (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
                     c.waiting_since, c.updated_at, c.created_at, now()
@@ -2610,6 +3758,7 @@ def process_batch(db: Session, limit: int = BOT_BATCH_LIMIT, *,
             WHERE c.needs_answer = true
               AND lower(COALESCE(c.last_sender, '')) IN ('customer', 'buyer', 'client', 'user')
               AND d.item_id IS NULL
+              AND COALESCE(s.bot_disabled, false) = false
               AND COALESCE(
                     (SELECT MAX(m.created_at) FROM ym_chat_messages m WHERE m.chat_id = c.chat_id),
                     c.waiting_since, c.updated_at, c.created_at, now()
@@ -2649,6 +3798,7 @@ def process_batch(db: Session, limit: int = BOT_BATCH_LIMIT, *,
               AND COALESCE(c.is_closing, false) = false
               AND c.last_sender = 'client'
               AND d.item_id IS NULL
+              AND COALESCE(s.bot_disabled, false) = false
               AND (CAST(:shadow AS boolean) = true OR c.reply_sign IS NOT NULL)
               AND c.last_ts > EXTRACT(EPOCH FROM now() - make_interval(days => :days)) * 1000
               AND (s.last_bot_at IS NULL
@@ -2731,20 +3881,28 @@ def process_batch_all(db: Session, limit: int = BOT_BATCH_LIMIT, *, force: bool 
     return {"ok": True, "processed": total, "by_mp": out}
 
 
+def process_batch_all_isolated(limit: int = BOT_BATCH_LIMIT, *, force: bool = False) -> dict:
+    """Сессия БД живёт только в этом потоке — не держим пул, пока думает ИИ."""
+    with db_session() as db:
+        return process_batch_all(db, limit=limit, force=force)
+
+
 # ── Воркер ───────────────────────────────────────────────────────────────────
 
 async def start_chat_bot_worker(get_db_func):
     logger.info("[ChatBot] worker started, interval=%ss (wb/ozon/ym)", BOT_INTERVAL_SEC)
     await asyncio.sleep(20)
     while True:
+        wait = _quota_wait_sec()
+        if wait > 0:
+            nap = min(300.0, max(15.0, wait))
+            logger.info("[ChatBot] все модели Qwen на паузе, жду %.0f сек — потом следующая", nap)
+            await asyncio.sleep(nap)
+            continue
         try:
-            db = next(get_db_func())
-            try:
-                stats = await asyncio.to_thread(process_batch_all, db, BOT_BATCH_LIMIT)
-                if stats.get("processed"):
-                    logger.info("[ChatBot] batch: %s", stats)
-            finally:
-                db.close()
+            stats = await asyncio.to_thread(process_batch_all_isolated, BOT_BATCH_LIMIT)
+            if stats.get("processed"):
+                logger.info("[ChatBot] batch: %s", stats)
         except asyncio.CancelledError:
             raise
         except Exception as e:

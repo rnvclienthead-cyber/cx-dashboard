@@ -17,3 +17,7 @@ passlib==1.7.4
 bcrypt==3.2.2
 python-jose
 python-multipart
+pypdf
+# Тесты (проверка перед выкладкой)
+pytest==9.1.1
+pytest-asyncio==1.4.0

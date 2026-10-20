@@ -9,7 +9,7 @@ const platformStore = usePlatformStore()
 const activeTab = ref('tagging') // 'tagging' | 'feedback'
 
 // Настройки
-const batchSize = ref(20)
+const batchSize = ref(5)
 const selectedModel = ref('qwen-free')
 const CLAIM_MODELS = [
   { key: 'qwen-free',   label: 'Qwen (бесплатный лимит)', icon: Cpu, hint: 'Plus выгорел · ротация', cost: 0, currency: '₽' },
@@ -28,14 +28,15 @@ const progress = ref(0)
 const statusText = ref('')
 const resultMessage = ref(null)
 
-const stats = ref({ untagged: 0, untaggedFeedbacks: 0, jobRunning: false })
+const stats = ref({ untagged: 0, untaggedFeedbacks: 0, jobRunning: false, qwenPause: '' })
 const isStatsLoading = ref(true)
 
 let pollingInterval = null
 let pollTicks = 0
 const initialCount = ref(0)
 
-const BG_JOB_KEY = 'cx_ai_job'
+const BG_JOB_KEY = 'cx_ai_job_v2'
+const TAGGING_STALE_TICKS = 36 // 36 × 5с ≈ 3 мин без нового лога — воркер умер
 
 function saveJob() {
   localStorage.setItem(BG_JOB_KEY, JSON.stringify({
@@ -60,6 +61,7 @@ const fetchStats = async () => {
       stats.value.untaggedFeedbacks = data.untagged_feedbacks
       stats.value.jobRunning = !!data.feedback_job_running
       stats.value.last_log = data.last_log
+      stats.value.qwenPause = data.qwen_pause || ''
     }
   } catch (e) {
     console.error('Ошибка:', e)
@@ -82,10 +84,15 @@ onMounted(async () => {
     const job = JSON.parse(saved)
     const age = Date.now() - job.startedAt
     if (age < 12 * 3_600_000 && job.platform === platformStore.platform) {
-      initialCount.value = job.initialCount
-      isProcessing.value = true
-      activeTab.value = job.tab === 'feedback' ? 'feedback' : 'tagging'
-      startPolling()
+      if (stats.value.last_log && taggingStoppedWithError() && !stats.value.jobRunning) {
+        clearJob()
+        resultMessage.value = { type: 'error', text: taggingErrorText() }
+      } else {
+        initialCount.value = job.initialCount
+        isProcessing.value = true
+        activeTab.value = job.tab === 'feedback' ? 'feedback' : 'tagging'
+        startPolling()
+      }
     } else {
       clearJob()
     }
@@ -116,8 +123,26 @@ function stopPolling() {
   progress.value = 0
 }
 
+function taggingStoppedWithError() {
+  const log = stats.value.last_log
+  if (!log) return false
+  const st = String(log.status || '').toUpperCase()
+  const details = String(log.details || '')
+  return st === 'ERROR' || /insufficient_quota|Free quota|Очередь не трогаем|лимит моделей/i.test(details)
+}
+
+function taggingErrorText() {
+  const details = String(stats.value.last_log?.details || '')
+  if (/insufficient_quota|Free quota/i.test(details)) {
+    return 'Разметка остановилась: у этой модели кончился бесплатный лимит. Нажми запуск ещё раз — теперь берутся другие модели.'
+  }
+  return 'Разметка остановилась. Нажми запуск ещё раз.'
+}
+
 function startPolling() {
   pollTicks = 0
+  let staleTicks = 0
+  let lastFingerprint = ''
   if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null }
   pollingInterval = setInterval(async () => {
     await fetchStats()
@@ -126,6 +151,9 @@ function startPolling() {
     progress.value = initialCount.value > 0
       ? Math.min(100, Math.floor((processed / initialCount.value) * 100))
       : 0
+    const fingerprint = `${stats.value.last_log?.details || ''}|${currentCount.value}`
+    if (fingerprint === lastFingerprint) staleTicks += 1
+    else { lastFingerprint = fingerprint; staleTicks = 0 }
 
     if (activeTab.value === 'feedback') {
       statusText.value = stats.value.jobRunning
@@ -145,6 +173,14 @@ function startPolling() {
     statusText.value = `Успешно обработано: ${processed} из ${initialCount.value} шт.`
     if (currentCount.value === 0 || progress.value >= 100) {
       finishJob('Все доступные данные были успешно обработаны ИИ.')
+      return
+    }
+    if (pollTicks >= 2 && taggingStoppedWithError()) {
+      finishJob(taggingErrorText(), true)
+      return
+    }
+    if (staleTicks >= TAGGING_STALE_TICKS && currentCount.value > 0) {
+      finishJob('Разметка остановилась. Нажми запуск ещё раз — продолжит с остатка.', true)
     }
   }, 5000)
 }
@@ -198,7 +234,7 @@ const startProcess = async () => {
   } catch (err) {
     stopPolling()
     clearJob()
-    resultMessage.value = { type: 'error', text: 'Сбой соединения с сервером ИИ.' }
+    resultMessage.value = { type: 'error', text: err.message || 'Сбой соединения с сервером ИИ.' }
   }
 }
 </script>
@@ -233,7 +269,7 @@ const startProcess = async () => {
         <div class="space-y-6">
           <div>
             <label class="block text-sm font-bold text-slate-700 mb-2">Размер пачки (Batch size): {{ batchSize }} шт.</label>
-            <input type="range" min="5" max="50" step="5" v-model="batchSize" class="w-full accent-indigo-600" :disabled="isProcessing">
+            <input type="range" min="5" max="10" step="1" v-model="batchSize" class="w-full accent-indigo-600" :disabled="isProcessing">
           </div>
           <div>
             <label class="block text-sm font-bold text-slate-700 mb-2">Модель нейросети:</label>
@@ -254,6 +290,10 @@ const startProcess = async () => {
         <div class="flex flex-col justify-between bg-slate-50 p-6 rounded-xl border border-slate-100">
           <div>
             <h3 class="font-bold text-slate-700 mb-3">Аналитика задачи</h3>
+            <p v-if="stats.qwenPause && !String(selectedModel).startsWith('yandex')"
+               class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3 leading-relaxed">
+              {{ stats.qwenPause }}
+            </p>
             <div v-if="isStatsLoading" class="text-sm text-slate-500 animate-pulse">Подсчет базы данных...</div>
             <div v-else>
               <div class="flex justify-between items-center mb-2">
@@ -304,7 +344,7 @@ const startProcess = async () => {
             <Loader2 v-if="isProcessing" class="w-5 h-5 animate-spin" />
             <Play v-else class="w-5 h-5" />
             <span v-if="currentCount === 0 && !isStatsLoading">НЕТ ЗАДАЧ</span>
-            <span v-else>{{ isProcessing ? 'Отправка...' : 'ЗАПУСТИТЬ АНАЛИЗ' }}</span>
+            <span v-else>{{ isProcessing ? 'Идёт разметка...' : 'ЗАПУСТИТЬ АНАЛИЗ' }}</span>
           </button>
         </div>
       </div>

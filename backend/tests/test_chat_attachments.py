@@ -122,10 +122,10 @@ class MarketplaceClientPayloadTests(unittest.TestCase):
             ))
         self.assertEqual(caught.exception.status_code, 415)
 
-    @patch("backend.wb_client.requests.post")
-    def test_wb_sends_repeated_multipart_file_fields(self, post_mock):
+    @patch("backend.wb_client.http_client.request")
+    def test_wb_sends_repeated_multipart_file_fields(self, req_mock):
         response = Mock()
-        post_mock.return_value = response
+        req_mock.return_value = response
 
         wb_client.send_chat_message(
             "reply-sign",
@@ -137,20 +137,20 @@ class MarketplaceClientPayloadTests(unittest.TestCase):
             key="token",
         )
 
-        multipart = post_mock.call_args.kwargs["files"]
+        multipart = req_mock.call_args.kwargs["files"]
         self.assertEqual([name for name, _ in multipart], ["replySign", "message", "file", "file"])
         self.assertEqual(multipart[2][1], ("one.png", b"png", "image/png"))
         response.raise_for_status.assert_called_once_with()
 
-    @patch("backend.wb_client.requests.post")
-    def test_wb_allows_file_without_text(self, post_mock):
-        post_mock.return_value = Mock()
+    @patch("backend.wb_client.http_client.request")
+    def test_wb_allows_file_without_text(self, req_mock):
+        req_mock.return_value = Mock()
         wb_client.send_chat_message(
             "reply-sign",
             attachments=[("manual.pdf", b"pdf", "application/pdf")],
             key="token",
         )
-        multipart = post_mock.call_args.kwargs["files"]
+        multipart = req_mock.call_args.kwargs["files"]
         self.assertEqual([name for name, _ in multipart], ["replySign", "file"])
 
     @patch("backend.ozon_client.post")
@@ -352,6 +352,39 @@ class UploadGuardTests(unittest.TestCase):
         }, receive, send))
         self.assertFalse(downstream_called)
         self.assertEqual(sent[0]["status"], 413)
+
+
+class YmChatAttachmentDisplayTests(unittest.TestCase):
+    def test_proxy_covers_messenger_host(self):
+        url = cx_responses._ym_proxy_or_direct(
+            "https://files.messenger.yandex.net/file/70d368d2-a6c4-ec8f-81ad-7dd3f4d9886e"
+        )
+        self.assertIn("/chat-download/ym?url=", url)
+        self.assertIn("files.messenger.yandex.net", url)
+
+    def test_newline_photo_stays_image(self):
+        items = cx_responses._typed_ym_attachments(
+            "https://avatars.mds.yandex.net/get-market-chat/123/photo.jpg"
+        )
+        self.assertEqual(items[0]["type"], "image")
+        self.assertIn("/chat-download/ym?url=", items[0]["url"])
+
+    def test_json_payload_keeps_name(self):
+        items = cx_responses._typed_ym_attachments(
+            '[{"url":"https://avatars.mds.yandex.net/get-market-chat/1/a.png","name":"a.png","size":12}]'
+        )
+        self.assertEqual(items[0]["type"], "image")
+        self.assertEqual(items[0]["name"], "a.png")
+
+    def test_messenger_video_is_not_shown_as_image(self):
+        with patch.object(cx_responses, "_sniff_ym_content_type", return_value="video/mp4") as sniff:
+            items = cx_responses._typed_ym_attachments(
+                "https://files.messenger.yandex.net/file/70d368d2-a6c4-ec8f-81ad-7dd3f4d9886e"
+            )
+        sniff.assert_called_once()
+        self.assertEqual(items[0]["type"], "video")
+        self.assertEqual(items[0]["name"], "Видео из чата")
+        self.assertIn("/chat-download/ym?url=", items[0]["url"])
 
 
 if __name__ == "__main__":

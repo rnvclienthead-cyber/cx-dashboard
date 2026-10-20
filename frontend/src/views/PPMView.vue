@@ -108,10 +108,56 @@ const claimsMetadata = ref({ factories: [], invoices: [], containers: [] })
 const manualSearch = ref({ factory: '', invoice: '', container: '' })
 const manualDropdown = ref({ factory: false, invoice: false, container: false })
 
+const isPlaceholderInvoice = (value) => {
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw) return true
+  return raw.includes('не закрыт') || ['не указан', 'нет инвойса', '-', '---', '0', 'nan', 'none'].includes(raw)
+}
+const uniqMeta = (list, limit = 80) => {
+  const seen = new Set()
+  const out = []
+  for (const item of list || []) {
+    const raw = String(item || '').trim()
+    if (!raw) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(raw)
+    if (out.length >= limit) break
+  }
+  return out
+}
+const invoiceHits = ref(null)
+let invoiceSearchTimer = null
 const filteredMeta = (field, query) => {
+  if (field === 'invoice' && invoiceHits.value) return invoiceHits.value
   const list = claimsMetadata.value[field === 'invoice' ? 'invoices' : field === 'container' ? 'containers' : 'factories'] || []
-  const q = query.toLowerCase()
-  return q ? list.filter(v => v.toLowerCase().includes(q)).slice(0, 40) : list.slice(0, 40)
+  const q = (query || '').trim().toLowerCase()
+  const extra = field === 'invoice'
+    ? manualClaims.value.map(c => c.invoice_ref).filter(Boolean)
+    : []
+  const merged = uniqMeta([...(list || []), ...extra], 500)
+  const cleaned = field === 'invoice' ? merged.filter(v => !isPlaceholderInvoice(v)) : merged
+  return q ? cleaned.filter(v => String(v).toLowerCase().includes(q)).slice(0, 80) : cleaned.slice(0, 80)
+}
+const searchInvoices = async (q) => {
+  try {
+    const res = await apiFetch(`/api/v1/analytics/claims-metadata?invoice_q=${encodeURIComponent(q)}`)
+    if (!res.ok) return
+    const invoices = ((await res.json()).data || {}).invoices || []
+    invoiceHits.value = uniqMeta(invoices.filter(v => !isPlaceholderInvoice(v)), 80)
+  } catch {}
+}
+const onInvoiceSearchInput = () => {
+  manualDropdown.value.invoice = true
+  newManualClaim.value.invoice_ref = manualSearch.value.invoice
+  clearTimeout(invoiceSearchTimer)
+  const q = (manualSearch.value.invoice || '').trim()
+  if (q.length < 2) {
+    invoiceHits.value = null
+    return
+  }
+  invoiceSearchTimer = setTimeout(() => searchInvoices(q), 250)
 }
 
 const setManualField = (fieldName, value) => {
@@ -119,6 +165,7 @@ const setManualField = (fieldName, value) => {
   const key = fieldName === 'factory_name' ? 'factory' : fieldName === 'invoice_ref' ? 'invoice' : 'container'
   manualSearch.value[key] = value
   manualDropdown.value[key] = false
+  if (key === 'invoice') invoiceHits.value = null
 }
 
 // Поиск в ячейке таблицы
@@ -628,15 +675,23 @@ const effFactory = (c) => {
   return activeFactoryBySku.value[sku] || 'Уточняется'
 }
 
+const PPM_FACTORY_FROM = '2026-08-01'
+const PPM_FACTORY_CATS = [1, 2, 4, 5, 7, 9]
+
 const isClaimDefect = (c) => {
-  // Ozon PPM-claims уже отфильтрованы по заводским причинам — все считаем браком
-  if (c.platform === 'ozon') return true
   const validVals = ['1','1.0','+','true','да', 't']
-  for (let i = 1; i <= 13; i++) {
+  const hasCat = (ids) => ids.some(i => {
     const val = c[`cat_${i}`]
-    if (val === true || validVals.includes(String(val || '').trim().toLowerCase())) return true
-  }
-  return false
+    return val === true || validVals.includes(String(val || '').trim().toLowerCase())
+  })
+  let dateStr = ''
+  if (c['created_dt']) dateStr = String(c['created_dt']).substring(0, 10)
+  else if (c['claim_date']) dateStr = String(c['claim_date']).substring(0, 10)
+  const plat = String(c.platform || '').toLowerCase()
+  // ЯМ и Ozon — теги акта за все периоды. WB — с августа 2026, раньше любой тег 1–13.
+  if (plat === 'ym' || plat === 'ozon') return hasCat(PPM_FACTORY_CATS)
+  if (dateStr >= PPM_FACTORY_FROM) return hasCat(PPM_FACTORY_CATS)
+  return hasCat([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
 }
 
 // Набор SKU, помеченных как новинки (из rawDataset)
@@ -1236,35 +1291,12 @@ const activeDefectCategories = computed(() => {
         result.push({ key: groupKey, name: config.ru, name_cn: config.cn, count: matchedClaims.length, list: matchedClaims, photos: visiblePhotos, invoices: groupedInvoices })
       }
     })
-
-    let otherClaims = []
-    currentSkuClaims.value.forEach(c => {
-      const srid = String(c.srid || c.SRID || c.id)
-      if (assignedSrids.has(srid)) return 
-      let hasAnyValidTag = false
-      for (let i = 1; i <= 11; i++) { 
-         const val = c[`cat_${i}`]
-         if (val === true || validVals.includes(String(val || '').trim().toLowerCase())) { hasAnyValidTag = true; break } 
-      }
-      if (hasAnyValidTag) { otherClaims.push(c); assignedSrids.add(srid) }
-    })
-    if (otherClaims.length > 0) {
-        const invCounts = {}
-        otherClaims.forEach(c => {
-          const inv = String(c['invoice_num'] || '').trim()
-          if (inv && !['nan', 'none', '', 'не указан'].includes(inv.toLowerCase())) { invCounts[inv] = (invCounts[inv] || 0) + 1 }
-        })
-        const groupedInvoices = Object.entries(invCounts).map(([name, count]) => ({ name, count }))
-        const visiblePhotos = categoryPhotosState.value['others']?.visible || []
-        result.push({ key: "others", name: "Прочие производственные дефекты", name_cn: "其他生产缺陷", count: otherClaims.length, list: otherClaims, photos: visiblePhotos, invoices: groupedInvoices })
-    }
     return result
   } catch (err) { return [] }
 })
 
-// Помесячная разбивка типов дефектов для выбранного SKU (та же логика распределения
-// претензии по группе, что и в activeDefectCategories — каждая претензия попадает
-// ровно в одну категорию, приоритет отдаём CLAIM_CATEGORIES_LOGIC, остальное — "Прочие").
+// Помесячная разбивка типов дефектов для выбранного SKU — только группы акта
+// (некомплект, повреждения, хлипкость/материалы). Прочие теги карты в PPM/акт не входят.
 const monthlyDefectTypeData = computed(() => {
   try {
     if (!clickedSku.value) return { months: [], series: [] }
@@ -1291,14 +1323,6 @@ const monthlyDefectTypeData = computed(() => {
         })
         if (hasMatch) { matchedKey = groupKey; break }
       }
-      if (!matchedKey) {
-        let hasAnyValidTag = false
-        for (let i = 1; i <= 11; i++) {
-          const val = c[`cat_${i}`]
-          if (val === true || validVals.includes(String(val || '').trim().toLowerCase())) { hasAnyValidTag = true; break }
-        }
-        if (hasAnyValidTag) matchedKey = 'others'
-      }
       if (!matchedKey) return
 
       ensureMonth(month)
@@ -1306,8 +1330,8 @@ const monthlyDefectTypeData = computed(() => {
     })
 
     const months = [...monthSet].sort()
-    const allKeys = [...groupKeys, 'others']
-    const nameMap = { ...Object.fromEntries(groupKeys.map(k => [k, CLAIM_CATEGORIES_LOGIC[k].ru])), others: 'Прочие производственные дефекты' }
+    const allKeys = [...groupKeys]
+    const nameMap = Object.fromEntries(groupKeys.map(k => [k, CLAIM_CATEGORIES_LOGIC[k].ru]))
     const series = allKeys
       .map(key => ({ key, name: nameMap[key], counts: months.map(m => grid[m]?.[key] || 0) }))
       .filter(s => s.counts.some(v => v > 0))
@@ -1329,7 +1353,7 @@ const buildDefectTypeChart = () => {
   const xLabels = months.map(monthLabel)
   // Цвет закреплён за конкретным типом дефекта (ключом), а не за позицией в массиве —
   // чтобы, например, "Повреждения деталей" были одного и того же цвета на любом SKU/графике.
-  const colorByKey = { Shortage: '#f97316', Damage: '#ef4444', Flimsy: '#a855f7', others: '#64748b' }
+  const colorByKey = { Shortage: '#f97316', Damage: '#ef4444', Flimsy: '#a855f7' }
 
   const traces = series.map(s => ({
     x: xLabels, y: s.counts, name: s.name, type: 'bar',
@@ -1452,7 +1476,7 @@ watch([clickedSku, selectedFactory], async ([newSku, newFactory]) => {
   const assignedSrids = new Set()
   const usedPhotoUrls = new Set()  // глобальная дедупликация фото между блоками
   const newPhotoCommentMap = {}
-  const categoriesList = [{ key: 'Shortage', ids: [1, 2] }, { key: 'Damage', ids: [4, 5] }, { key: 'Flimsy', ids: [7, 9] }, { key: 'others', ids: [] }]
+  const categoriesList = [{ key: 'Shortage', ids: [1, 2] }, { key: 'Damage', ids: [4, 5] }, { key: 'Flimsy', ids: [7, 9] }]
 
   // Фото строго по выбранному заводу (без ограничения по датам — чтобы включить всю историю дефектов).
   // snapSku/snapFactory захвачены из аргументов watch, чтобы избежать гонки при быстрых кликах.
@@ -1471,14 +1495,9 @@ watch([clickedSku, selectedFactory], async ([newSku, newFactory]) => {
     claimsForPhotos.forEach(c => {
       const srid = String(c.srid || c.SRID || c.id)
       if (assignedSrids.has(srid)) return
-      if (cat.key === 'others') {
-        let hasAny = false
-        for (let i = 1; i <= 11; i++) {
-           if (c[`cat_${i}`] === true || validVals.includes(String(c[`cat_${i}`] || '').trim().toLowerCase())) { hasAny = true; break }
-        }
-        if (hasAny) { matched.push(c); assignedSrids.add(srid) }
-      } else {
-        if (cat.ids.some(id => c[`cat_${id}`] === true || validVals.includes(String(c[`cat_${id}`] || '').trim().toLowerCase()))) { matched.push(c); assignedSrids.add(srid) }
+      if (cat.ids.some(id => c[`cat_${id}`] === true || validVals.includes(String(c[`cat_${id}`] || '').trim().toLowerCase()))) {
+        matched.push(c)
+        assignedSrids.add(srid)
       }
     })
     const poolSet = new Set()
@@ -1538,8 +1557,8 @@ const generatePDFClaim = async (isTest = false) => {
   isGenerating.value = true
   try {
     // ── ШАГИ 1: Фиксированные данные — НЕ зависят от тумблеров ─────────────
-    // Кол-во брака и % берём из ВСЕх категорий (до любой фильтрации по тумблерам)
-    // и из строки таблицы-спецификации. Тумблеры не должны их менять.
+    // Кол-во брака и % — из строки таблицы (PPM: с августа только теги акта).
+    // Тумблеры меняют только фото и текст акта, не цифру.
     const _allCats = activeDefectCategories.value   // ВСЕ категории, без фильтра
     const _specRow = baseTableData.value.find(r =>
       String(r['Артикул']).trim().toLowerCase() === String(clickedSku.value).trim().toLowerCase() &&
@@ -2164,10 +2183,10 @@ onMounted(() => {
               <!-- Инвойс — поиск -->
               <div class="relative">
                 <label class="text-[10px] font-black text-blue-800 uppercase block mb-1">№ инвойса</label>
-                <input v-model="manualSearch.invoice" @input="manualDropdown.invoice = true; newManualClaim.invoice_ref = manualSearch.invoice"
+                <input v-model="manualSearch.invoice" @input="onInvoiceSearchInput"
                        @focus="manualDropdown.invoice = true"
                        class="w-full p-2 border border-slate-200 rounded-lg text-xs bg-white outline-none focus:border-blue-400" placeholder="Поиск инвойса..." />
-                <div v-if="manualDropdown.invoice && filteredMeta('invoice', manualSearch.invoice).length" class="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-40 overflow-y-auto">
+                <div v-if="manualDropdown.invoice && filteredMeta('invoice', manualSearch.invoice).length" class="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">
                   <div v-for="v in filteredMeta('invoice', manualSearch.invoice)" :key="v" @mousedown.prevent="setManualField('invoice_ref', v)" class="px-3 py-1.5 text-xs hover:bg-blue-50 cursor-pointer font-mono">{{ v }}</div>
                 </div>
               </div>

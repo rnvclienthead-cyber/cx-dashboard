@@ -1,15 +1,15 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink } from 'vue-router'
 import {
-  DollarSign, AlertTriangle, Star, Cpu, Calendar, ChevronDown,
+  DollarSign, AlertTriangle, Star, ShieldCheck, Calendar, ChevronDown,
   ArrowUpRight, TrendingUp, TrendingDown, BarChart3, ChevronLeft, ChevronRight, X
 } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+import MetricNote from '../components/MetricNote.vue'
 
 const platformStore = usePlatformStore()
-const router = useRouter()
 const loading = ref(true)
 const dashboardData = ref(null)
 
@@ -119,6 +119,10 @@ const loadDashboardData = async () => {
   const seq = ++_dashLoadSeq
   loading.value = true
   dashboardData.value = null // сразу убираем старые цифры при смене периода
+  skuPayload.value = null
+  ecoPayload.value = null
+  if (skuOpen.value) loadSkuProblems()
+  if (ecoOpen.value) loadEco()
   try {
     const res = await apiFetch(`/api/v1/dashboard/executive?start_date=${startDate.value}&end_date=${endDate.value}&platform=${platformStore.platform}`)
     if (seq !== _dashLoadSeq) return // устаревший ответ после смены периода
@@ -134,9 +138,72 @@ const loadDashboardData = async () => {
 
 const formatMoney = (v) => new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(v || 0)
 
+// Тяжёлые блоки грузятся только после раскрытия.
+const skuOpen = ref(false)
+const ecoOpen = ref(false)
+const skuPayload = ref(null)
+const ecoPayload = ref(null)
+const skuLoading = ref(false)
+const ecoLoading = ref(false)
+const skuError = ref('')
+const ecoError = ref('')
+let _skuSeq = 0
+let _ecoSeq = 0
+
+const dashQuery = () =>
+  `start_date=${startDate.value}&end_date=${endDate.value}&platform=${platformStore.platform}`
+
+const loadSkuProblems = async () => {
+  if (!startDate.value || !endDate.value) return
+  const seq = ++_skuSeq
+  skuLoading.value = true
+  skuError.value = ''
+  try {
+    const res = await apiFetch(`/api/v1/dashboard/executive/sku-problems?${dashQuery()}`)
+    if (seq !== _skuSeq) return
+    if (!res.ok) throw new Error('sku')
+    skuPayload.value = await res.json()
+  } catch (err) {
+    if (seq !== _skuSeq) return
+    skuError.value = 'Не удалось загрузить'
+    console.error(err)
+  } finally {
+    if (seq === _skuSeq) skuLoading.value = false
+  }
+}
+
+const loadEco = async () => {
+  if (!startDate.value || !endDate.value) return
+  const seq = ++_ecoSeq
+  ecoLoading.value = true
+  ecoError.value = ''
+  try {
+    const res = await apiFetch(`/api/v1/dashboard/executive/reshipment-economics?${dashQuery()}`)
+    if (seq !== _ecoSeq) return
+    if (!res.ok) throw new Error('eco')
+    ecoPayload.value = await res.json()
+  } catch (err) {
+    if (seq !== _ecoSeq) return
+    ecoError.value = 'Не удалось загрузить'
+    console.error(err)
+  } finally {
+    if (seq === _ecoSeq) ecoLoading.value = false
+  }
+}
+
+const toggleSku = () => {
+  skuOpen.value = !skuOpen.value
+  if (skuOpen.value && !skuPayload.value) loadSkuProblems()
+}
+
+const toggleEco = () => {
+  ecoOpen.value = !ecoOpen.value
+  if (ecoOpen.value && !ecoPayload.value) loadEco()
+}
+
 // ─── Топ SKU по типам проблем (для решения о доотправке) ─────────────────────
 const selectedProblemCat = ref(1)
-const problemCatTabs = computed(() => dashboardData.value?.top_sku_by_problem || [])
+const problemCatTabs = computed(() => skuPayload.value?.top_sku_by_problem || [])
 const activeProblemBlock = computed(() => {
   const tabs = problemCatTabs.value
   if (!tabs.length) return null
@@ -151,7 +218,8 @@ watch(problemCatTabs, (tabs) => {
   }
 })
 
-const skuProblemIndex = computed(() => dashboardData.value?.sku_problem_index || [])
+const skuProblemIndex = computed(() => skuPayload.value?.sku_problem_index || [])
+const eco = computed(() => ecoPayload.value?.reshipment_economics || null)
 const problemZoneClass = (zone) => {
   if (zone === 'high') return 'bg-rose-100 text-rose-700'
   if (zone === 'mid') return 'bg-amber-100 text-amber-700'
@@ -172,7 +240,7 @@ const modalConfig = {
     getPrev:  (d) => d?.metrics?.prev_ppm ?? null,
     getDelta: (d) => d?.metrics?.ppm_delta ?? null,
     format:   (v) => `${v}%`,
-    desc: '% дефектных товаров от числа заказов',
+    desc: 'Доля рекламаций с дефектом от заказов. Нужна, чтобы видеть, растёт ли брак.',
     invertColors: false,
   },
   csat: {
@@ -182,17 +250,7 @@ const modalConfig = {
     getPrev:  (d) => d?.metrics?.prev_csat ?? null,
     getDelta: (d) => d?.metrics?.csat_delta ?? null,
     format:   (v) => `${v}%`,
-    desc: 'Доля положительных отзывов (оценки 4 и 5)',
-    invertColors: true,
-  },
-  ai: {
-    title: 'Объёмы ИИ воркера',
-    route: '/ai-tagging', routeLabel: 'Перейти в ИИ',
-    getValue: (d) => d?.metrics?.ai_processed ?? 0,
-    getPrev:  (d) => d?.metrics?.prev_ai_processed ?? null,
-    getDelta: (d) => d?.metrics?.ai_processed_delta ?? null,
-    format:   (v) => `${v} обр.`,
-    desc: 'Количество отзывов и рекламаций, проанализированных ИИ',
+    desc: 'Доля отзывов на 4 и 5 звёзд. Нужна, чтобы видеть, довольны ли покупатели.',
     invertColors: true,
   },
 }
@@ -245,7 +303,7 @@ watch(() => platformStore.platform, loadDashboardData)
       <div class="flex items-center gap-3">
         <div class="p-3 bg-slate-800 text-white rounded-2xl shadow-sm"><BarChart3 class="w-6 h-6" /></div>
         <div>
-          <h1 class="text-2xl font-black text-slate-800 tracking-tight">Панель Управления Компанией</h1>
+          <h1 class="text-2xl font-black text-slate-800 tracking-tight">Главный дашборд CX</h1>
           <p class="text-xs text-slate-400 mt-0.5">Сводные операционные показатели и финансовые риски на маркетплейсах</p>
         </div>
       </div>
@@ -310,11 +368,11 @@ watch(() => platformStore.platform, loadDashboardData)
     <!-- Карточки метрик -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
 
-      <div @click="router.push('/finances')" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-violet-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden">
+      <router-link to="/finances" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-violet-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden no-underline text-inherit block">
         <div class="absolute right-3 top-3 text-slate-300 group-hover:text-violet-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all"><ArrowUpRight class="w-5 h-5"/></div>
         <div class="flex items-center gap-4 mb-3">
           <div class="p-3.5 bg-violet-50 text-violet-600 rounded-2xl"><TrendingDown class="w-6 h-6"/></div>
-          <div class="text-xs font-black text-slate-400 uppercase tracking-wider">Недополученный доход</div>
+          <div class="text-xs font-black text-slate-400 uppercase tracking-wider">Выручка по отказам</div>
         </div>
         <div class="text-2xl font-black text-slate-800 mb-2">{{ formatMoney(dashboardData?.metrics?.lost_revenue) }}</div>
         <div class="flex items-center gap-2 mb-2">
@@ -327,10 +385,48 @@ watch(() => platformStore.platform, loadDashboardData)
           </template>
           <span v-else class="text-[10px] text-slate-400">нет данных за предыд. период</span>
         </div>
-        <p class="text-[11px] text-slate-400">Сумма розничных цен одобренных возвратов и рекламаций</p>
-      </div>
+        <MetricNote
+          how="Розничные цены товаров, по которым возврат одобрили."
+          why="Видно, сколько продаж потеряли, когда согласились на возврат."
+        />
+      </router-link>
 
-      <div @click="router.push('/finances')" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-red-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden">
+      <router-link to="/finances" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-emerald-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden no-underline text-inherit block">
+        <div class="absolute right-3 top-3 text-slate-300 group-hover:text-emerald-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all"><ArrowUpRight class="w-5 h-5"/></div>
+        <div class="flex items-center gap-4 mb-3">
+          <div class="p-3.5 bg-emerald-50 text-emerald-600 rounded-2xl"><ShieldCheck class="w-6 h-6"/></div>
+          <div class="text-xs font-black text-slate-400 uppercase tracking-wider leading-tight">Сохранённая выручка после отказов</div>
+        </div>
+        <div class="text-2xl font-black text-slate-800 mb-2">{{ formatMoney(dashboardData?.metrics?.saved_revenue) }}</div>
+        <div class="flex items-center gap-2 mb-2">
+          <template v-if="dashboardData?.metrics?.saved_revenue_delta != null">
+            <span :class="dashboardData.metrics.saved_revenue_delta > 0 ? 'text-emerald-500' : 'text-rose-500'" class="flex items-center gap-1 text-xs font-black">
+              <TrendingUp v-if="dashboardData.metrics.saved_revenue_delta > 0" class="w-3.5 h-3.5"/><TrendingDown v-else class="w-3.5 h-3.5"/>
+              {{ Math.abs(dashboardData.metrics.saved_revenue_delta) }}%
+            </span>
+            <span class="text-[10px] text-slate-400">vs {{ dashboardData?.prev_period_label }}</span>
+          </template>
+          <span v-else class="text-[10px] text-slate-400">нет данных за предыд. период</span>
+        </div>
+        <div class="mt-1 space-y-1.5 border-t border-slate-100 pt-3">
+          <div class="flex items-baseline justify-between gap-3 text-[11px]">
+            <span class="text-slate-500">Доотправка деталей <span class="text-slate-400">· {{ dashboardData?.metrics?.saved_reship_count || 0 }} заяв.</span></span>
+            <span class="font-black text-slate-700 tabular-nums">{{ formatMoney(dashboardData?.metrics?.saved_reship_revenue) }}</span>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 text-[11px]">
+            <span class="text-slate-500">Прочие отказы <span class="text-slate-400">· {{ dashboardData?.metrics?.saved_other_count || 0 }} заяв.</span></span>
+            <span class="font-black text-slate-700 tabular-nums">{{ formatMoney(dashboardData?.metrics?.saved_other_revenue) }}</span>
+          </div>
+        </div>
+        <div class="mt-3">
+          <MetricNote
+            how="Розничные цены заявок, в которых в возврате отказали. Строки ниже — доотправка деталей и остальные отказы."
+            why="Видно, сколько продаж удержали, не возвращая товар."
+          />
+        </div>
+      </router-link>
+
+      <router-link to="/finances" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-red-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden no-underline text-inherit block">
         <div class="absolute right-3 top-3 text-slate-300 group-hover:text-red-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all"><ArrowUpRight class="w-5 h-5"/></div>
         <div class="flex items-center gap-4 mb-3">
           <div class="p-3.5 bg-red-50 text-red-600 rounded-2xl"><DollarSign class="w-6 h-6"/></div>
@@ -347,10 +443,13 @@ watch(() => platformStore.platform, loadDashboardData)
           </template>
           <span v-else class="text-[10px] text-slate-400">нет данных за предыд. период</span>
         </div>
-        <p class="text-[11px] text-slate-400">Стоимость подтвержденного фабричного брака в себестоимости</p>
-      </div>
+        <MetricNote
+          how="Себестоимость товаров с подтверждённым заводским браком."
+          why="Это прямые потери на брак — что реально «сгорело»."
+        />
+      </router-link>
 
-      <div @click="router.push('/finances')" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-purple-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden">
+      <router-link to="/finances" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-purple-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden no-underline text-inherit block">
         <div class="absolute right-3 top-3 text-slate-300 group-hover:text-purple-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all"><ArrowUpRight class="w-5 h-5"/></div>
         <div class="flex items-center gap-4 mb-3">
           <div class="p-3.5 bg-purple-50 text-purple-600 rounded-2xl"><DollarSign class="w-6 h-6"/></div>
@@ -367,8 +466,11 @@ watch(() => platformStore.platform, loadDashboardData)
           </template>
           <span v-else class="text-[10px] text-slate-400">нет данных за предыд. период</span>
         </div>
-        <p class="text-[11px] text-slate-400">Разница между ценой продажи и себестоимостью по потерям</p>
-      </div>
+        <MetricNote
+          how="Цена продажи минус себестоимость по одобренным возвратам."
+          why="Сколько маржи не заработали на этих возвратах."
+        />
+      </router-link>
 
       <div @click="openModal('ppm')" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-amber-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden">
         <div class="absolute right-3 top-3 text-slate-300 group-hover:text-amber-400 transition-all"><BarChart3 class="w-5 h-5"/></div>
@@ -387,7 +489,10 @@ watch(() => platformStore.platform, loadDashboardData)
           </template>
           <span v-else class="text-[10px] text-slate-400">нет данных за предыд. период</span>
         </div>
-        <p class="text-[11px] text-slate-400">Средний процент дефектных товаров от общего числа чистых заказов</p>
+        <MetricNote
+          how="Доля рекламаций с дефектом от числа чистых заказов за период."
+          why="Показывает, растёт ли брак относительно продаж."
+        />
       </div>
 
       <div @click="openModal('csat')" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-emerald-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden">
@@ -407,27 +512,10 @@ watch(() => platformStore.platform, loadDashboardData)
           </template>
           <span v-else class="text-[10px] text-slate-400">нет данных за предыд. период</span>
         </div>
-        <p class="text-[11px] text-slate-400">Доля положительных отзывов (оценки 4 и 5) от общего числа</p>
-      </div>
-
-      <div @click="openModal('ai')" class="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:border-indigo-400 hover:shadow-md transition-all cursor-pointer group relative overflow-hidden">
-        <div class="absolute right-3 top-3 text-slate-300 group-hover:text-indigo-400 transition-all"><BarChart3 class="w-5 h-5"/></div>
-        <div class="flex items-center gap-4 mb-3">
-          <div class="p-3.5 bg-indigo-50 text-indigo-600 rounded-2xl"><Cpu class="w-6 h-6"/></div>
-          <div class="text-xs font-black text-slate-400 uppercase tracking-wider">Объёмы ИИ воркера</div>
-        </div>
-        <div class="text-2xl font-black text-slate-800 mb-2">{{ dashboardData?.metrics?.ai_processed || 0 }} <span class="text-sm font-bold text-slate-400">обр.</span></div>
-        <div class="flex items-center gap-2 mb-2">
-          <template v-if="dashboardData?.metrics?.ai_processed_delta != null">
-            <span :class="dashboardData.metrics.ai_processed_delta > 0 ? 'text-emerald-500' : 'text-rose-500'" class="flex items-center gap-1 text-xs font-black">
-              <TrendingUp v-if="dashboardData.metrics.ai_processed_delta > 0" class="w-3.5 h-3.5"/><TrendingDown v-else class="w-3.5 h-3.5"/>
-              {{ Math.abs(dashboardData.metrics.ai_processed_delta) }}%
-            </span>
-            <span class="text-[10px] text-slate-400">vs {{ dashboardData?.prev_period_label }}</span>
-          </template>
-          <span v-else class="text-[10px] text-slate-400">нет данных за предыд. период</span>
-        </div>
-        <p class="text-[11px] text-slate-400">Количество отзывов и рекламаций, проанализированных ИИ</p>
+        <MetricNote
+          how="Доля отзывов с оценкой 4 и 5 от всех отзывов за период."
+          why="Насколько покупатели довольны — сигнал по товару и сервису."
+        />
       </div>
 
     </div>
@@ -435,10 +523,16 @@ watch(() => platformStore.platform, loadDashboardData)
     <!-- Нижние блоки -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
       <div class="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm md:col-span-2">
-        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2 mb-6">
+        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2 mb-2">
           <span class="w-2 h-4 bg-red-500 rounded-md block"></span>
           Красная зона: Топ-5 SKU по финансовым потерям
         </h3>
+        <div class="mb-4">
+          <MetricNote
+            how="Артикулы с самой большой суммой потерь по себестоимости за период."
+            why="С чего начинать разбор — какие товары съедают больше всего денег."
+          />
+        </div>
         <div class="overflow-x-auto">
           <table class="w-full text-left text-xs border-collapse">
             <thead>
@@ -463,10 +557,16 @@ watch(() => platformStore.platform, loadDashboardData)
       </div>
 
       <div class="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm flex flex-col justify-between">
-        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2 mb-4">
+        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2 mb-2">
           <span class="w-2 h-4 bg-slate-800 rounded-md block"></span>
           Воронка данных в периоде
         </h3>
+        <div class="mb-4">
+          <MetricNote
+            how="Чистые заказы, затем отзывы, затем рекламации с дефектом за тот же период."
+            why="Видно масштаб: сколько продали, сколько оценили, сколько брака всплыло."
+          />
+        </div>
         <div class="space-y-4 flex-1 flex flex-col justify-center">
           <div>
             <div class="flex justify-between text-xs font-bold text-slate-500 mb-1">
@@ -498,20 +598,43 @@ watch(() => platformStore.platform, loadDashboardData)
       </div>
     </div>
 
-    <!-- Топ SKU по типам проблем — для решения о доотправке -->
+    <!-- Аналитика SKU — грузится только после раскрытия -->
     <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+      <button type="button" class="w-full flex items-center justify-between gap-3 text-left" @click="toggleSku">
+        <div>
+          <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
+            <span class="w-2 h-4 bg-amber-500 rounded-md block"></span>
+            Аналитика проблем по SKU
+          </h3>
+          <p class="text-[11px] text-slate-400 mt-1">Топ по типам жалоб и индекс проблемы. Считается только после открытия.</p>
+        </div>
+        <span class="flex items-center gap-1.5 text-xs font-bold text-slate-500 shrink-0">
+          {{ skuOpen ? 'Скрыть' : 'Показать' }}
+          <ChevronDown class="w-4 h-4 transition-transform" :class="skuOpen ? 'rotate-180' : ''" />
+        </span>
+      </button>
+      <div v-if="skuOpen" class="mt-5">
+        <div v-if="skuLoading" class="py-8 text-center text-slate-400 text-sm animate-pulse">Загрузка…</div>
+        <div v-else-if="skuError" class="py-8 text-center text-rose-500 text-sm">{{ skuError }}</div>
+        <template v-else>
+    <div class="border border-slate-100 rounded-2xl p-4">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
         <div>
           <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
             <span class="w-2 h-4 bg-amber-500 rounded-md block"></span>
             Топ SKU по типам проблем
           </h3>
-          <p class="text-[11px] text-slate-400 mt-1">По каким товарам чаще всего жалобы — чтобы решить, куда запускать доотправку деталей</p>
+          <div class="mt-2">
+            <MetricNote
+              how="Топ артикулов внутри каждого типа жалобы за выбранный период."
+              why="Помогает решить, на какие товары запускать доотправку деталей."
+            />
+          </div>
         </div>
-        <button
-          @click="router.push('/production')"
-          class="text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 px-3 py-2 rounded-xl transition-colors whitespace-nowrap"
-        >Открыть в карте проблем →</button>
+        <router-link
+          to="/production"
+          class="text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 px-3 py-2 rounded-xl transition-colors whitespace-nowrap no-underline"
+        >Открыть в карте проблем →</router-link>
       </div>
 
       <div v-if="problemCatTabs.length" class="flex flex-wrap gap-1.5 mb-4">
@@ -563,20 +686,23 @@ watch(() => platformStore.platform, loadDashboardData)
           Типы 1–2 (некомплект) выделены — по ним обычно нужна доотправка.
         </p>
       </div>
-      <div v-else-if="!loading" class="py-8 text-center text-slate-400 text-sm">
+      <div v-else class="py-8 text-center text-slate-400 text-sm">
         За выбранный период размеченных проблем по типам нет.
       </div>
-      <div v-else class="py-8 text-center text-slate-400 text-sm animate-pulse">Загрузка…</div>
     </div>
 
-    <!-- Индекс проблемы — сводка по всем типам сразу -->
-    <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+    <div class="mt-6 border border-slate-100 rounded-2xl p-4">
       <div class="mb-5">
         <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
           <span class="w-2 h-4 bg-rose-500 rounded-md block"></span>
           Индекс проблемы по SKU
         </h3>
-        <p class="text-[11px] text-slate-400 mt-1">Какие товары в периоде самые «горячие» — по всем типам проблем сразу</p>
+        <div class="mt-2">
+          <MetricNote
+            how="Сводный балл по частоте жалоб, объёму, деньгам и рейтингу артикула."
+            why="Какие товары самые «горячие» по всем типам проблем сразу."
+          />
+        </div>
       </div>
 
       <!-- Памятка -->
@@ -653,10 +779,12 @@ watch(() => platformStore.platform, loadDashboardData)
           </tbody>
         </table>
       </div>
-      <div v-else-if="!loading" class="py-8 text-center text-slate-400 text-sm">
+      <div v-else class="py-8 text-center text-slate-400 text-sm">
         За выбранный период размеченных проблем нет.
       </div>
-      <div v-else class="py-8 text-center text-slate-400 text-sm animate-pulse">Загрузка…</div>
+    </div>
+        </template>
+      </div>
     </div>
 
     <!-- Воронка: Отправка деталей -->
@@ -665,7 +793,12 @@ watch(() => platformStore.platform, loadDashboardData)
         <span class="w-2 h-4 bg-sky-500 rounded-md block"></span>
         Доотправка деталей
       </h3>
-      <p class="text-[11px] text-slate-400 mb-5">Цифры за выбранный период фильтра дат (по дате создания заявки / ссылки)</p>
+      <div class="mb-5">
+        <MetricNote
+          how="Шаги инструмента: ссылка в чат → форма → одобрение → отправка → доставка. Период — по дате создания заявки."
+          why="Где клиенты отваливаются и сколько заявок реально доезжает."
+        />
+      </div>
 
       <!-- Воронка: верхний ряд — 3 основных шага -->
       <div class="grid grid-cols-3 gap-3 mb-3">
@@ -695,7 +828,21 @@ watch(() => platformStore.platform, loadDashboardData)
       </div>
 
       <!-- Нижний ряд — разбивка по перевозчикам + отправлено + доставлено -->
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-5">
+        <div class="rounded-2xl p-4 text-center" style="background:#EEF3FF">
+          <div class="text-2xl font-black tabular-nums" style="color:#005BFF">{{ dashboardData?.reshipment_funnel?.approved_ozon ?? '—' }}</div>
+          <div class="text-xs font-bold mt-1" style="color:#005BFF">Одобрено Ozon</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            {{ dashboardData?.reshipment_funnel?.approved > 0
+              ? Math.round(dashboardData.reshipment_funnel.approved_ozon / dashboardData.reshipment_funnel.approved * 100) + '% от одобренных'
+              : '—' }}
+          </div>
+          <div class="text-[10px] font-semibold mt-1" style="color:#005BFF">
+            {{ dashboardData?.reshipment_funnel?.approved_ozon_cost > 0
+              ? formatMoney(dashboardData.reshipment_funnel.approved_ozon_cost)
+              : '—' }}
+          </div>
+        </div>
         <div class="bg-blue-50 rounded-2xl p-4 text-center">
           <div class="text-2xl font-black text-blue-700">{{ dashboardData?.reshipment_funnel?.approved_wb ?? '—' }}</div>
           <div class="text-xs font-bold text-blue-600 mt-1">Одобрено СДЭК</div>
@@ -753,7 +900,12 @@ watch(() => platformStore.platform, loadDashboardData)
           <div>
             <div class="text-lg font-black text-slate-800">{{ formatMoney(dashboardData?.reshipment_funnel?.total_cost) }}</div>
             <div class="text-xs font-bold text-slate-500">Общие затраты на доставку</div>
-            <div class="text-[10px] text-slate-400">СДЭК + Яндекс, по одобренным за период</div>
+            <div class="mt-2">
+              <MetricNote
+                how="Сумма доставки СДЭК + Яндекс + Ozon по одобренным заявкам за период."
+                why="Сколько инструмент стоит сам по себе, без учёта сохранённых продаж."
+              />
+            </div>
           </div>
         </div>
         <div class="flex items-center gap-4 bg-green-50 rounded-2xl p-4">
@@ -768,20 +920,38 @@ watch(() => platformStore.platform, loadDashboardData)
                 ? Math.round(dashboardData.reshipment_funnel.reviews_left / dashboardData.reshipment_funnel.delivered * 100) + '% от доставленных'
                 : '—' }}
             </div>
+            <div class="mt-2">
+              <MetricNote
+                how="Отзывы, которые клиент обновил или оставил после доставки детали."
+                why="Видно, отрабатывает ли доотправка на оценке товара."
+              />
+            </div>
           </div>
         </div>
       </div>
     </div>
-    <!-- Экономика доотправок -->
-    <div v-if="dashboardData?.reshipment_economics?.requests_with_data > 0"
-         class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+    <!-- Экономика доотправок — грузится только после раскрытия -->
+    <div class="mt-6 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
+      <button type="button" class="w-full flex items-center justify-between gap-3 text-left" @click="toggleEco">
+        <div>
+          <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
+            <span class="w-2 h-4 bg-emerald-500 rounded-md block"></span>
+            Итоговая экономика доотправок
+          </h3>
+          <p class="text-[11px] text-slate-400 mt-1">Считается только после открытия.</p>
+        </div>
+        <span class="flex items-center gap-1.5 text-xs font-bold text-slate-500 shrink-0">
+          {{ ecoOpen ? 'Скрыть' : 'Показать' }}
+          <ChevronDown class="w-4 h-4 transition-transform" :class="ecoOpen ? 'rotate-180' : ''" />
+        </span>
+      </button>
+      <div v-if="ecoOpen" class="mt-5">
+        <div v-if="ecoLoading" class="py-8 text-center text-slate-400 text-sm animate-pulse">Загрузка…</div>
+        <div v-else-if="ecoError" class="py-8 text-center text-rose-500 text-sm">{{ ecoError }}</div>
+        <template v-else-if="eco?.requests_with_data > 0">
       <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-2 mb-5">
-        <h3 class="font-black text-slate-800 text-sm uppercase tracking-wider flex items-center gap-2">
-          <span class="w-2 h-4 bg-emerald-500 rounded-md block"></span>
-          Итоговая экономика доотправок
-        </h3>
-        <span class="text-[11px] text-slate-400 sm:text-right">
-          {{ dashboardData.reshipment_economics.requests_with_data }} фактически отправленных заявок с финданными<br>
+        <span class="text-[11px] text-slate-400 sm:ml-auto sm:text-right">
+          {{ eco.requests_with_data }} фактически отправленных заявок с финданными<br>
           <span class="text-slate-300">(из {{ dashboardData.reshipment_funnel.shipped }} отправленных за выбранный период)</span>
         </span>
       </div>
@@ -795,6 +965,12 @@ watch(() => platformStore.platform, loadDashboardData)
             <div class="text-2xl font-black text-violet-900 tabular-nums">{{ dashboardData.reshipment_funnel.returns_prevented }}</div>
             <div class="text-xs font-bold text-violet-700">Возвратов отменено</div>
             <div class="text-[10px] text-violet-500 mt-0.5">Справочный показатель · в расчёте выгоды не используется</div>
+            <div class="mt-2">
+              <MetricNote
+                how="Заявки на возврат, которые закрыли доотправкой детали."
+                why="Сколько возвратов инструмент снял с потока. В деньгах выгоды не участвует."
+              />
+            </div>
           </div>
         </div>
         <div class="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 flex items-center gap-4">
@@ -802,96 +978,108 @@ watch(() => platformStore.platform, loadDashboardData)
             <DollarSign class="w-5 h-5" />
           </div>
           <div>
-            <div class="text-2xl font-black text-emerald-900 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.saved_sales_amount) }}</div>
+            <div class="text-2xl font-black text-emerald-900 tabular-nums">{{ formatMoney(eco.saved_sales_amount) }}</div>
             <div class="text-xs font-bold text-emerald-700">Сумма продаж сохранена</div>
             <div class="text-[10px] text-emerald-500 mt-0.5">По всем фактически отправленным заявкам, найденным в финотчёте</div>
+            <div class="mt-2">
+              <MetricNote
+                how="Розничные суммы продаж по заявкам, где деталь реально отправили."
+                why="Какой объём продаж удержали доотправкой, а не возвратом."
+              />
+            </div>
           </div>
         </div>
       </div>
 
-      <div :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'"
+      <div :class="eco.real_benefit >= 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'"
            class="border rounded-2xl p-5 mb-5">
         <div class="flex items-start justify-between gap-4">
           <div>
-            <div :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'text-emerald-600' : 'text-rose-600'"
+            <div :class="eco.real_benefit >= 0 ? 'text-emerald-600' : 'text-rose-600'"
                  class="text-[10px] font-black uppercase tracking-wider mb-1">Реальная итоговая выгода</div>
-            <div :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'text-emerald-800' : 'text-rose-800'"
+            <div :class="eco.real_benefit >= 0 ? 'text-emerald-800' : 'text-rose-800'"
                  class="text-4xl font-black tabular-nums">
-              {{ dashboardData.reshipment_economics.real_benefit >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.real_benefit) }}
+              {{ eco.real_benefit >= 0 ? '+' : '' }}{{ formatMoney(eco.real_benefit) }}
             </div>
-            <div :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'text-emerald-600' : 'text-rose-600'"
+            <div :class="eco.real_benefit >= 0 ? 'text-emerald-600' : 'text-rose-600'"
                  class="text-xs mt-1">
-              В среднем {{ dashboardData.reshipment_economics.avg_real_benefit >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.avg_real_benefit) }} на доотправку
+              В среднем {{ eco.avg_real_benefit >= 0 ? '+' : '' }}{{ formatMoney(eco.avg_real_benefit) }} на доотправку
+            </div>
+            <div class="mt-3 max-w-md">
+              <MetricNote
+                how="Что получили с доотправкой минус то, что потеряли бы при возврате (себестоимость, расходы WB, обратная логистика)."
+                why="Итог инструмента: выгоднее ли чинить деталью, чем принимать возврат."
+              />
             </div>
           </div>
-          <TrendingUp v-if="dashboardData.reshipment_economics.real_benefit >= 0" class="w-8 h-8 text-emerald-500 flex-shrink-0" />
+          <TrendingUp v-if="eco.real_benefit >= 0" class="w-8 h-8 text-emerald-500 flex-shrink-0" />
           <TrendingDown v-else class="w-8 h-8 text-rose-500 flex-shrink-0" />
         </div>
-        <div :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200 text-emerald-800' : 'border-rose-200 text-rose-800'"
+        <div :class="eco.real_benefit >= 0 ? 'border-emerald-200 text-emerald-800' : 'border-rose-200 text-rose-800'"
              class="mt-4 pt-3 border-t text-[11px] space-y-2">
           <details class="group">
             <summary class="flex justify-between items-center gap-4 cursor-pointer list-none rounded-lg hover:bg-white/40 py-1 transition-colors">
               <span class="font-medium">Могли потерять при возврате</span>
               <span class="flex items-center gap-2">
-                <span class="font-bold tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.counterfactual_return_loss) }}</span>
+                <span class="font-bold tabular-nums">{{ formatMoney(-eco.counterfactual_return_loss) }}</span>
                 <ChevronDown class="w-4 h-4 opacity-60 transition-transform duration-200 group-open:rotate-180" />
               </span>
             </summary>
             <div class="mt-2 rounded-xl bg-white/60 p-3 space-y-1.5"
-                 :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border border-emerald-100' : 'border border-rose-100'">
+                 :class="eco.real_benefit >= 0 ? 'border border-emerald-100' : 'border border-rose-100'">
               <div class="flex justify-between gap-4">
                 <span>СС товаров, которые остались бы у клиента (2-СБ, кроме Full Black)</span>
-                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.stay_with_client_cog) }}</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(eco.stay_with_client_cog) }}</span>
               </div>
               <div class="flex justify-between gap-4">
                 <span>WB-расходы при возврате</span>
-                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(eco.total_wb_return_costs) }}</span>
               </div>
               <div class="flex justify-between gap-4">
                 <span>Обратная логистика товаров, которые вернулись бы на склад</span>
-                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.return_logistics) }}</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(eco.return_logistics) }}</span>
               </div>
               <div class="flex justify-between gap-4 border-t pt-2 font-black"
-                   :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
+                   :class="eco.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
                 <span>Итого возможная потеря</span>
-                <span class="tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.counterfactual_return_loss) }}</span>
+                <span class="tabular-nums">{{ formatMoney(-eco.counterfactual_return_loss) }}</span>
               </div>
             </div>
           </details>
           <details class="group border-t pt-2"
-               :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
+               :class="eco.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
             <summary class="flex justify-between items-center gap-4 cursor-pointer list-none rounded-lg hover:bg-white/40 py-1 transition-colors">
               <span class="font-medium">Факт после доотправок</span>
               <span class="flex items-center gap-2">
-                <span class="font-bold tabular-nums">{{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}</span>
+                <span class="font-bold tabular-nums">{{ eco.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(eco.net_v3) }}</span>
                 <ChevronDown class="w-4 h-4 opacity-60 transition-transform duration-200 group-open:rotate-180" />
               </span>
             </summary>
             <div class="mt-2 rounded-xl bg-white/60 p-3 space-y-1.5"
-                 :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border border-emerald-100' : 'border border-rose-100'">
+                 :class="eco.real_benefit >= 0 ? 'border border-emerald-100' : 'border border-rose-100'">
               <div class="flex justify-between gap-4">
                 <span>Сохранённая выплата WB (ppvz)</span>
-                <span class="font-bold tabular-nums">+{{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }}</span>
+                <span class="font-bold tabular-nums">+{{ formatMoney(eco.total_ppvz) }}</span>
               </div>
               <div class="flex justify-between gap-4">
                 <span>Себестоимость товара</span>
-                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.total_cog) }}</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(eco.total_cog) }}</span>
               </div>
               <div class="flex justify-between gap-4">
                 <span>Доставка деталей</span>
-                <span class="font-bold tabular-nums">-{{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }}</span>
+                <span class="font-bold tabular-nums">-{{ formatMoney(eco.total_delivery_cost) }}</span>
               </div>
               <div class="flex justify-between gap-4 border-t pt-2 font-black"
-                   :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
+                   :class="eco.real_benefit >= 0 ? 'border-emerald-200' : 'border-rose-200'">
                 <span>Итого факт после доотправок</span>
-                <span class="tabular-nums">{{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}</span>
+                <span class="tabular-nums">{{ eco.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(eco.net_v3) }}</span>
               </div>
             </div>
           </details>
           <div class="flex justify-between gap-4 border-t pt-2 font-black"
-               :class="dashboardData.reshipment_economics.real_benefit >= 0 ? 'border-emerald-300' : 'border-rose-300'">
+               :class="eco.real_benefit >= 0 ? 'border-emerald-300' : 'border-rose-300'">
             <span>Выгода = разница</span>
-            <span class="tabular-nums">{{ dashboardData.reshipment_economics.real_benefit >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.real_benefit) }}</span>
+            <span class="tabular-nums">{{ eco.real_benefit >= 0 ? '+' : '' }}{{ formatMoney(eco.real_benefit) }}</span>
           </div>
           <div class="pt-1 opacity-80">
             По всем фактически отправленным заявкам с финданными. Количество отменённых возвратов на итог не влияет.
@@ -903,13 +1091,25 @@ watch(() => platformStore.platform, loadDashboardData)
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
         <div class="bg-amber-50 border border-amber-100 rounded-2xl p-4">
           <div class="text-[10px] font-bold text-amber-700 uppercase tracking-wider">2-СБ, кроме Full Black</div>
-          <div class="text-2xl font-black text-amber-900 mt-1 tabular-nums">{{ dashboardData.reshipment_economics.stay_with_client_count }} шт.</div>
-          <div class="text-[11px] text-amber-700 mt-1">Остались бы у клиента · потеря себестоимости {{ formatMoney(dashboardData.reshipment_economics.stay_with_client_cog) }}</div>
+          <div class="text-2xl font-black text-amber-900 mt-1 tabular-nums">{{ eco.stay_with_client_count }} шт.</div>
+          <div class="text-[11px] text-amber-700 mt-1">Остались бы у клиента · потеря себестоимости {{ formatMoney(eco.stay_with_client_cog) }}</div>
+          <div class="mt-2">
+            <MetricNote
+              how="Товары 2-СБ (кроме Full Black): при возврате деньги клиенту, товар ему."
+              why="Эту себестоимость мы бы потеряли — её учитываем в выгоде доотправки."
+            />
+          </div>
         </div>
         <div class="bg-sky-50 border border-sky-100 rounded-2xl p-4">
           <div class="text-[10px] font-bold text-sky-700 uppercase tracking-wider">Full Black, BO, BS и другие SKU</div>
-          <div class="text-2xl font-black text-sky-900 mt-1 tabular-nums">{{ dashboardData.reshipment_economics.return_to_stock_count }} шт.</div>
-          <div class="text-[11px] text-sky-700 mt-1">Вернулись бы на склад · СС {{ formatMoney(dashboardData.reshipment_economics.return_to_stock_cog) }} не теряем · обратная логистика {{ formatMoney(dashboardData.reshipment_economics.return_logistics) }}</div>
+          <div class="text-2xl font-black text-sky-900 mt-1 tabular-nums">{{ eco.return_to_stock_count }} шт.</div>
+          <div class="text-[11px] text-sky-700 mt-1">Вернулись бы на склад · СС {{ formatMoney(eco.return_to_stock_cog) }} не теряем · обратная логистика {{ formatMoney(eco.return_logistics) }}</div>
+          <div class="mt-2">
+            <MetricNote
+              how="Full Black, BO, BS и прочие: товар вернулся бы на склад."
+              why="Себестоимость не теряем, но платили бы обратную логистику."
+            />
+          </div>
         </div>
       </div>
 
@@ -926,31 +1126,31 @@ watch(() => platformStore.platform, loadDashboardData)
           <div><span class="font-bold text-slate-700">Выплата WB (ppvz)</span> — сумма, которую WB перечисляет после своих комиссий за продажу.</div>
           <div><span class="font-bold text-slate-700">Себестоимость (СС)</span> — затраты на производство или закупку товара.</div>
           <div><span class="font-bold text-slate-700">WB-расходы при возврате</span> — эквайринг, штрафы и логистика. В обоих справочных вариантах это расход и он вычитается.</div>
-          <div><span class="font-bold text-slate-700">Обратная логистика</span> — доставка возвращаемого товара от клиента (в среднем {{ formatMoney(dashboardData.reshipment_economics.avg_return_delivery) }}/шт).</div>
+          <div><span class="font-bold text-slate-700">Обратная логистика</span> — среднее по последним 10 возвратам этого артикула из финотчёта WB (сейчас {{ formatMoney(eco.avg_return_delivery) }}/шт по заявкам, где товар вернулся бы на склад).</div>
         </div>
 
         <div class="mb-5">
           <div class="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-3">
-            Если бы согласовывали возврат — два прежних крайних сценария по тем же {{ dashboardData.reshipment_economics.requests_with_data }} заявкам
+            Если бы согласовывали возврат — два прежних крайних сценария по тем же {{ eco.requests_with_data }} заявкам
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="bg-red-50 border border-red-100 rounded-2xl p-4">
               <div class="flex items-start justify-between gap-2 mb-3">
                 <div>
                   <div class="text-[10px] font-bold text-red-500 uppercase tracking-wider mb-1">Вариант 1 — деньги клиенту, товар у него</div>
-                  <div class="text-3xl font-black text-red-700 tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v1) }}</div>
-                  <div class="text-[11px] text-red-500 mt-0.5">≈ {{ formatMoney(-Math.round(dashboardData.reshipment_economics.loss_if_return_v1 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку</div>
+                  <div class="text-3xl font-black text-red-700 tabular-nums">{{ formatMoney(-eco.loss_if_return_v1) }}</div>
+                  <div class="text-[11px] text-red-500 mt-0.5">≈ {{ formatMoney(-Math.round(eco.loss_if_return_v1 / eco.requests_with_data)) }}/заявку</div>
                 </div>
                 <TrendingDown class="w-7 h-7 text-red-300 flex-shrink-0 mt-1" />
               </div>
               <div class="space-y-1.5 text-[12px]">
                 <div class="flex justify-between items-center gap-3 py-1 border-b border-red-100">
                   <span class="text-red-600">Себестоимость товара</span>
-                  <span class="font-bold text-red-700 tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.total_cog) }}</span>
+                  <span class="font-bold text-red-700 tabular-nums">{{ formatMoney(-eco.total_cog) }}</span>
                 </div>
                 <div class="flex justify-between items-center gap-3 py-1">
                   <span class="text-red-600">WB-расходы при возврате</span>
-                  <span class="font-bold text-red-700 tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+                  <span class="font-bold text-red-700 tabular-nums">{{ formatMoney(-eco.total_wb_return_costs) }}</span>
                 </div>
               </div>
             </div>
@@ -959,23 +1159,23 @@ watch(() => platformStore.platform, loadDashboardData)
               <div class="flex items-start justify-between gap-2 mb-3">
                 <div>
                   <div class="text-[10px] font-bold text-orange-500 uppercase tracking-wider mb-1">Вариант 2 — деньги клиенту + товар к нам</div>
-                  <div class="text-3xl font-black text-orange-700 tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v2) }}</div>
-                  <div class="text-[11px] text-orange-500 mt-0.5">≈ {{ formatMoney(-Math.round(dashboardData.reshipment_economics.loss_if_return_v2 / dashboardData.reshipment_economics.requests_with_data)) }}/заявку</div>
+                  <div class="text-3xl font-black text-orange-700 tabular-nums">{{ formatMoney(-eco.loss_if_return_v2) }}</div>
+                  <div class="text-[11px] text-orange-500 mt-0.5">≈ {{ formatMoney(-Math.round(eco.loss_if_return_v2 / eco.requests_with_data)) }}/заявку</div>
                 </div>
                 <TrendingDown class="w-7 h-7 text-orange-300 flex-shrink-0 mt-1" />
               </div>
               <div class="space-y-1.5 text-[12px]">
                 <div class="flex justify-between items-center gap-3 py-1 border-b border-orange-100">
                   <span class="text-orange-600">Себестоимость товара</span>
-                  <span class="font-bold text-orange-700 tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.total_cog) }}</span>
+                  <span class="font-bold text-orange-700 tabular-nums">{{ formatMoney(-eco.total_cog) }}</span>
                 </div>
                 <div class="flex justify-between items-center gap-3 py-1 border-b border-orange-100">
                   <span class="text-orange-600">WB-расходы при возврате</span>
-                  <span class="font-bold text-orange-700 tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.total_wb_return_costs) }}</span>
+                  <span class="font-bold text-orange-700 tabular-nums">{{ formatMoney(-eco.total_wb_return_costs) }}</span>
                 </div>
                 <div class="flex justify-between items-center gap-3 py-1">
                   <span class="text-orange-600">Обратная логистика всех товаров</span>
-                  <span class="font-bold text-orange-700 tabular-nums">{{ formatMoney(-dashboardData.reshipment_economics.ret_logistics) }}</span>
+                  <span class="font-bold text-orange-700 tabular-nums">{{ formatMoney(-eco.ret_logistics) }}</span>
                 </div>
               </div>
             </div>
@@ -987,18 +1187,18 @@ watch(() => platformStore.platform, loadDashboardData)
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div class="bg-slate-50 rounded-2xl p-4">
               <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Выплата WB сохранена (ppvz)</div>
-              <div class="text-2xl font-black text-slate-800 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.total_ppvz) }}</div>
+              <div class="text-2xl font-black text-slate-800 tabular-nums">{{ formatMoney(eco.total_ppvz) }}</div>
               <div class="text-[11px] text-slate-400 mt-1">Выручка после комиссий WB не аннулирована возвратом</div>
             </div>
             <div class="bg-slate-50 rounded-2xl p-4">
               <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Доставка деталей</div>
-              <div class="text-2xl font-black text-slate-800 tabular-nums">−{{ formatMoney(dashboardData.reshipment_economics.total_delivery_cost) }}</div>
+              <div class="text-2xl font-black text-slate-800 tabular-nums">−{{ formatMoney(eco.total_delivery_cost) }}</div>
               <div class="text-[11px] text-slate-400 mt-1">СДЭК + Яндекс по заявкам с финданными</div>
             </div>
-            <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'bg-emerald-50' : 'bg-rose-50'" class="rounded-2xl p-4">
-              <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'text-emerald-500' : 'text-rose-500'" class="text-[10px] font-bold uppercase tracking-wider mb-1">Чистый результат (ppvz − СС − доставка)</div>
-              <div :class="dashboardData.reshipment_economics.net_v3 >= 0 ? 'text-emerald-800' : 'text-rose-700'" class="text-2xl font-black tabular-nums">
-                {{ dashboardData.reshipment_economics.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}
+            <div :class="eco.net_v3 >= 0 ? 'bg-emerald-50' : 'bg-rose-50'" class="rounded-2xl p-4">
+              <div :class="eco.net_v3 >= 0 ? 'text-emerald-500' : 'text-rose-500'" class="text-[10px] font-bold uppercase tracking-wider mb-1">Чистый результат (ppvz − СС − доставка)</div>
+              <div :class="eco.net_v3 >= 0 ? 'text-emerald-800' : 'text-rose-700'" class="text-2xl font-black tabular-nums">
+                {{ eco.net_v3 >= 0 ? '+' : '' }}{{ formatMoney(eco.net_v3) }}
               </div>
               <div class="text-[11px] text-slate-500 mt-1">СС товара и доставка вычтены из сохранённой выплаты</div>
             </div>
@@ -1012,28 +1212,28 @@ watch(() => platformStore.platform, loadDashboardData)
               <div class="flex items-start justify-between gap-2 mb-3">
                 <div>
                   <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Выгода против варианта 1</div>
-                  <div class="text-3xl font-black text-emerald-700 tabular-nums">{{ dashboardData.reshipment_economics.benefit_vs_v1 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v1) }}</div>
-                  <div class="text-[12px] text-emerald-600 mt-0.5">В среднем {{ dashboardData.reshipment_economics.avg_benefit_vs_v1 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v1) }}/заявку</div>
+                  <div class="text-3xl font-black text-emerald-700 tabular-nums">{{ eco.benefit_vs_v1 >= 0 ? '+' : '' }}{{ formatMoney(eco.benefit_vs_v1) }}</div>
+                  <div class="text-[12px] text-emerald-600 mt-0.5">В среднем {{ eco.avg_benefit_vs_v1 >= 0 ? '+' : '' }}{{ formatMoney(eco.avg_benefit_vs_v1) }}/заявку</div>
                 </div>
                 <TrendingUp class="w-7 h-7 text-emerald-400 flex-shrink-0 mt-1" />
               </div>
               <div class="bg-emerald-100 rounded-xl p-3 text-[11px] text-emerald-800 space-y-1">
                 <div class="font-bold">Наш результат − результат варианта 1</div>
-                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.net_v3) }} − ({{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v1) }})</div>
+                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(eco.net_v3) }} − ({{ formatMoney(-eco.loss_if_return_v1) }})</div>
               </div>
             </div>
             <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
               <div class="flex items-start justify-between gap-2 mb-3">
                 <div>
                   <div class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Выгода против варианта 2</div>
-                  <div class="text-3xl font-black text-emerald-700 tabular-nums">{{ dashboardData.reshipment_economics.benefit_vs_v2 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.benefit_vs_v2) }}</div>
-                  <div class="text-[12px] text-emerald-600 mt-0.5">В среднем {{ dashboardData.reshipment_economics.avg_benefit_vs_v2 >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.avg_benefit_vs_v2) }}/заявку</div>
+                  <div class="text-3xl font-black text-emerald-700 tabular-nums">{{ eco.benefit_vs_v2 >= 0 ? '+' : '' }}{{ formatMoney(eco.benefit_vs_v2) }}</div>
+                  <div class="text-[12px] text-emerald-600 mt-0.5">В среднем {{ eco.avg_benefit_vs_v2 >= 0 ? '+' : '' }}{{ formatMoney(eco.avg_benefit_vs_v2) }}/заявку</div>
                 </div>
                 <TrendingUp class="w-7 h-7 text-emerald-400 flex-shrink-0 mt-1" />
               </div>
               <div class="bg-emerald-100 rounded-xl p-3 text-[11px] text-emerald-800 space-y-1">
                 <div class="font-bold">Наш результат − результат варианта 2</div>
-                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.net_v3) }} − ({{ formatMoney(-dashboardData.reshipment_economics.loss_if_return_v2) }})</div>
+                <div class="border-t border-emerald-200 pt-1 tabular-nums">{{ formatMoney(eco.net_v3) }} − ({{ formatMoney(-eco.loss_if_return_v2) }})</div>
               </div>
             </div>
           </div>
@@ -1045,15 +1245,20 @@ watch(() => platformStore.platform, loadDashboardData)
         <div class="font-bold text-slate-700">Расчёт итога</div>
         <div class="flex justify-between gap-4">
           <span>Результат доотправок (ppvz − СС − доставка)</span>
-          <span class="font-bold tabular-nums">{{ formatMoney(dashboardData.reshipment_economics.net_v3) }}</span>
+          <span class="font-bold tabular-nums">{{ formatMoney(eco.net_v3) }}</span>
         </div>
         <div class="flex justify-between gap-4 border-t border-slate-200 pt-2">
           <span>+ Предотвращённые потери при возврате (СС оставшихся 2-СБ + WB-расходы + обратная логистика)</span>
-          <span class="font-bold text-emerald-700 tabular-nums">+{{ formatMoney(dashboardData.reshipment_economics.counterfactual_return_loss) }}</span>
+          <span class="font-bold text-emerald-700 tabular-nums">+{{ formatMoney(eco.counterfactual_return_loss) }}</span>
         </div>
         <div class="flex justify-between gap-4 border-t border-slate-300 pt-2 font-black text-slate-900">
           <span>= Реальная выгода</span>
-          <span class="tabular-nums">{{ dashboardData.reshipment_economics.real_benefit >= 0 ? '+' : '' }}{{ formatMoney(dashboardData.reshipment_economics.real_benefit) }}</span>
+          <span class="tabular-nums">{{ eco.real_benefit >= 0 ? '+' : '' }}{{ formatMoney(eco.real_benefit) }}</span>
+        </div>
+      </div>
+        </template>
+        <div v-else class="py-8 text-center text-slate-400 text-sm">
+          За выбранный период нет данных по отправленным заявкам.
         </div>
       </div>
     </div>
@@ -1074,6 +1279,12 @@ watch(() => platformStore.platform, loadDashboardData)
             {{ p.l }}
           </button>
         </div>
+      </div>
+      <div class="mb-5">
+        <MetricNote
+          how="Сколько рекламационных актов ушло на завод и какая доля получила ответ, дату исправления и инвойс."
+          why="Показывает, отрабатывает ли завод претензии, а не только что мы их отправили."
+        />
       </div>
 
       <template v-if="dashboardData?.ppm_realization">
@@ -1118,7 +1329,7 @@ watch(() => platformStore.platform, loadDashboardData)
       </template>
 
       <p class="text-[10px] text-slate-400 mt-4 border-t border-slate-100 pt-3">
-        % считается от числа отправленных актов в выбранном периоде. <button @click="router.push('/production')" class="text-amber-600 font-bold hover:underline">Перейти в PPM →</button>
+        % считается от числа отправленных актов в выбранном периоде. <router-link to="/production" class="text-amber-600 font-bold hover:underline">Перейти в PPM →</router-link>
       </p>
     </div>
     </template>
@@ -1133,10 +1344,9 @@ watch(() => platformStore.platform, loadDashboardData)
           </button>
           <template v-if="activeModal && modalConfig[activeModal]">
             <div class="flex items-center gap-3 mb-6">
-              <div :class="{ 'bg-amber-50 text-amber-600': activeModal==='ppm', 'bg-emerald-50 text-emerald-600': activeModal==='csat', 'bg-indigo-50 text-indigo-600': activeModal==='ai' }" class="p-3 rounded-2xl">
+              <div :class="{ 'bg-amber-50 text-amber-600': activeModal==='ppm', 'bg-emerald-50 text-emerald-600': activeModal==='csat' }" class="p-3 rounded-2xl">
                 <AlertTriangle v-if="activeModal==='ppm'" class="w-5 h-5"/>
                 <Star v-if="activeModal==='csat'" class="w-5 h-5"/>
-                <Cpu v-if="activeModal==='ai'" class="w-5 h-5"/>
               </div>
               <div>
                 <h2 class="text-base font-black text-slate-800">{{ modalConfig[activeModal].title }}</h2>
@@ -1161,7 +1371,7 @@ watch(() => platformStore.platform, loadDashboardData)
                   <span class="font-black text-slate-800">{{ modalConfig[activeModal].format(modalBarData.curr) }}</span>
                 </div>
                 <div class="w-full bg-slate-200 h-3 rounded-full overflow-hidden">
-                  <div :class="{ 'bg-amber-500': activeModal==='ppm', 'bg-emerald-500': activeModal==='csat', 'bg-indigo-500': activeModal==='ai' }" class="h-full rounded-full transition-all duration-500" :style="{ width: `${modalBarData.currPct}%` }"></div>
+                  <div :class="{ 'bg-amber-500': activeModal==='ppm', 'bg-emerald-500': activeModal==='csat' }" class="h-full rounded-full transition-all duration-500" :style="{ width: `${modalBarData.currPct}%` }"></div>
                 </div>
               </div>
               <div>
@@ -1181,11 +1391,11 @@ watch(() => platformStore.platform, loadDashboardData)
               </div>
             </div>
             <div v-else class="bg-slate-50 rounded-2xl p-4 mb-6 text-center text-xs text-slate-400">Нет данных за предыдущий период для сравнения</div>
-            <button @click="closeModal(); router.push(modalConfig[activeModal].route)"
-              class="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl font-bold text-sm transition-all"
-              :class="{ 'bg-amber-50 text-amber-700 hover:bg-amber-100': activeModal==='ppm', 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100': activeModal==='csat', 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100': activeModal==='ai' }">
+            <router-link :to="modalConfig[activeModal].route" @click="closeModal"
+              class="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl font-bold text-sm transition-all no-underline"
+              :class="{ 'bg-amber-50 text-amber-700 hover:bg-amber-100': activeModal==='ppm', 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100': activeModal==='csat' }">
               {{ modalConfig[activeModal].routeLabel }} <ArrowUpRight class="w-4 h-4"/>
-            </button>
+            </router-link>
           </template>
         </div>
       </div>

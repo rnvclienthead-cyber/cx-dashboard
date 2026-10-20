@@ -37,8 +37,17 @@ def check(name: str, method: str, url: str, **kw):
 
 
 def main():
-    print("=== read / worker paths ===")
-    check("auth/token", "POST", f"{base}/v2/auth/token", json={})
+    print("=== token scopes ===")
+    r = check("auth/token", "POST", f"{base}/v2/auth/token", json={})
+    if r is not None and r.status_code == 200:
+        scopes = (((r.json().get("result") or {}).get("apiKey") or {}).get("authScopes") or [])
+        print("  scopes:", ", ".join(scopes) or "(none)")
+        write_ok = any(s in ("ALL_METHODS", "INVENTORY_AND_ORDER_PROCESSING") for s in scopes)
+        comm_ok = any(s in ("ALL_METHODS", "COMMUNICATION") for s in scopes)
+        print("  returns write:", "OK" if write_ok else "MISSING (нужно INVENTORY_AND_ORDER_PROCESSING)")
+        print("  chats/questions/reviews:", "OK" if comm_ok else "MISSING (нужно COMMUNICATION)")
+
+    print("\n=== read / worker paths ===")
     check("orders", "GET", f"{base}/v2/campaigns/{camp}/orders", params={"page": 1, "pageSize": 1})
     check("returns", "GET", f"{base}/v2/campaigns/{camp}/returns", params={"limit": 1})
     check(
@@ -52,6 +61,18 @@ def main():
         "POST",
         f"{base}/v1/businesses/{biz}/goods-questions",
         json={"pageSize": 1, "needAnswer": True},
+    )
+    check(
+        "questions update exists",
+        "POST",
+        f"{base}/v1/businesses/{biz}/goods-questions/update",
+        json={},
+    )
+    check(
+        "feedback comments update exists",
+        "POST",
+        f"{base}/v2/businesses/{biz}/goods-feedback/comments/update",
+        json={},
     )
 
     r = check(

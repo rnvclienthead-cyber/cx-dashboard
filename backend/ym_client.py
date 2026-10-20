@@ -8,6 +8,8 @@ ym_worker.py уже имел собственный аккуратный сло�
 from __future__ import annotations
 
 import os
+import time
+
 import requests
 
 try:
@@ -40,14 +42,77 @@ def headers(key: str | None = None) -> dict:
     return {"Api-Key": key or api_key(), "Content-Type": "application/json"}
 
 
-def request(method: str, path: str, *, params=None, json_body=None, key: str | None = None, timeout: int = 30) -> requests.Response:
-    """HTTP-запрос к ЯМ. При 420 (rate limit) — сразу RateLimitError, дальше
-    caller сам решает: пропустить задачу (воркеры) или отдать 502 (роутер)."""
-    r = getattr(requests, method)(
-        f"{BASE}{path}", headers=headers(key), timeout=timeout, params=params, json=json_body,
-    )
-    if r.status_code == 420:
-        raise RateLimitError(f"420 rate limit на {path}. Попробуем позже.")
+def list_campaigns(*, key: str | None = None, timeout: int = 30) -> list[dict]:
+    """Все магазины кабинета (FBY / FBS / DBS) из GET /v2/campaigns."""
+    data = get("/v2/campaigns", key=key, timeout=timeout)
+    return list(data.get("campaigns") or [])
+
+
+def available_campaigns(*, key: str | None = None, timeout: int = 30) -> list[dict]:
+    """Кампании с apiAvailability=AVAILABLE (сюда входят FBY и FBS)."""
+    out = []
+    for c in list_campaigns(key=key, timeout=timeout):
+        if str(c.get("apiAvailability") or "") != "AVAILABLE":
+            continue
+        cid = c.get("id")
+        if cid is None:
+            continue
+        out.append({
+            "id": int(cid),
+            "placementType": str(c.get("placementType") or "").upper() or "UNKNOWN",
+            "domain": c.get("domain") or "",
+        })
+    # Если API пуст — хотя бы основной YM_CAMPAIGN_ID
+    if not out:
+        main = (campaign_id() or "").strip()
+        if main.isdigit():
+            out.append({"id": int(main), "placementType": "FBY", "domain": "default"})
+    return out
+
+
+# 500/502/503 у ЯМ бывают «морганием». Чтения повторяем; запись в кабинет — нет,
+# чтобы не отправить ответ покупателю дважды.
+_TRANSIENT = {429, 500, 502, 503, 504}
+
+
+def request(
+    method: str,
+    path: str,
+    *,
+    params=None,
+    json_body=None,
+    key: str | None = None,
+    timeout: int = 30,
+    mutate: bool = False,
+) -> requests.Response:
+    """HTTP-запрос к ЯМ. 420 — RateLimitError (крону лучше подождать цикл).
+    5xx на чтениях — несколько попыток с паузой."""
+    attempts = 1 if mutate else 4
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            r = getattr(requests, method)(
+                f"{BASE}{path}",
+                headers=headers(key),
+                timeout=timeout,
+                params=params,
+                json=json_body,
+            )
+        except requests.RequestException as e:
+            last_exc = e
+            if mutate or attempt >= attempts - 1:
+                raise
+            time.sleep(min(20, 3 * (2 ** attempt)))
+            continue
+        if r.status_code == 420:
+            raise RateLimitError(f"420 rate limit на {path}. Попробуем позже.")
+        if r.status_code in _TRANSIENT and not mutate and attempt < attempts - 1:
+            time.sleep(min(20, 3 * (2 ** attempt)))
+            continue
+        r.raise_for_status()
+        return r
+    if last_exc:
+        raise last_exc
     r.raise_for_status()
     return r
 
@@ -56,35 +121,121 @@ def get(path: str, params: dict | None = None, *, key: str | None = None, timeou
     return request("get", path, params=params or {}, key=key, timeout=timeout).json()
 
 
-def post(path: str, body: dict | None = None, *, params: dict | None = None, key: str | None = None, timeout: int = 30) -> dict:
-    return request("post", path, params=params, json_body=body if body is not None else {}, key=key, timeout=timeout).json()
+def raise_if_error(data, *, path: str = "") -> dict:
+    """ЯМ часто отвечает HTTP 200 с status=ERROR — для записи это провал."""
+    if not isinstance(data, dict):
+        return data or {}
+    if str(data.get("status") or "").upper() != "ERROR":
+        return data
+    errs = data.get("errors") or []
+    parts = []
+    for err in errs:
+        if isinstance(err, dict):
+            parts.append(str(err.get("message") or err.get("code") or err))
+        else:
+            parts.append(str(err))
+    msg = "; ".join(x for x in parts if x) or "ERROR"
+    raise requests.HTTPError(f"ЯМ API ERROR {path}: {msg[:300]}")
+
+
+def post(
+    path: str,
+    body: dict | None = None,
+    *,
+    params: dict | None = None,
+    key: str | None = None,
+    timeout: int = 30,
+    mutate: bool = False,
+) -> dict:
+    data = request(
+        "post", path, params=params,
+        json_body=body if body is not None else {},
+        key=key, timeout=timeout, mutate=mutate,
+    ).json()
+    if mutate:
+        raise_if_error(data, path=path)
+    return data
 
 
 # ── Отзывы и вопросы ──────────────────────────────────────────────────────────
 
 def answer_feedback(feedback_id: str, text: str, *, biz: str | None = None, key: str | None = None, timeout: int = 20) -> dict:
-    """POST — опубликовать комментарий к отзыву ЯМ. Раньше дублировалось 3 раза
-    в cx_responses.py (прямой ответ, подтверждение модерации, авто-ответ по шаблону)."""
+    """POST — опубликовать комментарий к отзыву ЯМ.
+
+    Актуальный метод: /v2/businesses/{id}/goods-feedback/comments/update.
+    Старый /comments только читает список комментариев и молча «успешен».
+    """
     biz = biz or business_id()
-    return post(f"/v2/businesses/{biz}/goods-feedback/comments",
-                {"feedbackId": feedback_id, "text": text}, key=key, timeout=timeout)
+    try:
+        fid = int(str(feedback_id).strip())
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"feedback_id должен быть числом: {feedback_id!r}") from e
+    txt = (text or "").strip()
+    if not txt:
+        raise ValueError("текст ответа пустой")
+    return post(
+        f"/v2/businesses/{biz}/goods-feedback/comments/update",
+        {"feedbackId": fid, "comment": {"text": txt[:4096]}},
+        key=key,
+        timeout=timeout,
+        mutate=True,
+    )
+
+
+def feedback_gone_from_cabinet(exc: BaseException) -> bool:
+    """404 Feedbacks not found — отзыв уже снят с Маркета."""
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) != 404:
+        return False
+    raw = (getattr(resp, "text", None) or "").lower()
+    return "feedbacks not found" in raw or "not_found" in raw
 
 
 def answer_question(question_id: str, text: str, *, biz: str | None = None, key: str | None = None, timeout: int = 20) -> dict:
-    """POST — ответить на вопрос ЯМ (эндпоинт .../questions/{id}/answers — не
-    путать с .../goods-questions, который используется только для листинга)."""
+    """POST — ответить на вопрос ЯМ.
+
+    Актуальный метод: /v1/businesses/{id}/goods-questions/update
+    (CREATE + parentEntityId=вопрос). Старый .../questions/{id}/answers даёт 404.
+    """
     biz = biz or business_id()
-    return post(f"/v1/businesses/{biz}/questions/{question_id}/answers",
-                {"text": text}, key=key, timeout=timeout)
+    try:
+        qid = int(str(question_id).strip())
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"question_id должен быть числом: {question_id!r}") from e
+    txt = (text or "").strip()
+    if not txt:
+        raise ValueError("текст ответа пустой")
+    return post(
+        f"/v1/businesses/{biz}/goods-questions/update",
+        {
+            "operationType": "CREATE",
+            "parentEntityId": {"id": qid, "type": "QUESTION"},
+            "text": txt[:5000],
+        },
+        key=key,
+        timeout=timeout,
+        mutate=True,
+    )
 
 
 # ── Чаты ──────────────────────────────────────────────────────────────────────
 
 def list_chats(statuses: list[str], *, limit: int = 50, biz: str | None = None, key: str | None = None, timeout: int = 30) -> list[dict]:
     biz = biz or business_id()
-    data = post(f"/v2/businesses/{biz}/chats", {"statuses": statuses, "limit": limit}, key=key, timeout=timeout)
-    result = data.get("result") or data
-    return result.get("chats") or []
+    out: list[dict] = []
+    page_token = None
+    for _ in range(40):
+        body: dict = {"statuses": statuses, "limit": limit}
+        if page_token:
+            body["pageToken"] = page_token
+        data = post(f"/v2/businesses/{biz}/chats", body, key=key, timeout=timeout)
+        result = data.get("result") or data
+        out.extend(result.get("chats") or [])
+        paging = result.get("paging") if isinstance(result.get("paging"), dict) else {}
+        page_token = paging.get("nextPageToken") or paging.get("next_page_token")
+        if not page_token:
+            break
+    return out
 
 
 def fetch_chat_history(chat_id: int | str, *, biz: str | None = None, key: str | None = None, timeout: int = 30) -> dict:

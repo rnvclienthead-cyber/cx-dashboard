@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import io
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -11,7 +12,10 @@ from PIL import Image
 from sqlalchemy import text
 
 from backend.database import db_session
-from backend import broadcaster, wb_client
+from backend import sse_bridge, wb_client
+from backend.invoice_match import claims_income_update_sql, clean_supply_id
+from backend.purged_claims import is_purged_claim
+from backend.review_updates import WB_ANSWERED_MARK, WB_UNANSWERED_MARK
 
 WB_PHOTO_DIR = os.getenv("WB_PHOTO_DIR", "/root/cx-dashboard/static/wb_claims").strip()
 WB_PHOTO_RETENTION_DAYS = int(os.getenv("WB_PHOTO_RETENTION_DAYS", "90"))
@@ -19,6 +23,36 @@ WB_PHOTO_RETENTION_DAYS = int(os.getenv("WB_PHOTO_RETENTION_DAYS", "90"))
 
 def _key() -> str:
     return wb_client.api_key()
+
+
+async def _run_db(fn, *args, **kwargs):
+    """Открыть сессию БД в том же потоке, где идёт блокирующий HTTP."""
+    def _inner():
+        with db_session() as db:
+            return fn(db, *args, **kwargs)
+    return await asyncio.to_thread(_inner)
+
+
+def _goods_return_cycle():
+    from backend.wb_goods_return import ensure_table, sync_goods_returns
+    with db_session() as db:
+        ensure_table(db)
+        n = db.execute(text("SELECT COUNT(*) FROM wb_goods_returns")).scalar() or 0
+        days = 186 if n == 0 else 31
+        sleep_s = 61 if days > 31 else 0
+        return sync_goods_returns(db, days_back=days, sleep_s=sleep_s)
+
+
+def _feedback_answer_text(fb) -> str | None:
+    """Текст ответа продавца из payload WB. None — ответа не было."""
+    ans = (fb or {}).get("answer")
+    if isinstance(ans, dict):
+        text = str(ans.get("text") or "").strip()
+        return text or None
+    if isinstance(ans, str):
+        text = ans.strip()
+        return text or None
+    return None
 
 
 def _photo_url(p) -> str:
@@ -145,6 +179,7 @@ def sync_recent_feedbacks(db) -> int:
                     imt_id                = COALESCE(EXCLUDED.imt_id, wb_feedbacks.imt_id),
                     last_order_shk_id     = COALESCE(EXCLUDED.last_order_shk_id, wb_feedbacks.last_order_shk_id),
                     last_order_created_at = COALESCE(EXCLUDED.last_order_created_at, wb_feedbacks.last_order_created_at),
+                    """ + WB_UNANSWERED_MARK + """,
                     state                 = 'active'
             """), {
                 "id":         fb_id,
@@ -342,6 +377,7 @@ def sync_answered_feedbacks_for_active_requests(db) -> int:
                         imt_id                = COALESCE(EXCLUDED.imt_id, wb_feedbacks.imt_id),
                         last_order_shk_id     = COALESCE(EXCLUDED.last_order_shk_id, wb_feedbacks.last_order_shk_id),
                         last_order_created_at = COALESCE(EXCLUDED.last_order_created_at, wb_feedbacks.last_order_created_at),
+                        """ + WB_ANSWERED_MARK + """,
                         state                 = 'answered'
                 """), {
                     "id":         fb_id,
@@ -414,6 +450,48 @@ def _map_claim_status(raw_st: str, st_ex: str = "", wb_comment: str = "") -> str
     return status_map.get(raw, "На рассмотрении")
 
 
+_TERMINAL_CLAIM_STATUSES = frozenset({"Одобрено", "Отказ", "Отменена", "Закрыта"})
+
+
+def persist_live_claim_status(
+    db, *, claim_id: str, status: str, status_ex: str = "", srid: str = "",
+    overwrite_ex: bool = False,
+) -> None:
+    """Пишет живой статус WB в базу, чтобы фильтр очереди не врал."""
+    cid = str(claim_id or "").strip()
+    st = str(status or "").strip()
+    if not cid or not st:
+        return
+    ex = str(status_ex or "").strip()[:500]
+    arch = st in _TERMINAL_CLAIM_STATUSES
+    prev = db.execute(text("""
+        SELECT status, srid FROM wb_claims WHERE claim_id::text = :cid LIMIT 1
+    """), {"cid": cid}).mappings().first()
+    db.execute(text("""
+        UPDATE wb_claims
+        SET status = :st,
+            status_ex = CASE
+              WHEN CAST(:overwrite AS boolean) THEN :ex
+              WHEN :ex <> '' THEN :ex
+              ELSE status_ex
+            END,
+            is_archive = CASE WHEN :arch THEN true ELSE is_archive END,
+            last_sync = NOW()
+        WHERE claim_id::text = :cid
+    """), {"st": st, "ex": ex, "arch": arch, "cid": cid, "overwrite": overwrite_ex})
+    db.commit()
+    prev_status = str((prev or {}).get("status") or "").strip()
+    if st == "Одобрено" and prev_status != "Одобрено":
+        try:
+            from .chat_bot import expire_form_tokens_for_approved_return
+            expire_form_tokens_for_approved_return(
+                db, srid=srid or (prev or {}).get("srid") or None,
+            )
+            db.commit()
+        except Exception as e:
+            print(f"[MiniSync] persist expire form tokens: {e}")
+
+
 def _status_ex_label(raw_ex, wb_comment: str = "") -> str:
     """Читаемая расшифровка: числовой status_ex + комментарий WB."""
     ex = str(raw_ex if raw_ex is not None else "").strip()
@@ -426,25 +504,98 @@ def _status_ex_label(raw_ex, wb_comment: str = "") -> str:
     return ex[:500]
 
 
+def _merge_claims_by_srid(active_claims: list, archive_claims: list) -> dict:
+    """Один srid в WB может иметь несколько претензий (отказ → новая заявка).
+
+    В очереди держим живую. Архив не должен затирать активную с другим id.
+    """
+    by_srid: dict = {}
+    for item in archive_claims:
+        srid = str(item.get("srid", "")).strip()
+        if srid:
+            by_srid[srid] = (item, True)
+    for item in active_claims:
+        srid = str(item.get("srid", "")).strip()
+        if srid:
+            by_srid[srid] = (item, False)
+    return by_srid
+
+
+def _nm_id_key(raw) -> str:
+    s = str(raw or "").strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+def lookup_wb_articles_by_nm(conn, nm_ids) -> dict:
+    """Наш артикул по nm_id WB. Только маленькие таблицы, не wb_logistics (~1M заказов)."""
+    ids = []
+    seen = set()
+    for raw in nm_ids or []:
+        n = _nm_id_key(raw)
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        ids.append(n)
+    if not ids:
+        return {}
+    out = {}
+    remaining = list(ids)
+    # Возвраты и отзывы — тысячи/десятки тысяч строк. Миллион заказов сюда не тащим.
+    sources = ("wb_claims", "wb_feedbacks")
+    try:
+        for table in sources:
+            if not remaining:
+                break
+            rows = conn.execute(text(f"""
+                SELECT nm_id AS nm, TRIM(supplier_article) AS article
+                FROM {table}
+                WHERE nm_id = ANY(CAST(:ids AS text[]))
+                  AND NULLIF(TRIM(supplier_article), '') IS NOT NULL
+            """), {"ids": remaining}).mappings().all()
+            for r in rows:
+                nm = _nm_id_key(r.get("nm"))
+                art = str(r.get("article") or "").strip()
+                if nm and art and nm not in out:
+                    out[nm] = art
+            remaining = [n for n in remaining if n not in out]
+    except Exception as e:
+        print(f"[MiniSync] article by nm_id lookup error: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return out
+    return out
+
+
 def _upsert_claim_row(db, item: dict, *, is_archive: bool) -> bool:
     srid = str(item.get("srid", "")).strip()
     if not srid:
+        return False
+    claim_id = str(item.get("id") or item.get("claim_id") or "")
+    if is_purged_claim(db, srid=srid, claim_id=claim_id):
         return False
     wb_comment = str(item.get("wb_comment") or item.get("wbComment") or "")
     st_ex_raw = item.get("status_description") or item.get("status_ex") or ""
     st_ex = _status_ex_label(st_ex_raw, wb_comment)
     status = _map_claim_status(item.get("status", ""), str(st_ex_raw), wb_comment)
     nm_id = str(item.get("nm_id") or item.get("nmId") or "").strip() or None
-    article = str(item.get("supplier_article") or item.get("supplierArticle") or item.get("saName") or "")
-    existing_photos = db.execute(
-        text("SELECT photos FROM wb_claims WHERE srid = :srid"),
+    article = str(item.get("supplier_article") or item.get("supplierArticle") or item.get("saName") or "").strip()
+    if not article and nm_id:
+        article = lookup_wb_articles_by_nm(db, [nm_id]).get(_nm_id_key(nm_id), "")
+    existing = db.execute(
+        text("SELECT photos, claim_id, status FROM wb_claims WHERE srid = :srid"),
         {"srid": srid},
-    ).scalar()
+    ).mappings().first()
+    existing_photos = None
+    if existing and str(existing.get("claim_id") or "") == claim_id:
+        existing_photos = existing.get("photos")
     photos = _build_claim_photos(item, existing_photos)
-    income = str(item.get("income_id") or item.get("incomeId") or "0")
-    claim_id = str(item.get("id") or item.get("claim_id") or "")
+    income = clean_supply_id(item.get("income_id") or item.get("incomeId"))
     try:
-        db.execute(text("""
+        db.execute(text(f"""
             INSERT INTO wb_claims
                 (srid, claim_id, created_dt, supplier_article, nm_id, user_comment,
                  status, status_ex, claim_type, income_id, is_archive, last_sync, photos,
@@ -455,14 +606,24 @@ def _upsert_claim_row(db, item: dict, *, is_archive: bool) -> bool:
                  :order_date, :claim_date)
             ON CONFLICT (srid) DO UPDATE SET
                 claim_id     = COALESCE(NULLIF(EXCLUDED.claim_id, ''), wb_claims.claim_id),
-                status       = EXCLUDED.status,
+                status       = CASE
+                                 WHEN wb_claims.status IN ('Одобрено', 'Отказ', 'Отменена', 'Закрыта')
+                                  AND EXCLUDED.status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+                                 THEN wb_claims.status
+                                 ELSE EXCLUDED.status
+                               END,
                 status_ex    = CASE
+                                 WHEN wb_claims.status IN ('Одобрено', 'Отказ', 'Отменена', 'Закрыта')
+                                  AND EXCLUDED.status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+                                 THEN wb_claims.status_ex
                                  WHEN EXCLUDED.status_ex IS NOT NULL AND EXCLUDED.status_ex <> ''
                                  THEN EXCLUDED.status_ex
                                  ELSE wb_claims.status_ex
                                END,
                 user_comment = COALESCE(EXCLUDED.user_comment, wb_claims.user_comment),
                 photos       = CASE
+                                 WHEN wb_claims.claim_id IS DISTINCT FROM EXCLUDED.claim_id
+                                 THEN EXCLUDED.photos
                                  WHEN wb_claims.photos IS NOT NULL AND wb_claims.photos <> ''
                                       AND (wb_claims.photos LIKE '%/static/wb_claims/%'
                                            OR wb_claims.photos LIKE '%storage.yandexcloud.net%')
@@ -472,9 +633,26 @@ def _upsert_claim_row(db, item: dict, *, is_archive: bool) -> bool:
                                  ELSE wb_claims.photos
                                END,
                 nm_id        = COALESCE(EXCLUDED.nm_id, wb_claims.nm_id),
-                income_id    = COALESCE(EXCLUDED.income_id, wb_claims.income_id),
-                is_archive   = EXCLUDED.is_archive,
+                supplier_article = CASE
+                    WHEN wb_claims.supplier_article IS NULL
+                         OR TRIM(wb_claims.supplier_article) IN ('', 'Без артикула')
+                    THEN COALESCE(NULLIF(TRIM(EXCLUDED.supplier_article), ''), wb_claims.supplier_article)
+                    ELSE wb_claims.supplier_article
+                END,
+                {claims_income_update_sql()},
+                is_archive   = CASE
+                                 WHEN wb_claims.status IN ('Одобрено', 'Отказ', 'Отменена', 'Закрыта')
+                                  AND EXCLUDED.status IN ('На рассмотрении', '0', '0.0', 'Открыта')
+                                 THEN true
+                                 ELSE EXCLUDED.is_archive
+                               END,
+                claim_date   = COALESCE(EXCLUDED.claim_date, wb_claims.claim_date),
                 last_sync    = NOW()
+            WHERE NOT (
+                wb_claims.is_archive = false
+                AND EXCLUDED.is_archive = true
+                AND wb_claims.claim_id IS DISTINCT FROM EXCLUDED.claim_id
+            )
         """), {
             "srid":       srid,
             "claim_id":   claim_id,
@@ -491,6 +669,13 @@ def _upsert_claim_row(db, item: dict, *, is_archive: bool) -> bool:
             "order_date": item.get("order_dt") or item.get("orderDate"),
             "claim_date": item.get("dt") or item.get("claimDate"),
         })
+        prev_status = str((existing or {}).get("status") or "").strip()
+        if status == "Одобрено" and prev_status != "Одобрено":
+            try:
+                from .chat_bot import expire_form_tokens_for_approved_return
+                expire_form_tokens_for_approved_return(db, srid=srid)
+            except Exception as e:
+                print(f"[MiniSync] expire form tokens: {e}")
         return True
     except Exception as e:
         print(f"[MiniSync] claim insert error: {e}")
@@ -653,9 +838,10 @@ def refresh_stale_claim_statuses(db, *, limit: int = 40) -> int:
             AND coalesce(claim_date, created_dt, last_sync) > NOW() - INTERVAL '20 days'
         )
         SELECT srid, claim_id, nm_id FROM pending
-        ORDER BY prio ASC, dt DESC NULLS LAST
+        ORDER BY prio ASC, dt ASC NULLS LAST
         LIMIT :lim
     """), {"lim": limit}).fetchall()
+    db.commit()
     if not rows:
         return 0
 
@@ -694,9 +880,9 @@ def refresh_stale_claim_statuses(db, *, limit: int = 40) -> int:
                     last_sync = NOW()
                 WHERE srid = :srid
             """), {"srid": srid})
+        db.commit()
         _time.sleep(0.35)
     if updated or rows:
-        db.commit()
         print(f"[MiniSync] stale claims refreshed: {updated}/{len(rows)}")
     return updated
 
@@ -716,7 +902,7 @@ def archive_waiting_chats_with_approved_claims(db) -> int:
           WHERE d.item_id IS NULL
             AND COALESCE(c.is_closing, false) = false
             AND c.needs_answer = true
-            AND c.last_sender = 'client'
+            AND to_timestamp(COALESCE(c.last_ts, 0) / 1000.0) < now() - interval '1 day'
         )
         SELECT w.chat_id, w.rid
         FROM waiting w
@@ -740,6 +926,12 @@ def archive_waiting_chats_with_approved_claims(db) -> int:
             WHERE chat_id = :cid
         """), {"cid": t["chat_id"]})
         closed += 1
+    try:
+        from .chat_bot import set_bot_disabled
+        for t in targets:
+            set_bot_disabled(db, t["chat_id"])
+    except Exception as e:
+        print(f"[MiniSync] bot disable: {e}")
     db.commit()
     print(f"[MiniSync] archived waiting chats (approved claim): {closed}")
     return closed
@@ -794,16 +986,8 @@ def sync_recent_claims(db) -> int:
         print(f"[MiniSync] claims API error: {e}")
         return 0
 
-    # Дедуп по srid (глубокие страницы могут пересечься со свежими)
-    by_srid: dict = {}
-    for item in active_claims:
-        srid = str(item.get("srid", "")).strip()
-        if srid:
-            by_srid[srid] = (item, False)
-    for item in archive_claims:
-        srid = str(item.get("srid", "")).strip()
-        if srid:
-            by_srid[srid] = (item, True)
+    # Дедуп по srid: активная заявка важнее архивной (повторная претензия по заказу).
+    by_srid = _merge_claims_by_srid(active_claims, archive_claims)
 
     for item, is_arch in by_srid.values():
         if _upsert_claim_row(db, item, is_archive=is_arch):
@@ -831,6 +1015,7 @@ def sync_recent_claims(db) -> int:
             """).bindparams(bindparam("srids", expanding=True)),
             {"srids": active_srids},
         ).fetchall()
+        db.commit()
         for (srid,) in missing:
             item = archive_by_srid.get(srid)
             if item:
@@ -841,6 +1026,7 @@ def sync_recent_claims(db) -> int:
                 row = db.execute(text(
                     "SELECT claim_id, nm_id FROM wb_claims WHERE srid = :srid"
                 ), {"srid": srid}).mappings().first()
+                db.commit()
                 hit = None
                 is_arch = True
                 if row:
@@ -869,7 +1055,7 @@ def sync_recent_claims(db) -> int:
                             last_sync = NOW()
                         WHERE srid = :srid AND is_archive = false
                     """), {"srid": srid})
-        db.commit()
+            db.commit()
         if missing:
             print(f"[MiniSync] claims left active list: {len(missing)}")
 
@@ -882,6 +1068,14 @@ def sync_recent_claims(db) -> int:
         archive_waiting_chats_with_approved_claims(db)
     except Exception as e:
         print(f"[MiniSync] archive_waiting_chats_with_approved_claims: {e}")
+
+    try:
+        from .claim_auto_reject import reject_matching_wb_claims
+        ar = reject_matching_wb_claims(db, limit=8, dry_run=False, sleep_s=1.2)
+        if ar.get("rejected") or ar.get("skipped"):
+            print(f"[MiniSync] auto-reject claims: {ar}")
+    except Exception as e:
+        print(f"[MiniSync] auto-reject claims: {e}")
 
     return count
 
@@ -1112,6 +1306,10 @@ def send_pickup_reminders(db) -> int:
         rows = db.execute(text("""
             SELECT r.id, r.customer_name, r.cdek_uuid, r.wb_reply_sign,
                    r.salebot_client_id, r.salebot_messenger, r.salebot_blocked,
+                   r.delivery_method, r.track_number, r.yandex_sharing_url,
+                   r.yandex_pvz_address, r.yandex_pvz_name,
+                   r.ozon_pvz_address, r.ozon_pvz_name, r.ozon_posting_number,
+                   r.client_pvz_address, r.marketplace, r.ym_chat_id, r.ozon_chat_id,
                    l.changed_at AS ready_at
             FROM reshipment_requests r
             JOIN reshipment_status_log l ON l.request_id = r.id AND l.new_status = 'ready_for_pickup'
@@ -1126,9 +1324,9 @@ def send_pickup_reminders(db) -> int:
 
     sent = 0
     for row in rows:
-        # Пытаемся получить срок хранения из СДЭК
+        method = (row.get("delivery_method") or "cdek").strip().lower()
         keep_until_str = ""
-        if row["cdek_uuid"]:
+        if method in ("", "cdek") and row["cdek_uuid"]:
             try:
                 from .cdek import _req, CDEK_BASE, _h
                 r = _req.get(f"{CDEK_BASE}/orders/{row['cdek_uuid']}", headers=_h(), timeout=10)
@@ -1146,21 +1344,37 @@ def send_pickup_reminders(db) -> int:
             except Exception as e:
                 print(f"[MiniSync] pickup_reminders: cdek error req#{row['id']}: {e}")
 
-        msg = "📦 Напоминаем: ваша посылка ожидает вас в пункте выдачи СДЭК."
-        if keep_until_str:
-            msg += f"\nСрок бесплатного хранения: {keep_until_str}."
-        msg += "\nПожалуйста, заберите посылку, чтобы не пропустить срок хранения."
+        if method == "ozon":
+            pvz_addr = row.get("ozon_pvz_address") or row.get("client_pvz_address") or ""
+            pvz_name = row.get("ozon_pvz_name") or ""
+            track = row.get("ozon_posting_number") or row.get("track_number") or ""
+        elif method == "yandex":
+            pvz_addr = row.get("yandex_pvz_address") or row.get("client_pvz_address") or ""
+            pvz_name = row.get("yandex_pvz_name") or ""
+            track = row.get("track_number") or ""
+        else:
+            pvz_addr = row.get("client_pvz_address") or ""
+            pvz_name = ""
+            track = row.get("track_number") or ""
+
+        from .salebot import format_pickup_reminder
+        msg = format_pickup_reminder(
+            delivery_method=method,
+            pvz_address=pvz_addr,
+            pvz_name=pvz_name,
+            keep_until=keep_until_str,
+            sharing_url=row.get("yandex_sharing_url") or "",
+            track_number=track,
+        )
 
         msg_sent = False
 
-        # WB чат
-        if row["wb_reply_sign"]:
-            try:
-                from . import wb_chat as _wbc
-                _wbc.send_message(row["wb_reply_sign"], msg)
+        try:
+            from . import reshipment_notify
+            if reshipment_notify.send_marketplace_message(row, msg, db=db):
                 msg_sent = True
-            except Exception as e:
-                print(f"[MiniSync] pickup_reminders: wb_chat error req#{row['id']}: {e}")
+        except Exception as e:
+            print(f"[MiniSync] pickup_reminders: chat error req#{row['id']}: {e}")
 
         # Salebot (TG или MAX)
         if row["salebot_client_id"] and not row["salebot_blocked"]:
@@ -1209,14 +1423,30 @@ def sync_all_answered_wb(db) -> int:
         if not feedbacks:
             break
 
-        ids = [str(fb.get("id", "")).strip() for fb in feedbacks if fb.get("id")]
+        ids = []
+        answers = []
+        for fb in feedbacks:
+            fid = str(fb.get("id") or "").strip()
+            if not fid:
+                continue
+            ids.append(fid)
+            ans = _feedback_answer_text(fb)
+            if ans:
+                answers.append({"id": fid, "ans": ans})
         try:
-            res = db.execute(text("""
-                UPDATE wb_feedbacks SET state = 'answered'
-                WHERE id = ANY(:ids) AND state = 'active'
-            """), {"ids": ids})
+            if ids:
+                res = db.execute(text("""
+                    UPDATE wb_feedbacks SET state = 'answered'
+                    WHERE id = ANY(:ids) AND state = 'active'
+                """), {"ids": ids})
+                total_updated += res.rowcount
+            for row in answers:
+                db.execute(text("""
+                    UPDATE wb_feedbacks
+                    SET answer_text = COALESCE(NULLIF(TRIM(answer_text), ''), :ans)
+                    WHERE id = :id
+                """), row)
             db.commit()
-            total_updated += res.rowcount
         except Exception as e:
             print(f"[MiniSync] sync_all_answered DB error: {e}")
             break
@@ -1308,25 +1538,150 @@ def _post_wb_feedback_reply(feedback_id: str, existing_answer: str | None) -> bo
         return False
 
 
-def _send_review_msg_to_client(row: dict, msg: str) -> bool:
-    """Отправить сообщение клиенту во все доступные каналы (WB чат + Salebot)."""
+def _send_review_msg_to_client(row: dict, msg: str, *, promo_mode: bool = False) -> bool:
+    """Отправить сообщение клиенту.
+
+    promo_mode=True  — Salebot/Max и чат площадки (промокод при отказе).
+    promo_mode=False — только чат площадки. Просьба об отзыве в Max
+                       раздражает, особенно если пришла не та деталь.
+    """
     ok = False
-    if row.get("wb_reply_sign"):
-        try:
-            from backend import wb_chat
-            wb_chat.send_message(row["wb_reply_sign"], msg)
-            ok = True
-        except Exception as e:
-            print(f"[MiniSync] WB review msg req#{row['id']}: {e}")
-    if row.get("salebot_client_id") and not row.get("salebot_blocked"):
+    has_salebot = bool(row.get("salebot_client_id") and not row.get("salebot_blocked"))
+
+    if promo_mode and has_salebot:
         try:
             from backend import salebot
             if salebot.is_enabled():
-                salebot.send_message(row["salebot_client_id"], msg)
+                if salebot.send_message(row["salebot_client_id"], msg):
+                    ok = True
+        except Exception as e:
+            print(f"[MiniSync] Salebot review msg req#{row.get('id')}: {e}")
+
+    mp = str(row.get("marketplace") or "").strip().lower()
+    if row.get("ozon_chat_id") or row.get("ym_chat_id") or mp in ("ozon", "ym"):
+        try:
+            from . import reshipment_notify
+            if reshipment_notify.send_marketplace_message(row, msg):
                 ok = True
         except Exception as e:
-            print(f"[MiniSync] Salebot review msg req#{row['id']}: {e}")
+            print(f"[MiniSync] marketplace review msg req#{row.get('id')}: {e}")
+        return ok
+
+    try:
+        from backend import wb_chat
+        chat_id = (row.get("wb_chat_id") or "").strip()
+        stored = (row.get("wb_reply_sign") or "").strip()
+        sign = stored
+        if chat_id:
+            try:
+                fresh = wb_chat.resolve_reply_sign(chat_id) or ""
+                if fresh:
+                    sign = fresh
+            except Exception as e:
+                print(f"[MiniSync] resolve_reply_sign req#{row.get('id')}: {e}")
+        if sign:
+            wb_chat.send_message(sign, msg)
+            ok = True
+    except Exception as e:
+        print(f"[MiniSync] WB review msg req#{row.get('id')}: {e}")
     return ok
+
+
+def _as_rating(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def review_request_chain_done(row: dict) -> bool:
+    """Нужно ли прекратить просить отзыв.
+
+    Победа: уже есть оценка после доставки, оценка выросла или стоит 5.
+    Старый плохой отзыв без улучшения — цепочку не останавливаем (просим обновить).
+    """
+    before = _as_rating(row.get("review_before_rating"))
+    latest = _as_rating(row.get("review_after_rating"))
+    if latest is None:
+        latest = _as_rating(row.get("current_rating"))
+    if any(v is not None and v >= 5 for v in (latest, before)):
+        return True
+    if latest is not None and before is None:
+        return True
+    if latest is not None and before is not None and latest > before:
+        return True
+    return False
+
+
+_REVIEW_COMPLAINT_RE = re.compile(
+    r"не\s*та\b|не\s*тот\b|не\s*ту\b|не\s*те\b|не\s*то\b|"
+    r"сломан|брак|не\s*подош|другая\s*детал|некомплект|не\s*хвата|"
+    r"не\s*пришл|не\s*дошл|перепут|опять\s+не",
+    re.I,
+)
+
+
+def text_looks_like_part_complaint(text: str) -> bool:
+    """Клиент пишет, что деталь не та или сломана — отзыв не просим."""
+    return bool(_REVIEW_COMPLAINT_RE.search(str(text or "")))
+
+
+def review_has_marketplace_chat(row: dict) -> bool:
+    mp = str(row.get("marketplace") or "").strip().lower()
+    if row.get("ozon_chat_id") or row.get("ym_chat_id"):
+        return True
+    if mp in ("ozon", "ym"):
+        return bool(row.get("ozon_chat_id") or row.get("ym_chat_id"))
+    return bool((row.get("wb_reply_sign") or "").strip() or (row.get("wb_chat_id") or "").strip())
+
+
+def _client_complaint_after_delivery(db, row: dict) -> bool:
+    """После получения детали клиент написал, что она не та / сломана."""
+    delivered = row.get("confirmed_at") or row.get("updated_at")
+    if not delivered:
+        return False
+    cid_wb = (row.get("wb_chat_id") or "").strip()
+    cid_ym = (row.get("ym_chat_id") or "").strip()
+    cid_oz = (row.get("ozon_chat_id") or "").strip()
+    texts = []
+    try:
+        if cid_wb:
+            texts.extend(db.execute(text("""
+                SELECT text FROM wb_chat_messages
+                WHERE chat_id = :cid
+                  AND lower(COALESCE(sender, '')) IN ('client', 'buyer', 'customer', 'user')
+                  AND to_timestamp(add_ts/1000.0) > :dt
+                ORDER BY add_ts DESC
+                LIMIT 8
+            """), {"cid": cid_wb, "dt": delivered}).scalars().all())
+        if cid_ym:
+            texts.extend(db.execute(text("""
+                SELECT text FROM ym_chat_messages
+                WHERE chat_id = :cid
+                  AND lower(COALESCE(sender_type, '')) IN ('customer', 'client', 'buyer', 'user')
+                  AND created_at > :dt
+                ORDER BY created_at DESC
+                LIMIT 8
+            """), {"cid": cid_ym, "dt": delivered}).scalars().all())
+        if cid_oz:
+            texts.extend(db.execute(text("""
+                SELECT text FROM ozon_chat_messages
+                WHERE chat_id = :cid
+                  AND lower(COALESCE(sender_type, '')) IN ('customer', 'client', 'buyer', 'user')
+                  AND created_at > :dt
+                ORDER BY created_at DESC
+                LIMIT 8
+            """), {"cid": cid_oz, "dt": delivered}).scalars().all())
+    except Exception as e:
+        print(f"[MiniSync] complaint check req#{row.get('id')}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    return any(text_looks_like_part_complaint(t) for t in texts)
 
 
 def send_review_requests(db) -> int:
@@ -1336,13 +1691,25 @@ def send_review_requests(db) -> int:
     Step 1 → 2: напоминание через 24ч после первого
     Step 2 → 3: финальное через 72ч после напоминания
     Step 3: завершено, не трогаем
-    Цепочка прекращается, только если after-снепшот показывает рост оценки.
+    Цепочка прекращается, если отзыв уже есть (тем более пятёрка) или оценка выросла.
     """
     try:
         rows = db.execute(text("""
             SELECT r.id, r.review_step, r.review_last_sent_at,
                    r.confirmed_at, r.updated_at, r.matched_srid,
-                   r.wb_reply_sign, r.salebot_client_id, r.salebot_blocked,
+                   r.wb_reply_sign, r.wb_chat_id, r.salebot_client_id, r.salebot_blocked,
+                   r.marketplace, r.ym_chat_id, r.ozon_chat_id, r.customer_phone,
+                   (SELECT 1 FROM reshipment_requests r2
+                    WHERE r2.id > r.id
+                      AND r2.status NOT IN ('rejected')
+                      AND (
+                        (NULLIF(TRIM(r.customer_phone), '') IS NOT NULL
+                         AND r2.customer_phone = r.customer_phone)
+                        OR (r.wb_chat_id IS NOT NULL AND r2.wb_chat_id = r.wb_chat_id)
+                        OR (r.ym_chat_id IS NOT NULL AND r2.ym_chat_id = r.ym_chat_id)
+                        OR (r.ozon_chat_id IS NOT NULL AND r2.ozon_chat_id = r.ozon_chat_id)
+                      )
+                    LIMIT 1) AS later_reshipment,
                    (SELECT 1 FROM wb_feedbacks f
                     JOIN wb_orders o ON (
                         o.shk_id = f.last_order_shk_id
@@ -1353,9 +1720,6 @@ def send_review_requests(db) -> int:
                       AND f.created_date < COALESCE(r.confirmed_at, r.updated_at) - INTERVAL '3 hours'
                     ORDER BY f.created_date ASC
                     LIMIT 1) AS had_review_before,
-                   (SELECT 1 FROM wb_feedback_snapshots s
-                    WHERE s.request_id = r.id
-                      AND s.snapshot_type = 'after' LIMIT 1) AS has_review_after,
                    (SELECT s.valuation FROM wb_feedback_snapshots s
                     WHERE s.request_id = r.id
                       AND s.snapshot_type IN ('before', 'on_approve')
@@ -1363,11 +1727,21 @@ def send_review_requests(db) -> int:
                    (SELECT s.valuation FROM wb_feedback_snapshots s
                     WHERE s.request_id = r.id
                       AND s.snapshot_type = 'after'
-                    ORDER BY s.captured_at DESC LIMIT 1) AS review_after_rating
+                    ORDER BY s.captured_at DESC LIMIT 1) AS review_after_rating,
+                   (SELECT f.valuation FROM wb_feedbacks f
+                    JOIN wb_orders o ON (
+                        o.shk_id = f.last_order_shk_id
+                        OR (o.dt = f.last_order_created_at + INTERVAL '3 hours'
+                            AND o.supplier_article = f.supplier_article)
+                    )
+                    WHERE o.srid = r.matched_srid
+                    ORDER BY f.created_date DESC NULLS LAST
+                    LIMIT 1) AS current_rating
             FROM reshipment_requests r
             WHERE r.status = 'delivered'
               AND r.review_step < 3
               AND (r.wb_reply_sign IS NOT NULL
+                   OR r.wb_chat_id IS NOT NULL
                    OR (r.salebot_client_id IS NOT NULL
                        AND NOT COALESCE(r.salebot_blocked, FALSE)))
         """)).mappings().fetchall()
@@ -1376,23 +1750,32 @@ def send_review_requests(db) -> int:
         return 0
 
     sent = 0
+    closed = 0
     now = datetime.utcnow()
 
     for row in rows:
         req_id = row["id"]
         step = row["review_step"] or 0
 
-        # Завершаем цепочку только если оценка действительно выросла. Сам факт
-        # after-снимка недостаточен: WB может вернуть тот же исходный отзыв.
-        if (
-            row["has_review_after"]
-            and row["review_before_rating"] is not None
-            and row["review_after_rating"] is not None
-            and row["review_after_rating"] > row["review_before_rating"]
-        ):
+        if review_request_chain_done(dict(row)):
             db.execute(text(
                 "UPDATE reshipment_requests SET review_step = 3 WHERE id = :id"
             ), {"id": req_id})
+            closed += 1
+            continue
+
+        if row.get("later_reshipment") or not review_has_marketplace_chat(dict(row)):
+            db.execute(text(
+                "UPDATE reshipment_requests SET review_step = 3 WHERE id = :id"
+            ), {"id": req_id})
+            closed += 1
+            continue
+
+        if _client_complaint_after_delivery(db, dict(row)):
+            db.execute(text(
+                "UPDATE reshipment_requests SET review_step = 3 WHERE id = :id"
+            ), {"id": req_id})
+            closed += 1
             continue
 
         delivered_at = row["confirmed_at"] or row["updated_at"]
@@ -1443,26 +1826,71 @@ def send_review_requests(db) -> int:
             """), {"step": step + 1, "id": req_id})
             sent += 1
 
-    if sent:
+    if sent or closed:
         db.commit()
-        print(f"[MiniSync] review requests sent: {sent}")
+        if sent:
+            print(f"[MiniSync] review requests sent: {sent}")
+        if closed:
+            print(f"[MiniSync] review request chains closed: {closed}")
     return sent
 
 
+_RU_MONTHS_GEN = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля", 5: "мая", 6: "июня",
+    7: "июля", 8: "августа", 9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+}
+
+
+def _fmt_promo_expiry(expires_at) -> str:
+    if not expires_at:
+        return ""
+    month = _RU_MONTHS_GEN.get(getattr(expires_at, "month", None), "")
+    day = getattr(expires_at, "day", None)
+    if not day or not month:
+        return ""
+    return f" Промокод действителен до {day} {month}."
+
+
+def format_rejection_promo_message(
+    code: str,
+    expires_at=None,
+    *,
+    has_review: bool = False,
+    marketplace: str = "wb",
+) -> str:
+    """Одно сообщение при отказе с промокодом: не отправим, возврат одобрен, скидка."""
+    is_ym = str(marketplace or "").lower() == "ym"
+    return_line = (
+        "Оформите возврат в личном кабинете Яндекс Маркета."
+        if is_ym else
+        "Мы одобрили ваш возврат в личном кабинете Wildberries."
+    )
+    expiry_str = _fmt_promo_expiry(expires_at)
+    closing = (
+        "Также будем очень признательны, если вы найдёте возможность обновить отзыв о товаре — "
+        "для нас это очень важно!"
+        if has_review else
+        "Будем рады снова видеть вас среди покупателей Видовито!"
+    )
+    return (
+        "К сожалению, отправить деталь не получится — запрашиваемой позиции нет на складе.\n\n"
+        f"{return_line}\n\n"
+        f"В качестве извинений подготовили промокод на скидку 15% на следующую покупку: {code}.{expiry_str} "
+        "Применить его можно при оформлении заказа на Wildberries.\n\n"
+        f"{closing}\n\n"
+        "С уважением, Александр из команды Видовито."
+    )
+
+
 def send_rejection_promo(db) -> int:
-    """Второе сообщение после отказа: промокод + просьба обновить отзыв (если есть).
+    """Одно сообщение после отказа: не отправим + возврат одобрен + промокод.
     Страховочный воркер: основная отправка идёт через фоновую задачу (10 сек) в reject_request,
     этот проход — запасной вариант, если фоновая задача не выполнилась (например, рестарт сервера).
     """
-    _RU_MONTHS_GEN = {
-        1: "января", 2: "февраля", 3: "марта", 4: "апреля", 5: "мая", 6: "июня",
-        7: "июля", 8: "августа", 9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
-    }
-
     try:
         rows = db.execute(text("""
-            SELECT r.id, r.promo_code,
-                   r.wb_reply_sign, r.salebot_client_id, r.salebot_blocked,
+            SELECT r.id, r.promo_code, r.marketplace,
+                   r.wb_reply_sign, r.wb_chat_id, r.salebot_client_id, r.salebot_blocked,
                    r.matched_srid,
                    (SELECT s.expires_at FROM reshipment_settings s WHERE s.key = 'promo_code') AS promo_expires_at,
                    (SELECT 1 FROM wb_feedbacks f
@@ -1477,6 +1905,11 @@ def send_rejection_promo(db) -> int:
               AND r.promo_code IS NOT NULL
               AND r.promo_sent_at IS NULL
               AND r.processed_at < NOW() - INTERVAL '2 minutes'
+              AND (
+                    (r.salebot_client_id IS NOT NULL AND NOT COALESCE(r.salebot_blocked, FALSE))
+                 OR r.wb_reply_sign IS NOT NULL
+                 OR r.wb_chat_id IS NOT NULL
+              )
         """)).mappings().all()
     except Exception as e:
         print(f"[MiniSync] send_rejection_promo: fetch error: {e}")
@@ -1485,26 +1918,13 @@ def send_rejection_promo(db) -> int:
     sent = 0
     for row in rows:
         row = dict(row)
-        code = row["promo_code"]
-        has_review = row.get("has_review")
-        expires_at = row.get("promo_expires_at")
-        expiry_str = f" Промокод действителен до {expires_at.day} {_RU_MONTHS_GEN.get(expires_at.month, '')}." if expires_at else ""
-
-        if has_review:
-            msg = (
-                f"В качестве извинений мы подготовили для вас персональный промокод на следующую покупку "
-                f"со скидкой 15%: {code}.{expiry_str} Применить его можно при оформлении заказа на Wildberries.\n\n"
-                "Также будем очень признательны, если вы найдёте возможность обновить отзыв о товаре — "
-                "для нас это очень важно!\n\nС уважением, Александр из команды Видовито."
-            )
-        else:
-            msg = (
-                f"В качестве извинений мы подготовили для вас персональный промокод на следующую покупку "
-                f"со скидкой 15%: {code}.{expiry_str} Применить его можно при оформлении заказа на Wildberries.\n\n"
-                "Будем рады снова видеть вас среди покупателей Видовито!\n\nС уважением, Александр из команды Видовито."
-            )
-
-        ok = _send_review_msg_to_client(row, msg)
+        msg = format_rejection_promo_message(
+            row["promo_code"],
+            row.get("promo_expires_at"),
+            has_review=bool(row.get("has_review")),
+            marketplace=row.get("marketplace") or "wb",
+        )
+        ok = _send_review_msg_to_client(row, msg, promo_mode=True)
         if ok:
             db.execute(text(
                 "UPDATE reshipment_requests SET promo_sent_at = NOW() WHERE id = :id"
@@ -1577,46 +1997,53 @@ async def start_mini_sync_worker(get_db) -> None:
             # Каждый sync_* делает блокирующие HTTP-запросы к API WB (таймауты до 30с).
             # Выполняем их в отдельном потоке через asyncio.to_thread, иначе они
             # замораживают event loop uvicorn и весь сайт перестаёт отвечать на эти секунды.
-            with db_session() as db:
-                new_feedbacks = await asyncio.to_thread(sync_recent_feedbacks, db) or 0
-                await asyncio.sleep(2)
-                await asyncio.to_thread(sync_answered_feedbacks_for_active_requests, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(sync_recent_claims, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(sync_recent_questions, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(scan_unlinked_tokens, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(sync_reshipment_review_snapshots, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(send_pickup_reminders, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(send_review_requests, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(send_rejection_promo, db)
-                await asyncio.sleep(2)
-                await asyncio.to_thread(sync_yandex_statuses, db)
+            # Сессию БД открываем внутри потока — иначе одно соединение висит
+            # на весь цикл и пул для страниц заканчивается.
+            new_feedbacks = await _run_db(sync_recent_feedbacks) or 0
+            await asyncio.sleep(2)
+            await _run_db(sync_answered_feedbacks_for_active_requests)
+            await asyncio.sleep(2)
+            await _run_db(sync_recent_claims)
+            await asyncio.sleep(2)
+            await _run_db(sync_recent_questions)
+            await asyncio.sleep(2)
+            await _run_db(scan_unlinked_tokens)
+            await asyncio.sleep(2)
+            await _run_db(sync_reshipment_review_snapshots)
+            await asyncio.sleep(2)
+            await _run_db(send_pickup_reminders)
+            await asyncio.sleep(2)
+            await _run_db(send_review_requests)
+            await asyncio.sleep(2)
+            await _run_db(send_rejection_promo)
+            await asyncio.sleep(2)
+            await _run_db(sync_yandex_statuses)
 
-                # Ежедневно: ре-синк отвеченных + архивирование старых
-                today = _dt.date.today()
-                if _last_daily != today:
-                    await asyncio.sleep(5)
-                    await asyncio.to_thread(sync_all_answered_wb, db)
-                    await asyncio.sleep(3)
-                    await asyncio.to_thread(archive_old_active_feedbacks, db)
-                    await asyncio.sleep(3)
-                    await asyncio.to_thread(sync_all_answered_questions, db)
-                    await asyncio.sleep(2)
-                    await asyncio.to_thread(cleanup_old_wb_photos)
-                    _last_daily = today
+            # Ежедневно: ре-синк отвеченных + архивирование старых
+            today = _dt.date.today()
+            if _last_daily != today:
+                await asyncio.sleep(5)
+                await _run_db(sync_all_answered_wb)
+                await asyncio.sleep(3)
+                await _run_db(archive_old_active_feedbacks)
+                await asyncio.sleep(3)
+                await _run_db(sync_all_answered_questions)
+                await asyncio.sleep(2)
+                await asyncio.to_thread(cleanup_old_wb_photos)
+                try:
+                    from backend import ozon_delivery as _ozon_dlv
+                    await asyncio.to_thread(_ozon_dlv.sync_pvz_catalog, False)
+                except Exception as _e:
+                    print(f"[MiniSync] ozon pvz catalog: {_e}")
+                try:
+                    result = await asyncio.to_thread(_goods_return_cycle)
+                    print(f"[MiniSync] goods-return: {result}")
+                except Exception as _e:
+                    print(f"[MiniSync] goods-return: {_e}")
+                _last_daily = today
 
-            # Уведомляем фронтенд об обновлении данных
-            await broadcaster.broadcast("voc")
-            await broadcaster.broadcast("moderation")
-            await broadcaster.broadcast("dashboard")
-            await broadcaster.broadcast("sync")
-            await broadcaster.broadcast("chats")
+            # Уведомляем вкладки сайта (через Postgres — фон и API в разных процессах)
+            sse_bridge.publish("voc", "moderation", "dashboard", "sync", "chats")
 
             # Centrifugo: реалтайм-сигнал разделу отзывов о новых отзывах
             if new_feedbacks > 0:

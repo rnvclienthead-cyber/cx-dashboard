@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { apiFetch } from '../api'
 import {
   ShieldAlert, Users, MailPlus, Trash2, Check, UserCog,
@@ -12,6 +12,8 @@ const invites      = ref([])
 const newInviteEmail = ref('')
 const newInviteRole  = ref('sales_manager')
 const isLoading    = ref(true)
+const presence     = ref({})
+let presenceTimer  = null
 
 // ── Роли и права ─────────────────────────────────────────────────────────────
 const dbRoles      = ref([])    // роли из БД
@@ -223,7 +225,43 @@ const deleteRole = async (roleName) => {
   } catch (e) { alert(e.message) }
 }
 
-onMounted(loadData)
+onMounted(() => {
+  loadData()
+  loadPresence()
+  presenceTimer = setInterval(loadPresence, 2000)
+})
+
+onUnmounted(() => {
+  if (presenceTimer) clearInterval(presenceTimer)
+})
+
+const onlineNow = computed(() =>
+  Object.values(presence.value).filter((s) => s.status === 'online')
+)
+
+function presenceOf (user) {
+  return presence.value[user.id] || null
+}
+
+function presenceLabel (user) {
+  const s = presenceOf(user)
+  if (!s || s.status === 'offline') return 'не в сети'
+  if (s.status === 'online') return 'онлайн'
+  const sec = s.last_seen_sec
+  if (sec != null && sec < 60) return `${sec} сек назад`
+  if (s.last_seen_min != null && s.last_seen_min < 60) return `${s.last_seen_min} мин назад`
+  return 'недавно'
+}
+
+async function loadPresence () {
+  try {
+    const r = await apiFetch('/api/v1/cx-control/staff')
+    const d = await r.json()
+    const map = {}
+    for (const s of d.staff || []) map[s.id] = s
+    presence.value = map
+  } catch { /* тихий опрос */ }
+}
 </script>
 
 <template>
@@ -256,6 +294,20 @@ onMounted(loadData)
 
       <!-- ── Вкладка: Пользователи ────────────────────────────────────────── -->
       <div v-if="activeTab === 'users'" class="space-y-6">
+
+        <div class="rounded-2xl border px-5 py-4 flex items-start gap-3"
+          :class="onlineNow.length ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-200'">
+          <span class="mt-1.5 w-2.5 h-2.5 rounded-full flex-shrink-0"
+            :class="onlineNow.length ? 'bg-emerald-500' : 'bg-slate-300'"></span>
+          <div class="min-w-0">
+            <div class="text-sm font-bold" :class="onlineNow.length ? 'text-emerald-800' : 'text-slate-600'">
+              {{ onlineNow.length ? `Сейчас на сайте: ${onlineNow.map(s => s.name).join(', ')}` : 'На сайте сейчас никого нет' }}
+            </div>
+            <div class="text-xs mt-1" :class="onlineNow.length ? 'text-emerald-700/80' : 'text-slate-400'">
+              {{ onlineNow.length ? 'Есть живая активность (клик, набор, прокрутка).' : 'Можно перезапускать службу — вкладок без действий не считаем.' }}
+            </div>
+          </div>
+        </div>
 
         <!-- Белый список -->
         <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
@@ -311,6 +363,7 @@ onMounted(loadData)
                 <tr class="text-slate-400 uppercase tracking-wider text-[10px] border-b">
                   <th class="pb-3 font-bold">ID</th>
                   <th class="pb-3 font-bold">Email</th>
+                  <th class="pb-3 font-bold">На сайте</th>
                   <th class="pb-3 font-bold">Роль</th>
                   <th class="pb-3 font-bold">Telegram-алерты</th>
                   <th class="pb-3 font-bold text-right">Пароль</th>
@@ -320,6 +373,22 @@ onMounted(loadData)
                 <tr v-for="user in users" :key="user.id" class="hover:bg-slate-50">
                   <td class="py-3 font-black text-slate-400">#{{ user.id }}</td>
                   <td class="py-3 font-bold text-slate-800">{{ user.email }}</td>
+                  <td class="py-3">
+                    <div class="flex items-center gap-2">
+                      <span class="w-2 h-2 rounded-full flex-shrink-0"
+                        :class="presenceOf(user)?.status === 'online' ? 'bg-emerald-500' : presenceOf(user)?.status === 'recent' ? 'bg-amber-400' : 'bg-slate-300'"></span>
+                      <div>
+                        <div class="text-xs font-bold"
+                          :class="presenceOf(user)?.status === 'online' ? 'text-emerald-700' : presenceOf(user)?.status === 'recent' ? 'text-amber-700' : 'text-slate-400'">
+                          {{ presenceLabel(user) }}
+                        </div>
+                        <div v-if="presenceOf(user)?.last_path && presenceOf(user)?.status !== 'offline'"
+                          class="font-mono text-[10px] text-slate-400 truncate max-w-[140px]">
+                          {{ presenceOf(user).last_path }}
+                        </div>
+                      </div>
+                    </div>
+                  </td>
                   <td class="py-3">
                     <select v-model="user.role" @change="changeUserRole(user.id, user.role)"
                       class="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-700 focus:outline-none cursor-pointer">

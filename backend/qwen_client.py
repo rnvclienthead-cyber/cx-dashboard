@@ -303,6 +303,11 @@ class QwenClient:
                     url, headers=self._headers(), json=payload, timeout=timeout
                 ) as resp:
                     body = await resp.text()
+                    try:
+                        from .qwen_quota import note_http_quota
+                        note_http_quota(self.model, resp.status, resp.headers, body)
+                    except Exception:
+                        pass
                     if resp.status == 200:
                         try:
                             return json.loads(body)
@@ -431,6 +436,11 @@ class QwenClient:
                     json=payload,
                     timeout=self.timeout,
                 )
+                try:
+                    from .qwen_quota import note_http_quota
+                    note_http_quota(self.model, resp.status_code, resp.headers, resp.text)
+                except Exception:
+                    pass
                 if resp.status_code == 200:
                     data = resp.json()
                     choices = data.get("choices") or []

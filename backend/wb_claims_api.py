@@ -73,6 +73,43 @@ TEMPLATE_REJECT = {
     "reject3": "Отказать (шаблон 3)",
 }
 
+# Причины для rejectcustom: менеджер выбирает, комментарий уходит в WB сам.
+WB_REJECT_REASONS = [
+    {
+        "value": "not_confirmed",
+        "label": "Проблема с товаром не подтверждена",
+        "comment": "По описанию и фото проблема с товаром не подтверждена. Заявку отклоняем.",
+    },
+    {
+        "value": "proper_quality",
+        "label": "Товар надлежащего качества / не подошёл",
+        "comment": "Товар надлежащего качества. Отказ от покупки по причине «не подошёл» по этой заявке не принимаем.",
+    },
+    {
+        "value": "used",
+        "label": "Товар был в использовании",
+        "comment": "Товар был в использовании, возврат надлежащего качества невозможен.",
+    },
+    {
+        "value": "appearance",
+        "label": "Нарушен товарный вид или комплектация",
+        "comment": "Нарушен товарный вид или комплектация. Возврат отклоняем.",
+    },
+    {
+        "value": "nonreturnable",
+        "label": "По правилам WB категория не подлежит возврату",
+        "comment": "По правилам Wildberries этот товар не подлежит возврату как товар надлежащего качества. Отказаться можно было при получении.",
+    },
+]
+
+
+def comment_for_reject_reason(reason: str, fallback: str = "") -> str:
+    key = str(reason or "").strip()
+    for row in WB_REJECT_REASONS:
+        if row["value"] == key:
+            return row["comment"]
+    return (fallback or "").strip()
+
 
 def _key() -> str:
     return wb_client.api_key()
@@ -130,14 +167,21 @@ def map_actions(raw_actions: list | None, *, status: str | int | None = None) ->
             label = meta["label"]
             if is_rejected and meta["kind"].startswith("approve"):
                 label = "Изменить решение: " + label.lower()
-            out.append({
+            item = {
                 "action": code,
                 "label": label,
                 "kind": meta["kind"],
                 "needs_comment": meta["needs_comment"],
                 "primary": True,
                 "is_change": is_rejected,
-            })
+            }
+            if code == "rejectcustom":
+                item["reason_types"] = [
+                    {"value": r["value"], "label": r["label"]}
+                    for r in WB_REJECT_REASONS
+                ]
+                item["needs_comment"] = False
+            out.append(item)
             continue
         if code in TEMPLATE_REJECT and not is_rejected:
             out.append({
@@ -235,6 +279,15 @@ def apply_local_status(
         WHERE {" OR ".join(where)}
     """), params)
     db.commit()
+    if status == "Одобрено":
+        try:
+            from .chat_bot import expire_form_tokens_for_approved_return
+            expire_form_tokens_for_approved_return(
+                db, chat_id=None, srid=srid or None,
+            )
+            db.commit()
+        except Exception as e:
+            logger.warning("[WB Claims] expire form tokens: %s", e)
 
 
 def decide_claim(
@@ -242,8 +295,13 @@ def decide_claim(
     claim_id: str,
     action: str,
     comment: str = "",
+    reason: str = "",
 ) -> dict[str, Any]:
     """PATCH в WB + локальный UPDATE. Возвращает результат для API."""
+    if action == "rejectcustom":
+        comment = comment_for_reject_reason(reason, comment)
+        if not comment:
+            return {"ok": False, "error": "Выберите причину отказа", "status_code": 400}
     row = db.execute(text("""
         SELECT claim_id::text, srid, status, status_ex, is_archive
         FROM wb_claims WHERE claim_id::text = :cid LIMIT 1
@@ -306,3 +364,153 @@ def decide_claim(
         "status_ex": wb_comment or meta.get("local_ex") or "",
         "status_label": meta.get("local_status") or ("Отказ" if action.startswith("reject") else "Одобрено"),
     }
+
+
+def _claim_srid_candidates(
+    db: Session,
+    *,
+    srid: str | None = None,
+    wb_chat_id: str | None = None,
+    order_number: str | None = None,
+) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw) -> None:
+        s = str(raw or "").strip()
+        if not s:
+            return
+        key = s.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(s)
+
+    _add(srid)
+    _add(order_number)
+    cid = str(wb_chat_id or "").strip()
+    if not cid:
+        return out
+    pending = db.execute(text(
+        "SELECT rid FROM wb_chat_pending WHERE chat_id = :c"
+    ), {"c": cid}).mappings().first()
+    if pending:
+        _add(pending.get("rid"))
+    chat = db.execute(text(
+        "SELECT order_rid FROM wb_chats WHERE chat_id = :c LIMIT 1"
+    ), {"c": cid}).mappings().first()
+    if chat:
+        _add(chat.get("order_rid"))
+    return out
+
+
+def _find_claim_for_reshipment(
+    db: Session,
+    *,
+    srid: str | None = None,
+    wb_chat_id: str | None = None,
+    order_number: str | None = None,
+) -> dict[str, Any] | None:
+    for cand in _claim_srid_candidates(
+        db, srid=srid, wb_chat_id=wb_chat_id, order_number=order_number,
+    ):
+        row = db.execute(text("""
+            SELECT claim_id::text AS claim_id, srid, status
+            FROM wb_claims WHERE LOWER(srid) = LOWER(:s) LIMIT 1
+        """), {"s": cand}).mappings().first()
+        if row and row.get("claim_id"):
+            return dict(row)
+    return None
+
+
+def reject_return_for_reshipment(
+    db: Session,
+    *,
+    srid: str | None = None,
+    wb_chat_id: str | None = None,
+    order_number: str | None = None,
+    comment: str | None = None,
+) -> dict[str, Any]:
+    """Отказать в возврате WB: клиент уже заполнил / получил доотправку."""
+    row = _find_claim_for_reshipment(
+        db, srid=srid, wb_chat_id=wb_chat_id, order_number=order_number,
+    )
+    if not row:
+        return {"ok": False, "skipped": "no_claim"}
+    status = str(row.get("status") or "").strip()
+    if status in ("Отказ", "Отклонено"):
+        return {
+            "ok": True,
+            "skipped": "already_rejected",
+            "claim_id": row["claim_id"],
+            "srid": row["srid"],
+            "status": status,
+        }
+    text_comment = (comment or (
+        "По вашей заявке оформлена доотправка недостающей детали. "
+        "Возврат товара по этой претензии не требуется."
+    )).strip()
+    resp = patch_claim(row["claim_id"], "rejectcustom", text_comment)
+    if not resp.get("ok"):
+        return {
+            "ok": False,
+            "error": resp.get("text") or "WB отклонил запрос",
+            "status_code": resp.get("status_code") or 502,
+            "claim_id": row["claim_id"],
+            "srid": row["srid"],
+        }
+    apply_local_status(
+        db,
+        claim_id=row["claim_id"],
+        srid=row["srid"],
+        action="rejectcustom",
+        wb_comment=text_comment,
+    )
+    return {
+        "ok": True,
+        "claim_id": row["claim_id"],
+        "srid": row["srid"],
+        "action": "rejectcustom",
+        "status": "Отказ",
+    }
+
+
+def approve_return_for_reshipment(
+    db: Session,
+    *,
+    srid: str | None = None,
+    wb_chat_id: str | None = None,
+    order_number: str | None = None,
+) -> dict[str, Any]:
+    """Одобрить связанную заявку на возврат WB при отклонении доотправки."""
+    row = _find_claim_for_reshipment(
+        db, srid=srid, wb_chat_id=wb_chat_id, order_number=order_number,
+    )
+    if not row:
+        return {"ok": False, "skipped": "no_claim"}
+
+    status = str(row.get("status") or "").strip()
+    if status == "Одобрено":
+        return {
+            "ok": True,
+            "skipped": "already_approved",
+            "claim_id": row["claim_id"],
+            "srid": row["srid"],
+            "status": status,
+        }
+
+    live = fetch_claim_from_wb(row["claim_id"])
+    live_actions = list((live or {}).get("actions") or [])
+    chosen = None
+    for action in ("approve2", "approve1", "autorefund1", "approvecc1"):
+        if action in live_actions:
+            chosen = action
+            break
+    if not chosen:
+        # Пустой список actions: WB иногда всё равно принимает смену решения
+        chosen = "approve2"
+
+    result = decide_claim(db, row["claim_id"], chosen)
+    result.setdefault("srid", row["srid"])
+    result.setdefault("claim_id", row["claim_id"])
+    return result

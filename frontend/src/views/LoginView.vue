@@ -4,15 +4,18 @@ import { useRouter } from 'vue-router'
 import { Lock, Mail, AlertCircle, CheckCircle2 } from 'lucide-vue-next'
 import { usePermissionsStore } from '../stores/permissions'
 import { MODULE_ROUTES } from '../router/index'
+import { isTelegramMiniApp } from '../telegramWebApp'
+import { setAuthSession, takeAfterLogin } from '../authStorage'
 
 const router = useRouter()
 const permissionsStore = usePermissionsStore()
 const isRegisterMode = ref(false)
 const email = ref('')
 const password = ref('')
-const errorMsg = ref('')
+const errorMsg = ref(typeof sessionStorage !== 'undefined' ? (sessionStorage.getItem('tgAuthError') || '') : '')
 const successMsg = ref('')
 const isLoading = ref(false)
+const telegramGate = isTelegramMiniApp()
 
 const handleSubmit = async () => {
   errorMsg.value = ''; successMsg.value = ''; isLoading.value = true
@@ -42,13 +45,20 @@ const handleSubmit = async () => {
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Неверный логин или пароль')
 
-      localStorage.setItem('token', data.access_token)
-      localStorage.setItem('role', data.role)
-      localStorage.setItem('username', data.username)
+      setAuthSession({
+        token: data.access_token,
+        role: data.role,
+        username: data.username,
+      })
+      try { sessionStorage.removeItem('tgAuthError') } catch { /* ignore */ }
 
-      // Загружаем права и редиректим на первую доступную страницу
       permissionsStore.clear()
       await permissionsStore.load()
+      const next = takeAfterLogin()
+      if (next) {
+        router.push(next)
+        return
+      }
       const first = MODULE_ROUTES.find(r => permissionsStore.can(r.module))
       router.push(first ? first.path : '/ratings')
     }
@@ -70,7 +80,9 @@ const handleSubmit = async () => {
         </div>
         <h2 class="text-2xl font-black text-slate-900 tracking-tight">{{ isRegisterMode ? 'Активация доступа' : 'Вход в систему' }}</h2>
         <p class="text-sm text-slate-500 mt-2 font-medium">
-          {{ isRegisterMode ? 'Придумайте пароль для вашего Email' : 'Аналитический центр Data Lake' }}
+          {{ telegramGate
+            ? (errorMsg ? errorMsg : 'Входим через Telegram… Если экран не сменился — откройте кнопку ещё раз из бота.')
+            : (isRegisterMode ? 'Придумайте пароль для вашего Email' : 'Аналитический центр Data Lake') }}
         </p>
       </div>
 
@@ -83,10 +95,10 @@ const handleSubmit = async () => {
 
       <form @submit.prevent="handleSubmit" class="space-y-5">
         <div>
-          <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Ваш Email</label>
+          <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Логин</label>
           <div class="relative">
             <Mail class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-            <input v-model="email" type="email" required class="w-full bg-slate-50 border border-slate-200 text-slate-900 rounded-xl px-4 py-3 pl-12 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" placeholder="name@company.com">
+            <input v-model="email" type="text" autocomplete="username" required class="w-full bg-slate-50 border border-slate-200 text-slate-900 rounded-xl px-4 py-3 pl-12 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" placeholder="логин или почта">
           </div>
         </div>
         <div>

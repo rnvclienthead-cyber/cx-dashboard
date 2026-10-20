@@ -56,6 +56,7 @@ class YmProductCardTests(unittest.TestCase):
             card = ym_product_card.get_product_card(db, "2-СБ-Black")
         self.assertEqual(card["status"], "unavailable")
         db.commit.assert_not_called()
+        self.assertEqual(card["fasteners"][0]["code"], "VINT-M6x30-SILV")
 
     def test_cached_payload_is_re_filtered_with_current_rules(self):
         db = Mock()
@@ -84,6 +85,7 @@ class YmProductCardTests(unittest.TestCase):
         ])
         self.assertNotIn("name", card["product"])
         self.assertNotIn("manuals", card["product"])
+        self.assertEqual(card["fasteners"][0]["label"], "М6×30, серебристый")
 
 
 if __name__ == "__main__":

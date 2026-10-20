@@ -44,9 +44,10 @@ class ToolRegistryTests(unittest.TestCase):
 
 
 class _FakeResponse:
-    def __init__(self, status, body):
+    def __init__(self, status, body, headers=None):
         self.status = status
         self._body = body
+        self.headers = headers or {}
 
     async def text(self):
         return self._body

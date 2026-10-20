@@ -44,3 +44,23 @@ def test_publish_chat_removed():
     assert pub.call_args[0][1]["type"] == "chat_removed"
     assert pub.call_args[0][1]["chat_id"] == "ym-9"
     assert pub.call_args[0][1]["mp"] == "ym"
+
+
+def test_publish_chat_seen():
+    chat_realtime.set_cached_chats_queue("wb", {"items": [], "counts": {}})
+    with patch.object(chat_realtime.centrifugo, "publish", return_value=True) as pub:
+        ok = chat_realtime.publish_chat_seen("1:abc", "wb", 123)
+    assert ok is True
+    assert chat_realtime.get_cached_chats_queue("wb") is None
+    body = pub.call_args[0][1]
+    assert body["type"] == "chat_seen"
+    assert body["chat_id"] == "1:abc"
+    assert body["seen_ts"] == 123
+
+
+def test_publish_chats_seen_all():
+    with patch.object(chat_realtime.centrifugo, "publish", return_value=True) as pub:
+        ok = chat_realtime.publish_chats_seen_all("ozon")
+    assert ok is True
+    assert pub.call_args[0][1]["type"] == "chats_seen_all"
+    assert pub.call_args[0][1]["mp"] == "ozon"

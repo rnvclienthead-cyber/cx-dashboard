@@ -75,6 +75,13 @@ test('Yandex paperclip is enabled for all marketplaces', () => {
   assert.doesNotMatch(source, /На Яндекс Маркете вложения в этой версии пока недоступны/)
 })
 
+test('Yandex chat videos are rendered as video, not as a broken image', () => {
+  const source = readFileSync(new URL('../src/views/ChatsView.vue', import.meta.url), 'utf8')
+  assert.match(source, /function msgVideos\(/)
+  assert.match(source, /item\.type === 'video'/)
+  assert.match(source, /<video v-for="\(attachment, i\) in msgVideos\(msg\)"/)
+})
+
 test('product card is on-demand and never substitutes a marketplace match', () => {
   const source = readFileSync(new URL('../src/views/ChatsView.vue', import.meta.url), 'utf8')
   assert.match(source, /title="Карточка товара"/)

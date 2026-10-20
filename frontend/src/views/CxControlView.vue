@@ -4,7 +4,7 @@ import { apiFetch } from '../api'
 import {
   RefreshCw, AlertTriangle, Clock, Inbox, CheckCircle2,
   ChevronDown, Plug, TrendingUp, TrendingDown, Minus,
-  BarChart2, ListChecks, Award, Bell, Users, Circle
+  BarChart2, ListChecks, Award, Bell, Users, Circle, MessageSquare
 } from 'lucide-vue-next'
 
 const tab = ref('queues')
@@ -23,6 +23,7 @@ const wDays    = ref(30)
 // ── Сотрудники ───────────────────────────────────────────────────────────────
 const staffData    = ref(null)
 const staffLoading = ref(true)
+let staffTimer     = null
 
 async function loadStaff () {
   try {
@@ -89,6 +90,20 @@ async function loadQuality () {
   } catch (e) { qualError.value = e.message || 'Ошибка загрузки' }
   finally { qualLoading.value = false }
 }
+
+const repliesData = ref(null)
+const repliesLoading = ref(true)
+const repliesError = ref('')
+const repliesDays = ref(30)
+
+async function loadReplies () {
+  try {
+    repliesError.value = ''
+    const r = await apiFetch(`/api/v1/cx-control/replies?days=${repliesDays.value}`)
+    repliesData.value = await r.json()
+  } catch (e) { repliesError.value = e.message || 'Ошибка загрузки' }
+  finally { repliesLoading.value = false }
+}
 async function loadAlerts () {
   try {
     const r = await apiFetch('/api/v1/cx-control/alerts/status')
@@ -97,16 +112,21 @@ async function loadAlerts () {
 }
 
 async function reload () {
-  qLoading.value = true; wLoading.value = true; qualLoading.value = true; staffLoading.value = true
-  await Promise.all([loadQueues(), loadWorkload(), loadQuality(), loadAlerts(), loadStaff()])
+  qLoading.value = true; wLoading.value = true; qualLoading.value = true; staffLoading.value = true; repliesLoading.value = true
+  await Promise.all([loadQueues(), loadWorkload(), loadQuality(), loadAlerts(), loadStaff(), loadReplies()])
 }
 
 onMounted(() => {
-  loadQueues(); loadWorkload(); loadQuality(); loadAlerts(); loadStaff(); loadSlaSettings()
+  loadQueues(); loadWorkload(); loadQuality(); loadAlerts(); loadStaff(); loadReplies(); loadSlaSettings()
   pollTimer = setInterval(reload, 60000)
+  staffTimer = setInterval(loadStaff, 2000)
   tickTimer = setInterval(() => tick.value++, 1000)
 })
-onUnmounted(() => { clearInterval(pollTimer); clearInterval(tickTimer) })
+onUnmounted(() => {
+  clearInterval(pollTimer)
+  clearInterval(staffTimer)
+  clearInterval(tickTimer)
+})
 
 // ── Helpers очередей ─────────────────────────────────────────────────────────
 const agoText = computed(() => {
@@ -335,6 +355,11 @@ const reshipFunnel = computed(() => {
         class="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
         :class="tab==='quality'?'bg-white text-slate-800 shadow-sm':'text-slate-500 hover:text-slate-700'">
         <Award class="w-4 h-4"/> Качество
+      </button>
+      <button @click="tab='replies'"
+        class="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+        :class="tab==='replies'?'bg-white text-slate-800 shadow-sm':'text-slate-500 hover:text-slate-700'">
+        <MessageSquare class="w-4 h-4"/> Автоответы
       </button>
       <button @click="tab='staff'"
         class="relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
@@ -918,6 +943,99 @@ const reshipFunnel = computed(() => {
       </template>
     </template>
 
+    <!-- ВКЛАДКА: Автоответы и менеджеры -->
+    <template v-else-if="tab==='replies'">
+      <div v-if="repliesError" class="mb-4 p-3 rounded-lg bg-rose-50 text-rose-700 text-sm border border-rose-100">{{ repliesError }}</div>
+      <div v-if="repliesLoading && !repliesData" class="text-slate-400 text-sm py-20 text-center">Загрузка…</div>
+      <template v-else-if="repliesData">
+        <div class="flex items-center gap-2 mb-6">
+          <span class="text-sm text-slate-500">Период:</span>
+          <div class="flex gap-1">
+            <button v-for="d in [7,14,30,60]" :key="d" @click="repliesDays=d;loadReplies()"
+              class="px-3 py-1 rounded-lg text-sm transition-colors"
+              :class="repliesDays===d?'bg-emerald-600 text-white':'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'">{{ d }} дн</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+          <div class="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+            <div class="text-slate-400 text-xs font-medium uppercase tracking-wide">Автоответы в чатах</div>
+            <div class="text-3xl font-bold text-slate-800 mt-1">{{ repliesData.chats?.auto_sent || 0 }}</div>
+          </div>
+          <div class="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+            <div class="text-slate-400 text-xs font-medium uppercase tracking-wide">На проверку</div>
+            <div class="text-3xl font-bold text-amber-700 mt-1">{{ repliesData.chats?.need_check || 0 }}</div>
+          </div>
+          <div class="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+            <div class="text-slate-400 text-xs font-medium uppercase tracking-wide">Передано менеджеру</div>
+            <div class="text-3xl font-bold text-rose-600 mt-1">{{ repliesData.chats?.handoff || 0 }}</div>
+          </div>
+          <div class="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+            <div class="text-slate-400 text-xs font-medium uppercase tracking-wide">Ответы менеджеров</div>
+            <div class="text-3xl font-bold text-slate-800 mt-1">{{ repliesData.chats?.manager_sent || 0 }}</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-6">
+          <div class="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+            <div class="text-slate-400 text-xs font-medium uppercase tracking-wide">Автоответы на отзывы</div>
+            <div class="text-2xl font-bold text-slate-800 mt-1">{{ repliesData.reviews?.auto_sent || 0 }}</div>
+          </div>
+          <div class="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+            <div class="text-slate-400 text-xs font-medium uppercase tracking-wide">Отзывы менеджеров</div>
+            <div class="text-2xl font-bold text-slate-800 mt-1">{{ repliesData.reviews?.manager_sent || 0 }}</div>
+          </div>
+          <div class="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+            <div class="text-slate-400 text-xs font-medium uppercase tracking-wide">Обучение по правкам</div>
+            <div class="text-2xl font-bold text-slate-800 mt-1">{{ repliesData.corrections || 0 }}</div>
+            <div class="text-xs text-slate-500 mt-1">
+              примеров за период · сработало на похожих: {{ repliesData.learned_hits || 0 }}
+            </div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+          <div class="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
+            <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-100">По площадкам</div>
+            <table class="w-full text-sm">
+              <thead><tr class="text-xs text-slate-400 uppercase">
+                <th class="text-left px-4 py-2">Площадка</th>
+                <th class="text-center px-3 py-2">Авто</th>
+                <th class="text-center px-3 py-2">Проверка</th>
+                <th class="text-center px-3 py-2">Менеджеру</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="row in (repliesData.chats?.by_mp || [])" :key="row.mp" class="border-t border-slate-50">
+                  <td class="px-4 py-2 font-medium">{{ (row.mp || '').toUpperCase() }}</td>
+                  <td class="text-center px-3 py-2">{{ row.auto_sent }}</td>
+                  <td class="text-center px-3 py-2">{{ row.need_check }}</td>
+                  <td class="text-center px-3 py-2">{{ row.handoff }}</td>
+                </tr>
+                <tr v-if="!(repliesData.chats?.by_mp || []).length">
+                  <td colspan="4" class="px-4 py-6 text-center text-slate-400">Пока нет данных</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
+            <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-100">Кто отвечал в чатах</div>
+            <table class="w-full text-sm">
+              <thead><tr class="text-xs text-slate-400 uppercase">
+                <th class="text-left px-4 py-2">Менеджер</th>
+                <th class="text-center px-3 py-2">Ответов</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="row in (repliesData.chats?.managers || [])" :key="row.manager" class="border-t border-slate-50">
+                  <td class="px-4 py-2">{{ row.manager }}</td>
+                  <td class="text-center px-3 py-2 font-semibold">{{ row.n }}</td>
+                </tr>
+                <tr v-if="!(repliesData.chats?.managers || []).length">
+                  <td colspan="2" class="px-4 py-6 text-center text-slate-400">Пока нет данных</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+    </template>
+
     <!-- ══════════════════════════════════════════════════════════════════════ -->
     <!-- ВКЛАДКА 4: Сотрудники                                                -->
     <!-- ══════════════════════════════════════════════════════════════════════ -->
@@ -925,10 +1043,10 @@ const reshipFunnel = computed(() => {
       <div v-if="staffLoading && !staffData" class="text-slate-400 text-sm py-20 text-center">Загрузка…</div>
 
       <template v-else-if="staffData">
-        <h2 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Менеджеры КС</h2>
+        <h2 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Кто на сайте</h2>
 
         <div v-if="!staffData.staff?.length" class="text-slate-400 text-sm py-10 text-center">
-          Нет пользователей с ролью cs_manager
+          Нет пользователей
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -947,7 +1065,7 @@ const reshipFunnel = computed(() => {
                     :class="s.status==='online'?'bg-emerald-500':s.status==='recent'?'bg-amber-400':'bg-slate-300'"
                     :title="s.status==='online'?'Онлайн':s.status==='recent'?'Недавно был':'Не в сети'"></span>
                 </div>
-                <div class="text-xs text-slate-400 truncate mt-0.5">{{ s.username }}</div>
+                <div class="text-xs text-slate-400 truncate mt-0.5">{{ s.username }} · {{ s.role }}</div>
               </div>
             </div>
 
@@ -964,7 +1082,10 @@ const reshipFunnel = computed(() => {
               <div class="flex items-center justify-between text-sm">
                 <span class="text-slate-500">Последняя активность</span>
                 <span class="font-medium text-slate-700">
-                  <template v-if="s.last_seen_min !== null">
+                  <template v-if="s.last_seen_sec != null && s.last_seen_sec < 60">
+                    {{ s.status === 'online' ? 'сейчас' : `${s.last_seen_sec} сек назад` }}
+                  </template>
+                  <template v-else-if="s.last_seen_min !== null">
                     <template v-if="s.last_seen_min < 1">только что</template>
                     <template v-else-if="s.last_seen_min < 60">{{ s.last_seen_min }} мин назад</template>
                     <template v-else-if="s.last_seen_min < 1440">{{ Math.floor(s.last_seen_min/60) }} ч назад</template>
@@ -1020,7 +1141,7 @@ const reshipFunnel = computed(() => {
         </div>
 
         <p class="text-xs text-slate-400 mt-6">
-          Онлайн — активность менее 5 мин назад · Недавно — менее 30 мин · Обновляется раз в минуту.
+          Онлайн — клик, набор или прокрутка в последние 12 сек. Открытая вкладка без действий не считается. Обновление каждые 2 сек.
         </p>
       </template>
     </template>

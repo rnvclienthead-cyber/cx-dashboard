@@ -1,0 +1,8 @@
+[Unit]
+Description=Restart Ozon seller Chrome (profile and VPN stay)
+
+[Service]
+Type=oneshot
+# VPN не перезапускаем: адрес для кабинета тот же, вход в профиле сохраняется.
+TimeoutStartSec=180
+ExecStart=/bin/systemctl restart ozon-chrome.service

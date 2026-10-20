@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from ..database import get_db
+from ..ppm_defects import ym_not_plain_refusal_sql
 from .auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["Production Analytics / Отчет производства"], dependencies=[Depends(get_current_user)])
@@ -158,7 +159,7 @@ def get_production_claims(
                 # Связка через поставки ЯМ отключена (в API нет пути возврат→поставка).
                 ym_invoice_map = {}
                 ym_supply_map = {}
-                ym_rows = conn.execute(text("""
+                ym_rows = conn.execute(text(f"""
                     SELECT
                         r.return_id, r.order_id, r.supplier_article,
                         r.status, r.status_ru, r.created_at, r.updated_at,
@@ -172,6 +173,7 @@ def get_production_claims(
                     LEFT JOIN wb_assortment a ON LOWER(TRIM(r.supplier_article)) = LOWER(TRIM(a.supplier_article))
                     WHERE r.supplier_article IS NOT NULL
                       AND r.supplier_article != ''
+                      AND {ym_not_plain_refusal_sql("r")}
                 """)).mappings().all()
 
                 # Похожий отзыв по тому же SKU (последний негативный, 1-3★).
@@ -204,8 +206,8 @@ def get_production_claims(
                     or r.get("status_ru")
                     or "На рассмотрении"
                 )
-                # Отказы и отменённые заявки в карту проблем не берём
-                if status_ru.lower() in ("отказ", "отменено") or status_code in ("REJECTED", "CANCELLED", "NOT_RETURNED", "FAILED"):
+                # Отмену не берём. Отказ из‑за доотправки уже отобран SQL, его оставляем.
+                if status_ru.lower() == "отменено" or status_code == "CANCELLED":
                     continue
                 row = {
                     "Артикул продавца":               r["supplier_article"],
@@ -243,7 +245,9 @@ def get_production_claims(
         # PPM сужает до заводских отдельно.
         if platform in ("ozon", "all"):
             from ..ozon_returns_filters import ozon_returns_where_sql
+            from .. import ozon_returns_api
             with db.bind.connect() as conn:
+                ozon_returns_api.ensure_schema(conn)
 
                 oz_rows = conn.execute(text(f"""
                     SELECT
@@ -251,6 +255,7 @@ def get_production_claims(
                         r.supplier_article, r.product_name,
                         r.return_reason, r.status_sys, r.status_ru,
                         r.is_opened, r.return_date,
+                        r.buyer_comment, r.photos,
                         r.cat_1,  r.cat_2,  r.cat_3,  r.cat_4,  r.cat_5,
                         r.cat_6,  r.cat_7,  r.cat_8,  r.cat_9,  r.cat_10,
                         r.cat_11, r.cat_12, r.cat_13,
@@ -272,8 +277,8 @@ def get_production_claims(
                     "Дата заказа":                     r["return_date"].isoformat() if r["return_date"] else None,
                     "Номер поставки":                  r.get("posting_number") or "",
                     "posting_number":                  r.get("posting_number") or "",
-                    "Комментарий покупателя":          "",
-                    "photos":                          "",
+                    "Комментарий покупателя":          (r.get("buyer_comment") or "").strip(),
+                    "photos":                          r.get("photos") or "",
                     "platform":                        "ozon",
                     "category":                        r.get("category") or "Прочее",
                     "Причина ЯМ":                      r.get("return_reason") or "",

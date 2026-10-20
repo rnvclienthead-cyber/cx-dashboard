@@ -10,6 +10,7 @@ from typing import List, Dict, Any
 from ..database import get_db, SessionLocal
 from ..llm import complete_async, is_yandex_lite
 from ..qwen_client import mask_pii
+from ..qwen_quota import qwen_pause_message
 from .auth import get_current_user
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -19,6 +20,19 @@ load_dotenv()
 router = APIRouter(prefix="/api/v1/ai", tags=["AI / Автоматическое тегирование"], dependencies=[Depends(get_current_user)])
 
 # qwen-plus — основная модель. yandex-lite остаётся запасным выбором в UI.
+
+def _quota_fields() -> dict:
+    msg = qwen_pause_message()
+    return {"qwen_paused": bool(msg), "qwen_pause": msg}
+
+
+def _refuse_qwen_if_paused(model: str) -> None:
+    if is_yandex_lite(model):
+        return
+    msg = qwen_pause_message()
+    if msg:
+        raise HTTPException(status_code=429, detail=msg)
+
 
 CATEGORIES = {
     1: "Некомплект: Фурнитура", 2: "Некомплект: Несущие детали", 3: "Состояние упаковки",
@@ -102,6 +116,36 @@ def add_system_log_db(db: Session, action: str, status: str, details: str = ""):
         db.rollback()
         print(f"🚨 Ошибка записи лога: {e}")
 
+
+def _end_tx(db: Session) -> None:
+    """Закрыть транзакцию до долгого HTTP.
+
+    Postgres рвёт сессию через 30с idle-in-transaction. Пока ждём Qwen
+    (до 90с), открытый SELECT/lookup убивает воркер — UI висит на
+    «Отправка...», FATAL в лог не пишется (сессия уже мёртвая).
+    """
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _log_tagging_fresh(action: str, status: str, details: str = "") -> None:
+    db = SessionLocal()
+    try:
+        add_system_log_db(db, action, status, details)
+    except Exception as e:
+        print(f"🚨 Ошибка записи лога: {e}")
+    finally:
+        db.close()
+
+
+def _clamp_tag_batch(batch_size: int) -> int:
+    return max(1, min(int(batch_size or 8), 8))
+
 # ==========================================
 # СТАТИСТИКА ДЛЯ ФРОНТЕНДА
 # ==========================================
@@ -148,6 +192,7 @@ def get_ai_stats(
                 "untagged_feedbacks": 0,
                 "feedback_job_running": False,
                 "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
+                **_quota_fields(),
             }
 
         if platform == "ym":
@@ -191,6 +236,7 @@ def get_ai_stats(
                 "untagged_feedbacks": int(untagged_feedbacks),
                 "feedback_job_running": _feedback_job_flag("ym"),
                 "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
+                **_quota_fields(),
             }
 
         # WB
@@ -220,6 +266,7 @@ def get_ai_stats(
             "untagged_feedbacks": untagged_feedbacks,
             "feedback_job_running": _feedback_job_flag("wb"),
             "last_log": {"action": log_res[0], "status": log_res[1], "details": log_res[2]} if log_res else None,
+            **_quota_fields(),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -264,10 +311,19 @@ async def fetch_ai_tags_rotating(
     model_key: str,
 ) -> tuple[List[Dict[str, Any]], str]:
     """Теги брака: при исчерпании free-quota сама берёт следующую модель."""
-    from ..qwen_quota import is_quota_or_model_error, resolve_free_qwen_models
+    from ..qwen_quota import (
+        is_quota_or_model_error,
+        is_transient_network_error,
+        resolve_free_qwen_models,
+        should_rotate_qwen_model,
+    )
 
-    models = resolve_free_qwen_models(model_key)
+    rotate_key = model_key if is_yandex_lite(model_key) else "qwen-free"
+    models = resolve_free_qwen_models(rotate_key)
     last: List[Dict[str, Any]] = []
+    if not models:
+        msg = qwen_pause_message() or "Qwen: все модели на паузе (лимит), без запроса к API"
+        return [{"error": msg}], ""
     current = models[0]
     for i, current in enumerate(models):
         last = await fetch_ai_tags(session, batch, memory_string, current)
@@ -277,8 +333,11 @@ async def fetch_ai_tags_rotating(
         err = ""
         if last and isinstance(last[0], dict):
             err = str(last[0].get("error") or "")
-        if not is_quota_or_model_error(err):
+        if not should_rotate_qwen_model(err):
             return last, current
+        from ..qwen_quota import note_exhausted
+        if is_quota_or_model_error(err) and not is_transient_network_error(err):
+            note_exhausted(current)
         if i + 1 < len(models):
             print(f"[AI] брак: {current} лимит/ошибка → {models[i + 1]}")
     return last, current
@@ -340,6 +399,8 @@ async def fetch_ai_feedback_tags(session: aiohttp.ClientSession, batch: List[Dic
 
 # --- ФОНОВЫЕ ЗАДАЧИ ---
 async def process_tagging_task(model_key: str, batch_size: int):
+    # 20 сразу — Qwen часто не успевает за 90 сек, пачка зависает.
+    batch_size = _clamp_tag_batch(batch_size)
     db = SessionLocal()
     try:
         query = """
@@ -348,14 +409,18 @@ async def process_tagging_task(model_key: str, batch_size: int):
             WHERE NOT (cat_1 OR cat_2 OR cat_3 OR cat_4 OR cat_5 OR cat_6 OR cat_7 OR cat_8 OR cat_9 OR cat_10 OR cat_11 OR cat_12 OR cat_13)
             AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
         """
-        rows = db.execute(text(query)).fetchall()
+        rows = [(r[0], r[1], r[2]) for r in db.execute(text(query)).fetchall()]
+        _end_tx(db)
         total_rows = len(rows)
         if total_rows == 0: return
 
         add_system_log_db(db, "Бэкенд ИИ: Старт", "INFO", f"Запущено тегирование {total_rows} строк через свободный лимит Qwen")
 
         from ..qwen_quota import is_quota_or_model_error, resolve_free_qwen_models
-        start_model = resolve_free_qwen_models(model_key)[0]
+        models = resolve_free_qwen_models(model_key)
+        if not models:
+            add_system_log_db(db, "Бэкенд ИИ: Стоп", "ERROR", qwen_pause_message() or "Лимит Qwen")
+            return
 
         async with aiohttp.ClientSession() as session:
             for i in range(0, total_rows, batch_size):
@@ -366,6 +431,7 @@ async def process_tagging_task(model_key: str, batch_size: int):
                         mem = find_similar_examples_sql(str(row[2]), db, top_n=2)
                         if mem and "Прямых совпадений" not in mem: memory_list.append(mem)
                 chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
+                _end_tx(db)
 
                 batch_to_send = []
                 srid_map = {}
@@ -374,7 +440,7 @@ async def process_tagging_task(model_key: str, batch_size: int):
                     srid_map[ref_id] = str(row[0])
                     batch_to_send.append({"id": ref_id, "text": f"Артикул: {row[1]}. Текст: {row[2]}"})
 
-                results, used_model = await fetch_ai_tags_rotating(session, batch_to_send, chunk_memory, start_model)
+                results, used_model = await fetch_ai_tags_rotating(session, batch_to_send, chunk_memory, model_key)
                 
                 if results:
                     saved_count = 0
@@ -415,7 +481,12 @@ async def process_tagging_task(model_key: str, batch_size: int):
                 else:
                     add_system_log_db(db, f"Пачка {i}", "WARNING", f"{used_model}: пустой ответ, пачку не помечаем пропуском")
                     await asyncio.sleep(5)
-    except Exception as e: print(f"Ошибка тегирования: {e}")
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _log_tagging_fresh("Бэкенд ИИ: FATAL", "ERROR", f"Сбой воркера: {str(e)}")
     finally: db.close()
 
 async def process_feedback_tagging_task(model_key: str, batch_size: int):
@@ -433,10 +504,11 @@ async def process_ym_feedback_tagging_task(model_key: str, batch_size: int):
 # Логика аналогична WB-претензиям — те же категории, тот же AI-промпт
 # ==========================================
 async def process_ym_tagging_task(model_key: str, batch_size: int):
+    batch_size = _clamp_tag_batch(batch_size)
     db = SessionLocal()
     try:
         # Берём возвраты с текстом, у которых ещё нет ни одного тега
-        rows = db.execute(text("""
+        rows = [(r[0], r[1], r[2]) for r in db.execute(text("""
             SELECT return_id, supplier_article, return_comment
             FROM ym_returns
             WHERE return_comment IS NOT NULL AND return_comment != ''
@@ -447,7 +519,8 @@ async def process_ym_tagging_task(model_key: str, batch_size: int):
               AND cat_13 IS NULL
               AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
             ORDER BY created_at DESC
-        """)).fetchall()
+        """)).fetchall()]
+        _end_tx(db)
 
         total_rows = len(rows)
         if total_rows == 0:
@@ -456,6 +529,8 @@ async def process_ym_tagging_task(model_key: str, batch_size: int):
 
         add_system_log_db(db, "ИИ Разметка ЯМ: Старт", "INFO",
                           f"Запущено тегирование {total_rows} возвратов ЯМ через {model_key}")
+
+        from ..qwen_quota import is_quota_or_model_error
 
         async with aiohttp.ClientSession() as session:
             for i in range(0, total_rows, batch_size):
@@ -469,6 +544,7 @@ async def process_ym_tagging_task(model_key: str, batch_size: int):
                         if mem and "Прямых совпадений" not in mem:
                             memory_list.append(mem)
                 chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
+                _end_tx(db)
 
                 batch_to_send = []
                 id_map = {}
@@ -483,9 +559,13 @@ async def process_ym_tagging_task(model_key: str, batch_size: int):
                 if results:
                     saved_count = 0
                     batch_details = []
+                    quota_fail = False
                     for res in results:
                         if "error" in res:
-                            batch_details.append(f"❌ Ошибка ИИ: {res.get('error')}")
+                            err = str(res.get('error') or '')
+                            batch_details.append(f"❌ Ошибка ИИ: {err}")
+                            if is_quota_or_model_error(err):
+                                quota_fail = True
                             continue
 
                         num_match = re.search(r'\d+', str(res.get('id', '')).upper())
@@ -516,26 +596,36 @@ async def process_ym_tagging_task(model_key: str, batch_size: int):
                                 batch_details.append(f"⚠️ {real_rid}: ИИ пропустил")
 
                     db.commit()
+                    note = f"{used_model}. Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
+                    if quota_fail and saved_count == 0:
+                        add_system_log_db(db, f"ЯМ Пачка {i}", "ERROR", note + "\nОчередь не трогаем — лимит моделей.")
+                        return
                     add_system_log_db(
                         db, f"ЯМ Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING",
-                        f"{used_model}. Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
+                        note
                     )
                     await asyncio.sleep(3)
                 else:
                     add_system_log_db(db, f"ЯМ Пачка {i}", "WARNING", f"{used_model}: пустой ответ, пачку не помечаем")
                     await asyncio.sleep(5)
 
+        add_system_log_db(db, "ИИ Разметка ЯМ: Итог", "SUCCESS", f"Готово. Пачек: {(total_rows + batch_size - 1) // batch_size}.")
     except Exception as e:
-        add_system_log_db(db, "ИИ Разметка ЯМ: FATAL", "ERROR", f"Сбой воркера: {str(e)}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _log_tagging_fresh("ИИ Разметка ЯМ: FATAL", "ERROR", f"Сбой воркера: {str(e)}")
     finally:
         db.close()
 
 
 async def process_ozon_tagging_task(model_key: str, batch_size: int):
     """Тегирует возвраты Ozon по полю return_reason (причина на русском)."""
+    batch_size = _clamp_tag_batch(batch_size)
     db = SessionLocal()
     try:
-        rows = db.execute(text("""
+        rows = [(r[0], r[1], r[2], r[3]) for r in db.execute(text("""
             SELECT return_id, supplier_article, return_reason, product_name
             FROM ozon_returns
             WHERE return_date >= '2026-05-01'
@@ -549,7 +639,8 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
               AND cat_13 IS NULL
               AND (audit_status IS NULL OR audit_status != 'Пропущено ИИ')
             ORDER BY return_date DESC
-        """)).fetchall()
+        """)).fetchall()]
+        _end_tx(db)
 
         total_rows = len(rows)
         if total_rows == 0:
@@ -558,6 +649,8 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
 
         add_system_log_db(db, "ИИ Разметка OZON: Старт", "INFO",
                           f"Запущено тегирование {total_rows} возвратов Ozon через {model_key}")
+
+        from ..qwen_quota import is_quota_or_model_error
 
         async with aiohttp.ClientSession() as session:
             for i in range(0, total_rows, batch_size):
@@ -570,6 +663,7 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
                         if mem and "Прямых совпадений" not in mem:
                             memory_list.append(mem)
                 chunk_memory = "\n".join(set(memory_list)) if memory_list else "Опыта пока нет."
+                _end_tx(db)
 
                 batch_to_send = []
                 id_map = {}
@@ -584,9 +678,13 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
                 if results:
                     saved_count = 0
                     batch_details = []
+                    quota_fail = False
                     for res in results:
                         if "error" in res:
-                            batch_details.append(f"❌ Ошибка ИИ: {res.get('error')}")
+                            err = str(res.get('error') or '')
+                            batch_details.append(f"❌ Ошибка ИИ: {err}")
+                            if is_quota_or_model_error(err):
+                                quota_fail = True
                             continue
 
                         num_match = re.search(r'\d+', str(res.get('id', '')).upper())
@@ -617,9 +715,13 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
                                 batch_details.append(f"⚠️ {real_rid}: ИИ пропустил")
 
                     db.commit()
+                    note = f"{used_model}. Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
+                    if quota_fail and saved_count == 0:
+                        add_system_log_db(db, f"OZON Пачка {i}", "ERROR", note + "\nОчередь не трогаем — лимит моделей.")
+                        return
                     add_system_log_db(
                         db, f"OZON Пачка {i}", "SUCCESS" if saved_count > 0 else "WARNING",
-                        f"{used_model}. Обработано {saved_count} из {len(chunk)}\n" + "\n".join(batch_details)
+                        note
                     )
                     await asyncio.sleep(3)
                 else:
@@ -627,7 +729,11 @@ async def process_ozon_tagging_task(model_key: str, batch_size: int):
                     await asyncio.sleep(5)
 
     except Exception as e:
-        add_system_log_db(db, "ИИ Разметка OZON: FATAL", "ERROR", f"Сбой воркера: {str(e)}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _log_tagging_fresh("ИИ Разметка OZON: FATAL", "ERROR", f"Сбой воркера: {str(e)}")
     finally:
         db.close()
 
@@ -640,6 +746,7 @@ def start_tagging(
     batch_size: int = 20,
     background_tasks: BackgroundTasks = None
 ):
+    _refuse_qwen_if_paused(model)
     if platform == "ym":
         background_tasks.add_task(process_ym_tagging_task, model, batch_size)
         return {"status": "started", "message": "Разметка возвратов ЯМ запущена в фоне."}
@@ -661,6 +768,7 @@ def start_feedback_tagging(
     background_tasks: BackgroundTasks = None
 ):
     from ..feedback_tagger_job import is_feedback_job_running, spawn_feedback_job
+    _refuse_qwen_if_paused(model)
     if platform == "ozon":
         return {"status": "skipped", "message": "Отзывы Ozon недоступны (требуется подписка)."}
     if platform not in ("wb", "ym"):
@@ -707,6 +815,7 @@ def get_moderation_queue(
                     COALESCE(return_reason, '') AS comment,
                     audit_status,
                     NULL AS photos,
+                    staff_tags,
                     cat_1, cat_2, cat_3, cat_4, cat_5, cat_6, cat_7,
                     cat_8, cat_9, cat_10, cat_11, cat_12, cat_13
                 FROM ozon_returns
@@ -725,7 +834,7 @@ def get_moderation_queue(
                 SELECT
                     return_id::text AS srid, created_at AS claim_date,
                     supplier_article AS sku, return_comment AS comment, audit_status,
-                    photos,
+                    photos, staff_tags,
                     cat_1, cat_2, cat_3, cat_4, cat_5, cat_6, cat_7,
                     cat_8, cat_9, cat_10, cat_11, cat_12, cat_13
                 FROM ym_returns
@@ -743,7 +852,7 @@ def get_moderation_queue(
             query = text("""
                 SELECT
                     srid, created_dt AS claim_date, supplier_article AS sku,
-                    user_comment AS comment, audit_status,
+                    user_comment AS comment, audit_status, staff_tags,
                     cat_1, cat_2, cat_3, cat_4, cat_5, cat_6, cat_7,
                     cat_8, cat_9, cat_10, cat_11, cat_12, cat_13
                 FROM wb_claims
@@ -753,7 +862,8 @@ def get_moderation_queue(
             """)
         with db.bind.connect() as conn:
             rows = conn.execute(query).mappings().all()
-            return {"status": "success", "data": [dict(row) for row in rows]}
+            from ..claim_staff_tags import attach_staff_tag_fields
+            return {"status": "success", "data": [attach_staff_tag_fields(dict(row)) for row in rows]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

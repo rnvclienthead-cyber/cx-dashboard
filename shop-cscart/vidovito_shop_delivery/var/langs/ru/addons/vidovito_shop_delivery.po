@@ -1,0 +1,30 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: vidovito_shop_delivery\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language-Team: Russian\n"
+"Language: ru_RU\n"
+
+msgctxt "Addons::name::vidovito_shop_delivery"
+msgid "Vidovito CDEK and Yandex delivery"
+msgstr "Доставка СДЭК и Яндекс"
+
+msgctxt "Addons::description::vidovito_shop_delivery"
+msgid "Pickup rates via CX Dashboard APIs"
+msgstr "Расчёт доставки в пункт выдачи через те же API, что и в доотправках"
+
+msgctxt "Languages::vidovito_delivery_picker"
+msgid "Vidovito pickup delivery"
+msgstr "Доставка Vidovito (СДЭК / Яндекс / Ozon)"
+
+msgctxt "SettingsSections::vidovito_shop_delivery::general"
+msgid "General"
+msgstr "Общие"
+
+msgctxt "SettingsOptions::vidovito_shop_delivery::api_url"
+msgid "CX Dashboard URL"
+msgstr "Адрес CX Dashboard"
+
+msgctxt "SettingsOptions::vidovito_shop_delivery::api_token"
+msgid "Shop delivery token"
+msgstr "Токен витрины"

@@ -15,6 +15,7 @@ from sqlalchemy import text
 from pydantic import BaseModel
 from typing import Optional
 from ..database import get_db, db_session
+from ..wb_return_logistics import FALLBACK, fetch_avg_return_delivery
 from .auth import get_current_user
 from weasyprint import HTML
 from weasyprint.text.fonts import FontConfiguration
@@ -69,6 +70,25 @@ router = APIRouter(
 )
 
 
+def _maps_js_key() -> str:
+    """Ключ JS API Яндекс.Карт. Не путать с ключом LLM (хотя локально они совпадают)."""
+    return (
+        os.getenv("YANDEX_MAPS_JS_KEY")
+        or os.getenv("VITE_YANDEX_MAPS_KEY")
+        or os.getenv("YANDEX_API_KEY")
+        or ""
+    ).strip()
+
+
+@router.get("/maps-config")
+def get_maps_config():
+    """Ключ карты для кабинета КС. Не зашиваем в сборку фронта — иначе git-деплой теряет .env."""
+    key = _maps_js_key()
+    if not key:
+        raise HTTPException(status_code=503, detail="Ключ Яндекс.Карт не настроен")
+    return {"apikey": key}
+
+
 # ── Схемы ────────────────────────────────────────────────────────────────────
 
 class ApproveRequest(BaseModel):
@@ -77,7 +97,7 @@ class ApproveRequest(BaseModel):
     moderator_comment: Optional[str] = None
     processed_by: Optional[str] = None
     tariff_code: Optional[int] = None
-    delivery_method: Optional[str] = None  # 'cdek' | 'yandex' — выбор КС, если у заявки есть оба кандидата
+    delivery_method: Optional[str] = None  # 'cdek' | 'yandex' | 'ozon'
 
 
 class RejectRequest(BaseModel):
@@ -85,13 +105,115 @@ class RejectRequest(BaseModel):
     processed_by: Optional[str] = None
 
 
+def _skip_reject_stock_template(promo_code, claim_result) -> bool:
+    """Не слать «не можем отправить / оформите возврат», если уходит промокод или возврат WB уже есть."""
+    if promo_code:
+        return True
+    if not claim_result or claim_result.get("skipped") == "no_claim":
+        return False
+    return bool(claim_result.get("claim_id") or claim_result.get("ok"))
+
+
 class PromoCodeUpdate(BaseModel):
     code: str
     expires_at: Optional[str] = None  # ISO date, напр. "2026-07-06"
+    wb_uuid: Optional[str] = None  # ID промокода из кабинета WB
+    valid_from: Optional[str] = None  # ISO date начала действия
     processed_by: Optional[str] = None
 
 
 PROMO_DISCOUNT_PERCENT = 15
+
+
+def _promo_history_stats(db: Session) -> list[dict]:
+    """История промокодов + отправки из CX и заказы/скидка из финотчёта WB."""
+    rows = db.execute(text("""
+        SELECT
+            h.id,
+            h.code,
+            h.wb_uuid,
+            h.discount_percent,
+            h.valid_from,
+            h.expires_at,
+            h.created_at,
+            h.created_by,
+            h.is_active,
+            (
+                SELECT COUNT(*)::int
+                FROM reshipment_requests r
+                WHERE UPPER(TRIM(r.promo_code)) = UPPER(TRIM(h.code))
+                  AND r.promo_sent_at IS NOT NULL
+            ) AS sent_count,
+            CASE
+                WHEN h.wb_uuid IS NULL OR TRIM(h.wb_uuid) = '' THEN NULL
+                ELSE (
+                    SELECT COUNT(*)::int
+                    FROM wb_report_detail d
+                    WHERE d.uuid_promocode = h.wb_uuid
+                      AND d.doc_type_name = 'Продажа'
+                )
+            END AS orders_count,
+            CASE
+                WHEN h.wb_uuid IS NULL OR TRIM(h.wb_uuid) = '' THEN NULL
+                ELSE (
+                    SELECT COUNT(*)::int
+                    FROM wb_report_detail d
+                    WHERE d.uuid_promocode = h.wb_uuid
+                      AND d.doc_type_name = 'Возврат'
+                )
+            END AS returns_count,
+            CASE
+                WHEN h.wb_uuid IS NULL OR TRIM(h.wb_uuid) = '' THEN NULL
+                ELSE (
+                    SELECT COALESCE(SUM(
+                        COALESCE(d.retail_price, 0)
+                        * COALESCE(NULLIF(d.sale_price_promocode_discount_prc, 0), h.discount_percent, 15)
+                        / 100.0
+                    ), 0)
+                    FROM wb_report_detail d
+                    WHERE d.uuid_promocode = h.wb_uuid
+                      AND d.doc_type_name = 'Продажа'
+                )
+            END AS discount_sales_sum,
+            CASE
+                WHEN h.wb_uuid IS NULL OR TRIM(h.wb_uuid) = '' THEN NULL
+                ELSE (
+                    SELECT COALESCE(SUM(
+                        COALESCE(d.retail_price, 0)
+                        * COALESCE(NULLIF(d.sale_price_promocode_discount_prc, 0), h.discount_percent, 15)
+                        / 100.0
+                    ), 0)
+                    FROM wb_report_detail d
+                    WHERE d.uuid_promocode = h.wb_uuid
+                      AND d.doc_type_name = 'Возврат'
+                )
+            END AS discount_returns_sum
+        FROM reshipment_promo_history h
+        ORDER BY h.is_active DESC, h.created_at DESC, h.id DESC
+    """)).mappings().all()
+    out = []
+    for r in rows:
+        sales = r["discount_sales_sum"]
+        rets = r["discount_returns_sum"]
+        net = None
+        if sales is not None:
+            net = round(float(sales) - float(rets or 0), 2)
+        out.append({
+            "id": r["id"],
+            "code": r["code"],
+            "wb_uuid": r["wb_uuid"],
+            "discount_percent": float(r["discount_percent"] or PROMO_DISCOUNT_PERCENT),
+            "valid_from": r["valid_from"],
+            "expires_at": r["expires_at"],
+            "created_at": r["created_at"],
+            "created_by": r["created_by"],
+            "is_active": bool(r["is_active"]),
+            "sent_count": int(r["sent_count"] or 0),
+            "orders_count": None if r["orders_count"] is None else int(r["orders_count"]),
+            "returns_count": None if r["returns_count"] is None else int(r["returns_count"]),
+            "discount_sum": net,
+        })
+    return out
 
 _RU_MONTHS_GEN = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля", 5: "мая", 6: "июня",
@@ -151,16 +273,34 @@ def _next_yandex_act_number(db: Session) -> str:
     return f"{prefix}{seq:03d}"
 
 
+def _fallback_customer_track_number(row) -> str:
+    token_source = str(
+        row.get("chat_token")
+        or row.get("confirmation_token")
+        or row.get("track_number")
+        or row["id"]
+    )
+    return f"reship-{row['id']}-{hashlib.sha1(token_source.encode('utf-8')).hexdigest()[:8]}"
+
+
+def _customer_track_number_for_act(row) -> str:
+    """Номер в акте должен совпадать с номером заказа в Яндексе, не с локальным хешем."""
+    track = (row.get("track_number") or "").strip()
+    if track:
+        try:
+            from .. import yandex_ndd
+            real = yandex_ndd.get_operator_request_id(track)
+            if real:
+                return real
+        except Exception as e:
+            logger.warning("yandex operator_request_id for #%s: %s", row.get("id"), e)
+    return _fallback_customer_track_number(row)
+
+
 def _serialize_yandex_dispatch_rows(rows) -> list[dict]:
     payload = []
     for idx, row in enumerate(rows, 1):
-        token_source = str(
-            row.get("chat_token")
-            or row.get("confirmation_token")
-            or row.get("track_number")
-            or row["id"]
-        )
-        customer_track = f"reship-{row['id']}-{hashlib.sha1(token_source.encode('utf-8')).hexdigest()[:8]}"
+        customer_track = _customer_track_number_for_act(row)
         payload.append({
             "line_no": idx,
             "request_id": row["id"],
@@ -317,25 +457,85 @@ def get_promo_code(db: Session = Depends(get_db)):
     row = db.execute(text(
         "SELECT value, updated_at, updated_by, expires_at FROM reshipment_settings WHERE key = 'promo_code'"
     )).mappings().first()
+    active = db.execute(text("""
+        SELECT wb_uuid, valid_from FROM reshipment_promo_history
+        WHERE is_active = TRUE
+        ORDER BY id DESC LIMIT 1
+    """)).mappings().first()
     return {
         "status": "success",
         "code": (row["value"] if row else "") or "",
         "updated_at": row["updated_at"] if row else None,
         "updated_by": row["updated_by"] if row else None,
         "expires_at": row["expires_at"] if row else None,
+        "wb_uuid": (active["wb_uuid"] if active else None) or "",
+        "valid_from": active["valid_from"] if active else None,
         "discount_percent": PROMO_DISCOUNT_PERCENT,
+        "history": _promo_history_stats(db),
     }
 
 
 @router.post("/promo-code")
 def set_promo_code(payload: PromoCodeUpdate, db: Session = Depends(get_db)):
-    code = payload.code.strip()
+    code = payload.code.strip().upper()
+    wb_uuid = (payload.wb_uuid or "").strip() or None
+    expires_at = payload.expires_at or None
+    valid_from = payload.valid_from or None
+    by = payload.processed_by
+
     db.execute(text("""
-        UPDATE reshipment_settings SET value = :code, updated_at = NOW(), updated_by = :by, expires_at = :expires_at
+        UPDATE reshipment_settings
+        SET value = :code, updated_at = NOW(), updated_by = :by, expires_at = :expires_at
         WHERE key = 'promo_code'
-    """), {"code": code, "by": payload.processed_by, "expires_at": payload.expires_at or None})
+    """), {"code": code, "by": by, "expires_at": expires_at})
+
+    # Если уже есть активный с тем же кодом — обновляем его, иначе закрываем старый и создаём новый
+    active = db.execute(text("""
+        SELECT id, code FROM reshipment_promo_history WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
+    """)).mappings().first()
+
+    if active and (active["code"] or "").upper() == code:
+        db.execute(text("""
+            UPDATE reshipment_promo_history SET
+                wb_uuid = COALESCE(:wb_uuid, wb_uuid),
+                expires_at = COALESCE(:expires_at, expires_at),
+                valid_from = COALESCE(:valid_from, valid_from),
+                created_by = COALESCE(:by, created_by)
+            WHERE id = :id
+        """), {
+            "wb_uuid": wb_uuid, "expires_at": expires_at, "valid_from": valid_from,
+            "by": by, "id": active["id"],
+        })
+    else:
+        db.execute(text("UPDATE reshipment_promo_history SET is_active = FALSE WHERE is_active = TRUE"))
+        db.execute(text("""
+            INSERT INTO reshipment_promo_history
+                (code, wb_uuid, discount_percent, valid_from, expires_at, created_by, is_active)
+            VALUES
+                (:code, :wb_uuid, :pct, COALESCE(:valid_from, CURRENT_DATE), :expires_at, :by, TRUE)
+        """), {
+            "code": code, "wb_uuid": wb_uuid, "pct": PROMO_DISCOUNT_PERCENT,
+            "valid_from": valid_from, "expires_at": expires_at, "by": by,
+        })
+
     db.commit()
-    return {"status": "success", "code": code}
+    return {"status": "success", "code": code, "history": _promo_history_stats(db)}
+
+
+@router.patch("/promo-code/history/{item_id}")
+def update_promo_history_uuid(item_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Дописать ID промокода WB к уже сохранённому коду в истории."""
+    wb_uuid = (payload.get("wb_uuid") or "").strip() or None
+    if not wb_uuid:
+        raise HTTPException(status_code=400, detail="Укажите wb_uuid")
+    res = db.execute(text("""
+        UPDATE reshipment_promo_history SET wb_uuid = :wb_uuid WHERE id = :id
+        RETURNING id
+    """), {"wb_uuid": wb_uuid, "id": item_id})
+    if not res.first():
+        raise HTTPException(status_code=404, detail="Код не найден в истории")
+    db.commit()
+    return {"status": "success", "history": _promo_history_stats(db)}
 
 
 class WarehouseRejectRequest(BaseModel):
@@ -405,28 +605,60 @@ def get_nearest_pickup(
     address: str = Query(""),
     lat: Optional[float] = Query(None),
     lon: Optional[float] = Query(None),
+    phone: str = Query(""),
 ):
     """
-    Превью для формы клиента: проверяет, что хотя бы один перевозчик (СДЭК или
-    Яндекс) смог подобрать точку рядом с адресом. Перевозчик и цена клиенту НЕ
+    Превью для формы клиента: проверяет, что хотя бы один перевозчик (СДЭК, Яндекс или Ozon)
+    смог подобрать точку рядом с адресом. Перевозчик и цена клиенту НЕ
     показываются — окончательный выбор делает КС на этапе одобрения заявки.
+    Отправка деталей — только по России.
     """
     try:
-        from ..pickup_resolver import get_both_candidates, resolve_address
-        normalized = None
+        from ..pickup_resolver import (
+            get_both_candidates, resolve_address,
+            is_foreign_address_hint, address_missing_street,
+            RUSSIA_ONLY_MESSAGE, STREET_REQUIRED_MESSAGE,
+        )
+        if is_foreign_address_hint(city, address):
+            return {
+                "status": "outside_russia",
+                "message": RUSSIA_ONLY_MESSAGE,
+                "data": None,
+            }
+        normalized = resolve_address(address or city)
+        if address_missing_street(normalized, address=address, city=city):
+            return {
+                "status": "need_street",
+                "message": STREET_REQUIRED_MESSAGE,
+                "data": None,
+            }
         if lat is None or lon is None:
-            normalized = resolve_address(address or city)
             if normalized:
                 city = normalized["city"]
                 address = normalized["address"]
                 lat = normalized["lat"]
                 lon = normalized["lon"]
-        candidates = get_both_candidates(city=city, address=address or city, lat=lat, lon=lon)
-        cdek_c, yd_c = candidates.get("cdek"), candidates.get("yandex")
-        if not cdek_c and not yd_c:
+            elif is_foreign_address_hint(city, address) or not (address or city):
+                return {
+                    "status": "outside_russia" if is_foreign_address_hint(city, address) else "not_found",
+                    "message": RUSSIA_ONLY_MESSAGE if is_foreign_address_hint(city, address) else None,
+                    "data": None,
+                }
+        candidates = get_both_candidates(city=city, address=address or city, lat=lat, lon=lon, phone=phone or "")
+        cdek_c, yd_c, oz_c = candidates.get("cdek"), candidates.get("yandex"), candidates.get("ozon")
+        oz_ok = bool(oz_c and oz_c.get("available"))
+        if not cdek_c and not yd_c and not oz_ok:
+            # Нет ПВЗ рядом — для зарубежья (или опечаток) даём то же понятное сообщение,
+            # если адрес выглядит как не-РФ; иначе обычный not_found.
+            if is_foreign_address_hint(city, address, (normalized or {}).get("address")):
+                return {
+                    "status": "outside_russia",
+                    "message": RUSSIA_ONLY_MESSAGE,
+                    "data": None,
+                }
             return {"status": "not_found", "data": None}
         # Для превью клиенту достаточно любого найденного адреса — без деталей точки/цены
-        pick = cdek_c or yd_c
+        pick = cdek_c or yd_c or (oz_c if oz_ok else None)
         return {
             "status": "success",
             "data": {
@@ -440,6 +672,31 @@ def get_nearest_pickup(
         }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ошибка подбора пункта выдачи: {e}")
+
+
+@public_router.get("/ozon-check")
+def ozon_check(phone: str = Query("")):
+    """На форме заявки: можно ли этому телефону получать Ozon Доставку."""
+    from .. import ozon_delivery
+    result = ozon_delivery.check_client(phone)
+    eligible = bool(result.get("eligible"))
+    if eligible:
+        hint = (
+            "Можем отправить через Ozon — обычно это выгоднее. "
+            "Забрать посылку можно в пункте Ozon по штрихкоду в приложении."
+        )
+    else:
+        hint = (
+            result.get("reason")
+            or "На этот номер нет аккаунта Ozon"
+        )
+        hint += ". Тогда отправим СДЭК или Яндекс. Чтобы открыть Ozon — зарегистрируйтесь в приложении Ozon на этот номер."
+    return {
+        "status": "success",
+        "eligible": eligible,
+        "hint": hint,
+        "enabled": ozon_delivery.is_enabled(),
+    }
 
 
 @public_router.post("/upload-photo")
@@ -457,6 +714,42 @@ async def upload_photo(request: Request, file: UploadFile = File(...)):
     file_path = UPLOAD_DIR / safe_name
     file_path.write_bytes(contents)
     return {"filename": safe_name, "url": f"/uploads/reshipment/{safe_name}"}
+
+
+def _find_open_reshipment(db: Session, phone: str, chat_id: str | None):
+    return db.execute(text("""
+        SELECT id FROM reshipment_requests
+        WHERE status NOT IN ('rejected', 'delivered')
+          AND (
+            customer_phone = :phone
+            OR (:chat IS NOT NULL AND (wb_chat_id = :chat OR ym_chat_id = :chat OR ozon_chat_id = :chat))
+          )
+        ORDER BY id DESC
+        LIMIT 1
+    """), {"phone": phone, "chat": chat_id}).mappings().first()
+
+
+def claim_submit_token(db: Session, token: str):
+    """Занять ссылку сразу, до долгого подбора ПВЗ. Иначе две вкладки успевают создать две заявки."""
+    row = db.execute(text("""
+        UPDATE reshipment_chat_tokens
+        SET used_at = NOW()
+        WHERE token = :t
+          AND used_at IS NULL
+          AND request_id IS NULL
+          AND COALESCE(expired, FALSE) IS NOT TRUE
+          AND (expires_at IS NULL OR expires_at > NOW())
+        RETURNING chat_id, mp
+    """), {"t": token}).mappings().first()
+    return dict(row) if row else None
+
+
+def release_submit_token(db: Session, token: str) -> None:
+    db.execute(text("""
+        UPDATE reshipment_chat_tokens
+        SET used_at = NULL
+        WHERE token = :t AND request_id IS NULL
+    """), {"t": token})
 
 
 @public_router.post("/submit")
@@ -510,16 +803,32 @@ def submit_reshipment(
         raise HTTPException(status_code=400, detail="Укажите, что нужно отправить")
     if not address_city and not client_pvz_city:
         raise HTTPException(status_code=400, detail="Укажите город доставки")
+    from ..pickup_resolver import STREET_REQUIRED_MESSAGE, address_missing_street, resolve_address
+    _addr_for_street = (client_pvz_address or address_street or "").strip()
+    _city_for_street = (address_city or client_pvz_city or "").strip()
+    _resolved_street = resolve_address(_addr_for_street or _city_for_street) if (_addr_for_street or _city_for_street) else None
+    if address_missing_street(_resolved_street, address=_addr_for_street, city=_city_for_street):
+        raise HTTPException(status_code=400, detail=STREET_REQUIRED_MESSAGE)
+
+    # Отправка деталей — только по России (на этапе формы)
+    from ..pickup_resolver import is_foreign_address_hint, RUSSIA_ONLY_MESSAGE
+    if is_foreign_address_hint(
+        client_pvz_city, client_pvz_address, address_city, address_region, address_postal,
+    ):
+        raise HTTPException(status_code=400, detail=RUSSIA_ONLY_MESSAGE)
 
     # ── Защита от дублей ──────────────────────────────────────────────────────
     _phone_clean = customer_phone.strip()
     _chat_clean  = (wb_chat_id or "").strip() or None
     _token_clean = (chat_token or "").strip() or None
+    _token_mp    = None
+    token_claimed = False
 
-    # Токен одноразовый: на сервере жёстко запрещаем повтор (даже если обошли экран формы)
+    # Токен одноразовый: занимаем ссылку сразу, до подбора ПВЗ (он может идти минуты).
+    # Иначе клиент жмёт ещё раз / открывает вторую вкладку — и получаются две заявки.
     if _token_clean:
         _tok_check = db.execute(text("""
-            SELECT used_at, expired, expires_at, request_id, chat_id
+            SELECT used_at, expired, expires_at, request_id, chat_id, mp
             FROM reshipment_chat_tokens
             WHERE token = :t
         """), {"t": _token_clean}).mappings().first()
@@ -527,6 +836,15 @@ def submit_reshipment(
             raise HTTPException(
                 status_code=400,
                 detail="Ссылка недействительна. Попросите менеджера выслать новую ссылку в чате.",
+            )
+        from ..chat_bot import form_token_block_reason
+        _block = form_token_block_reason(
+            db, _token_clean, chat_id=_tok_check.get("chat_id") or _chat_clean,
+        )
+        if _block == "return_approved":
+            raise HTTPException(
+                status_code=400,
+                detail="По этому заказу возврат уже одобрен. Ссылка на форму доотправки больше не действует.",
             )
         if _tok_check["used_at"] or _tok_check["request_id"]:
             rid = _tok_check["request_id"]
@@ -547,26 +865,25 @@ def submit_reshipment(
             )
         if not _chat_clean and _tok_check["chat_id"]:
             _chat_clean = _tok_check["chat_id"]
+        _token_mp = (_tok_check.get("mp") or "").strip().lower() or None
+        claimed = claim_submit_token(db, _token_clean)
+        if not claimed:
+            raise HTTPException(
+                status_code=409,
+                detail="По этой ссылке заявка уже принята. Попросите менеджера выслать новую ссылку.",
+            )
+        db.commit()
+        token_claimed = True
+        if not _chat_clean and claimed.get("chat_id"):
+            _chat_clean = claimed["chat_id"]
+        if not _token_mp:
+            _token_mp = (claimed.get("mp") or "").strip().lower() or None
 
-    if not _chat_clean and _token_clean:
-        _tok_row = db.execute(text(
-            "SELECT chat_id FROM reshipment_chat_tokens WHERE token = :t AND used_at IS NULL"
-        ), {"t": _token_clean}).mappings().first()
-        if _tok_row and _tok_row["chat_id"]:
-            _chat_clean = _tok_row["chat_id"]
-
-    _existing = db.execute(text("""
-        SELECT id FROM reshipment_requests
-        WHERE status NOT IN ('rejected', 'delivered')
-          AND (
-            customer_phone = :phone
-            OR (:chat IS NOT NULL AND (wb_chat_id = :chat OR ym_chat_id = :chat))
-          )
-        ORDER BY id DESC
-        LIMIT 1
-    """), {"phone": _phone_clean, "chat": _chat_clean}).mappings().first()
-
+    _existing = _find_open_reshipment(db, _phone_clean, _chat_clean)
     if _existing:
+        if token_claimed:
+            release_submit_token(db, _token_clean)
+            db.commit()
         raise HTTPException(
             status_code=409,
             detail=f"Заявка #{_existing['id']} по этому клиенту уже обрабатывается. "
@@ -590,6 +907,13 @@ def submit_reshipment(
     yandex_cost        = None
     cdek_pvz_lat = cdek_pvz_lng = None
     yandex_pvz_lat = yandex_pvz_lng = None
+    ozon_pvz_code = ozon_pvz_address = ozon_pvz_name = None
+    ozon_cost = None
+    ozon_pvz_lat = ozon_pvz_lng = None
+    ozon_from_pvz_id = ozon_from_pvz_address = None
+    ozon_client_ok = None
+    ozon_reason = None
+    ozon_shipment_method_id = None
     city_for_resolver = address_city or client_pvz_city
     if city_for_resolver:
         try:
@@ -598,6 +922,7 @@ def submit_reshipment(
                 city=city_for_resolver,
                 address=shipping_address or city_for_resolver,
                 lat=client_lat, lon=client_lon,
+                phone=customer_phone or "",
             )
             cdek_c = candidates.get("cdek")
             if cdek_c:
@@ -615,7 +940,22 @@ def submit_reshipment(
                 yandex_cost        = yd_c.get("cost")
                 yandex_pvz_lat     = yd_c.get("lat")
                 yandex_pvz_lng     = yd_c.get("lng")
-            if not cdek_c and not yd_c:
+            oz_c = candidates.get("ozon")
+            if oz_c and oz_c.get("available"):
+                ozon_pvz_code = oz_c["pvz_code"]
+                ozon_pvz_address = oz_c.get("pvz_address")
+                ozon_pvz_name = oz_c.get("pvz_name")
+                ozon_cost = oz_c.get("cost")
+                ozon_pvz_lat = oz_c.get("lat")
+                ozon_pvz_lng = oz_c.get("lng")
+                ozon_from_pvz_id = oz_c.get("from_pvz_id")
+                ozon_from_pvz_address = oz_c.get("from_pvz_address")
+                ozon_client_ok = True
+                ozon_shipment_method_id = oz_c.get("shipment_method_id")
+            elif oz_c:
+                ozon_client_ok = bool(oz_c.get("client_ok"))
+                ozon_reason = oz_c.get("reason") or ""
+            if not cdek_c and not yd_c and not (oz_c and oz_c.get("available")):
                 logger.warning("pickup_resolver: ни один перевозчик не подобрал точку для city=%s", city_for_resolver)
         except Exception as e:
             logger.warning("pickup_resolver failed at submit: %s", e)
@@ -629,23 +969,30 @@ def submit_reshipment(
     wb_client_id   = None
     wb_chat_id_val = None
     ym_chat_id_val = None
+    ozon_chat_id_val = None
     marketplace    = "wb"
-    clean_chat_id  = (wb_chat_id or "").strip() or None
+    # Чат уже мог быть взят из токена выше — до claim used_at. Повторный
+    # поиск с used_at IS NULL после занятия ссылки как раз обнулял заказ.
+    clean_chat_id  = (wb_chat_id or "").strip() or _chat_clean or None
     clean_token    = (chat_token or "").strip() or None
-    token_mp       = None
+    token_mp       = _token_mp
     category_val   = (product_category or "").strip() or None
     order_num_val  = (order_number or "").strip() or None
     supplier_article_val = None
 
-    # Новая схема: ищем chatID по токену (если воркер уже успел его привязать)
+    if clean_token:
+        from .. import chat_bot as _chat_bot
+        sent_cid = _chat_bot.chat_id_for_form_token(db, clean_token)
+        if sent_cid:
+            clean_chat_id = sent_cid
     if not clean_chat_id and clean_token:
         token_row = db.execute(text("""
             SELECT chat_id, mp FROM reshipment_chat_tokens
-            WHERE token = :token AND used_at IS NULL
+            WHERE token = :token
         """), {"token": clean_token}).mappings().first()
         if token_row and token_row["chat_id"]:
             clean_chat_id = token_row["chat_id"]
-            token_mp = (token_row.get("mp") or "").strip().lower() or None
+            token_mp = token_mp or (token_row.get("mp") or "").strip().lower() or None
 
     if clean_chat_id:
         # Явный mp с токена или автодетект по таблицам чатов
@@ -655,6 +1002,10 @@ def submit_reshipment(
                 "SELECT 1 FROM ym_chats WHERE chat_id = :cid"
             ), {"cid": clean_chat_id}).first():
                 mp = "ym"
+            elif db.execute(text(
+                "SELECT 1 FROM ozon_chats WHERE chat_id = :cid"
+            ), {"cid": clean_chat_id}).first():
+                mp = "ozon"
             elif db.execute(text(
                 "SELECT 1 FROM wb_chats WHERE chat_id = :cid"
             ), {"cid": clean_chat_id}).first():
@@ -668,16 +1019,36 @@ def submit_reshipment(
             marketplace = "ym"
             ym_chat_id_val = clean_chat_id
             ym_row = db.execute(text("""
-                SELECT order_id, context_article FROM ym_chats WHERE chat_id = :cid
+                SELECT order_id, context_article, context_type
+                FROM ym_chats WHERE chat_id = :cid
             """), {"cid": clean_chat_id}).mappings().first()
             if ym_row:
-                if not order_num_val and ym_row.get("order_id"):
-                    order_num_val = ym_row["order_id"]
-                art = (ym_row.get("context_article") or "").strip() or None
+                ctx = (ym_row.get("context_type") or "").strip().upper()
+                # DIRECT — вопрос по карточке, не чат заказа. Артикул/номер
+                # оттуда в заявку не копируем, иначе привяжется чужой товар.
+                if ctx in ("ORDER", "RETURN"):
+                    if not order_num_val and ym_row.get("order_id"):
+                        order_num_val = ym_row["order_id"]
+                    art = (ym_row.get("context_article") or "").strip() or None
+                    if art:
+                        supplier_article_val = art
+                        if not category_val:
+                            category_val = art
+        elif mp == "ozon":
+            marketplace = "ozon"
+            ozon_chat_id_val = clean_chat_id
+            ozon_row = db.execute(text("""
+                SELECT order_number, context_article, context_sku
+                FROM ozon_chats WHERE chat_id = :cid
+            """), {"cid": clean_chat_id}).mappings().first()
+            if ozon_row:
+                art = (ozon_row.get("context_article") or "").strip() or None
                 if art:
                     supplier_article_val = art
                     if not category_val:
                         category_val = art
+                if not order_num_val and ozon_row.get("order_number"):
+                    order_num_val = ozon_row["order_number"]
         else:
             marketplace = "wb"
             wb_chat_id_val = clean_chat_id
@@ -695,8 +1066,22 @@ def submit_reshipment(
                 if chat_meta:
                     wb_reply_sign = chat_meta.get("reply_sign") or wb_reply_sign
                     wb_nm_id = wb_nm_id or chat_meta.get("nm_id")
+            if wb_nm_id and not supplier_article_val:
+                from ..chat_bot import _get_article
+                art = (_get_article(db, wb_nm_id) or "").strip()
+                if art:
+                    supplier_article_val = art
 
     try:
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                   {"k": f"resh|{_phone_clean}|{_chat_clean or ''}"})
+        _again = _find_open_reshipment(db, _phone_clean, _chat_clean)
+        if _again:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Заявка #{_again['id']} по этому клиенту уже обрабатывается. "
+                       "Дублирование запрещено.",
+            )
         result = db.execute(text("""
             INSERT INTO reshipment_requests
                 (customer_name, customer_email, customer_phone, order_number, marketplace,
@@ -706,8 +1091,11 @@ def submit_reshipment(
                  client_pvz_code, client_pvz_address, client_pvz_city, cdek_cost,
                  yandex_pvz_code, yandex_pvz_address, yandex_pvz_name, yandex_cost,
                  client_lat, client_lon, cdek_pvz_lat, cdek_pvz_lng, yandex_pvz_lat, yandex_pvz_lng,
+                 ozon_pvz_code, ozon_pvz_address, ozon_pvz_name, ozon_cost,
+                 ozon_pvz_lat, ozon_pvz_lng, ozon_from_pvz_id, ozon_from_pvz_address,
+                 ozon_client_ok, ozon_reason, ozon_shipment_method_id,
                  photo_files, privacy_consent,
-                 wb_chat_id, wb_reply_sign, wb_nm_id, wb_client_id, ym_chat_id,
+                 wb_chat_id, wb_reply_sign, wb_nm_id, wb_client_id, ym_chat_id, ozon_chat_id,
                  salebot_client_id, chat_token)
             VALUES
                 (:name, :email, :phone, :order_num, :marketplace,
@@ -717,8 +1105,11 @@ def submit_reshipment(
                  :pvz_code, :pvz_address, :pvz_city, :cdek_cost,
                  :yandex_pvz_code, :yandex_pvz_address, :yandex_pvz_name, :yandex_cost,
                  :client_lat, :client_lon, :cdek_pvz_lat, :cdek_pvz_lng, :yandex_pvz_lat, :yandex_pvz_lng,
+                 :ozon_pvz_code, :ozon_pvz_address, :ozon_pvz_name, :ozon_cost,
+                 :ozon_pvz_lat, :ozon_pvz_lng, :ozon_from_pvz_id, :ozon_from_pvz_address,
+                 :ozon_client_ok, :ozon_reason, :ozon_shipment_method_id,
                  :photos, :consent,
-                 :wb_chat_id, :wb_reply_sign, :wb_nm_id, :wb_client_id, :ym_chat_id,
+                 :wb_chat_id, :wb_reply_sign, :wb_nm_id, :wb_client_id, :ym_chat_id, :ozon_chat_id,
                  :salebot_client_id, :chat_token)
             RETURNING id
         """), {
@@ -751,6 +1142,17 @@ def submit_reshipment(
             "cdek_pvz_lng":       cdek_pvz_lng,
             "yandex_pvz_lat":     yandex_pvz_lat,
             "yandex_pvz_lng":     yandex_pvz_lng,
+            "ozon_pvz_code":      ozon_pvz_code,
+            "ozon_pvz_address":   ozon_pvz_address,
+            "ozon_pvz_name":      ozon_pvz_name,
+            "ozon_cost":          ozon_cost,
+            "ozon_pvz_lat":       ozon_pvz_lat,
+            "ozon_pvz_lng":       ozon_pvz_lng,
+            "ozon_from_pvz_id":   ozon_from_pvz_id,
+            "ozon_from_pvz_address": ozon_from_pvz_address,
+            "ozon_client_ok":     ozon_client_ok,
+            "ozon_reason":        ozon_reason,
+            "ozon_shipment_method_id": ozon_shipment_method_id,
             "photos":        photo_files,
             "consent":       personal_data_consent,
             "wb_chat_id":        wb_chat_id_val,
@@ -758,6 +1160,7 @@ def submit_reshipment(
             "wb_nm_id":          wb_nm_id,
             "wb_client_id":      wb_client_id,
             "ym_chat_id":        ym_chat_id_val,
+            "ozon_chat_id":      ozon_chat_id_val,
             "salebot_client_id": clean_salebot_id,
             "chat_token":        clean_token,
         })
@@ -775,38 +1178,38 @@ def submit_reshipment(
 
         # Помечаем токен как использованный атомарно (второй клиент с той же ссылкой не пройдёт)
         if clean_token:
-            claimed = db.execute(text("""
+            db.execute(text("""
                 UPDATE reshipment_chat_tokens
-                SET used_at = NOW(), request_id = :req_id,
+                SET request_id = :req_id,
                     mp = COALESCE(mp, :mp),
                     chat_id = COALESCE(NULLIF(chat_id, ''), :cid)
                 WHERE token = :token
-                  AND used_at IS NULL
-                  AND request_id IS NULL
-                  AND COALESCE(expired, FALSE) IS NOT TRUE
-                RETURNING token
             """), {
                 "req_id": new_id,
                 "token": clean_token,
-                "mp": marketplace if (wb_chat_id_val or ym_chat_id_val) else None,
-                "cid": wb_chat_id_val or ym_chat_id_val,
-            }).first()
-            if not claimed:
-                # Гонка: кто-то успел использовать токен между проверкой и INSERT
-                db.execute(text("DELETE FROM reshipment_requests WHERE id = :id"), {"id": new_id})
-                db.commit()
-                raise HTTPException(
-                    status_code=409,
-                    detail="По этой ссылке заявка уже принята. Попросите менеджера выслать новую ссылку.",
-                )
+                "mp": marketplace if (wb_chat_id_val or ym_chat_id_val or ozon_chat_id_val) else None,
+                "cid": wb_chat_id_val or ym_chat_id_val or ozon_chat_id_val,
+            })
             db.commit()
 
         return {"status": "success", "id": new_id, "message": "Заявка принята. Мы свяжемся с вами."}
     except HTTPException:
         db.rollback()
+        if token_claimed:
+            try:
+                release_submit_token(db, _token_clean)
+                db.commit()
+            except Exception:
+                pass
         raise
     except Exception as e:
         db.rollback()
+        if token_claimed:
+            try:
+                release_submit_token(db, _token_clean)
+                db.commit()
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=f"Ошибка при сохранении: {e}")
 
 
@@ -899,6 +1302,17 @@ def cdek_webhook(payload: dict, db: Session = Depends(get_db)):
     if not cdek_number:
         return {"ok": True}
 
+    try:
+        from .. import shop_orders as shop_orders_mod
+        shop_orders_mod.apply_cdek_webhook(
+            db,
+            cdek_number,
+            status_code,
+            uuid=str(attributes.get("uuid") or payload.get("uuid") or ""),
+        )
+    except Exception:
+        _log.getLogger("cdek_webhook").warning("shop orders CDEK webhook failed", exc_info=True)
+
     # Маппинг CDEK кодов → наши статусы
     CDEK_MAP = {
         "RECEIVED_AT_SHIPMENT_WAREHOUSE":              ("shipped",          "approved,packed"),
@@ -929,51 +1343,19 @@ def cdek_webhook(payload: dict, db: Session = Depends(get_db)):
                 confirmed_at = CASE WHEN :new_status IN ('delivered','returned') THEN COALESCE(confirmed_at, NOW()) ELSE confirmed_at END,
                 confirmation_token = COALESCE(confirmation_token, :token)
             WHERE cdek_number = :num AND status = ANY(:from_list)
-            RETURNING id, salebot_client_id, wb_reply_sign, ym_chat_id, marketplace, client_pvz_address
+            RETURNING id, salebot_client_id, wb_reply_sign, ym_chat_id, ozon_chat_id, marketplace, client_pvz_address, wb_chat_id
         """), {"new_status": new_status, "num": cdek_number,
                "token": secrets.token_hex(32), "from_list": list(from_list)}).mappings().first()
         db.commit()
 
         if row:
             from .. import reshipment_notify
-            # Вебхук СДЭК и опросник могут сработать почти одновременно —
-            # право на одно уведомление по статусу забирает claim_notify.
-            if not reshipment_notify.claim_notify(db, row["id"], new_status):
-                return {"ok": True}
-
-            salebot_id = row.get("salebot_client_id")
-            salebot_sent = False
-            try:
-                from ..salebot import (notify_shipped, notify_in_transit,
-                                       notify_ready_for_pickup, notify_delivered, is_enabled)
-                if salebot_id and is_enabled():
-                    if new_status == "shipped":
-                        salebot_sent = notify_shipped(salebot_id, row["id"], track_number=cdek_number, delivery_method="cdek")
-                    elif new_status == "in_transit":
-                        salebot_sent = notify_in_transit(salebot_id, row["id"], track_number=cdek_number)
-                    elif new_status == "ready_for_pickup":
-                        salebot_sent = notify_ready_for_pickup(salebot_id, row["id"], track_number=cdek_number,
-                                                               delivery_method="cdek",
-                                                               pvz_address=row.get("client_pvz_address") or "")
-                    elif new_status == "delivered":
-                        salebot_sent = notify_delivered(salebot_id, row["id"])
-            except Exception:
-                pass
-
-            if not salebot_sent:
-                pvz_addr = row.get("client_pvz_address") or ""
-                msg = None
-                if new_status == "shipped":
-                    msg = f"📦 Ваша посылка отправлена!\nСлужба доставки: СДЭК\nТрек-номер: {cdek_number}"
-                elif new_status == "in_transit":
-                    msg = f"🚚 Ваша посылка в пути!\nТрек-номер СДЭК: {cdek_number}\nСкоро прибудет в ваш город."
-                elif new_status == "ready_for_pickup":
-                    pvz_line = f"\nАдрес ПВЗ: {pvz_addr}" if pvz_addr else "\nЗаберите её в пункте выдачи СДЭК."
-                    msg = f"📬 Ваша посылка готова к выдаче!\nТрек-номер СДЭК: {cdek_number}{pvz_line}"
-                elif new_status == "delivered":
-                    msg = "✅ Посылка получена! Надеемся, деталь подошла."
-                if msg:
-                    _wb_notify(dict(row), msg)
+            reshipment_notify.notify_delivery_status(
+                db, dict(row), new_status,
+                delivery_method="cdek",
+                track_number=cdek_number,
+                pvz_address=row.get("client_pvz_address") or "",
+            )
 
     return {"ok": True}
 
@@ -1016,6 +1398,10 @@ def check_token(token: str, db: Session = Depends(get_db)):
         return {"valid": False, "reason": "used"}
     if row["expired"] or (row["expires_at"] and row["expires_at"] < __import__("datetime").datetime.utcnow()):
         return {"valid": False, "reason": "expired"}
+    from ..chat_bot import form_token_block_reason
+    blocked = form_token_block_reason(db, token)
+    if blocked:
+        return {"valid": False, "reason": blocked}
     return {"valid": True}
 
 
@@ -1047,15 +1433,21 @@ def get_requests(
                r.matched_srid, r.match_notes, r.moderator_comment, r.processed_by, r.processed_at,
                r.rejected_by, r.rejection_reason,
                r.track_number, r.shipping_cost, r.cdek_uuid, r.cdek_number, r.cdek_cost,
+               r.cdek_cost_actual,
                r.yandex_pvz_code, r.yandex_pvz_address, r.yandex_cost,
+               r.yandex_sharing_url,
+               r.ozon_pvz_code, r.ozon_pvz_address, r.ozon_cost, r.ozon_cost_actual,
+               r.ozon_client_ok, r.ozon_reason,
+               r.ozon_from_pvz_address, r.ozon_order_number, r.ozon_posting_number,
                r.shipped_at, r.confirmed_at, r.review_requested,
                r.review_step, r.review_msg1_at, r.review_msg2_at, r.review_msg3_at,
                r.wb_chat_id, r.wb_nm_id, r.wb_client_id, r.wb_reply_sign, r.delivery_method,
-               r.ym_chat_id, r.marketplace,
+               r.ym_chat_id, r.ozon_chat_id, r.marketplace,
                y.cabinet_chat_id AS ym_cabinet_chat_id,
                y.context_type AS ym_context_type,
-               COALESCE(NULLIF(TRIM(r.supplier_article), ''), y.context_article) AS ym_context_article,
+               COALESCE(NULLIF(TRIM(r.supplier_article), ''), y.context_article, oc.context_article) AS ym_context_article,
                y.order_id AS ym_order_id,
+               oc.order_number AS ozon_chat_order_number,
                r.salebot_client_id, r.salebot_messenger, r.salebot_blocked,
                r.promo_code, r.promo_sent_at, r.chat_token, r.confirmation_token,
                -- Отзыв ДО отправки (зафиксирован при одобрении; on_approve — устаревший тип для старых заявок)
@@ -1068,11 +1460,22 @@ def get_requests(
                 ORDER BY s.captured_at DESC LIMIT 1) AS wb_after_rating
         FROM reshipment_requests r
         LEFT JOIN ym_chats y ON y.chat_id = r.ym_chat_id
+        LEFT JOIN ozon_chats oc ON oc.chat_id = r.ozon_chat_id
         {where}
         ORDER BY r.updated_at DESC
     """), params).mappings().all()
 
-    return {"status": "success", "count": len(rows), "data": [dict(r) for r in rows]}
+    try:
+        from .. import yandex_ndd
+        default_src = yandex_ndd.source_station_label()
+    except Exception:
+        default_src = "Казань, Тульская 40"
+    return {
+        "status": "success",
+        "count": len(rows),
+        "yandex_default_source_pvz": default_src,
+        "data": [dict(r) for r in rows],
+    }
 
 
 @router.get("/requests/{req_id}")
@@ -1080,7 +1483,33 @@ def get_request(req_id: int, db: Session = Depends(get_db)):
     row = db.execute(text("SELECT * FROM reshipment_requests WHERE id = :id"), {"id": req_id}).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Заявка не найдена")
-    return {"status": "success", "data": dict(row)}
+    data = dict(row)
+    # Точка сдачи Яндекса: из реального заказа, иначе текущий дефолт .env
+    try:
+        from .. import yandex_ndd
+        data["yandex_default_source_pvz"] = yandex_ndd.source_station_label()
+        track = (data.get("track_number") or "").strip()
+        if (data.get("delivery_method") or "") == "yandex" and track:
+            real = yandex_ndd.get_order_source_label(track)
+            data["yandex_source_pvz"] = real or data["yandex_default_source_pvz"]
+            sharing = (data.get("yandex_sharing_url") or "").strip()
+            if not sharing:
+                info = yandex_ndd.get_order_status(track)
+                sharing = (info.get("sharing_url") or "").strip()
+                if sharing:
+                    data["yandex_sharing_url"] = sharing
+                    db.execute(text("""
+                        UPDATE reshipment_requests
+                        SET yandex_sharing_url = :url
+                        WHERE id = :id AND (yandex_sharing_url IS NULL OR yandex_sharing_url = '')
+                    """), {"url": sharing, "id": req_id})
+                    db.commit()
+        else:
+            data["yandex_source_pvz"] = data["yandex_default_source_pvz"]
+    except Exception:
+        data.setdefault("yandex_source_pvz", "Казань, Тульская 40")
+        data.setdefault("yandex_default_source_pvz", data["yandex_source_pvz"])
+    return {"status": "success", "data": data}
 
 
 @router.get("/requests/{req_id}/tariff-options")
@@ -1149,7 +1578,8 @@ def get_request_economics(
     Стоимость доставки в варианте V3 берётся по выбранному перевозчику (carrier) — до одобрения
     заявки КС может посмотреть экономику и для СДЭК, и для Яндекса, чтобы сравнить и согласовать."""
     req = db.execute(text("""
-        SELECT matched_srid, cdek_cost, yandex_cost, shipping_cost, delivery_method, wb_nm_id
+        SELECT matched_srid, cdek_cost, cdek_cost_actual, yandex_cost, shipping_cost,
+               ozon_cost, ozon_cost_actual, delivery_method, wb_nm_id
         FROM reshipment_requests WHERE id = :id
     """), {"id": req_id}).mappings().first()
     if not req:
@@ -1157,13 +1587,26 @@ def get_request_economics(
 
     # Какого перевозчика используем для стоимости доставки в V3
     chosen_carrier = carrier or req["delivery_method"]
-    if chosen_carrier not in ("cdek", "yandex"):
-        chosen_carrier = "cdek" if req["cdek_cost"] is not None else ("yandex" if req["yandex_cost"] is not None else "cdek")
-    if chosen_carrier == "yandex":
-        # shipping_cost — подтверждённая цена после создания заказа; yandex_cost — предварительная оценка
-        delivery_cost = float(req["shipping_cost"] or req["yandex_cost"] or 0)
-    else:
-        delivery_cost = float(req["cdek_cost"] or 0)
+    if chosen_carrier not in ("cdek", "yandex", "ozon"):
+        if req["ozon_cost"] is not None:
+            chosen_carrier = "ozon"
+        elif req["cdek_cost"] is not None:
+            chosen_carrier = "cdek"
+        elif req["yandex_cost"] is not None:
+            chosen_carrier = "yandex"
+        else:
+            chosen_carrier = "cdek"
+    from ..reshipment_costs import delivery_amounts
+    amounts = delivery_amounts(
+        chosen_carrier,
+        cdek_cost=req["cdek_cost"],
+        cdek_cost_actual=req.get("cdek_cost_actual"),
+        yandex_cost=req["yandex_cost"],
+        shipping_cost=req["shipping_cost"],
+        ozon_cost=req.get("ozon_cost"),
+        ozon_cost_actual=req.get("ozon_cost_actual"),
+    )
+    delivery_cost = amounts["main"]
 
     matched_srid = req["matched_srid"]
     wb_nm_id     = req["wb_nm_id"]
@@ -1173,6 +1616,9 @@ def get_request_economics(
         "matched_srid":        matched_srid,
         "carrier":             chosen_carrier,
         "delivery_cost":       delivery_cost,
+        "delivery_cost_plan":  amounts["plan"],
+        "delivery_cost_fact":  amounts["fact"],
+        "delivery_cost_diff":  amounts["diff"],
         # из финотчёта (заполняется если есть matched_srid)
         "ppvz_for_pay":        None,   # выплата WB за продажу
         "acquiring_fee_sale":  None,   # эквайринг при продаже
@@ -1187,16 +1633,22 @@ def get_request_economics(
         "cog_exact":           False,  # True = точная по поставке, False = последняя по артикулу
         # средняя стоимость обратной доставки WB→ПВЗ по артикулу
         "avg_return_delivery": None,
+        "avg_return_delivery_n": 0,
+        "avg_return_delivery_source": "fallback",
         # флаг: данные из финотчёта доступны
         "has_report_data":     False,
+        "ppvz_estimated":      False,  # True = выплата с последней продажи этого артикула, заказ ещё не в отчёте
     }
 
+    sa_name = None
+    sale = ret = empty = None
     if matched_srid:
-        # 1. Строка «Продажа»
+        # 1. Строка «Продажа» — берём ту, где есть выплата (у одного srid бывает нулевая строка)
         sale = db.execute(text("""
-            SELECT ppvz_for_pay, acquiring_fee, retail_amount
+            SELECT ppvz_for_pay, acquiring_fee, retail_amount, sa_name
             FROM wb_report_detail
             WHERE LOWER(srid) = LOWER(:srid) AND doc_type_name = 'Продажа'
+            ORDER BY (COALESCE(ppvz_for_pay, 0) > 0) DESC, rrd_id DESC
             LIMIT 1
         """), {"srid": matched_srid}).mappings().first()
 
@@ -1217,7 +1669,37 @@ def get_request_economics(
             WHERE LOWER(srid) = LOWER(:srid) AND doc_type_name = ''
         """), {"srid": matched_srid}).mappings().first()
 
-        # 4. Артикул из финотчёта для дальнейшего матча
+        sa_name = (sale["sa_name"] if sale and sale.get("sa_name") else None)
+
+    # Заказ свежий — в еженедельном финотчёте его ещё нет. Берём последнюю
+    # продажу этого же nm_id, чтобы экономика не была пустой.
+    if (not sale or not sale.get("ppvz_for_pay")) and wb_nm_id:
+        try:
+            fb_sale = db.execute(text("""
+                SELECT ppvz_for_pay, acquiring_fee, retail_amount, sa_name
+                FROM wb_report_detail
+                WHERE nm_id = :nm_id
+                  AND doc_type_name = 'Продажа'
+                  AND COALESCE(ppvz_for_pay, 0) > 0
+                ORDER BY rr_dt DESC NULLS LAST, rrd_id DESC
+                LIMIT 1
+            """), {"nm_id": int(wb_nm_id)}).mappings().first()
+        except (TypeError, ValueError):
+            fb_sale = None
+        except Exception as e:
+            print(f"[economics] nm_id sale fallback #{req_id}: {e}")
+            fb_sale = None
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        if fb_sale:
+            sale = fb_sale
+            result["ppvz_estimated"] = True
+            if not sa_name:
+                sa_name = fb_sale.get("sa_name")
+
+    if not sa_name and matched_srid:
         sa_row = db.execute(text("""
             SELECT sa_name FROM wb_report_detail
             WHERE LOWER(srid) = LOWER(:srid) AND sa_name IS NOT NULL AND sa_name != ''
@@ -1225,34 +1707,38 @@ def get_request_economics(
         """), {"srid": matched_srid}).mappings().first()
         sa_name = sa_row["sa_name"] if sa_row else None
 
-        if sale or ret or empty:
-            result["has_report_data"]      = True
-            result["ppvz_for_pay"]         = float(sale["ppvz_for_pay"] or 0) if sale else None
-            result["acquiring_fee_sale"]   = float(sale["acquiring_fee"] or 0) if sale else None
-            result["retail_amount"]        = float(sale["retail_amount"] or 0) if sale else None
-            result["rebill_logistic"]      = float(empty["rebill_logistic"] or 0) if empty else None
-            result["penalty"]              = float(empty["penalty"] or 0) if empty else None
-            result["delivery_rub"]         = float(empty["delivery_rub"] or 0) if empty else None
-            # Эквайринг при возврате: из отчёта или расчётный 4% от суммы продажи
-            ret_acq = float(ret["acquiring_fee"] or 0) if ret else 0
-            if ret_acq == 0 and result["retail_amount"]:
-                result["acquiring_fee_return"]           = round(result["retail_amount"] * 0.04, 2)
-                result["acquiring_fee_return_estimated"] = True
-            else:
-                result["acquiring_fee_return"]           = ret_acq
-                result["acquiring_fee_return_estimated"] = False
-    else:
-        sa_name = None
+    if sale or ret or (empty and (float(empty["rebill_logistic"] or 0) or float(empty["penalty"] or 0) or float(empty["delivery_rub"] or 0))):
+        result["has_report_data"]      = True
+        result["ppvz_for_pay"]         = float(sale["ppvz_for_pay"] or 0) if sale else None
+        result["acquiring_fee_sale"]   = float(sale["acquiring_fee"] or 0) if sale else None
+        result["retail_amount"]        = float(sale["retail_amount"] or 0) if sale else None
+        result["rebill_logistic"]      = float(empty["rebill_logistic"] or 0) if empty else None
+        result["penalty"]              = float(empty["penalty"] or 0) if empty else None
+        result["delivery_rub"]         = float(empty["delivery_rub"] or 0) if empty else None
+        ret_acq = float(ret["acquiring_fee"] or 0) if ret else 0
+        if ret_acq == 0 and result["retail_amount"]:
+            result["acquiring_fee_return"]           = round(result["retail_amount"] * 0.04, 2)
+            result["acquiring_fee_return_estimated"] = True
+        else:
+            result["acquiring_fee_return"]           = ret_acq
+            result["acquiring_fee_return_estimated"] = False
 
-    # Фолбэк: артикул через wb_nm_id → wb_logistics
+    # Фолбэк: артикул через wb_nm_id → wb_logistics (nm_id в БД — text)
     if not sa_name and wb_nm_id:
-        nm_row = db.execute(text("""
-            SELECT TRIM(supplier_article) AS sa FROM wb_logistics
-            WHERE nm_id = :nm_id AND supplier_article IS NOT NULL AND supplier_article != ''
-            LIMIT 1
-        """), {"nm_id": int(wb_nm_id)}).mappings().first()
-        if nm_row:
-            sa_name = nm_row["sa"]
+        try:
+            nm_row = db.execute(text("""
+                SELECT TRIM(supplier_article) AS sa FROM wb_logistics
+                WHERE nm_id = :nm_id AND supplier_article IS NOT NULL AND supplier_article != ''
+                LIMIT 1
+            """), {"nm_id": str(wb_nm_id)}).mappings().first()
+            if nm_row:
+                sa_name = nm_row["sa"]
+        except Exception as e:
+            print(f"[economics] nm_id lookup #{req_id}: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
     # 5. Себестоимость: точный матч по поставке через wb_logistics → wb_invoices → wb_cogs
     if sa_name and matched_srid:
@@ -1280,22 +1766,11 @@ def get_request_economics(
         """), {"sa": sa_name}).mappings().first()
         result["cog"] = float(fallback_cog["cost_value"]) if fallback_cog else None
 
-    # 6. Средняя стоимость обратной доставки WB→ПВЗ по артикулу (mp.*.r строки)
-    if sa_name:
-        mp_row = db.execute(text("""
-            SELECT AVG(delivery_rub) AS avg_delivery
-            FROM wb_report_detail
-            WHERE srid LIKE 'mp.%.r' AND delivery_rub > 0 AND LOWER(sa_name) = LOWER(:sa)
-        """), {"sa": sa_name}).mappings().first()
-        if mp_row and mp_row["avg_delivery"]:
-            result["avg_return_delivery"] = round(float(mp_row["avg_delivery"]), 2)
-        else:
-            # fallback: общее среднее по всем артикулам
-            fallback = db.execute(text("""
-                SELECT AVG(delivery_rub) AS avg_delivery
-                FROM wb_report_detail WHERE srid LIKE 'mp.%.r' AND delivery_rub > 0
-            """)).mappings().first()
-            result["avg_return_delivery"] = round(float(fallback["avg_delivery"]), 2) if fallback and fallback["avg_delivery"] else 372.0
+    # 6. Обратная логистика: среднее по последним 10 возвратам артикула
+    ret_info = fetch_avg_return_delivery(db, sa_name)
+    result["avg_return_delivery"] = ret_info["value"]
+    result["avg_return_delivery_n"] = ret_info["n"]
+    result["avg_return_delivery_source"] = ret_info["source"]
 
     # 7. Рассчитываем итоги по 3 вариантам
     ppvz       = result["ppvz_for_pay"]
@@ -1304,7 +1779,7 @@ def get_request_economics(
     penalty    = result["penalty"] or 0
     deliv      = result["delivery_rub"] or 0
     cog        = result["cog"] or 0
-    ret_deliv  = result["avg_return_delivery"] or 372.0
+    ret_deliv  = result["avg_return_delivery"] or FALLBACK
 
     wb_return_costs = acq_ret + rebill + penalty + deliv  # WB-расходы при любом возврате
 
@@ -1372,9 +1847,12 @@ def get_shipping_cost(req_id: int, db: Session = Depends(get_db)):
     row = db.execute(text("""
         SELECT address_city, client_pvz_city, client_pvz_address, shipping_address,
                cdek_cost, yandex_cost, yandex_pvz_address, yandex_pvz_name,
+               ozon_cost, ozon_pvz_address, ozon_pvz_name, ozon_client_ok, ozon_reason,
+               ozon_from_pvz_address,
                delivery_method,
                client_lat, client_lon,
-               cdek_pvz_lat, cdek_pvz_lng, yandex_pvz_lat, yandex_pvz_lng
+               cdek_pvz_lat, cdek_pvz_lng, yandex_pvz_lat, yandex_pvz_lng,
+               ozon_pvz_lat, ozon_pvz_lng
         FROM reshipment_requests WHERE id = :id
     """), {"id": req_id}).mappings().first()
 
@@ -1387,6 +1865,7 @@ def get_shipping_cost(req_id: int, db: Session = Depends(get_db)):
     client_lon = row["client_lon"]
     cdek_available   = row["cdek_cost"] is not None
     yandex_available = row["yandex_cost"] is not None
+    ozon_available   = row["ozon_cost"] is not None
 
     return {
         "status": "success",
@@ -1413,6 +1892,19 @@ def get_shipping_cost(req_id: int, db: Session = Depends(get_db)):
             "lng":          float(row["yandex_pvz_lng"]) if row["yandex_pvz_lng"] is not None else None,
             "distance_km":  distance_km(client_lat, client_lon, row["yandex_pvz_lat"], row["yandex_pvz_lng"]),
         },
+        "ozon": {
+            "available":    ozon_available,
+            "cost":         float(row["ozon_cost"]) if ozon_available else None,
+            "pvz_address":  row["ozon_pvz_address"],
+            "pvz_name":     row["ozon_pvz_name"],
+            "lat":          float(row["ozon_pvz_lat"]) if row["ozon_pvz_lat"] is not None else None,
+            "lng":          float(row["ozon_pvz_lng"]) if row["ozon_pvz_lng"] is not None else None,
+            "distance_km":  distance_km(client_lat, client_lon, row["ozon_pvz_lat"], row["ozon_pvz_lng"]),
+            "client_ok":    row["ozon_client_ok"],
+            "reason":       row["ozon_reason"] or "",
+            "from_pvz_address": row["ozon_from_pvz_address"] or "",
+            "recommended":  ozon_available,
+        },
     }
 
 
@@ -1426,18 +1918,20 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
     # уже посчитаны при подаче заявки (см. pickup_resolver.get_both_candidates).
     has_cdek_candidate   = bool(row.get("client_pvz_code"))
     has_yandex_candidate = bool(row.get("yandex_pvz_code"))
+    has_ozon_candidate   = bool(row.get("ozon_pvz_code") and row.get("ozon_cost") is not None)
     chosen_method = payload.delivery_method
     if not chosen_method:
-        # Явный выбор не передан — если доступен только один вариант, берём его
-        if has_cdek_candidate and not has_yandex_candidate:
-            chosen_method = "cdek"
-        elif has_yandex_candidate and not has_cdek_candidate:
-            chosen_method = "yandex"
+        available = [m for m, ok in (("ozon", has_ozon_candidate), ("cdek", has_cdek_candidate), ("yandex", has_yandex_candidate)) if ok]
+        if len(available) == 1:
+            chosen_method = available[0]
+        elif has_ozon_candidate:
+            chosen_method = "ozon"
         else:
-            raise HTTPException(status_code=400, detail="Укажите перевозчика (delivery_method: cdek или yandex) — доступны оба варианта")
-    if chosen_method not in ("cdek", "yandex"):
-        raise HTTPException(status_code=400, detail="delivery_method должен быть 'cdek' или 'yandex'")
+            raise HTTPException(status_code=400, detail="Укажите перевозчика (cdek, yandex или ozon)")
+    if chosen_method not in ("cdek", "yandex", "ozon"):
+        raise HTTPException(status_code=400, detail="delivery_method должен быть 'cdek', 'yandex' или 'ozon'")
     is_yandex = chosen_method == "yandex"
+    is_ozon = chosen_method == "ozon"
 
     cdek_uuid    = row.get("cdek_uuid") or ""
     cdek_number  = row.get("cdek_number") or ""
@@ -1452,6 +1946,31 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
     yandex_pvz_code    = row.get("yandex_pvz_code") or ""
     yandex_pvz_address = row.get("yandex_pvz_address") or ""
     yandex_pvz_city    = row.get("client_pvz_city") or row.get("address_city")
+    ozon_error = None
+    ozon_order = row.get("ozon_order_number") or ""
+    ozon_posting = row.get("ozon_posting_number") or ""
+
+    if is_ozon:
+        pvz_code = row.get("ozon_pvz_code") or ""
+        cost = row.get("ozon_cost")
+        if not ozon_order:
+            try:
+                from .. import ozon_delivery
+                if not pvz_code:
+                    raise RuntimeError("У заявки нет подобранного ПВЗ Ozon")
+                oz_result = ozon_delivery.create_order(
+                    req_id=req_id,
+                    customer_name=row["customer_name"],
+                    customer_phone=row["customer_phone"],
+                    destination_pvz_id=pvz_code,
+                    items_description=row.get("items_to_send", "Комплектующие"),
+                    shipment_method_id=row.get("ozon_shipment_method_id"),
+                )
+                ozon_order = oz_result.get("order_number") or oz_result.get("posting_number") or ""
+                ozon_posting = oz_result.get("posting_number") or ""
+            except Exception as e:
+                ozon_error = str(e)
+                print(f"[Ozon Delivery] approve #{req_id}: {e}")
 
     if is_yandex:
         pvz_code = yandex_pvz_code
@@ -1475,7 +1994,7 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
                 yandex_error = str(e)
                 print(f"[Yandex NDD] approve #{req_id}: {e}")
 
-    if not is_yandex and not cdek_uuid:  # Не создавать повторно если уже есть
+    if not is_yandex and not is_ozon and not cdek_uuid:  # Не создавать повторно если уже есть
         try:
             from ..cdek import create_order, calculate_cost_for_pvz, find_nearest_pvz
             city = row.get("address_city") or row.get("client_pvz_city")
@@ -1513,65 +2032,91 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
             delivery_method = :delivery_method,
             cdek_cost = COALESCE(:cdek_cost, cdek_cost),
             shipping_cost = COALESCE(:yandex_result_cost, shipping_cost),
+            ozon_order_number = COALESCE(NULLIF(:ozon_order,''), ozon_order_number),
+            ozon_posting_number = COALESCE(NULLIF(:ozon_posting,''), ozon_posting_number),
             cdek_uuid = COALESCE(NULLIF(:uuid,''), cdek_uuid),
             cdek_number = COALESCE(NULLIF(:cdek_num,''), cdek_number),
             cdek_tariff_code = COALESCE(:tariff, cdek_tariff_code),
-            client_pvz_code    = CASE WHEN :is_yandex THEN NULLIF(:yandex_pvz,'') ELSE COALESCE(NULLIF(:pvz,''), client_pvz_code) END,
-            client_pvz_address = CASE WHEN :is_yandex THEN NULLIF(:yandex_addr,'') ELSE client_pvz_address END,
+            client_pvz_code    = CASE
+                WHEN :is_yandex THEN NULLIF(:yandex_pvz,'')
+                WHEN :is_ozon THEN NULLIF(:ozon_pvz,'')
+                ELSE COALESCE(NULLIF(:pvz,''), client_pvz_code)
+            END,
+            client_pvz_address = CASE
+                WHEN :is_yandex THEN NULLIF(:yandex_addr,'')
+                WHEN :is_ozon THEN NULLIF(:ozon_addr,'')
+                ELSE client_pvz_address
+            END,
             track_number = COALESCE(NULLIF(:track,''), track_number)
         WHERE id = :id
     """), {
         "delivery_method": chosen_method,
         "is_yandex": is_yandex,
+        "is_ozon": is_ozon,
         "yandex_pvz":  yandex_pvz_code,
         "yandex_addr": yandex_pvz_address,
-        "yandex_result_cost": cost if is_yandex else None,
+        "ozon_pvz": row.get("ozon_pvz_code") or "",
+        "ozon_addr": row.get("ozon_pvz_address") or "",
+        "ozon_order": ozon_order,
+        "ozon_posting": ozon_posting,
+        "yandex_result_cost": cost if (is_yandex or is_ozon) else None,
         "srid":     payload.matched_srid,
         "notes":    payload.match_notes,
         "comment":  payload.moderator_comment,
         "by":       payload.processed_by,
-        "cdek_cost":   cost if not is_yandex else None,
+        "cdek_cost":   cost if (not is_yandex and not is_ozon) else None,
         "uuid":     cdek_uuid,
         "cdek_num": cdek_number or None,
         "tariff":   cdek_tariff,
         "pvz":      pvz_code,
-        "track":    yandex_track,
+        "track":    ozon_order if is_ozon else yandex_track,
         "id":       req_id,
     })
     db.commit()
 
-    # 2. Автоотклонение рекламации WB — только если заявка привязана к srid
-    srid_for_claim = payload.matched_srid
-    if srid_for_claim:
+    # 2. Автоотклонение рекламации WB — по заказу или чату, не только если srid вручную
+    try:
+        from ..wb_claims_api import reject_return_for_reshipment
+        _comment = (
+            "Ваша претензия закрыта — недостающая деталь направлена вам отдельным отправлением. "
+            "Ожидайте посылку в ближайшее время."
+        )
+        _resp = reject_return_for_reshipment(
+            db,
+            srid=payload.matched_srid or row.get("matched_srid"),
+            wb_chat_id=row.get("wb_chat_id"),
+            order_number=row.get("order_number"),
+            comment=_comment,
+        )
+        print(f"[WB Claims] auto-reject on approve #{req_id}: {_resp}")
+    except Exception as _e:
+        print(f"[WB Claims] Ошибка при отклонении рекламации для #{req_id}: {_e}")
+
+    # 2b. ЯМ: при одобрении доотправки отказываем в возврате по заказу/чату
+    mp = (row.get("marketplace") or "").lower()
+    if mp == "ym" or row.get("ym_chat_id"):
         try:
-            claim_row = db.execute(text("""
-                SELECT claim_id FROM wb_claims WHERE LOWER(srid) = LOWER(:srid) LIMIT 1
-            """), {"srid": srid_for_claim}).mappings().first()
-            if claim_row and claim_row["claim_id"]:
-                from .. import wb_claims_api
-                _comment = (
-                    "Ваша претензия закрыта — недостающая деталь направлена вам отдельным отправлением. "
-                    "Ожидайте посылку в ближайшее время."
-                )
-                _resp = wb_claims_api.patch_claim(
-                    claim_row["claim_id"], "rejectcustom", _comment
-                )
-                if _resp.get("ok"):
-                    print(f"[WB Claims] Рекламация {claim_row['claim_id']} отклонена (reshipment #{req_id})")
-                    wb_claims_api.apply_local_status(
-                        db,
-                        claim_id=str(claim_row["claim_id"]),
-                        srid=srid_for_claim,
-                        action="rejectcustom",
-                        wb_comment="Товар остается у покупателя (Заявка отклонена) — доотправка детали",
-                    )
-                else:
-                    print(
-                        f"[WB Claims] Не удалось отклонить {claim_row['claim_id']}: "
-                        f"{_resp.get('status_code')} {_resp.get('text', '')[:200]}"
-                    )
+            from .. import ym_returns_api
+            ym_result = ym_returns_api.decline_return_for_reshipment(
+                db,
+                order_id=row.get("order_number"),
+                ym_chat_id=row.get("ym_chat_id"),
+            )
+            print(f"[YM Returns] decline on reshipment #{req_id}: {ym_result}")
         except Exception as _e:
-            print(f"[WB Claims] Ошибка при отклонении рекламации для #{req_id}: {_e}")
+            print(f"[YM Returns] auto-decline on approve #{req_id}: {_e}")
+
+    if mp == "ozon" or row.get("ozon_chat_id"):
+        try:
+            from .. import ozon_returns_api
+            oz_result = ozon_returns_api.decline_return_for_reshipment(
+                db,
+                order_id=row.get("order_number"),
+                ozon_chat_id=row.get("ozon_chat_id"),
+            )
+            print(f"[Ozon Returns] decline on reshipment #{req_id}: {oz_result}")
+        except Exception as _e:
+            print(f"[Ozon Returns] auto-decline on approve #{req_id}: {_e}")
 
     # 3. Снэпшот отзыва на момент одобрения (чтобы потом видеть "было/стало")
     try:
@@ -1592,26 +2137,37 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
         pass
 
     # 3. Уведомить клиента через Salebot
+    from ..salebot import notify_approved, is_enabled, format_approved_message
     salebot_notified = False
     salebot_id = row.get("salebot_client_id")
     if salebot_id:
         try:
-            from ..salebot import notify_approved, is_enabled
             if is_enabled():
-                salebot_notified = notify_approved(salebot_id, req_id)
+                salebot_notified = notify_approved(
+                    salebot_id, req_id, delivery_method=chosen_method,
+                )
         except Exception:
             pass
 
     # 4. Уведомить в WB чат только если не удалось через Salebot
     if not salebot_notified:
-        _wb_notify(row, "✅ Ваша заявка одобрена! Мы готовим посылку к отправке. Когда передадим в доставку — пришлём трек-номер для отслеживания.")
+        _wb_notify(row, format_approved_message(chosen_method))
+
+    if chosen_method == "ozon":
+        try:
+            from .. import reshipment_notify
+            guide_row = dict(row)
+            guide_row["delivery_method"] = "ozon"
+            reshipment_notify.send_ozon_pickup_guide(guide_row, db=db)
+        except Exception as e:
+            print(f"[approve] ozon pickup guide #{req_id}: {e}")
 
     result = {
         "status":           "success",
         "message":          f"Заявка #{req_id} одобрена",
         "cdek_uuid":        cdek_uuid,
         "cdek_number":      cdek_number,
-        "track_number":     yandex_track or None,
+        "track_number":     (ozon_order if is_ozon else yandex_track) or None,
         "salebot_notified": salebot_notified,
     }
     if cost is not None:
@@ -1620,6 +2176,8 @@ def approve_request(req_id: int, payload: ApproveRequest, db: Session = Depends(
         result["cdek_warning"] = f"Заказ СДЭК не создан: {cdek_error}"
     if yandex_error:
         result["cdek_warning"] = f"Заказ Яндекс не создан: {yandex_error}"
+    if ozon_error:
+        result["cdek_warning"] = f"Заказ Ozon не создан: {ozon_error}"
     return result
 
 
@@ -1684,6 +2242,69 @@ def yandex_create(req_id: int, payload: YandexCreateRequest, db: Session = Depen
     }
 
 
+@router.post("/requests/{req_id}/ozon-create")
+def ozon_create(req_id: int, payload: YandexCreateRequest, db: Session = Depends(get_db)):
+    """Создать заказ Ozon Доставки, если при одобрении это не удалось."""
+    row = _check_exists(req_id, db)
+    if row["status"] not in ("approved", "packed"):
+        raise HTTPException(status_code=400, detail="Заявка должна быть в статусе 'одобрена' или 'собрана'")
+    if row.get("delivery_method") != "ozon":
+        raise HTTPException(status_code=400, detail="Заявка не помечена как Ozon-доставка")
+
+    pvz_code = row.get("ozon_pvz_code") or row.get("client_pvz_code") or ""
+    if not pvz_code:
+        raise HTTPException(status_code=400, detail="У заявки нет подобранного ПВЗ Ozon")
+
+    from .. import ozon_delivery
+    existing_pn = (row.get("ozon_posting_number") or "").strip()
+    existing_on = (row.get("ozon_order_number") or row.get("track_number") or "").strip()
+    attempt_key = None
+    if existing_pn:
+        st = str(ozon_delivery.posting_status(existing_pn) or "").lower()
+        if st and st not in ozon_delivery.CANCELED_STATUSES:
+            return {
+                "status": "success",
+                "track_number": existing_on or existing_pn,
+                "price": row.get("ozon_cost"),
+                "message": f"Заказ Ozon уже есть: {existing_on or existing_pn}",
+            }
+        attempt_key = existing_on or existing_pn
+    try:
+        oz_result = ozon_delivery.create_order(
+            req_id=req_id,
+            customer_name=row["customer_name"],
+            customer_phone=row["customer_phone"],
+            destination_pvz_id=pvz_code,
+            items_description=row.get("items_to_send", "Комплектующие"),
+            shipment_method_id=row.get("ozon_shipment_method_id"),
+            attempt_key=attempt_key,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ozon API: {e}")
+
+    ozon_order = oz_result.get("order_number") or oz_result.get("posting_number") or ""
+    ozon_posting = oz_result.get("posting_number") or ""
+    cost = row.get("ozon_cost")
+
+    db.execute(text("""
+        UPDATE reshipment_requests SET
+            track_number = :track,
+            ozon_order_number = :track,
+            ozon_posting_number = COALESCE(NULLIF(:posting, ''), ozon_posting_number),
+            shipping_cost = COALESCE(:cost, shipping_cost),
+            processed_by = COALESCE(:by, processed_by)
+        WHERE id = :id
+    """), {"track": ozon_order, "posting": ozon_posting, "cost": cost, "by": payload.processed_by, "id": req_id})
+    db.commit()
+
+    return {
+        "status":       "success",
+        "track_number": ozon_order,
+        "price":        cost,
+        "message":      f"Заказ Ozon создан: {ozon_order}",
+    }
+
+
 class RecreateShipmentRequest(BaseModel):
     processed_by: Optional[str] = None
     notify_client: bool = True
@@ -1709,7 +2330,7 @@ def recreate_shipment(
         )
 
     method = row.get("delivery_method") or ""
-    if method not in ("yandex", "cdek"):
+    if method not in ("yandex", "cdek", "ozon"):
         raise HTTPException(status_code=400, detail="У заявки не выбран перевозчик")
 
     old_track = (row.get("track_number") or row.get("cdek_number") or "").strip()
@@ -1724,11 +2345,37 @@ def recreate_shipment(
             print(f"[recreate] cancel old yandex {old_track}: {e}")
 
     new_track = ""
+    new_posting = ""
     new_cost = None
     cdek_uuid = ""
     cdek_number = ""
 
-    if method == "yandex":
+    if method == "ozon":
+        pvz_code = row.get("ozon_pvz_code") or row.get("client_pvz_code") or ""
+        if not pvz_code:
+            raise HTTPException(status_code=400, detail="Нет ПВЗ Ozon у заявки")
+        try:
+            from .. import ozon_delivery
+            oz = ozon_delivery.create_order(
+                req_id=req_id,
+                customer_name=row["customer_name"],
+                customer_phone=row["customer_phone"],
+                destination_pvz_id=pvz_code,
+                items_description=row.get("items_to_send", "Комплектующие"),
+                shipment_method_id=row.get("ozon_shipment_method_id"),
+                attempt_key=old_track or "recreate",
+            )
+            new_track = oz.get("order_number") or oz.get("posting_number") or ""
+            new_posting = oz.get("posting_number") or ""
+            if old_track and new_track == old_track:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Ozon вернул старый заказ вместо нового. Повторите создание отправления.",
+                )
+            new_cost = row.get("ozon_cost")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Ozon API: {e}")
+    elif method == "yandex":
         pvz_code = row.get("yandex_pvz_code") or row.get("client_pvz_code") or ""
         if not pvz_code:
             raise HTTPException(status_code=400, detail="Нет ПВЗ Яндекса у заявки")
@@ -1773,12 +2420,15 @@ def recreate_shipment(
     db.execute(text("""
         UPDATE reshipment_requests SET
             status = 'approved',
-            track_number = CASE WHEN :is_yandex THEN :track ELSE NULL END,
-            cdek_uuid = CASE WHEN :is_yandex THEN cdek_uuid ELSE NULLIF(:cdek_uuid, '') END,
-            cdek_number = CASE WHEN :is_yandex THEN cdek_number ELSE NULLIF(:cdek_number, '') END,
+            track_number = CASE WHEN :use_track THEN :track ELSE NULL END,
+            ozon_order_number = CASE WHEN :is_ozon THEN NULLIF(:track, '') ELSE ozon_order_number END,
+            ozon_posting_number = CASE WHEN :is_ozon THEN NULLIF(:posting, '') ELSE ozon_posting_number END,
+            cdek_uuid = CASE WHEN :use_track THEN cdek_uuid ELSE NULLIF(:cdek_uuid, '') END,
+            cdek_number = CASE WHEN :use_track THEN cdek_number ELSE NULLIF(:cdek_number, '') END,
             shipping_cost = COALESCE(:cost, shipping_cost),
-            cdek_cost = CASE WHEN :is_yandex THEN cdek_cost ELSE COALESCE(:cost, cdek_cost) END,
+            cdek_cost = CASE WHEN :use_track THEN cdek_cost ELSE COALESCE(:cost, cdek_cost) END,
             yandex_sharing_url = NULL,
+            yandex_dispatch_act_id = NULL,
             shipped_at = NULL,
             confirmed_at = NULL,
             confirmation_token = NULL,
@@ -1800,8 +2450,10 @@ def recreate_shipment(
         WHERE id = :id
     """), {
         "id": req_id,
-        "is_yandex": method == "yandex",
+        "use_track": method in ("yandex", "ozon"),
+        "is_ozon": method == "ozon",
         "track": new_track,
+        "posting": new_posting,
         "cdek_uuid": cdek_uuid,
         "cdek_number": cdek_number,
         "cost": new_cost,
@@ -1819,11 +2471,18 @@ def recreate_shipment(
 
     notified = False
     if payload.notify_client:
-        msg = (
-            "Здравствуйте! Предыдущая посылка с деталями вернулась по техническим причинам. "
-            "Мы уже оформили повторную отправку — как только передадим в доставку, "
-            "пришлём новый трек-номер сюда, в чат."
-        )
+        if method == "ozon":
+            msg = (
+                "Здравствуйте! Предыдущая посылка с деталями вернулась по техническим причинам. "
+                "Мы уже оформили повторную отправку — как только передадим в доставку, "
+                "напишем сюда, как забрать её в пункте Ozon."
+            )
+        else:
+            msg = (
+                "Здравствуйте! Предыдущая посылка с деталями вернулась по техническим причинам. "
+                "Мы уже оформили повторную отправку — как только передадим в доставку, "
+                "пришлём новый трек-номер сюда, в чат."
+            )
         try:
             reply_sign = row.get("wb_reply_sign")
             if reply_sign:
@@ -1848,13 +2507,16 @@ def recreate_shipment(
 
 
 async def _send_rejection_promo_delayed(req_id: int, delay_sec: int = 10) -> None:
-    """Фоновая задача: через delay_sec секунд отправляет второе сообщение с промокодом."""
+    """Фоновая задача: через delay_sec секунд шлёт одно сообщение об отказе.
+
+    Не отправим деталь + возврат одобрен + промокод. Salebot/Max и чат WB.
+    """
     await asyncio.sleep(delay_sec)
     try:
         with db_session() as db:
             row = db.execute(text("""
-                SELECT r.id, r.promo_code, r.wb_reply_sign, r.salebot_client_id, r.salebot_blocked,
-                       r.matched_srid,
+                SELECT r.id, r.promo_code, r.marketplace, r.salebot_client_id, r.salebot_blocked,
+                       r.wb_reply_sign, r.wb_chat_id, r.matched_srid,
                        (SELECT 1 FROM wb_feedbacks f
                         JOIN wb_orders o ON (
                             o.shk_id = f.last_order_shk_id
@@ -1864,45 +2526,31 @@ async def _send_rejection_promo_delayed(req_id: int, delay_sec: int = 10) -> Non
                         WHERE o.srid = r.matched_srid LIMIT 1) AS has_review
                 FROM reshipment_requests r
                 WHERE r.id = :id AND r.promo_code IS NOT NULL AND r.promo_sent_at IS NULL
+                  AND (
+                        (r.salebot_client_id IS NOT NULL AND COALESCE(r.salebot_blocked, FALSE) = FALSE)
+                     OR r.wb_reply_sign IS NOT NULL
+                     OR r.wb_chat_id IS NOT NULL
+                  )
             """), {"id": req_id}).mappings().first()
             if not row:
                 return
             row = dict(row)
-            code = row["promo_code"]
             expires_row = db.execute(text(
                 "SELECT expires_at FROM reshipment_settings WHERE key = 'promo_code'"
             )).mappings().first()
             expires_at = expires_row["expires_at"] if expires_row else None
-            expiry_str = f" Промокод действителен до {_fmt_ru_date(expires_at)}." if expires_at else ""
-            if row.get("has_review"):
-                msg = (
-                    f"В качестве извинений мы подготовили для вас персональный промокод на следующую покупку "
-                    f"со скидкой 15%: {code}.{expiry_str} Применить его можно при оформлении заказа на Wildberries.\n\n"
-                    "Также будем очень признательны, если вы найдёте возможность обновить отзыв о товаре — "
-                    "для нас это очень важно!\n\nС уважением, Александр из команды Видовито."
-                )
-            else:
-                msg = (
-                    f"В качестве извинений мы подготовили для вас персональный промокод на следующую покупку "
-                    f"со скидкой 15%: {code}.{expiry_str} Применить его можно при оформлении заказа на Wildberries.\n\n"
-                    "Будем рады снова видеть вас среди покупателей Видовито!\n\nС уважением, Александр из команды Видовито."
-                )
-            ok = False
-            if row.get("wb_reply_sign"):
-                try:
-                    from .. import wb_chat
-                    wb_chat.send_message(row["wb_reply_sign"], msg)
-                    ok = True
-                except Exception as e:
-                    print(f"[Reject promo] WB req#{req_id}: {e}")
-            if row.get("salebot_client_id") and not row.get("salebot_blocked"):
-                try:
-                    from .. import salebot
-                    if salebot.is_enabled():
-                        salebot.send_message(row["salebot_client_id"], msg)
-                        ok = True
-                except Exception as e:
-                    print(f"[Reject promo] Salebot req#{req_id}: {e}")
+            from ..wb_mini_sync import _send_review_msg_to_client, format_rejection_promo_message
+            msg = format_rejection_promo_message(
+                row["promo_code"],
+                expires_at,
+                has_review=bool(row.get("has_review")),
+                marketplace=row.get("marketplace") or "wb",
+            )
+            try:
+                ok = _send_review_msg_to_client(row, msg, promo_mode=True)
+            except Exception as e:
+                print(f"[Reject promo] send req#{req_id}: {e}")
+                return
             if ok:
                 db.execute(text("UPDATE reshipment_requests SET promo_sent_at = NOW() WHERE id = :id"), {"id": req_id})
                 db.commit()
@@ -1939,15 +2587,14 @@ def refresh_candidates(req_id: int, db: Session = Depends(get_db)):
         from ..pickup_resolver import get_both_candidates, distance_km
         candidates = get_both_candidates(
             city=city, address=address, lat=client_lat, lon=client_lon,
+            phone=row.get("customer_phone") or "",
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ошибка подбора: {e}")
 
     cdek_c = candidates.get("cdek")
     yd_c   = candidates.get("yandex")
-
-    if not cdek_c and not yd_c:
-        raise HTTPException(status_code=404, detail=f"Ни один перевозчик не нашёл ПВЗ для города «{city}»")
+    oz_c   = candidates.get("ozon")
 
     updates = {}
     if client_lat is not None and client_lon is not None:
@@ -1961,6 +2608,11 @@ def refresh_candidates(req_id: int, db: Session = Depends(get_db)):
             updates["cdek_pvz_lat"] = cdek_c["lat"]
         if cdek_c.get("lng") is not None:
             updates["cdek_pvz_lng"] = cdek_c["lng"]
+    else:
+        updates["client_pvz_code"] = None
+        updates["cdek_cost"] = None
+        updates["cdek_pvz_lat"] = None
+        updates["cdek_pvz_lng"] = None
     if yd_c:
         updates["yandex_pvz_code"]    = yd_c["pvz_code"]
         updates["yandex_pvz_address"] = yd_c["pvz_address"]
@@ -1979,12 +2631,58 @@ def refresh_candidates(req_id: int, db: Session = Depends(get_db)):
         updates["yandex_pvz_lat"] = None
         updates["yandex_pvz_lng"] = None
 
+    if oz_c and oz_c.get("available"):
+        updates["ozon_pvz_code"] = oz_c["pvz_code"]
+        updates["ozon_pvz_address"] = oz_c.get("pvz_address") or ""
+        updates["ozon_pvz_name"] = oz_c.get("pvz_name") or ""
+        updates["ozon_cost"] = oz_c.get("cost")
+        updates["ozon_client_ok"] = True
+        updates["ozon_reason"] = None
+        updates["ozon_from_pvz_id"] = oz_c.get("from_pvz_id")
+        updates["ozon_from_pvz_address"] = oz_c.get("from_pvz_address")
+        updates["ozon_shipment_method_id"] = oz_c.get("shipment_method_id")
+        if oz_c.get("lat") is not None:
+            updates["ozon_pvz_lat"] = oz_c["lat"]
+        if oz_c.get("lng") is not None:
+            updates["ozon_pvz_lng"] = oz_c["lng"]
+    else:
+        updates["ozon_pvz_code"] = None
+        updates["ozon_pvz_address"] = None
+        updates["ozon_pvz_name"] = None
+        updates["ozon_cost"] = None
+        updates["ozon_pvz_lat"] = None
+        updates["ozon_pvz_lng"] = None
+        updates["ozon_from_pvz_id"] = None
+        updates["ozon_from_pvz_address"] = None
+        updates["ozon_shipment_method_id"] = None
+        updates["ozon_client_ok"] = bool((oz_c or {}).get("client_ok")) if oz_c else None
+        updates["ozon_reason"] = (oz_c or {}).get("reason") or None
+
     if updates:
         set_clause = ", ".join(f"{k} = :{k}" for k in updates)
         updates["req_id"] = req_id
         db.execute(text(f"UPDATE reshipment_requests SET {set_clause} WHERE id = :req_id"), updates)
         db.commit()
 
+    oz_ok = bool(oz_c and oz_c.get("available"))
+    if not cdek_c and not yd_c and not oz_ok:
+        return {
+            "status": "not_found",
+            "message": f"Ни один перевозчик не нашёл ПВЗ рядом с «{city}» (возможно, адрес вне РФ)",
+            "client": {
+                "lat":     float(client_lat) if client_lat is not None else None,
+                "lon":     float(client_lon) if client_lon is not None else None,
+                "address": address,
+            },
+            "cdek": {"available": False},
+            "yandex": {"available": False},
+            "ozon": {
+                "available": False,
+                "reason": (oz_c or {}).get("reason") or "",
+                "client_ok": bool((oz_c or {}).get("client_ok")),
+            },
+            "updated": [k for k in updates.keys() if k != "req_id"],
+        }
     cdek_lat = cdek_c.get("lat") if cdek_c else None
     cdek_lng = cdek_c.get("lng") if cdek_c else None
     yd_lat   = yd_c.get("lat") if yd_c else None
@@ -2014,6 +2712,19 @@ def refresh_candidates(req_id: int, db: Session = Depends(get_db)):
             "lng":         yd_lng,
             "distance_km": distance_km(client_lat, client_lon, yd_lat, yd_lng),
         },
+        "ozon": {
+            "available":   oz_ok,
+            "cost":        oz_c.get("cost") if oz_ok else None,
+            "pvz_address": oz_c.get("pvz_address") if oz_ok else None,
+            "pvz_name":    oz_c.get("pvz_name") if oz_ok else None,
+            "lat":         oz_c.get("lat") if oz_ok else None,
+            "lng":         oz_c.get("lng") if oz_ok else None,
+            "distance_km": distance_km(client_lat, client_lon, (oz_c or {}).get("lat"), (oz_c or {}).get("lng")) if oz_ok else None,
+            "client_ok":   bool((oz_c or {}).get("client_ok")) if oz_c else None,
+            "reason":      (oz_c or {}).get("reason") or "",
+            "from_pvz_address": (oz_c or {}).get("from_pvz_address") or "",
+            "recommended": oz_ok,
+        },
         "updated": [k for k in updates.keys() if k != "req_id"],
     }
 
@@ -2021,7 +2732,6 @@ def refresh_candidates(req_id: int, db: Session = Depends(get_db)):
 @router.post("/requests/{req_id}/reject")
 def reject_request(req_id: int, payload: RejectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Отклонение заявки менеджером КС."""
-    _check_exists(req_id, db)
     row = _check_exists(req_id, db)
 
     # Текущий недельный промокод (обновляется вручную в интерфейсе)
@@ -2041,25 +2751,55 @@ def reject_request(req_id: int, payload: RejectRequest, background_tasks: Backgr
         "promo_code": promo_code, "id": req_id,
     })
     db.commit()
-    # Первое сообщение — отказ
-    mp_label = "Яндекс Маркета" if (row.get("marketplace") or "").lower() == "ym" else "Wildberries"
-    rejection_msg = (
-        "К сожалению, мы не можем выполнить вашу заявку на отправку детали — "
-        "запрашиваемая позиция отсутствует на нашем складе. "
-        f"Рекомендуем оформить возврат в личном кабинете {mp_label}."
-    )
-    _wb_notify(row, f"❌ {rejection_msg}")
-    salebot_id = row.get("salebot_client_id")
-    if salebot_id:
+
+    claim_result = None
+    if (row.get("marketplace") or "wb").lower() == "wb":
         try:
-            from ..salebot import notify_rejected, is_enabled
-            if is_enabled():
-                notify_rejected(salebot_id, req_id)
-        except Exception:
-            pass
-    if promo_code:
+            from ..wb_claims_api import approve_return_for_reshipment
+            claim_result = approve_return_for_reshipment(
+                db,
+                srid=row.get("matched_srid"),
+                wb_chat_id=row.get("wb_chat_id"),
+                order_number=row.get("order_number"),
+            )
+            print(f"[WB Claims] reject reshipment #{req_id}: {claim_result}")
+        except Exception as _e:
+            claim_result = {"ok": False, "error": str(_e)}
+            print(f"[WB Claims] auto-approve on reject #{req_id}: {_e}")
+
+    # Промокод = извинение, шаблон «не можем отправить» рядом с ним путает.
+    # Если возврат WB уже есть — тот шаблон тоже не нужен.
+    skip_return_template = _skip_reject_stock_template(promo_code, claim_result)
+
+    if not skip_return_template:
+        mp_label = "Яндекс Маркета" if (row.get("marketplace") or "").lower() == "ym" else "Wildberries"
+        rejection_msg = (
+            "К сожалению, мы не можем выполнить вашу заявку на отправку детали — "
+            "запрашиваемая позиция отсутствует на нашем складе. "
+            f"Рекомендуем оформить возврат в личном кабинете {mp_label}."
+        )
+        _wb_notify(row, f"❌ {rejection_msg}")
+        salebot_id = row.get("salebot_client_id")
+        if salebot_id:
+            try:
+                from ..salebot import notify_rejected, is_enabled
+                if is_enabled():
+                    notify_rejected(salebot_id, req_id)
+            except Exception:
+                pass
+    if promo_code and not row.get("salebot_blocked") and (
+        row.get("salebot_client_id") or row.get("wb_reply_sign") or row.get("wb_chat_id")
+    ):
         background_tasks.add_task(_send_rejection_promo_delayed, req_id, 10)
-    return {"status": "success", "message": f"Заявка #{req_id} отклонена", "promo_scheduled": bool(promo_code)}
+        promo_scheduled = True
+    else:
+        promo_scheduled = False
+    return {
+        "status": "success",
+        "message": f"Заявка #{req_id} отклонена",
+        "promo_scheduled": promo_scheduled,
+        "claim": claim_result,
+    }
 
 
 @router.post("/requests/{req_id}/warehouse-reject")
@@ -2074,6 +2814,19 @@ def warehouse_reject(req_id: int, payload: WarehouseRejectRequest, db: Session =
         WHERE id = :id
     """), {"reason": payload.rejection_reason, "by": payload.processed_by, "id": req_id})
     db.commit()
+
+    if (row.get("marketplace") or "wb").lower() == "wb":
+        try:
+            from ..wb_claims_api import approve_return_for_reshipment
+            claim_wh = approve_return_for_reshipment(
+                db,
+                srid=row.get("matched_srid"),
+                wb_chat_id=row.get("wb_chat_id"),
+                order_number=row.get("order_number"),
+            )
+            print(f"[WB Claims] warehouse-reject #{req_id}: {claim_wh}")
+        except Exception as _e:
+            print(f"[WB Claims] warehouse-reject claim #{req_id}: {_e}")
 
     # Отправляем email клиенту если есть адрес
     email_sent = False
@@ -2150,10 +2903,10 @@ def _do_warehouse_confirm(req_id: int, processed_by: Optional[str], db: Session,
     if row["status"] not in ("approved", "packed"):
         raise HTTPException(status_code=400, detail="Заявка должна быть в статусе 'одобрена' или 'собрана'")
 
-    if row.get("delivery_method") == "yandex":
+    if row.get("delivery_method") in ("yandex", "ozon"):
         raise HTTPException(
             status_code=400,
-            detail="Эта заявка подобрана на отправку через Яндекс — используйте ручную отправку Яндекс, а не СДЭК",
+            detail="Эта заявка не на СДЭК — сдайте в пункт выбранной службы, не создавайте заказ СДЭК",
         )
 
     # Определяем город и находим ближайший ПВЗ автоматически
@@ -2244,6 +2997,7 @@ def _do_warehouse_confirm(req_id: int, processed_by: Optional[str], db: Session,
                     track_number=cdek_result["cdek_number"],
                     delivery_method="cdek",
                     confirm_url=confirm_url,
+                    pvz_address=row.get("client_pvz_address") or "",
                 )
         except Exception:
             pass
@@ -2287,10 +3041,12 @@ def ship_yandex(req_id: int, payload: ShipYandexRequest, db: Session = Depends(g
     confirm_url = f"https://box.vidovito.com/reshipment/confirm/{token}"
     track = payload.track_number.strip()
     sharing_url = ""
+    eta_date = ""
     try:
         from .. import yandex_ndd
         info = yandex_ndd.get_order_status(track)
         sharing_url = (info.get("sharing_url") or "").strip()
+        eta_date = info.get("eta_raw") or ""
         if sharing_url:
             db.execute(text("""
                 UPDATE reshipment_requests SET yandex_sharing_url = :url WHERE id = :id
@@ -2315,6 +3071,7 @@ def ship_yandex(req_id: int, payload: ShipYandexRequest, db: Session = Depends(g
                     items_to_send=row.get("items_to_send") or "",
                     pvz_address=(row.get("yandex_pvz_address") or row.get("client_pvz_address") or ""),
                     pvz_name=row.get("yandex_pvz_name") or "",
+                    eta_date=eta_date,
                 )
         except Exception:
             pass
@@ -2329,6 +3086,7 @@ def ship_yandex(req_id: int, payload: ShipYandexRequest, db: Session = Depends(g
             items_to_send=row.get("items_to_send") or "",
             pvz_address=(row.get("yandex_pvz_address") or row.get("client_pvz_address") or ""),
             pvz_name=row.get("yandex_pvz_name") or "",
+            eta_date=eta_date,
         ))
 
     return {
@@ -2406,6 +3164,8 @@ def ship_yandex_auto(req_id: int, processed_by: Optional[str] = None, db: Sessio
                     track_number=claim_id,
                     delivery_method="yandex",
                     confirm_url=confirm_url,
+                    pvz_address=(row.get("yandex_pvz_address") or row.get("client_pvz_address") or ""),
+                    pvz_name=row.get("yandex_pvz_name") or "",
                 )
         except Exception:
             pass
@@ -2660,9 +3420,10 @@ def get_stats(db: Session = Depends(get_db)):
     rows = db.execute(text("""
         SELECT status, COUNT(*) as cnt,
                SUM(CASE
+                     WHEN delivery_method = 'ozon' THEN COALESCE(ozon_cost_actual, shipping_cost, 0)
                      WHEN delivery_method = 'yandex' THEN COALESCE(shipping_cost, 0)
-                     WHEN delivery_method = 'cdek'   THEN COALESCE(cdek_cost, 0)
-                     WHEN delivery_method IS NULL AND status NOT IN ('new','matched') THEN COALESCE(cdek_cost, 0)
+                     WHEN delivery_method = 'cdek'   THEN COALESCE(cdek_cost_actual, cdek_cost, 0)
+                     WHEN delivery_method IS NULL AND status NOT IN ('new','matched') THEN COALESCE(cdek_cost_actual, cdek_cost, 0)
                      ELSE 0
                    END) as total_cost
         FROM reshipment_requests GROUP BY status
@@ -2674,8 +3435,9 @@ def get_stats(db: Session = Depends(get_db)):
         SELECT COALESCE(delivery_method, 'cdek') AS delivery_method,
                COUNT(*) as cnt,
                SUM(CASE
+                     WHEN delivery_method = 'ozon' THEN COALESCE(ozon_cost_actual, shipping_cost, 0)
                      WHEN delivery_method = 'yandex' THEN COALESCE(shipping_cost, 0)
-                     ELSE COALESCE(cdek_cost, 0)
+                     ELSE COALESCE(cdek_cost_actual, cdek_cost, 0)
                    END) as total_cost
         FROM reshipment_requests
         WHERE status NOT IN ('new', 'matched', 'rejected')
@@ -2942,8 +3704,15 @@ def warehouse_packlist(db: Session = Depends(get_db)):
         dt_str = dt.strftime("%d.%m %H:%M") if dt else ""
         pvz_addr = row["client_pvz_address"] or row["shipping_address"] or ""
         is_yandex = row["delivery_method"] == "yandex"
-        cost = row["shipping_cost"] if is_yandex else row["cdek_cost"]
-        track = row["track_number"] or row["cdek_number"] or ""
+        is_ozon = row["delivery_method"] == "ozon"
+        cost = row["shipping_cost"] if (is_yandex or is_ozon) else row["cdek_cost"]
+        track = row["track_number"] or row["cdek_number"] or row.get("ozon_order_number") or ""
+        if is_ozon:
+            tk = "Ozon"
+        elif is_yandex:
+            tk = "Яндекс"
+        else:
+            tk = "СДЭК"
         vals = [
             i,
             row["id"],
@@ -2953,7 +3722,7 @@ def warehouse_packlist(db: Session = Depends(get_db)):
             row["client_pvz_code"] or "",
             pvz_addr,
             row["items_to_send"] or "",
-            "Яндекс" if is_yandex else "СДЭК",
+            tk,
             float(cost) if cost else "",
             track,
             dt_str,
@@ -2987,8 +3756,15 @@ LABEL_H_MM = 58  # вертикаль
 
 
 def _label_barcode_value(order: dict) -> str:
-    """Штрих-код для этикетки: place_barcode Яндекса или номер СДЭК."""
+    """Штрих-код для этикетки: posting_number Ozon, place_barcode Яндекса или номер СДЭК."""
     req_id = order["id"]
+    if order.get("delivery_method") == "ozon":
+        from .. import ozon_delivery
+        return ozon_delivery.resolve_label_barcode(
+            req_id=req_id,
+            order_number=order.get("track_number") or order.get("ozon_order_number") or "",
+            posting_number=order.get("ozon_posting_number") or "",
+        )
     if order.get("delivery_method") == "yandex":
         yd_track = order.get("track_number") or ""
         if yd_track:
@@ -3003,6 +3779,52 @@ def _label_barcode_value(order: dict) -> str:
         return f"REQ{req_id:06d}"
     cdek_no = order.get("cdek_number") or ""
     return cdek_no if cdek_no else f"REQ{req_id:06d}"
+
+
+def _ozon_dropoff_payload() -> dict:
+    from .. import ozon_delivery
+    info = ozon_delivery.dropoff_barcode_info()
+    info["svg"] = ozon_delivery.barcode_svg(info.get("barcode") or "")
+    return info
+
+
+@router.get("/ozon-dropoff")
+def ozon_dropoff_barcode(current_user: dict = Depends(get_current_user)):
+    """Штрихкод метода сдачи Ozon — для админа и склада."""
+    role = (current_user.get("role") or "").strip()
+    if role not in ("admin", "warehouse_manager"):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    return _ozon_dropoff_payload()
+
+
+@router.get("/ozon-dropoff/label")
+def ozon_dropoff_label(current_user: dict = Depends(get_current_user)):
+    """Этикетка 80×58 со штрихкодом сдачи в ПВЗ Ozon."""
+    role = (current_user.get("role") or "").strip()
+    if role not in ("admin", "warehouse_manager"):
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    from .. import ozon_delivery
+    info = ozon_delivery.dropoff_barcode_info()
+    barcode = (info.get("barcode") or "").strip()
+    if not barcode:
+        raise HTTPException(status_code=404, detail="Нет штрихкода сдачи Ozon")
+    fake = {
+        "id": 0,
+        "customer_name": info.get("address") or "Сдача в ПВЗ Ozon",
+        "address_city": "Ozon",
+        "client_pvz_city": "Сдача в ПВЗ",
+        "delivery_method": "ozon",
+        "track_number": barcode,
+        "ozon_order_number": barcode,
+        "ozon_posting_number": barcode,
+        "print_barcode": True,
+    }
+    buf = _build_labels_pdf_80x58([fake])
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="ozon_dropoff_barcode.pdf"'},
+    )
 
 
 def _build_labels_pdf_80x58(rows) -> io.BytesIO:
@@ -3031,13 +3853,23 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
     c = rl_canvas.Canvas(buf, pagesize=(W, H))
 
     for order in rows:
+        if order.get("delivery_method") == "ozon" and not order.get("print_barcode"):
+            continue
         req_id = order["id"]
         name = (order.get("customer_name") or "").strip()
         city = (order.get("client_pvz_city") or order.get("address_city") or "—").strip()
         is_yandex = order.get("delivery_method") == "yandex"
+        is_ozon = order.get("delivery_method") == "ozon"
         barcode_val = _label_barcode_value(order)
-        carrier_label = "Яндекс Доставка" if is_yandex else "СДЭК"
-        carrier_color = colors.HexColor("#D97706") if is_yandex else colors.HexColor("#1D4ED8")
+        if is_ozon:
+            carrier_label = "Ozon Доставка"
+            carrier_color = colors.HexColor("#005BFF")
+        elif is_yandex:
+            carrier_label = "Яндекс Доставка"
+            carrier_color = colors.HexColor("#D97706")
+        else:
+            carrier_label = "СДЭК"
+            carrier_color = colors.HexColor("#1D4ED8")
 
         c.setPageSize((W, H))
 
@@ -3060,12 +3892,17 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         max_bc_w = W - 2 * MARGIN
 
         try:
-            probe = code128.Code128(barcode_val, barWidth=1.0, quiet=False)
+            probe = code128.Code128(barcode_val, barWidth=1.0, quiet=is_ozon)
             natural_w = probe.width or 1.0
             bar_w = max_bc_w / natural_w
-            bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=bc_height, quiet=False)
+            if is_ozon:
+                bar_w = max(bar_w, 0.28 * mm)
+            bc = code128.Code128(barcode_val, barWidth=bar_w, barHeight=bc_height, quiet=is_ozon)
             bc.fillColor = colors.black
-            bc.drawOn(c, MARGIN + (max_bc_w - bc.width) / 2, FOOTER_H)
+            x = MARGIN + max(0, (max_bc_w - bc.width) / 2)
+            if bc.width > max_bc_w:
+                x = (W - bc.width) / 2
+            bc.drawOn(c, x, FOOTER_H)
         except Exception:
             c.setFont(_F_BOLD, 9)
             c.setFillColor(colors.black)
@@ -3077,7 +3914,10 @@ def _build_labels_pdf_80x58(rows) -> io.BytesIO:
         c.drawCentredString(W / 2, 13 * mm, barcode_val[:32])
 
         c.setFont(_F_BOLD, 8)
-        c.drawCentredString(W / 2, 8 * mm, f"#{req_id:06d}  {city[:22]}")
+        if req_id:
+            c.drawCentredString(W / 2, 8 * mm, f"#{req_id:06d}  {city[:22]}")
+        else:
+            c.drawCentredString(W / 2, 8 * mm, city[:28] or "Сдача в ПВЗ Ozon")
 
         c.setFont(_F, 7)
         c.drawCentredString(W / 2, 3.5 * mm, name[:30] if name else "—")
@@ -3104,7 +3944,7 @@ def _fetch_label_orders(db: Session, ids: Optional[str], *, yandex_only: bool = 
         SELECT id, customer_name, address_city, client_pvz_city,
                items_to_send, cdek_uuid, cdek_number, client_pvz_code,
                delivery_method, track_number, client_pvz_address,
-               yandex_pvz_name, yandex_pvz_address
+               yandex_pvz_name, yandex_pvz_address, ozon_order_number, ozon_posting_number
         FROM reshipment_requests {where}
         ORDER BY id ASC
     """), params).mappings().all()
@@ -3113,30 +3953,107 @@ def _fetch_label_orders(db: Session, ids: Optional[str], *, yandex_only: bool = 
     return rows
 
 
-@router.get("/warehouse/labels")
-def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    """PDF этикетки 80×58 мм (горизонталь 80) — СДЭК и Яндекс."""
-    rows = _fetch_label_orders(db, ids)
-    buf = _build_labels_pdf_80x58(rows)
+def _persist_ozon_postings(db: Session, rows: list) -> None:
+    """Если нашли posting_number при печати — запоминаем, чтобы этикетка не искала снова."""
+    from .. import ozon_delivery
+    changed = False
+    for order in rows:
+        if order.get("delivery_method") != "ozon":
+            continue
+        existing = (order.get("ozon_posting_number") or "").strip()
+        if existing:
+            continue
+        barcode = ozon_delivery.resolve_label_barcode(
+            req_id=int(order["id"]),
+            order_number=order.get("track_number") or order.get("ozon_order_number") or "",
+            posting_number="",
+        )
+        order_no = (order.get("track_number") or order.get("ozon_order_number") or "").strip()
+        if not barcode or barcode == order_no or str(barcode).upper().startswith("REQ"):
+            continue
+        db.execute(text("""
+            UPDATE reshipment_requests
+               SET ozon_posting_number = :posting
+             WHERE id = :id AND COALESCE(ozon_posting_number, '') = ''
+        """), {"posting": barcode, "id": order["id"]})
+        order["ozon_posting_number"] = barcode
+        changed = True
+    if changed:
+        db.commit()
+
+
+def _merge_pdfs(blobs: list) -> io.BytesIO:
+    from pypdf import PdfReader, PdfWriter
+    writer = PdfWriter()
+    for blob in blobs:
+        reader = PdfReader(io.BytesIO(blob))
+        for page in reader.pages:
+            writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out
+
+
+def _ozon_official_label_pdfs(rows: list) -> list:
+    """Только официальные этикетки Ozon с QR — самодельный штрихкод ПВЗ не читает."""
+    from .. import ozon_delivery
+    pdfs = []
+    errors = []
+    for order in rows:
+        if order.get("delivery_method") != "ozon":
+            continue
+        req_id = order.get("id")
+        pn = (order.get("ozon_posting_number") or "").strip()
+        if not pn:
+            errors.append(f"#{req_id}: нет номера отправления Ozon")
+            continue
+        ozon_delivery.ensure_ready_for_shipping(pn, wait_s=25)
+        raw = ozon_delivery.fetch_label_pdf(pn)
+        if not raw or not raw.startswith(b"%PDF"):
+            errors.append(f"#{req_id}: Ozon ещё не отдал этикетку с QR")
+            continue
+        pdfs.append(raw)
+    if errors:
+        raise HTTPException(status_code=502, detail="; ".join(errors))
+    return pdfs
+
+
+def _labels_pdf_response(rows: list):
+    ozon_rows = [r for r in rows if r.get("delivery_method") == "ozon"]
+    other_rows = [r for r in rows if r.get("delivery_method") != "ozon"]
+    parts = []
+    if ozon_rows:
+        parts.extend(_ozon_official_label_pdfs(ozon_rows))
+    if other_rows:
+        parts.append(_build_labels_pdf_80x58(other_rows).read())
+    if not parts:
+        raise HTTPException(status_code=404, detail="Нет заявок для печати")
     today = datetime.date.today().strftime("%Y-%m-%d")
+    buf = io.BytesIO(parts[0]) if len(parts) == 1 else _merge_pdfs(parts)
+    buf.seek(0)
+    name = "ozon_label" if ozon_rows and not other_rows else "labels"
     return StreamingResponse(
         buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
+        headers={"Content-Disposition": f'inline; filename="{name}_{today}.pdf"'},
     )
+
+
+@router.get("/warehouse/labels")
+def warehouse_labels(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    """Ozon — официальная этикетка с QR. СДЭК и Яндекс — 80×58."""
+    rows = [dict(r) for r in _fetch_label_orders(db, ids)]
+    _persist_ozon_postings(db, rows)
+    return _labels_pdf_response(rows)
 
 
 @router.get("/warehouse/labels/thermal")
 def warehouse_labels_thermal(ids: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    """Тот же формат 80×58 мм (алиас для термопринтера)."""
-    rows = _fetch_label_orders(db, ids)
-    buf = _build_labels_pdf_80x58(rows)
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    return StreamingResponse(
-        buf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="labels_80x58_{today}.pdf"'},
-    )
+    """Тот же набор этикеток, что /warehouse/labels."""
+    rows = [dict(r) for r in _fetch_label_orders(db, ids)]
+    _persist_ozon_postings(db, rows)
+    return _labels_pdf_response(rows)
 
 
 # ── Склад: отметить как физически отправленную ────────────────────────────────
@@ -3191,14 +4108,18 @@ def mark_shipped(req_id: int, processed_by: Optional[str] = None, db: Session = 
         raise HTTPException(status_code=400, detail="Заявка должна быть в статусе 'одобрена' или 'собрана'")
 
     is_yandex = row.get("delivery_method") == "yandex"
+    is_ozon = row.get("delivery_method") == "ozon"
+    method = row.get("delivery_method") or "cdek"
+    eta_date = row.get("eta_date") or ""
 
     # Фиксируем фактическую стоимость из СДЭК (если уже доступна) — у Яндекса цена уже точная
     actual_cost = None
-    if not is_yandex and row.get("cdek_uuid"):
+    if not is_yandex and not is_ozon and row.get("cdek_uuid"):
         try:
             from ..cdek import get_order_by_uuid
             info = get_order_by_uuid(row["cdek_uuid"])
             actual_cost = info.get("actual_cost")
+            eta_date = info.get("planned_delivery_date") or eta_date
         except Exception:
             pass
 
@@ -3207,14 +4128,14 @@ def mark_shipped(req_id: int, processed_by: Optional[str] = None, db: Session = 
         UPDATE reshipment_requests SET
             status = 'shipped',
             shipped_at = NOW(),
-            cdek_cost = COALESCE(:actual_cost, cdek_cost),
+            cdek_cost_actual = COALESCE(:actual_cost, cdek_cost_actual),
             confirmation_token = COALESCE(confirmation_token, :token),
             processed_by = COALESCE(:by, processed_by)
         WHERE id = :id
     """), {"actual_cost": actual_cost, "token": token, "by": processed_by, "id": req_id})
     db.commit()
 
-    track_number = (row.get("track_number") or row.get("cdek_number") or "")
+    track_number = (row.get("track_number") or row.get("ozon_order_number") or row.get("cdek_number") or "")
     confirm_url = f"https://box.vidovito.com/reshipment/confirm/{token}"
     sharing_url = (row.get("yandex_sharing_url") or "").strip()
     if is_yandex and track_number and not sharing_url:
@@ -3222,6 +4143,7 @@ def mark_shipped(req_id: int, processed_by: Optional[str] = None, db: Session = 
             from .. import yandex_ndd
             info = yandex_ndd.get_order_status(track_number)
             sharing_url = (info.get("sharing_url") or "").strip()
+            eta_date = info.get("eta_raw") or eta_date
             if sharing_url:
                 db.execute(text("""
                     UPDATE reshipment_requests SET yandex_sharing_url = :url
@@ -3231,13 +4153,25 @@ def mark_shipped(req_id: int, processed_by: Optional[str] = None, db: Session = 
         except Exception:
             pass
 
+    if is_ozon:
+        try:
+            from .. import ozon_delivery
+            info = ozon_delivery.get_order_status(
+                row.get("ozon_posting_number") or row.get("ozon_order_number") or track_number
+            )
+            eta_date = info.get("eta_raw") or eta_date
+        except Exception:
+            pass
+
     notify_kwargs = {
         "track_number": track_number,
-        "delivery_method": "yandex" if is_yandex else "cdek",
+        "delivery_method": method if method in ("cdek", "yandex", "ozon") else "cdek",
         "sharing_url": sharing_url,
         "items_to_send": row.get("items_to_send") or "",
-        "pvz_address": (row.get("yandex_pvz_address") or row.get("client_pvz_address") or ""),
-        "pvz_name": row.get("yandex_pvz_name") or "",
+        "pvz_address": (row.get("ozon_pvz_address") if is_ozon else None)
+            or (row.get("yandex_pvz_address") or row.get("client_pvz_address") or ""),
+        "pvz_name": (row.get("ozon_pvz_name") if is_ozon else None) or row.get("yandex_pvz_name") or "",
+        "eta_date": eta_date,
     }
 
     salebot_notified = False
@@ -3265,27 +4199,9 @@ def mark_shipped(req_id: int, processed_by: Optional[str] = None, db: Session = 
 
 
 def _wb_notify(req: dict, msg: str) -> None:
-    """Уведомить клиента в чат площадки (WB или Яндекс Маркет)."""
-    ym_chat_id = (req.get("ym_chat_id") or "").strip()
-    if ym_chat_id or (req.get("marketplace") or "").lower() == "ym":
-        cid = ym_chat_id
-        if not cid:
-            return
-        try:
-            from .. import ym_chat_sync
-            ym_chat_sync.send_message(cid, msg)
-        except Exception as e:
-            print(f"[YM Notify] req#{req.get('id')}: {e}")
-        return
-
-    reply_sign = req.get("wb_reply_sign")
-    if not reply_sign:
-        return
-    try:
-        from .. import wb_chat
-        wb_chat.send_message(reply_sign, msg)
-    except Exception as e:
-        print(f"[WB Notify] req#{req.get('id')}: {e}")
+    """Уведомить клиента в чат площадки (WB, Яндекс Маркет или Ozon)."""
+    from .. import reshipment_notify
+    reshipment_notify.send_marketplace_message(req, msg)
 
 
 class SendWbMessageRequest(BaseModel):
@@ -3293,11 +4209,20 @@ class SendWbMessageRequest(BaseModel):
 
 @router.post("/requests/{req_id}/send-wb-message")
 def send_wb_message(req_id: int, payload: SendWbMessageRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Отправить произвольное сообщение клиенту в чат WB или Яндекс Маркета."""
+    """Отправить произвольное сообщение клиенту в чат WB, ЯМ или Ozon."""
     req = _check_exists(req_id, db)
     text_msg = payload.text.strip()
     if not text_msg:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
+
+    ozon_chat_id = (req.get("ozon_chat_id") or "").strip()
+    if ozon_chat_id:
+        try:
+            from .. import ozon_chat_sync
+            ozon_chat_sync.send_message(ozon_chat_id, text_msg)
+            return {"status": "ok", "channel": "ozon"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка отправки в чат Ozon: {e}")
 
     ym_chat_id = (req.get("ym_chat_id") or "").strip()
     if ym_chat_id:
@@ -3310,7 +4235,7 @@ def send_wb_message(req_id: int, payload: SendWbMessageRequest, db: Session = De
 
     reply_sign = req.get("wb_reply_sign")
     if not reply_sign:
-        raise HTTPException(status_code=400, detail="У заявки нет привязанного чата WB/ЯМ")
+        raise HTTPException(status_code=400, detail="У заявки нет привязанного чата WB/ЯМ/Ozon")
     try:
         from .. import wb_chat
         wb_chat.send_message(reply_sign, text_msg)

@@ -46,11 +46,15 @@
         <div class="flex -mb-px">
           <button v-for="s in visibleSections" :key="s.key"
             @click="switchSection(s.key)"
-            :class="['px-4 py-2.5 text-sm font-medium border-b-2 transition-all',
+            :class="['px-4 py-2.5 text-sm font-medium border-b-2 transition-all inline-flex items-center gap-1.5',
               activeSection === s.key
                 ? 'border-sky-500 text-sky-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700']">
             {{ s.label }}
+            <span v-if="s.key === 'review' && pendingTemplateCount > 0"
+              class="inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full text-[10px] font-semibold bg-amber-500 text-white">
+              {{ pendingTemplateCount }}
+            </span>
           </button>
         </div>
       </div>
@@ -151,6 +155,21 @@
                   <span v-if="item.contact" class="text-xs text-gray-400 truncate">· {{ item.contact }}</span>
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
+                  <button v-if="productCardRequestFor(item)" type="button" @click="toggleProductCard(item)"
+                    :aria-expanded="!!item._productCardOpen"
+                    :class="[
+                      'inline-flex h-8 w-8 items-center justify-center rounded-lg border bg-white transition-colors',
+                      item._productCardOpen
+                        ? 'border-amber-300 bg-amber-50 text-amber-700'
+                        : 'border-gray-200 text-gray-500 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700'
+                    ]"
+                    title="Карточка товара">
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15.5A2.5 2.5 0 0 0 17.5 16H4z" />
+                      <path d="M6.5 3A2.5 2.5 0 0 0 4 5.5V19a2 2 0 0 0 2 2h11.5A2.5 2.5 0 0 0 20 18.5V16" />
+                      <path d="M8 7h8M8 10h8M8 13h5" />
+                    </svg>
+                  </button>
                   <span :class="['text-xs px-2 py-0.5 rounded-full font-medium', ageCls(item.age_sec)]">{{ fmtAge(item.age_sec) }}</span>
                   <button @click="dismissItem(item)" title="В архив без ответа"
                     aria-label="Перенести вопрос в архив без ответа"
@@ -171,6 +190,83 @@
                 <span v-else class="text-gray-400">Арт. {{ item.sku }}</span>
               </p>
               <p class="text-sm text-gray-700 leading-relaxed">{{ item.body }}</p>
+              <div class="mt-2">
+                <button type="button" @click="loadSimilar(item)"
+                  class="text-xs text-sky-700 hover:text-sky-800 font-medium">
+                  {{ item._similarLoading ? 'Ищем похожие…' : 'Похожие вопросы и ответы' }}
+                </button>
+                <div v-if="item._similarGroups?.length" class="mt-1.5 space-y-1">
+                  <div v-for="g in visibleSimilarGroups(item)" :key="g.category"
+                    class="flex items-start gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5">
+                    <button type="button"
+                      :title="similarCurrent(g).text || ''"
+                      @click="item._reply = similarCurrent(g).answer || item._reply"
+                      class="min-w-0 flex-1 text-left">
+                      <span class="text-[11px] font-semibold text-gray-700">{{ g.category }}</span>
+                      <p class="text-xs text-gray-600 line-clamp-2">{{ similarCurrent(g).answer || similarCurrent(g).text }}</p>
+                    </button>
+                    <button v-if="g.items.length > 1" type="button"
+                      @click="cycleSimilar(g)"
+                      class="shrink-0 text-[11px] font-medium text-sky-700 hover:text-sky-800">
+                      Другой ответ
+                    </button>
+                  </div>
+                  <button v-if="hiddenSimilarCount(item) > 0" type="button"
+                    @click="item._similarExpanded = !item._similarExpanded"
+                    class="text-[11px] font-medium text-sky-700 hover:text-sky-800">
+                    {{ item._similarExpanded ? 'Свернуть' : `Ещё ${hiddenSimilarCount(item)}` }}
+                  </button>
+                </div>
+                <p v-else-if="item._similarLoaded && !item._similarLoading" class="mt-1 text-[11px] text-gray-400">
+                  Похожих с готовым ответом не нашлось
+                </p>
+              </div>
+              <div v-if="productCardRequestFor(item) && item._productCardOpen"
+                class="mt-2 rounded-xl border border-gray-200 bg-white px-3 py-2.5">
+                <div class="flex items-center justify-between gap-3 border-b border-gray-100 pb-2">
+                  <div>
+                    <p class="text-xs font-semibold text-slate-900">Карточка товара</p>
+                    <p class="mt-0.5 text-[11px] text-slate-500">
+                      <span v-if="productCardRequestFor(item).article">арт. {{ productCardRequestFor(item).article }}</span>
+                      <span v-else-if="productCardRequestFor(item).nmId">WB nm_id {{ productCardRequestFor(item).nmId }}</span>
+                    </p>
+                  </div>
+                  <button type="button" @click="toggleProductCard(item)"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+                    title="Свернуть карточку">
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <path d="m6 15 6-6 6 6" />
+                    </svg>
+                  </button>
+                </div>
+                <div class="pt-2 text-xs text-slate-700">
+                  <p v-if="item._productCardLoading" class="text-gray-400">Загружаем карточку товара…</p>
+                  <template v-else>
+                    <p v-if="productFastenersLine(item._productCard)" class="mt-1">
+                      Винты: <span class="font-medium">{{ productFastenersLine(item._productCard) }}</span>
+                    </p>
+                    <template v-if="item._productCard?.status === 'ok'">
+                      <p v-if="productDimensionsLine(item._productCard.product.dimensions)" class="mt-1">
+                        Габариты упаковки: <span class="font-medium">{{ productDimensionsLine(item._productCard.product.dimensions) }} см</span>
+                      </p>
+                      <p v-if="item._productCard.product.dimensions?.weight != null" class="mt-1">
+                        Вес: <span class="font-medium">{{ item._productCard.product.dimensions.weight }} кг</span>
+                      </p>
+                      <dl v-if="item._productCard.product.params?.length" class="mt-2 grid gap-x-4 gap-y-1.5 sm:grid-cols-[minmax(140px,200px)_1fr]">
+                        <template v-for="param in item._productCard.product.params" :key="`${param.name}:${param.value}`">
+                          <dt class="text-slate-500">{{ param.name }}</dt>
+                          <dd class="font-medium break-words">{{ param.value }}</dd>
+                        </template>
+                      </dl>
+                      <p v-if="item._productCard.cached" class="mt-2 text-[10px] text-slate-400">Загружено из локальной базы</p>
+                    </template>
+                    <p v-else-if="!productFastenersLine(item._productCard) && item._productCard?.status === 'not_found'" class="text-slate-500">
+                      Для этого товара карточка пока не найдена.
+                    </p>
+                    <p v-else-if="!productFastenersLine(item._productCard)" class="text-slate-500">Карточка товара сейчас недоступна. Попробуйте позже.</p>
+                  </template>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -293,12 +389,21 @@
                 {{ item._suggestGenerating ? '…' : 'Сгенерировать ответ' }}
               </button>
             </div>
+            <div v-else class="mb-2 flex justify-end">
+              <button type="button" @click="generateSuggest(item)"
+                :disabled="item._suggestGenerating || item._suggestLoading || !(item.body || '').trim()"
+                class="shrink-0 text-[11px] font-medium px-2 py-1 rounded-md bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+                {{ item._suggestGenerating ? '…' : 'Сгенерировать ответ' }}
+              </button>
+            </div>
 
             <div v-if="chipGroupsFor(item).length" class="relative mb-2">
               <div class="flex min-w-0 flex-wrap items-center gap-1.5">
                 <button v-for="group in compactChipGroupsFor(item)" :key="group.theme_key"
                   type="button"
+                  :title="canEditQuestionTemplates ? 'Двойной щелчок — править шаблон' : ''"
                   @click="onQuestionThemeChip(item, group)"
+                  @dblclick.stop.prevent="openQuestionTemplateEditor(group.theme_key, group.templates?.[0])"
                   :class="[
                     'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
                     isQuestionThemeActive(item, group)
@@ -331,7 +436,9 @@
                 <div v-if="!item._tplTheme" class="flex flex-wrap gap-1.5">
                   <button v-for="group in chipGroupsFor(item)" :key="group.theme_key"
                     type="button"
+                    :title="canEditQuestionTemplates ? 'Двойной щелчок — править шаблон' : ''"
                     @click="onQuestionThemeChip(item, group)"
+                    @dblclick.stop.prevent="openQuestionTemplateEditor(group.theme_key, group.templates?.[0])"
                     :class="[
                       'px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors',
                       isQuestionThemeActive(item, group)
@@ -345,14 +452,20 @@
                 <div v-else class="flex flex-wrap gap-1.5">
                   <button v-for="t in (focusedChipGroup(item)?.templates || [])" :key="t.id"
                     type="button"
+                    :title="(templatePreviewText(t) || templateVariantLabel(t)) + (canEditQuestionTemplates ? ' · двойной щелчок — править' : '')"
                     @click="applyChip(item, t)"
+                    @dblclick.stop.prevent="openQuestionTemplateEditor(t.theme_key, t)"
                     :class="[
-                      'px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                      'max-w-full px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors text-left',
                       isChipActive(item, t)
                         ? 'bg-sky-600 text-white border-sky-600'
                         : 'bg-white text-gray-700 border-gray-200 hover:border-sky-200 hover:bg-sky-50'
                     ]">
-                    {{ templateVariantLabel(t) }}
+                    <span class="block font-semibold">{{ templateVariantLabel(t) }}</span>
+                    <span v-if="templatePreviewText(t)"
+                      class="mt-0.5 block text-[11px] font-normal leading-snug line-clamp-2 opacity-80">
+                      {{ templatePreviewText(t) }}
+                    </span>
                   </button>
                 </div>
               </div>
@@ -364,11 +477,27 @@
               :rows="replyRows(item._reply)"
               class="w-full min-h-[6.5rem] border border-gray-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent"
             ></textarea>
+            <div v-if="canSaveQuestionAsTemplate && (item._reply || '').trim()"
+              class="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+              <label class="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                <input type="checkbox" v-model="item._saveAsTemplate"
+                  class="w-3.5 h-3.5 rounded text-sky-600" />
+                Сделать шаблоном
+              </label>
+              <select v-if="item._saveAsTemplate" v-model="item._saveAsThemeKey"
+                class="border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-sky-400 max-w-[16rem]">
+                <option value="">Группа ответов…</option>
+                <option value="__unassigned__">Без темы</option>
+                <option v-for="th in saveAsTemplateThemes" :key="th.theme_key" :value="th.theme_key">
+                  {{ th.name || th.theme_key }}
+                </option>
+              </select>
+            </div>
             <div class="mt-2 flex flex-col sm:flex-row sm:items-center gap-2">
               <button v-if="canRequestClarification && item.clarification?.status !== 'pending'" @click="item._clarificationOpen = true"
                 title="Необязательное действие: покупателю ничего не отправляется"
                 class="self-start min-h-11 px-4 py-2 rounded-lg text-sm font-medium transition-all border border-violet-200 bg-white hover:bg-violet-50 text-violet-700">
-                Уточнить у качества
+                Уточнить!
               </button>
               <div class="flex flex-wrap gap-2 sm:ml-auto sm:justify-end">
                 <button v-if="isWbQuestion(item)" @click="sendReply(item, 'private')"
@@ -430,7 +559,8 @@
         <div>
           <h2 class="font-semibold text-gray-800">Плейбук вопросов</h2>
           <p class="text-xs text-gray-400 mt-0.5 max-w-xl">
-            Копия шаблонов из чатов. Правки здесь влияют только на вопросы — чатовый плейбук не меняется.
+            Копия из чатов, урезано до тем, которые реально использовались в ответах за последний месяц.
+            Правки здесь влияют только на вопросы.
           </p>
         </div>
         <div class="flex flex-wrap gap-2" v-if="canEditQuestionTemplates">
@@ -497,7 +627,7 @@
         <button @click="syncPlaybookFromChats" class="ml-1 text-sky-600 hover:underline">Скопировать из чатов</button>
       </div>
       <div v-else class="space-y-3">
-        <div v-for="th in pbThemes" :key="th.theme_key"
+        <div v-for="th in pbThemes" :key="th.theme_key" :id="'q-theme-' + th.theme_key"
           class="bg-white rounded-xl border border-gray-200 overflow-hidden">
           <button type="button" @click="toggleTheme(th.theme_key)"
             class="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50">
@@ -519,6 +649,10 @@
                   </span>
                   <span v-else class="px-1.5 py-0.5 rounded bg-gray-100">основной</span>
                   <span v-if="v.mp" class="uppercase font-medium">{{ v.mp }}</span>
+                  <span v-if="v.review_status === 'pending'"
+                    class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200">
+                    на проверке
+                  </span>
                 </div>
                 <div v-if="canEditQuestionTemplates" class="flex gap-2 shrink-0">
                   <button @click="openVariantForm(v)" class="text-xs text-sky-600 hover:underline">Ред.</button>
@@ -528,6 +662,85 @@
               <p class="text-sm text-gray-600 whitespace-pre-wrap leading-relaxed">{{ v.body }}</p>
             </div>
             <div v-if="!(th.variants || []).length" class="px-4 py-3 text-sm text-gray-400">Нет вариантов</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ НОВЫЕ ШАБЛОНЫ (проверка админом) ══════════════════════════════════ -->
+    <div v-if="activeSection === 'review' && canReviewQuestionTemplates" class="max-w-4xl mx-auto px-4 py-4">
+      <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 class="font-semibold text-gray-800">Новые шаблоны вопросов</h2>
+            <p class="text-xs text-gray-500 mt-1 leading-relaxed max-w-2xl">
+              Добавлены менеджером КС из ответа на вопрос. Уже могут подставляться — проверьте текст и нажмите «Проверено» или удалите.
+            </p>
+          </div>
+          <button type="button" @click="loadPendingQuestionTemplates"
+            class="text-xs px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50">
+            Обновить
+          </button>
+        </div>
+        <div v-if="pendingLoading" class="px-5 py-10 text-center text-xs text-gray-400">Загрузка…</div>
+        <div v-else-if="!pendingTemplates.length" class="px-5 py-10 text-center text-sm text-gray-400">
+          Нет шаблонов на проверке
+        </div>
+        <div v-else class="divide-y divide-gray-100">
+          <div v-for="p in pendingTemplates" :key="p.id" class="px-5 py-4 space-y-2">
+            <div class="flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
+              <span class="font-medium text-gray-700">
+                {{ p.needs_theme || p.theme_key === '__unassigned__' ? 'Без темы' : (p.theme_name || p.theme_key) }}
+              </span>
+              <span v-if="p.needs_theme || p.theme_key === '__unassigned__'"
+                class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                нужна тема
+              </span>
+              <span class="uppercase tracking-wide px-1.5 py-0.5 rounded border bg-gray-50">
+                {{ p.mp || 'все' }}
+              </span>
+              <span v-if="p.created_by">{{ p.created_by }}</span>
+              <span v-if="p.created_at">{{ fmtPendingAt(p.created_at) }}</span>
+              <span v-if="p.source_question_id" class="text-gray-400">вопрос {{ p.source_question_id }}</span>
+            </div>
+            <div class="flex flex-wrap items-end gap-2">
+              <label class="text-[11px] text-gray-500">
+                Тема
+                <select v-model="p._assignMode"
+                  class="mt-0.5 block border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white max-w-[16rem]">
+                  <option value="keep" v-if="p.theme_key && p.theme_key !== '__unassigned__'">
+                    Оставить: {{ p.theme_name || p.theme_key }}
+                  </option>
+                  <option value="existing">Выбрать из списка…</option>
+                  <option value="new">Создать новую тему…</option>
+                </select>
+              </label>
+              <select v-if="p._assignMode === 'existing'" v-model="p._assignThemeKey"
+                class="border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white max-w-[16rem]">
+                <option value="">Тема…</option>
+                <option v-for="th in saveAsTemplateThemes" :key="th.theme_key" :value="th.theme_key">
+                  {{ th.name || th.theme_key }}
+                </option>
+              </select>
+              <template v-if="p._assignMode === 'new'">
+                <input v-model="p._newThemeName" type="text" placeholder="Название новой темы"
+                  class="border border-gray-200 rounded-lg px-2 py-1.5 text-xs min-w-[12rem] focus:outline-none focus:ring-2 focus:ring-sky-400" />
+                <input v-model="p._newThemeWhen" type="text" placeholder="Когда использовать (необяз.)"
+                  class="border border-gray-200 rounded-lg px-2 py-1.5 text-xs min-w-[12rem] focus:outline-none focus:ring-2 focus:ring-sky-400" />
+              </template>
+            </div>
+            <textarea v-model="p.body" rows="4"
+              class="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs text-gray-700 resize-y focus:outline-none focus:ring-2 focus:ring-sky-400"></textarea>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" @click="approvePendingQuestion(p)" :disabled="p._busy"
+                class="text-xs font-medium px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                Проверено
+              </button>
+              <button type="button" @click="deletePendingQuestion(p)" :disabled="p._busy"
+                class="text-xs font-medium px-3 py-1.5 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 disabled:opacity-50">
+                Удалить
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -569,7 +782,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
@@ -577,7 +790,7 @@ import { usePermissionsStore } from '../stores/permissions'
 import { useToast } from '../composables/useToast'
 import { useCxQueueActions } from '../composables/useCxQueueActions'
 import { CX_BASE as BASE, MP_BADGE_CLASSES as mpBadgeCls, fmtAge, ageCls } from '../utils/cx'
-import { groupTemplatesByTheme, templateVariantLabel } from '../utils/templateGroups'
+import { groupTemplatesByTheme, templateVariantLabel, templatePreviewText } from '../utils/templateGroups'
 import { CircleCheckBig, ClipboardPenLine } from 'lucide-vue-next'
 
 const platformStore = usePlatformStore()
@@ -585,11 +798,13 @@ const permissionsStore = usePermissionsStore()
 const route = useRoute()
 const currentMp = computed(() => platformStore.platform || 'all')
 const canEditQuestionTemplates = computed(() =>
-  ['admin', 'moderator'].includes(permissionsStore.role)
+  ['admin', 'moderator', 'cs_manager'].includes(permissionsStore.role)
 )
+const canSaveQuestionAsTemplate = computed(() => canEditQuestionTemplates.value)
+const canReviewQuestionTemplates = computed(() => permissionsStore.isAdmin)
 const isCsManager = computed(() => permissionsStore.role === 'cs_manager')
 const canRequestClarification = computed(() =>
-  permissionsStore.isAdmin || isCsManager.value
+  permissionsStore.isAdmin || permissionsStore.can('cx_responses')
 )
 // Один и тот же компонент обслуживает два разных рабочих стола. Наличие
 // обоих прав не должно подменять обычные вопросы очередью качества.
@@ -608,25 +823,39 @@ const { toast, showToast } = useToast()
 const sections = [
   { key: 'queue',     label: 'Очередь'  },
   { key: 'templates', label: 'Шаблоны'  },
+  { key: 'review',    label: 'Новые шаблоны', adminOnly: true },
   { key: 'settings',  label: 'Автоответы' },
 ]
-const visibleSections = computed(() =>
-  hasQualityQuestionsAccess.value
-    ? sections.filter(s => s.key === 'queue')
-    : isCsManager.value
-    ? sections.filter(s => s.key !== 'settings')
-    : sections
-)
+const visibleSections = computed(() => {
+  if (hasQualityQuestionsAccess.value) {
+    return sections.filter(s => s.key === 'queue')
+  }
+  return sections.filter(s => {
+    if (s.key === 'settings' && isCsManager.value) return false
+    if (s.adminOnly && !canReviewQuestionTemplates.value) return false
+    return true
+  })
+})
 const activeSection = ref('queue')
 
 function switchSection(key) {
   activeSection.value = key
+  if (key === 'review' && canReviewQuestionTemplates.value) loadPendingQuestionTemplates()
 }
 
 watch(currentMp, () => {
   if (!hasQualityQuestionsAccess.value) loadPlaybookTemplates()
   if (activeSection.value === 'queue') loadQueue()
 })
+
+watch(
+  () => (queueItems.value || []).some(i => i._saveAsTemplate),
+  (on) => {
+    if (on && canSaveQuestionAsTemplate.value && !pbThemes.value.length) {
+      loadQuestionPlaybook()
+    }
+  },
+)
 
 // ── Очередь ────────────────────────────────────────────────────────────────
 const queueLoading = ref(false)
@@ -673,8 +902,10 @@ function toggleSort() {
 }
 
 const filteredItems = computed(() => {
+  const mp = currentMp.value || 'all'
   let list = (Array.isArray(queueItems.value) ? queueItems.value : [])
     .filter(i => i.item_type === 'question')
+    .filter(i => mp === 'all' || i.mp === mp)
   if (showAnsweredOnly.value) {
     list = list.filter(hasQualityAnswer)
   }
@@ -688,20 +919,33 @@ const pagedItems = computed(() => {
   return filteredItems.value.slice(start, start + perPage.value)
 })
 
+let queueRequest = 0
 async function loadQueue() {
+  const requestId = ++queueRequest
+  const mp = currentMp.value || 'all'
   queueLoading.value = true
   currentPage.value  = 1
   try {
     const queueBase = hasQualityQuestionsAccess.value ? '/api/v1/quality-questions' : BASE
-    const res = await apiFetch(`${queueBase}/queue?mp=${currentMp.value}`)
+    const res = await apiFetch(`${queueBase}/queue?mp=${encodeURIComponent(mp)}`)
+    if (requestId !== queueRequest) return
     const data = await res.json()
-    queueItems.value = (data.items || []).map(i => ({
+    if ((currentMp.value || 'all') !== mp) return
+    const rawItems = mp === 'all'
+      ? (data.items || [])
+      : (data.items || []).filter(i => i.mp === mp)
+    queueItems.value = rawItems.map(i => ({
       ...i,
       nm_id: i.nm_id ? Number(i.nm_id) : null,
       question_wb_nm_id: i.question_wb_nm_id ? Number(i.question_wb_nm_id) : null,
       question_product_url: String(i.question_product_url || '').trim() || null,
       question_market_sku: String(i.question_market_sku || '').trim() || null,
+      _productCardOpen: false,
+      _productCardLoading: false,
+      _productCard: null,
       _reply: '',
+      _saveAsTemplate: false,
+      _saveAsThemeKey: '',
       _suggest: null,
       _suggestMiss: null,
       _suggestLoading: false,
@@ -712,13 +956,17 @@ async function loadQueue() {
       _clarificationConsumed: false,
       _qaReply: '',
       _qaSaving: false,
+      _similar: [],
+      _similarLoading: false,
+      _similarLoaded: false,
     }))
     counts.value = data.counts || {}
     // Автоподбор для первой страницы
     if (!hasQualityQuestionsAccess.value) suggestForPage()
   } catch {
-    showToast('Ошибка загрузки очереди', 'error')
+    if (requestId === queueRequest) showToast('Ошибка загрузки очереди', 'error')
   } finally {
+    if (requestId !== queueRequest) return
     queueLoading.value = false
   }
 }
@@ -734,9 +982,15 @@ const tplFormOpen = ref(false)
 const editVariant = ref({})
 const expandedThemes = ref({})
 const replySignature = ref('')
+const pendingTemplates = ref([])
+const pendingTemplateCount = ref(0)
+const pendingLoading = ref(false)
 
 const pbVariantCount = computed(() =>
   pbThemes.value.reduce((n, th) => n + ((th.variants || []).length), 0)
+)
+const saveAsTemplateThemes = computed(() =>
+  (pbThemes.value || []).filter(t => t.active !== false && t.theme_key !== '__unassigned__')
 )
 
 function replyRows(text) {
@@ -756,17 +1010,66 @@ function wbProductUrl(nmId) {
     : ''
 }
 
-function ymProductUrl(marketSku) {
+function ymProductUrl(marketSku, offerId) {
   const sku = String(marketSku || '').trim()
-  return sku ? `https://market.yandex.ru/product--/${encodeURIComponent(sku)}` : ''
+  if (sku) return `https://market.yandex.ru/card/slug/${encodeURIComponent(sku)}`
+  const offer = String(offerId || '').trim()
+  // Если номера карточки ещё нет в справочнике — поиск по нашему артикулу.
+  return offer
+    ? `https://market.yandex.ru/search?text=${encodeURIComponent(offer)}&cvredirect=1`
+    : ''
 }
 
 function productCardUrl(item) {
   if (!item || item.item_type !== 'question') return ''
   if (item.mp === 'wb') return wbProductUrl(item.nm_id || item.question_wb_nm_id)
   if (item.mp === 'ozon') return String(item.question_product_url || '').trim()
-  if (item.mp === 'ym') return ymProductUrl(item.question_market_sku)
+  if (item.mp === 'ym') return ymProductUrl(item.question_market_sku, item.sku)
   return ''
+}
+
+function productCardRequestFor(item) {
+  if (!item || item.item_type !== 'question') return null
+  const mp = String(item.mp || '').toLowerCase()
+  const article = String(item.sku || '').trim()
+  const nmId = Number(item.nm_id || item.question_wb_nm_id || 0)
+  const hasNm = Number.isFinite(nmId) && nmId > 0
+  if (mp === 'wb') {
+    if (article || hasNm) return { mp, article, nmId: hasNm ? nmId : null }
+    return null
+  }
+  if (['ym', 'ozon'].includes(mp) && article) return { mp, article, nmId: null }
+  return null
+}
+
+function productDimensionsLine(dimensions) {
+  if (!dimensions || dimensions.length == null || dimensions.width == null || dimensions.height == null) return ''
+  return `${dimensions.length} × ${dimensions.width} × ${dimensions.height}`
+}
+
+function productFastenersLine(card) {
+  const items = card?.fasteners || card?.product?.fasteners || []
+  return items.map(item => item.label || item.code).filter(Boolean).join('; ')
+}
+
+async function toggleProductCard(item) {
+  if (!item) return
+  item._productCardOpen = !item._productCardOpen
+  if (!item._productCardOpen || item._productCard || item._productCardLoading) return
+  const req = productCardRequestFor(item)
+  if (!req) return
+  item._productCardLoading = true
+  try {
+    const params = new URLSearchParams({ mp: req.mp || 'wb' })
+    if (req.article) params.set('article', req.article)
+    if (req.nmId) params.set('nm_id', String(req.nmId))
+    const r = await apiFetch(`/api/v1/chat-bot/product-card?${params}`)
+    item._productCard = await r.json()
+  } catch {
+    item._productCard = { status: 'unavailable' }
+  } finally {
+    item._productCardLoading = false
+  }
 }
 
 function publicAnswerLabel(item) {
@@ -810,6 +1113,52 @@ function withSignature(body) {
   return `${text}\n\n${sig}`
 }
 
+/** Текст для сохранения в плейбук: без приветствия и подписи. */
+function bodyForTemplate(raw) {
+  let text = String(raw || '').trim()
+  if (!text) return ''
+  const sig = (replySignature.value || '').trim()
+  if (sig && text.includes(sig)) text = text.replace(sig, '').trim()
+  text = text.replace(/^(здравствуйте|добрый\s+(день|вечер))[!.,\s]*/i, '').trim()
+  text = text.replace(/\n*\s*александр,?\s+команда\s+видовито\s*$/i, '').trim()
+  return text
+}
+
+async function saveQuestionAsTemplateIfNeeded(item, replyText) {
+  if (!canSaveQuestionAsTemplate.value || !item?._saveAsTemplate) return
+  const themeKey = item._saveAsThemeKey
+  const body = bodyForTemplate(replyText)
+  if (!themeKey || !body) {
+    if (item._saveAsTemplate && !themeKey) {
+      showToast('Выберите группу для шаблона', 'error')
+    }
+    return
+  }
+  try {
+    await apiFetch(`${QPB}/variants/from-question`, {
+      method: 'POST',
+      body: JSON.stringify({
+        theme_key: themeKey,
+        body,
+        mp: item.mp || 'wb',
+        question_id: String(item.id || ''),
+      }),
+    })
+    item._saveAsTemplate = false
+    item._saveAsThemeKey = ''
+    showToast(
+      themeKey === '__unassigned__'
+        ? 'Шаблон без темы — админ назначит группу при проверке'
+        : 'Ответ сохранён как шаблон вопросов (на проверке)',
+      'ok',
+    )
+    if (pbThemes.value.length) loadQuestionPlaybook()
+    if (canReviewQuestionTemplates.value) loadPendingQuestionTemplates(true)
+  } catch {
+    showToast('Ответ ушёл, но шаблон не сохранился', 'error')
+  }
+}
+
 function isChipActive(item, t) {
   const reply = normalizeBody(item._reply)
   if (!reply) return false
@@ -825,15 +1174,9 @@ function applyChip(item, t) {
 }
 
 function chipsFor(item) {
-  const fromPb = (playbookTemplates.value || []).filter(t =>
+  return (playbookTemplates.value || []).filter(t =>
     t.mp === 'all' || !t.mp || t.mp === item.mp
   )
-  const theme = item._suggest?.theme
-  return [...fromPb].sort((a, b) => {
-    if (theme && a.theme_key === theme) return -1
-    if (theme && b.theme_key === theme) return 1
-    return 0
-  })
 }
 
 function chipGroupsFor(item) {
@@ -851,6 +1194,20 @@ function focusedChipGroup(item) {
 function toggleQuestionTplPanel(item) {
   item._tplOpen = !item._tplOpen
   if (!item._tplOpen) item._tplTheme = ''
+}
+
+async function openQuestionTemplateEditor(themeKey, variant) {
+  if (!canEditQuestionTemplates.value || !themeKey) return
+  if (!pbThemes.value.length) await loadQuestionPlaybook()
+  switchSection('templates')
+  expandedThemes.value = { ...expandedThemes.value, [themeKey]: true }
+  const theme = pbThemes.value.find(t => t.theme_key === themeKey)
+  const full = variant?.id
+    ? (theme?.variants || []).find(v => v.id === variant.id) || variant
+    : null
+  if (full) openVariantForm(full)
+  await nextTick()
+  document.getElementById('q-theme-' + themeKey)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 function onQuestionThemeChip(item, group) {
@@ -895,6 +1252,9 @@ async function loadQuestionPlaybook() {
     const r = await apiFetch(QPB)
     const d = await r.json()
     pbThemes.value = d.themes || []
+    if (typeof d.pending_count === 'number') {
+      pendingTemplateCount.value = d.pending_count
+    }
     if (!Object.keys(expandedThemes.value).length && pbThemes.value[0]) {
       expandedThemes.value = { [pbThemes.value[0].theme_key]: true }
     }
@@ -903,6 +1263,98 @@ async function loadQuestionPlaybook() {
     showToast('Не удалось загрузить плейбук вопросов', 'error')
   } finally {
     pbLoading.value = false
+  }
+}
+
+async function loadPendingQuestionTemplates(silent = false) {
+  if (!canReviewQuestionTemplates.value) return
+  pendingLoading.value = true
+  try {
+    const r = await apiFetch(`${QPB}/variants/pending`)
+    const d = await r.json()
+    pendingTemplates.value = (d.items || []).map(x => {
+      const needs = !!(x.needs_theme || x.theme_key === '__unassigned__')
+      return {
+        ...x,
+        _busy: false,
+        _assignMode: needs ? 'existing' : 'keep',
+        _assignThemeKey: needs ? '' : (x.theme_key || ''),
+        _newThemeName: '',
+        _newThemeWhen: '',
+      }
+    })
+    pendingTemplateCount.value = d.count ?? pendingTemplates.value.length
+  } catch {
+    if (!silent) showToast('Не удалось загрузить новые шаблоны', 'error')
+  } finally {
+    pendingLoading.value = false
+  }
+}
+
+function fmtPendingAt(iso) {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleString('ru', {
+      day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+    })
+  } catch { return String(iso) }
+}
+
+function pendingQuestionReviewPayload(p) {
+  const body = { status: 'approved', body: p.body }
+  if (p._assignMode === 'new') {
+    const name = (p._newThemeName || '').trim()
+    if (!name) return { error: 'Укажите название новой темы' }
+    body.new_theme_name = name
+    body.new_theme_when = (p._newThemeWhen || '').trim()
+  } else if (p._assignMode === 'existing') {
+    const key = (p._assignThemeKey || '').trim()
+    if (!key || key === '__unassigned__') return { error: 'Выберите тему' }
+    body.theme_key = key
+  } else if (p.needs_theme || p.theme_key === '__unassigned__') {
+    return { error: 'Выберите или создайте тему' }
+  }
+  return { body }
+}
+
+async function approvePendingQuestion(p) {
+  if (!p?.id || p._busy) return
+  const prepared = pendingQuestionReviewPayload(p)
+  if (prepared.error) {
+    showToast(prepared.error, 'error')
+    return
+  }
+  p._busy = true
+  try {
+    await apiFetch(`${QPB}/variants/${p.id}/review`, {
+      method: 'PUT',
+      body: JSON.stringify(prepared.body),
+    })
+    pendingTemplates.value = pendingTemplates.value.filter(x => x.id !== p.id)
+    pendingTemplateCount.value = Math.max(0, pendingTemplateCount.value - 1)
+    showToast('Шаблон проверен', 'ok')
+    await loadQuestionPlaybook()
+  } catch {
+    showToast('Не удалось сохранить', 'error')
+  } finally {
+    p._busy = false
+  }
+}
+
+async function deletePendingQuestion(p) {
+  if (!p?.id || p._busy) return
+  if (!confirm('Удалить этот шаблон?')) return
+  p._busy = true
+  try {
+    await apiFetch(`${QPB}/variants/${p.id}`, { method: 'DELETE' })
+    pendingTemplates.value = pendingTemplates.value.filter(x => x.id !== p.id)
+    pendingTemplateCount.value = Math.max(0, pendingTemplateCount.value - 1)
+    showToast('Шаблон удалён', 'ok')
+    await loadQuestionPlaybook()
+  } catch {
+    showToast('Не удалось удалить', 'error')
+  } finally {
+    p._busy = false
   }
 }
 
@@ -1019,9 +1471,15 @@ async function suggestOne(item, { forceAi = false } = {}) {
       if (!item._reply?.trim() || forceAi) item._reply = String(d.reply_text).replace(/^\s+/, '')
     } else {
       item._suggest = null
-      item._suggestMiss = {
-        reason: d?.reason || 'Нет подходящего шаблона',
-        can_generate: d?.can_generate !== false,
+      const reason = (d?.reason || '').trim()
+      // Нет шаблона (в т.ч. бывшее «меню 1–5») — без жёлтого баннера, только кнопка генерации
+      if (!reason || reason === 'Нет подходящего шаблона') {
+        item._suggestMiss = null
+      } else {
+        item._suggestMiss = {
+          reason,
+          can_generate: d?.can_generate !== false,
+        }
       }
     }
   } catch {
@@ -1034,10 +1492,69 @@ async function suggestOne(item, { forceAi = false } = {}) {
 
 function suggestForPage() {
   const list = pagedItems.value || []
-  const chunk = list.slice(0, 8)
-  chunk.forEach(item => {
+  list.forEach(item => {
     if (item._suggest || item._suggestMiss || item._suggestLoading) return
     suggestOne(item)
+  })
+}
+
+async function loadSimilar(item) {
+  if (!item || item._similarLoading) return
+  item._similarLoading = true
+  try {
+    const params = new URLSearchParams({
+      q: item.body || '',
+      mp: item.mp || 'all',
+      exclude: String(item.id || ''),
+    })
+    const r = await apiFetch(`${BASE}/questions/similar?${params}`)
+    const d = await r.json()
+    const groups = Array.isArray(d.groups) ? d.groups : []
+    item._similarGroups = groups.map(g => ({
+      category: g.category || 'Без категории',
+      items: Array.isArray(g.items) ? g.items : [],
+      _i: 0,
+    })).filter(g => g.items.length)
+    item._similar = item._similarGroups.map(g => g.items[0])
+  } catch {
+    item._similarGroups = []
+    item._similar = []
+  } finally {
+    item._similarLoading = false
+    item._similarLoaded = true
+  }
+}
+
+function visibleSimilarGroups(item) {
+  const groups = item?._similarGroups || []
+  if (item?._similarExpanded) return groups
+  return groups.slice(0, 3)
+}
+
+function hiddenSimilarCount(item) {
+  const groups = item?._similarGroups || []
+  if (item?._similarExpanded) return 0
+  return Math.max(0, groups.length - 3)
+}
+
+function similarCurrent(group) {
+  const items = group?.items || []
+  if (!items.length) return {}
+  const i = Number(group._i) || 0
+  return items[((i % items.length) + items.length) % items.length]
+}
+
+function cycleSimilar(group) {
+  const n = (group?.items || []).length
+  if (n < 2) return
+  group._i = ((Number(group._i) || 0) + 1) % n
+}
+
+function loadSimilarForPage() {
+  const list = pagedItems.value || []
+  list.forEach(item => {
+    if (item._similarLoaded || item._similarLoading) return
+    loadSimilar(item)
   })
 }
 
@@ -1051,6 +1568,7 @@ watch([currentPage, perPage], () => {
 
 watch(activeSection, (s) => {
   if (!hasQualityQuestionsAccess.value && s === 'templates' && !pbThemes.value.length) loadQuestionPlaybook()
+  if (s === 'review' && canReviewQuestionTemplates.value) loadPendingQuestionTemplates()
 })
 
 async function requestClarification(item) {
@@ -1116,8 +1634,20 @@ function replyEndpoint(item, visibility = 'public') {
 }
 
 const { sendReply: _sendReply, confirmMod: _confirmMod, rejectMod, dismissItem } = useCxQueueActions(queueItems, showToast)
-function sendReply(item, visibility = 'public') {
-  return _sendReply(item, entry => replyEndpoint(entry, visibility))
+async function sendReply(item, visibility = 'public') {
+  if (item._saveAsTemplate && !item._saveAsThemeKey) {
+    showToast('Выберите группу для шаблона', 'error')
+    return
+  }
+  const txt = item._reply?.trim() || ''
+  const wantTemplate = canSaveQuestionAsTemplate.value && item._saveAsTemplate && !!txt
+  const themeKey = item._saveAsThemeKey
+  const ok = await _sendReply(item, entry => replyEndpoint(entry, visibility))
+  if (ok && wantTemplate) {
+    item._saveAsTemplate = true
+    item._saveAsThemeKey = themeKey
+    await saveQuestionAsTemplateIfNeeded(item, txt)
+  }
 }
 function confirmMod(item, visibility = 'public') {
   return _confirmMod(item, isWbQuestion(item) ? visibility : '')

@@ -1,0 +1,46 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: vidovito_shop_orders\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language-Team: Russian\n"
+"Language: ru_RU\n"
+
+msgctxt "Addons::name::vidovito_shop_orders"
+msgid "Vidovito shop orders to CX"
+msgstr "Заказы сайта в CX"
+
+msgctxt "Addons::description::vidovito_shop_orders"
+msgid "Sends placed orders to CX Dashboard for warehouse shipping"
+msgstr "Отправляет оформленные заказы в CX, чтобы склад собирал и отправлял посылки"
+
+msgctxt "SettingsSections::vidovito_shop_orders::general"
+msgid "General"
+msgstr "Общие"
+
+msgctxt "SettingsOptions::vidovito_shop_orders::api_url"
+msgid "CX Dashboard URL"
+msgstr "Адрес CX Dashboard"
+
+msgctxt "SettingsOptions::vidovito_shop_orders::api_token"
+msgid "Shop token"
+msgstr "Токен витрины (можно оставить пустым — возьмётся из модуля доставки)"
+
+msgctxt "Statuses::vidovito_shop_orders::packed"
+msgid "Packed"
+msgstr "Собран"
+
+msgctxt "Statuses::vidovito_shop_orders::shipped"
+msgid "Shipped"
+msgstr "Отправлен"
+
+msgctxt "Statuses::vidovito_shop_orders::in_transit"
+msgid "In transit"
+msgstr "В пути"
+
+msgctxt "Statuses::vidovito_shop_orders::ready_for_pickup"
+msgid "Ready for pickup"
+msgstr "Готов к выдаче"
+
+msgctxt "Statuses::vidovito_shop_orders::delivered"
+msgid "Delivered"
+msgstr "Выдан"

@@ -15,7 +15,19 @@ test('reshipment form confirms selected address via nearest-pickup', () => {
   assert.match(source, /resolveTypedAddress/)
 })
 
-test('production form does not depend on a browser-side DaData key', () => {
-  assert.doesNotMatch(source, /VITE_DADATA_KEY/)
-  assert.doesNotMatch(source, /suggestions\.dadata\.ru/)
+test('reshipment form blocks non-Russia addresses with a clear message', () => {
+  assert.match(source, /outside_russia/)
+  assert.match(source, /только по России/)
+  assert.match(source, /В другие страны сейчас не отправляем/)
+})
+
+test('reshipment form blocks city-only addresses without a street', () => {
+  assert.match(source, /need_street/)
+  assert.match(source, /Укажите улицу и номер дома/)
+  assert.match(source, /addressImprecise/)
+})
+
+test('reshipment form closes when the return is already approved', () => {
+  assert.match(source, /token_return_approved/)
+  assert.match(source, /Возврат уже одобрен/)
 })

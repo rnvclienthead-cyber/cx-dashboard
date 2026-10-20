@@ -5,7 +5,10 @@ import re
 from typing import Optional
 import requests
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -14,6 +17,7 @@ from ..database import get_db
 from .auth import get_current_user
 from .. import chat_bot
 from .. import ym_product_card
+from .. import ym_parts
 from .. import wb_client
 from . import chat_playbook
 
@@ -161,7 +165,7 @@ def bot_status(
     only_days = chat_playbook.get_setting_mp(db, "bot_only_days", mp, "2")
     only_no_mgr = chat_playbook.get_setting_mp(db, "bot_only_no_manager", mp, "true")
     bot_model = chat_playbook.get_setting(db, "bot_model", "qwen-plus")
-    ai_draft = chat_playbook.get_setting_mp(db, "bot_ai_draft", mp, "true")
+    ai_draft = chat_playbook.get_setting_mp(db, "bot_ai_draft", mp, "false")
     try:
         days = int(float(only_days or "2"))
     except ValueError:
@@ -404,11 +408,40 @@ def question_chat_templates(
     return {"templates": question_playbook.list_chip_templates(db, mp=mp)}
 
 
+_OZON_PICKUP_GUIDE_DIR = Path(__file__).resolve().parent.parent / "ozon_pickup_guide"
+
+
+@router.get("/ozon-pickup-guide")
+def ozon_pickup_guide(current_user=Depends(get_current_user)):
+    """Текст и скриншоты с сайта: как открыть и проверить заказ Ozon Доставки."""
+    from ..reshipment_notify import format_ozon_pickup_guide
+    images = []
+    for n in range(1, 7):
+        name = f"{n}.png"
+        if (_OZON_PICKUP_GUIDE_DIR / name).is_file():
+            images.append({
+                "name": name,
+                "url": f"/api/v1/chat-bot/ozon-pickup-guide/{name}",
+            })
+    return {"text": format_ozon_pickup_guide(), "images": images}
+
+
+@router.get("/ozon-pickup-guide/{name}")
+def ozon_pickup_guide_file(name: str, current_user=Depends(get_current_user)):
+    if name not in {f"{n}.png" for n in range(1, 7)}:
+        raise HTTPException(status_code=404, detail="Нет такого шага")
+    path = _OZON_PICKUP_GUIDE_DIR / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Картинка инструкции не найдена")
+    return FileResponse(path, media_type="image/png", filename=name)
+
+
 @router.get("/chat-templates")
 @bot_api_router.get("/chat-templates")
 def chat_templates(
     mp: str = Query("wb", description="wb | ozon | ym"),
-    theme: str = Query("", description="тема текущей подсказки для приоритета"),
+    theme: str = Query("", description="устарело: порядок тем фиксирован, параметр игнорируется"),
+    chat_id: str = Query("", description="чтобы подставить артикул/промокод ЯМ"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -416,7 +449,8 @@ def chat_templates(
     mp = (mp or "wb").strip().lower()
     if mp not in ("wb", "ozon", "ym"):
         mp = "wb"
-    theme = (theme or "").strip()
+    _ = theme
+    chat_id = (chat_id or "").strip()
 
     rows = db.execute(text("""
         SELECT v.id, v.theme_key, t.name AS theme_name,
@@ -425,41 +459,60 @@ def chat_templates(
         FROM cx_chat_variants v
         JOIN cx_chat_themes t ON t.theme_key = v.theme_key
         WHERE v.active AND t.active
+          AND v.theme_key <> '__unassigned__'
           AND (
             COALESCE(v.mp, '') = ''
             OR COALESCE(v.mp, '') = :mp
           )
           AND (
-            :mp = 'wb'
-            OR v.theme_key NOT IN (
-              'nekomplekt', 'soglasie', 'ssylka', 'status_zayavki',
-              'otkaz_dootpravki', 'nevozvratny'
-            )
+            :mp = 'ym' OR v.theme_key <> 'kupit_detal'
           )
-          AND v.body !~ :placeholder_pattern
-        ORDER BY
-          CASE WHEN :theme != '' AND v.theme_key = :theme THEN 0 ELSE 1 END,
-          t.sort_order, v.theme_key, v.sort_order, v.id
+          AND (
+            :mp = 'wb' OR v.theme_key <> 'promokody'
+          )
+          AND (
+            :mp <> 'ozon' OR v.theme_key <> 'nevozvratny'
+          )
+        ORDER BY t.sort_order, v.theme_key, v.sort_order, v.id
     """), {
         "mp": mp,
-        "theme": theme,
-        "placeholder_pattern": r"\{[^{}]*\}",
     }).mappings().all()
+
+    article = ""
+    chat = None
+    if chat_id:
+        chat = chat_bot._load_chat_for_suggest(db, chat_id, mp)
+        if chat:
+            article = chat_bot._article_for_chat(db, chat, mp)
 
     templates = []
     for row in rows:
         body = (row["body"] or "").strip()
-        # Защита на случай неожиданной смены SQL: чип не должен
-        # подставлять менеджеру незаполненные {placeholders}.
-        if not body or re.search(r"\{[^{}]*\}", body):
+        if not body:
             continue
+        # В чипах: {form_url} подставляем при выборе; на ЯМ ещё промокод и артикул детали.
+        if re.search(
+            r"\{(?!form_url|promo_code|promo_pct|part_article|part_name|part_list\})[^{}]+\}",
+            body,
+        ):
+            continue
+        if mp == "ym" and ym_parts._PLACEHOLDER_RE.search(body):
+            last_msg = ""
+            if chat:
+                last_msg = (chat.get("last_message") or "").strip()
+            body = ym_parts.fill_part_placeholders(
+                body, product_article=article, client_msg=last_msg, db=db,
+            )
         title = row["theme_name"] or row["theme_key"]
         if row["branch_label"]:
             title = f"{title}: {row['branch_label']}"
+        preview = body.replace("{form_url}", "https://box.vidovito.com/reshipment/form?t=…")
         templates.append({
             "id": f"chat-{row['id']}",
             "title": title,
             "body": body,
+            "preview_body": preview,
+            "needs_form_url": "{form_url}" in body,
             "theme_key": row["theme_key"],
             "theme_name": row["theme_name"] or row["theme_key"],
             "branch_key": row["branch_key"] or "",
@@ -471,6 +524,8 @@ def chat_templates(
         "templates": templates,
         "greeting_text": chat_playbook.get_setting(db, "greeting_text", "Здравствуйте!"),
         "signature": chat_playbook.get_setting(db, "signature", ""),
+        "nekomplekt_branch": chat_bot.nekomplekt_chip_branch(db, mp, article),
+        "article": article,
     }
 
 
@@ -505,3 +560,101 @@ def bot_log_clear(
         )).rowcount or 0
     db.commit()
     return {"ok": True, "deleted_log": deleted, "reset_state": reset}
+
+
+class CorrectionIn(BaseModel):
+    chat_id: str
+    mp: str = "wb"
+    client_message: str = ""
+    suggested_theme: str = ""
+    suggested_branch: str = ""
+    chosen_theme: str
+    chosen_branch: str = ""
+    chosen_variant_id: Optional[int] = None
+
+
+class FormLinkIn(BaseModel):
+    chat_id: str
+    mp: str = "wb"
+    body: str = ""  # шаблон с {form_url}; пусто → первый soglasie
+
+
+@router.post("/form-link")
+@bot_api_router.post("/form-link")
+def mint_form_link(
+    payload: FormLinkIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Создаёт уникальный токен формы доотправки и подставляет {form_url} в текст."""
+    chat_id = (payload.chat_id or "").strip()
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Нужен chat_id")
+    mp = (payload.mp or "wb").strip().lower()
+    if mp not in ("wb", "ozon", "ym"):
+        mp = "wb"
+
+    body = (payload.body or "").strip()
+    if not body:
+        row = db.execute(text("""
+            SELECT body FROM cx_chat_variants
+            WHERE active AND theme_key = 'soglasie'
+              AND (COALESCE(mp, '') = '' OR COALESCE(mp, '') = :mp)
+              AND body ILIKE '%{form_url}%'
+            ORDER BY sort_order, id
+            LIMIT 1
+        """), {"mp": mp}).scalar()
+        body = (row or "").strip()
+    if not body:
+        body = (
+            "Отлично! Заполните, пожалуйста, короткую форму — укажите, какая деталь нужна "
+            "и куда её отправить.\n\n{form_url}"
+        )
+
+    url = chat_bot._make_form_url(db, chat_id, mp=mp)
+    reply = chat_bot._fill_placeholders(body, form_url=url)
+    # Подпись — только если в этом чате ещё не представлялись
+    sig = chat_playbook.get_setting(db, "signature", "").strip()
+    if (
+        sig
+        and not chat_bot._text_has_signature(reply, sig)
+        and not chat_bot._seller_already_signed(db, chat_id, mp, sig)
+    ):
+        reply = f"{reply}\n\n{sig}" if not reply.endswith("\n") else f"{reply}{sig}"
+    return {
+        "ok": True,
+        "url": url,
+        "reply_text": reply.lstrip(" \t\r\n"),
+        "chat_id": chat_id,
+        "mp": mp,
+    }
+
+
+@router.post("/correction")
+@bot_api_router.post("/correction")
+def bot_correction(
+    payload: CorrectionIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Менеджер выбрал другой шаблон — запоминаем для следующего подбора."""
+    mp = (payload.mp or "wb").strip().lower()
+    if mp not in ("wb", "ozon", "ym"):
+        mp = "wb"
+    variant_id = payload.chosen_variant_id
+    if isinstance(variant_id, str) and variant_id.isdigit():
+        variant_id = int(variant_id)
+    elif not isinstance(variant_id, int):
+        variant_id = None
+    return chat_bot.record_correction(
+        db,
+        chat_id=payload.chat_id,
+        mp=mp,
+        client_message=payload.client_message,
+        suggested_theme=payload.suggested_theme,
+        suggested_branch=payload.suggested_branch,
+        chosen_theme=payload.chosen_theme,
+        chosen_branch=payload.chosen_branch,
+        chosen_variant_id=variant_id,
+        created_by=str((current_user or {}).get("username") or ""),
+    )

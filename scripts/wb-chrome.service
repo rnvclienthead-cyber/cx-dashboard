@@ -1,0 +1,16 @@
+[Unit]
+Description=WB seller Chrome CDP (returns chat bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=150
+Restart=on-failure
+RestartSec=20
+ExecStart=/root/cx-dashboard/scripts/wb_chrome_start.sh
+ExecStop=/root/cx-dashboard/scripts/wb_chrome_stop.sh
+
+[Install]
+WantedBy=multi-user.target

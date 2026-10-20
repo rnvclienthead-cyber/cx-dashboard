@@ -25,6 +25,7 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy import bindparam, create_engine, text
 from backend import ozon_client
+from backend.review_updates import OZON_MARK
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
@@ -737,6 +738,18 @@ def sync_reviews():
                     ON CONFLICT (review_id) DO UPDATE SET
                         rating      = EXCLUDED.rating,
                         review_text = COALESCE(EXCLUDED.review_text, ozon_reviews.review_text),
+                        pros        = COALESCE(EXCLUDED.pros, ozon_reviews.pros),
+                        cons        = COALESCE(EXCLUDED.cons, ozon_reviews.cons),
+                        """ + OZON_MARK + """,
+                        answered_at = CASE
+                            WHEN ozon_reviews.answered_at IS NOT NULL AND EXCLUDED.answered_at IS NULL
+                                 AND (
+                                     COALESCE(ozon_reviews.review_text,'') IS DISTINCT FROM COALESCE(EXCLUDED.review_text,'')
+                                     OR ozon_reviews.rating IS DISTINCT FROM EXCLUDED.rating
+                                 )
+                            THEN NULL
+                            ELSE ozon_reviews.answered_at
+                        END,
                         synced_at   = NOW()
                 """), {
                     "rid":     rev_id,

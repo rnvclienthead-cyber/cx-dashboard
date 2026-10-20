@@ -67,6 +67,45 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         "role": user.role
     }
 
+
+class TelegramWebAppLogin(BaseModel):
+    init_data: str = ""
+
+
+@router.post("/telegram-webapp")
+def login_telegram_webapp(payload: TelegramWebAppLogin, db: Session = Depends(get_db)):
+    """Вход из окна бота: Telegram уже привязан в профиле (tg_chat_id)."""
+    from ..telegram_webapp import validate_init_data
+
+    try:
+        tg_user = validate_init_data(payload.init_data)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Не удалось проверить вход через Telegram",
+        )
+    tg_id = str(tg_user.get("id") or "").strip()
+    if not tg_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Нет Telegram id")
+    row = db.execute(text("""
+        SELECT username, role FROM users
+        WHERE btrim(COALESCE(tg_chat_id, '')) = :tg
+        ORDER BY id
+        LIMIT 1
+    """), {"tg": tg_id}).fetchone()
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Этот Telegram не привязан к профилю на сайте",
+        )
+    access_token = create_access_token(data={"sub": row.username, "role": row.role})
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": row.username,
+        "role": row.role,
+    }
+
 # --- ФУНКЦИЯ ДЛЯ ЗАЩИТЫ ДРУГИХ РОУТОВ ---
 def get_current_user(token: str = Depends(oauth2_scheme)):
     """

@@ -1,4 +1,6 @@
 import { ref, onMounted, onUnmounted } from 'vue'
+import { getAuthToken } from '../authStorage'
+import { shouldRecreateEventSource } from '../utils/apiNetwork'
 
 /**
  * Подписывается на SSE-поток. Не перезагружает автоматически —
@@ -13,6 +15,7 @@ export function useSSE(modules, onUpdate) {
   const watched = Array.isArray(modules) ? modules : [modules]
   const hasUpdate = ref(false)
   let es = null
+  let reconnectTimer = null
 
   function applyUpdate() {
     hasUpdate.value = false
@@ -20,7 +23,7 @@ export function useSSE(modules, onUpdate) {
   }
 
   function connect() {
-    const token = localStorage.getItem('token')
+    const token = getAuthToken()
     if (!token) return
 
     es = new EventSource(`/api/v1/events?token=${encodeURIComponent(token)}`)
@@ -35,13 +38,18 @@ export function useSSE(modules, onUpdate) {
     }
 
     es.onerror = () => {
+      // CONNECTING: браузер сам переподключается. CLOSED — создаём заново.
+      if (!es || !shouldRecreateEventSource(es.readyState)) return
       es.close()
-      setTimeout(connect, 10_000)
+      reconnectTimer = setTimeout(connect, 3000)
     }
   }
 
   onMounted(connect)
-  onUnmounted(() => { if (es) es.close() })
+  onUnmounted(() => {
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (es) es.close()
+  })
 
   return { hasUpdate, applyUpdate }
 }

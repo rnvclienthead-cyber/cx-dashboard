@@ -320,7 +320,20 @@ def nearby_city_names(
     return out
 
 
-def calculate_cost_by_city(city_name: str, tariff_code: Optional[int] = None) -> float:
+def _packages(weight_g: Optional[int] = None) -> list[dict]:
+    """Габариты для калькулятора. Лёгкие доотправки — маленький пакет из .env.
+    Для витрины (от 500 г) — коробка мебели, иначе СДЭК режет плотность."""
+    w = int(weight_g or PACKAGE_WEIGHT)
+    if w < 1:
+        w = PACKAGE_WEIGHT
+    if w >= 500:
+        return [{"weight": w, "length": 40, "width": 30, "height": 20}]
+    return [{"weight": w, "length": PACKAGE_LENGTH,
+             "width": PACKAGE_WIDTH, "height": PACKAGE_HEIGHT}]
+
+
+def calculate_cost_by_city(city_name: str, tariff_code: Optional[int] = None,
+                           weight_g: Optional[int] = None) -> float:
     """Рассчитать итоговую стоимость с НДС по названию города (для шага одобрения КС)."""
     cities = _api_get(
         f"{CDEK_BASE}/location/cities",
@@ -329,16 +342,30 @@ def calculate_cost_by_city(city_name: str, tariff_code: Optional[int] = None) ->
     ).json()
     if not cities:
         return 0.0
-    return calculate_cost_by_city_code(int(cities[0].get("code")), tariff_code=tariff_code)
+    return calculate_cost_by_city_code(int(cities[0].get("code")), tariff_code=tariff_code,
+                                       weight_g=weight_g)
 
 
-def calculate_cost_by_city_code(city_code: int, tariff_code: Optional[int] = None) -> float:
+def calculate_cost_by_city_code(city_code: int, tariff_code: Optional[int] = None,
+                                weight_g: Optional[int] = None,
+                                packages: Optional[list] = None) -> float:
     """Стоимость с НДС до city_code. Если основной тариф недоступен — берём
     самый дешёвый склад-склад из tarifflist (иначе деревни без тарифа 136
     отваливаются, и fallback цепляет омоним за тысячи км)."""
     preferred = tariff_code or TARIFF_CODE
-    packages = [{"weight": PACKAGE_WEIGHT, "length": PACKAGE_LENGTH,
-                 "width": PACKAGE_WIDTH, "height": PACKAGE_HEIGHT}]
+    if packages:
+        packages = [
+            {
+                "weight": max(1, int(p.get("weight") or p.get("weight_g") or 0)),
+                "length": max(1, int(p.get("length") or p.get("length_cm") or 40)),
+                "width": max(1, int(p.get("width") or p.get("width_cm") or 30)),
+                "height": max(1, int(p.get("height") or p.get("height_cm") or 20)),
+            }
+            for p in packages
+            if isinstance(p, dict)
+        ] or _packages(weight_g)
+    else:
+        packages = _packages(weight_g)
     payload = {
         "tariff_code":   preferred,
         "from_location": {"code": FROM_CITY_CODE},
@@ -478,6 +505,13 @@ def create_order(
     items_description: str = "Комплектующие",
     tariff_code:       Optional[int] = None,
     customer_email:    Optional[str] = None,
+    *,
+    weight_g:          Optional[int] = None,
+    length_cm:         Optional[int] = None,
+    width_cm:          Optional[int] = None,
+    height_cm:         Optional[int] = None,
+    declared_cost:     Optional[int] = None,
+    comment:           Optional[str] = None,
 ) -> dict:
     """
     Создаёт заказ в СДЭК. Возвращает {'uuid': ..., 'cdek_number': ..., 'tariff_code': ...}.
@@ -500,22 +534,22 @@ def create_order(
         "tariff_code":    code,
         "shipment_point": FROM_PVZ_CODE,           # ПВЗ откуда сдаём (Техническая 23Б — вместо from_location)
         "delivery_point": to_pvz_code,
-        "comment":        f"Отправка деталей #{req_id}: {items_description[:200]}",
+        "comment":        comment or f"Отправка деталей #{req_id}: {items_description[:200]}",
         "sender":         sender,
         "recipient":      recipient,
         "packages": [{
             "number": f"SHIP-{req_id}",
-            "weight": PACKAGE_WEIGHT,
-            "length": PACKAGE_LENGTH,
-            "width":  PACKAGE_WIDTH,
-            "height": PACKAGE_HEIGHT,
+            "weight": int(weight_g or PACKAGE_WEIGHT),
+            "length": int(length_cm or PACKAGE_LENGTH),
+            "width":  int(width_cm or PACKAGE_WIDTH),
+            "height": int(height_cm or PACKAGE_HEIGHT),
             "items": [{
                 "name":     items_description[:50] or "Комплектующие",
                 "ware_key": f"PART-{req_id}",
                 "payment":  {"value": 0},
-                "cost":     ITEM_COST,
+                "cost":     int(declared_cost if declared_cost is not None else ITEM_COST),
                 "amount":   1,
-                "weight":   PACKAGE_WEIGHT,
+                "weight":   int(weight_g or PACKAGE_WEIGHT),
             }],
         }],
     }
@@ -545,6 +579,7 @@ def get_order_by_uuid(uuid: str) -> dict:
         "status":       last_status.get("name", ""),
         "status_code":  last_status.get("code", ""),
         "actual_cost":  float(actual_cost) if actual_cost else None,
+        "planned_delivery_date": entity.get("planned_delivery_date") or "",
     }
 
 

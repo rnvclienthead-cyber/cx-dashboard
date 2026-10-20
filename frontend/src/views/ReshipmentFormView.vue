@@ -1,13 +1,12 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import IMask from 'imask'
 import { PackageCheck, CheckCircle2, AlertCircle, Loader2, Upload, X, Info, Send } from 'lucide-vue-next'
 import guideKomplImg from '../assets/guide-kompl.png'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
-const FORM_BASE = 'http://box.vidovito.com'
 
-const state = ref('form')   // form | loading | success | error | token_expired | token_used
+const state = ref('form')   // form | loading | success | error | token_expired | token_used | token_return_approved
 const errorMsg = ref('')
 const submittedReqId = ref(null)
 
@@ -56,7 +55,9 @@ onMounted(async () => {
       const res = await fetch(`${API_BASE}/api/v1/reshipment/check-token/${chatToken.value}`)
       const data = await res.json()
       if (!data.valid) {
-        state.value = data.reason === 'used' ? 'token_used' : 'token_expired'
+        if (data.reason === 'used') state.value = 'token_used'
+        else if (data.reason === 'return_approved') state.value = 'token_return_approved'
+        else state.value = 'token_expired'
       }
     } catch {}
   }
@@ -66,10 +67,16 @@ onMounted(async () => {
     categories.value = data.categories || []
   } catch {}
 
+  await nextTick()
   const phoneInput = document.getElementById('phone-input')
   if (phoneInput) {
-    IMask(phoneInput, { mask: '+{7} (000) 000-00-00', lazy: false, placeholderChar: '_' })
-    phoneInput.addEventListener('input', () => { form.customer_phone = phoneInput.value })
+    try {
+      IMask(phoneInput, { mask: '+{7} (000) 000-00-00', lazy: false, placeholderChar: '_' })
+      phoneInput.addEventListener('input', () => {
+        form.customer_phone = phoneInput.value
+        scheduleOzonCheck()
+      })
+    } catch {}
   }
 })
 
@@ -101,6 +108,44 @@ let suggestDebounce = null
 let addressRequestId = 0
 let suggestAbort = null
 let pickupAbort = null
+const ozonHint = ref('')
+const ozonEligible = ref(null)
+const ozonChecking = ref(false)
+let ozonCheckTimer = null
+
+const scheduleOzonCheck = () => {
+  clearTimeout(ozonCheckTimer)
+  ozonCheckTimer = setTimeout(checkOzonAccount, 400)
+}
+
+const checkOzonAccount = async () => {
+  const digits = String(form.customer_phone || '').replace(/\D/g, '')
+  if (digits.length < 11) {
+    ozonHint.value = ''
+    ozonEligible.value = null
+    return
+  }
+  ozonChecking.value = true
+  try {
+    const params = new URLSearchParams({ phone: form.customer_phone })
+    const res = await fetch(`${API_BASE}/api/v1/reshipment/ozon-check?${params}`)
+    const data = await res.json()
+    if (!data.enabled) {
+      ozonHint.value = ''
+      ozonEligible.value = null
+      return
+    }
+    ozonEligible.value = !!data.eligible
+    ozonHint.value = data.hint || ''
+  } catch {
+    ozonHint.value = ''
+    ozonEligible.value = null
+  } finally {
+    ozonChecking.value = false
+  }
+}
+
+watch(() => resolvedPickup.value, () => { scheduleOzonCheck() })
 
 const clearPickup = () => {
   resolvedPickup.value    = null
@@ -126,6 +171,7 @@ const onAddressInput = () => {
     pickupLoading.value = false
     return
   }
+  pickupError.value = ''
   // Быстрый список подсказок DaData (как привычный автокомплит)
   const suggestId = addressRequestId
   suggestDebounce = setTimeout(() => fetchAddressSuggestions(suggestId), 250)
@@ -148,8 +194,8 @@ const fetchAddressSuggestions = async (requestId) => {
     addressSuggestions.value = (data.suggestions || []).filter(s => s.selectable !== false)
     showSuggestions.value = addressSuggestions.value.length > 0
     if (!addressSuggestions.value.length && q.length >= 3) {
-      // Нет кликабельных подсказок — пробуем старый путь (город целиком)
-      addressDebounce = setTimeout(() => resolveTypedAddress(requestId), 400)
+      pickupError.value = 'Укажите улицу и номер дома — выберите адрес из списка'
+      addressImprecise.value = true
     }
   } catch (e) {
     if (e?.name === 'AbortError') return
@@ -165,6 +211,10 @@ const fetchAddressSuggestions = async (requestId) => {
 
 const pickSuggestion = async (item) => {
   if (!item?.value) return
+  if (item.selectable === false || item.address_imprecise) {
+    pickupError.value = 'Укажите улицу и номер дома'
+    return
+  }
   showSuggestions.value = false
   addressSuggestions.value = []
   addressQuery.value = item.value
@@ -205,17 +255,34 @@ const resolveTypedAddress = async (requestId = addressRequestId, preset = null) 
       params.set('lat', String(preset.lat))
       params.set('lon', String(preset.lon))
     }
+    if (form.customer_phone) params.set('phone', form.customer_phone)
     const res = await fetch(`${API_BASE}/api/v1/reshipment/nearest-pickup?${params}`, {
       signal: pickupAbort.signal,
     })
     const data = await res.json()
     if (requestId !== addressRequestId) return false
+    if (data.status === 'outside_russia') {
+      pickupError.value = data.message || 'Сейчас отправляем детали только по России'
+      return false
+    }
+    if (data.status === 'need_street') {
+      pickupError.value = data.message || 'Укажите улицу и номер дома'
+      addressImprecise.value = true
+      resolvedPickup.value = null
+      return false
+    }
     if (data.status !== 'success' || !data.data) {
       pickupError.value = 'Не нашли пункт выдачи рядом. Выберите адрес из списка подсказок'
       return false
     }
 
     const normalized = data.data
+    if (Boolean(normalized.address_imprecise)) {
+      pickupError.value = 'Укажите улицу и номер дома'
+      addressImprecise.value = true
+      resolvedPickup.value = null
+      return false
+    }
     addressQuery.value = normalized.address || query
     form.client_pvz_address = normalized.address || query
     form.client_pvz_city = normalized.city || query
@@ -310,11 +377,13 @@ const validate = () => {
   if (uploadedFiles.value.filter(f => f.url).length === 0)
                                     errors.photos = 'Прикрепите хотя бы одну фотографию'
   if (!resolvedPickup.value)        errors.pvz = 'Укажите адрес доставки — точку выдачи подберём автоматически'
+  if (addressImprecise.value)       errors.pvz = 'Укажите улицу и номер дома'
   if (!form.personal_data_consent)  errors.personal_data_consent = 'Необходимо согласие'
   return Object.keys(errors).length === 0
 }
 
 const submit = async () => {
+  if (state.value === 'loading') return
   if (!resolvedPickup.value && addressQuery.value.trim()) {
     state.value = 'loading'
     await resolveTypedAddress()
@@ -356,6 +425,10 @@ const submit = async () => {
       const detail = typeof data.detail === 'string' ? data.detail : (data.detail?.[0]?.msg || data.detail || 'Ошибка сервера')
       if (res.status === 409 && /ссылк/i.test(String(detail))) {
         state.value = 'token_used'
+        return
+      }
+      if (/возврат уже одобрен/i.test(String(detail))) {
+        state.value = 'token_return_approved'
         return
       }
       throw new Error(detail)
@@ -455,6 +528,18 @@ const submit = async () => {
           </p>
         </div>
 
+        <!-- Возврат уже одобрен -->
+        <div v-else-if="state === 'token_return_approved'" class="bg-white rounded-3xl p-10 text-center" style="box-shadow:0 4px 24px rgba(0,0,0,0.07);">
+          <div class="w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6" style="background:#FEF3C7;">
+            <AlertCircle class="w-10 h-10" style="color:#D97706;" />
+          </div>
+          <h2 class="text-2xl font-black mb-3" style="color:#1E2235;">Возврат уже одобрен</h2>
+          <p class="text-sm leading-relaxed" style="color:#6B7280;">
+            По этому заказу возврат уже согласован, форма доотправки закрыта.<br>
+            Если детали всё же нужны — напишите в чат, менеджер подскажет.
+          </p>
+        </div>
+
         <!-- Ссылка уже использована -->
         <div v-else-if="state === 'token_used'" class="bg-white rounded-3xl p-10 text-center" style="box-shadow:0 4px 24px rgba(0,0,0,0.07);">
           <div class="w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6" style="background:#F0FDF4;">
@@ -475,7 +560,7 @@ const submit = async () => {
           <div class="px-8 py-6" style="background:#1E2235;">
             <h1 class="text-xl font-black text-white mb-1">Заявка на отправку детали</h1>
             <p class="text-sm" style="color:#94A3B8;">
-              Заполните форму — мы проверим и организуем бесплатную отправку
+              Заполните форму — мы проверим и организуем бесплатную отправку по России
             </p>
           </div>
 
@@ -517,6 +602,13 @@ const submit = async () => {
                       errors.customer_phone ? 'border-red-300 bg-red-50' : '']"
                     :style="errors.customer_phone ? '' : 'border-color:#E5E7EB;'" />
                   <p v-if="errors.customer_phone" class="text-xs mt-1" style="color:#EF4444;">{{ errors.customer_phone }}</p>
+                  <p v-if="ozonChecking" class="text-xs mt-1.5" style="color:#9CA3AF;">Проверяем, можно ли отправить через Ozon…</p>
+                  <div v-else-if="ozonHint" class="mt-2 px-3 py-2 rounded-xl text-xs leading-relaxed"
+                    :style="ozonEligible
+                      ? 'background:#ECFDF5; border:1px solid #A7F3D0; color:#065F46;'
+                      : 'background:#FFF7ED; border:1px solid #FED7AA; color:#9A3412;'">
+                    {{ ozonHint }}
+                  </div>
                 </div>
 
                 <div>
@@ -742,7 +834,10 @@ const submit = async () => {
                 <div class="flex-1 h-px" style="background:#F0F0F0;"></div>
               </div>
 
-              <p class="text-xs mb-3" style="color:#9CA3AF;">Начните вводить город и улицу — выберите адрес из списка. ПВЗ подберём автоматически.</p>
+              <p class="text-xs mb-3" style="color:#9CA3AF;">
+                Начните вводить город и улицу в России — выберите адрес из списка. ПВЗ подберём автоматически.
+                В другие страны сейчас не отправляем.
+              </p>
 
               <!-- Адрес: подсказки DaData → затем проверка ПВЗ -->
               <div class="relative">
@@ -809,18 +904,16 @@ const submit = async () => {
                 </div>
               </div>
 
-              <!-- Предупреждение: указан только город, без улицы -->
-              <div v-if="resolvedPickup && addressImprecise"
+              <div v-if="addressImprecise && !resolvedPickup"
                 class="mt-2 px-4 py-3 rounded-2xl flex items-start gap-2"
-                style="background:#FFF3CD; border:1.5px solid #F59E0B;">
-                <svg class="w-4 h-4 flex-shrink-0 mt-0.5" style="color:#B45309;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                style="background:#FEF2F2; border:1.5px solid #FCA5A5;">
+                <svg class="w-4 h-4 flex-shrink-0 mt-0.5" style="color:#EF4444;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
                 </svg>
                 <div>
-                  <div class="text-xs font-bold" style="color:#92400E;">Указан только город — уточните адрес</div>
-                  <div class="text-xs mt-0.5 leading-relaxed" style="color:#78350F;">
-                    Без улицы и номера дома ПВЗ будет выбран ближайший к центру города.
-                    Для точного подбора укажите улицу и дом — так ПВЗ окажется рядом с вами.
+                  <div class="text-xs font-bold" style="color:#991B1B;">Нужны улица и дом</div>
+                  <div class="text-xs mt-0.5 leading-relaxed" style="color:#7F1D1D;">
+                    Без улицы заявку отправить нельзя. Выберите адрес из списка вместе с улицей и номером дома.
                   </div>
                 </div>
               </div>

@@ -1,0 +1,9 @@
+[Unit]
+Description=Ozon cabinet bot tick (VPN-isolated Chrome)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=OZON_BOT_FORCE=0
+ExecStart=/root/cx-dashboard/scripts/ozon_bot_tick_vps.sh
+Nice=10

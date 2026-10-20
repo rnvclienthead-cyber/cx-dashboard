@@ -27,7 +27,7 @@ def _post(path: str, body: dict) -> dict:
 
 
 def _collect_articles(get_db_func) -> list[str]:
-    """Собирает все известные supplier_article из БД (wb_assortment + ozon_returns)."""
+    """Собирает все известные артикулы (ассортимент, возвраты, заказы, вопросы, чаты)."""
     db = next(get_db_func())
     try:
         with db.bind.connect() as conn:
@@ -35,7 +35,13 @@ def _collect_articles(get_db_func) -> list[str]:
                 SELECT DISTINCT supplier_article FROM (
                     SELECT supplier_article FROM wb_assortment WHERE supplier_article IS NOT NULL
                     UNION
-                    SELECT supplier_article FROM ozon_returns  WHERE supplier_article IS NOT NULL
+                    SELECT supplier_article FROM ozon_returns WHERE supplier_article IS NOT NULL
+                    UNION
+                    SELECT supplier_article FROM ozon_orders WHERE supplier_article IS NOT NULL
+                    UNION
+                    SELECT supplier_article FROM ozon_questions WHERE supplier_article IS NOT NULL
+                    UNION
+                    SELECT context_article FROM ozon_chats WHERE context_article IS NOT NULL
                 ) t
             """)).fetchall()
         return [r[0] for r in rows if r[0]]

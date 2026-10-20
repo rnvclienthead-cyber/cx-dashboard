@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { Lock, AlertCircle, CheckCircle2 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -93,9 +93,9 @@ const handleSubmit = async () => {
       </form>
 
       <div class="mt-6 text-center">
-        <button @click="$router.push('/login')" class="text-sm font-bold text-slate-400 hover:text-blue-600 transition-colors">
+        <RouterLink to="/login" class="text-sm font-bold text-slate-400 hover:text-blue-600 transition-colors">
           ← Вернуться к входу
-        </button>
+        </RouterLink>
       </div>
 
     </div>

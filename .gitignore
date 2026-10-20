@@ -8,6 +8,8 @@ bot_api_key.json
 # python
 __pycache__/
 *.pyc
+backend/.ozon_pvz_cache.json
+backend/.ozon_map_points.json
 
 # системный мусор
 .DS_Store
@@ -20,8 +22,24 @@ local_uploads/
 /tmp/
 /tmp_ym_movement/
 /tmp_*.py
+/_tmp_*.py
 /label_*.png
 /label_*.pdf
 /scripts/_tmp_*.env
 /scripts/_tmp_*.py
+/scripts/tshopping_poller.log
+/_tmp_kontrolmp/
+/_tmp_hub/
 /ym_2fa_code.txt
+
+# не код проекта: сессии браузера, снимки кабинета, кэш сборки
+/node_modules/
+/package.json
+/package-lock.json
+/ozon_browser_profile/
+/ozon_session.json
+/ozon_*.json
+/ozon_*.log
+/ozon_*.png
+/cloudflare/.wrangler/
+/shop-cscart/*.zip

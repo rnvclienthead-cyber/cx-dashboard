@@ -4,7 +4,7 @@ import {
   HelpCircle, Search, ChevronDown, ChevronUp,
   Package, Ruler, Wrench, RotateCcw, ShoppingBag, Dumbbell, Clock,
   MessageCircle, X, TrendingUp, ClipboardList, UserCheck, Copy, Check,
-  LayoutGrid, ChevronRight, Loader2, ExternalLink, AlertTriangle
+  LayoutGrid, ChevronRight, Loader2, ExternalLink, AlertTriangle, PackageCheck
 } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 
@@ -149,10 +149,27 @@ const faqs = [
       'Сдать товар на ПВЗ в любой упаковке. Деньги вернутся в течение 3–10 рабочих дней.',
     ],
     staffFlow: [
-      'Уточнить у покупателя: какая именно деталь отсутствует и есть ли у него возможность отправить фото через Чат с продавцом.',
-      'Проверить в разделе «Отправка деталей» — есть ли техническая возможность доотправить нужную деталь через СДЭК. Если есть — предложить, это лучше для покупателя, чем возврат.',
-      'Если доотправка невозможна — дать стандартный шаблонный ответ с инструкцией по возврату.',
+      'Сверить артикул со списком «Кому отправляем детали» на этой странице — он совпадает с настройкой бота.',
+      'Если товар в списке «можно» (WB, Ozon и Яндекс Маркет) — предложить доотправку через «Отправка деталей» и форму в чате.',
+      'Если товара в списке нет — стандартный возврат с пометкой «Брак», доотправку не обещать.',
       'Зафиксировать в комментарии к заказу тип недостающей детали — помогает выявлять системные проблемы упаковки.',
+    ],
+  },
+  {
+    id: 'missing-skus', category: 'missing', freq: 18,
+    q: 'По каким товарам можно отправить деталь, а по каким только возврат?',
+    template: `Здравствуйте! Если не хватает детали, сначала напишите нам артикул из заказа — по части товаров мы бесплатно досылаем комплектующие, по остальным поможет только возврат. С уважением, Софья из команды Видовито.`,
+    clientFlow: [
+      'Назвать артикул из заказа в чате с продавцом.',
+      'Если товар из списка доотправки — придёт ссылка на форму, деталь отправим бесплатно.',
+      'Если товара в списке нет — оформить возврат: Профиль → Покупки → «Вернуть товар» → причина «Брак».',
+      'На Ozon, если товар в списке, деталь тоже досылаем: в чате придёт ссылка на форму.',
+    ],
+    staffFlow: [
+      'Открыть зелёный список на этой странице — это актуальные товары, которым шлём детали.',
+      'Артикул есть в «можно» — на WB, Ozon и ЯМ форма доотправки, не возврат.',
+      'Артикула нет в «можно» — только возврат, форму не отправлять.',
+      'Список меняется в разделе «Отправка деталей» → Товары. Здесь он подтягивается сам.',
     ],
   },
   {
@@ -218,9 +235,9 @@ const faqs = [
       'Швабра без ведра — в текущем ассортименте не выставлена, поискать аналог на WB по диаметру стакана для отжима (28–32 мм).',
     ],
     staffFlow: [
-      'Сначала проверить через раздел «Отправка деталей» — есть ли возможность доотправить нужную деталь через СДЭК.',
-      'Если доотправка невозможна — дать шаблонный ответ и порекомендовать хозяйственный магазин.',
-      'Не обещать того, чего нет в наличии — стандартный ответ: «у нас, к сожалению, комплектующих отдельно нет».',
+      'Сверить артикул со списком «Кому отправляем детали» на этой странице.',
+      'Если товар в «можно» (WB/ЯМ) — доотправка. Если нет или площадка Ozon — шаблонный ответ, запчасти отдельно не продаём, возврат.',
+      'Не обещать досылку по товарам из красного списка.',
     ],
   },
   {
@@ -260,6 +277,66 @@ const filteredFaqs = computed(() => {
 
 const expandAll   = () => { openItems.value = new Set(filteredFaqs.value.map(f => f.id)) }
 const collapseAll = () => { openItems.value = new Set() }
+
+const skuAllowed = ref([])
+const skuDenied = ref([])
+const skuLoading = ref(false)
+const skuError = ref('')
+const skuQuery = ref('')
+const skuShowDenied = ref(false)
+
+function groupSkuRows(items) {
+  const map = new Map()
+  for (const it of items || []) {
+    const article = String(it.article || '').trim()
+    if (!article) continue
+    const group = String(it.group_name || '').trim() || 'Без группы'
+    if (!map.has(group)) map.set(group, [])
+    const list = map.get(group)
+    if (!list.includes(article)) list.push(article)
+  }
+  return [...map.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], 'ru'))
+    .map(([group, articles]) => ({
+      group,
+      articles: articles.slice().sort((a, b) => a.localeCompare(b, 'ru')),
+    }))
+}
+
+const skuNeedle = computed(() => skuQuery.value.trim().toLowerCase())
+
+function skuMatches(it) {
+  const q = skuNeedle.value
+  if (!q) return true
+  return `${it.article} ${it.group_name}`.toLowerCase().includes(q)
+}
+
+const skuAllowedGroups = computed(() => groupSkuRows(skuAllowed.value.filter(skuMatches)))
+const skuDeniedGroups = computed(() => groupSkuRows(skuDenied.value.filter(skuMatches)))
+const skuAllowedCount = computed(() => skuAllowedGroups.value.reduce((n, g) => n + g.articles.length, 0))
+const skuDeniedCount = computed(() => skuDeniedGroups.value.reduce((n, g) => n + g.articles.length, 0))
+const showSkuPanel = computed(() =>
+  ['all', 'missing', 'spareparts'].includes(activeCategory.value)
+)
+
+async function loadReshipmentSkus() {
+  skuLoading.value = true
+  skuError.value = ''
+  try {
+    const res = await apiFetch('/api/v1/faq/reshipment-skus')
+    const data = await res.json()
+    skuAllowed.value = data.allowed || []
+    skuDenied.value = data.denied || []
+  } catch (e) {
+    skuError.value = 'Не удалось загрузить список товаров'
+  } finally {
+    skuLoading.value = false
+  }
+}
+
+onMounted(() => {
+  loadReshipmentSkus()
+})
 
 // ─── ПО КАРТОЧКАМ ─────────────────────────────────────────────────────
 const cards         = ref([])
@@ -397,6 +474,80 @@ const maxTotal = computed(() => Math.max(...(filteredCards.value.map(c => c.tota
           {{ cat.label }}
           <span v-if="cat.id !== 'all'" class="text-[11px] opacity-75">({{ faqs.filter(f => f.category === cat.id).length }})</span>
         </button>
+      </div>
+
+      <div v-if="showSkuPanel" class="bg-white rounded-2xl border border-emerald-200 shadow-sm overflow-hidden">
+        <div class="px-5 py-3 border-b border-emerald-100 bg-emerald-50/80 flex items-start gap-3">
+          <PackageCheck class="w-5 h-5 text-emerald-700 flex-shrink-0 mt-0.5" />
+          <div class="min-w-0">
+            <p class="text-sm font-black text-emerald-900">Кому отправляем детали</p>
+            <p class="text-xs text-emerald-800/80 mt-0.5">
+              WB, Ozon и Яндекс Маркет — только товары из зелёного списка. Если артикула нет в списке — только возврат.
+              Список тот же, что у бота и в разделе «Отправка деталей».
+            </p>
+          </div>
+        </div>
+        <div class="px-5 py-3 border-b border-slate-100">
+          <div class="relative">
+            <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input v-model="skuQuery" type="text" placeholder="Проверить артикул: 2-СБ, BO-White, Mop…"
+              class="w-full pl-9 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+            <button v-if="skuQuery" @click="skuQuery = ''" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+              <X class="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+        <div v-if="skuLoading" class="px-5 py-8 flex items-center justify-center text-slate-500 text-sm">
+          <Loader2 class="w-4 h-4 animate-spin mr-2" /> Загружаем список…
+        </div>
+        <div v-else-if="skuError" class="px-5 py-4 text-sm text-rose-600">{{ skuError }}</div>
+        <div v-else class="px-5 py-4 space-y-4">
+          <div>
+            <p class="text-xs font-black uppercase tracking-wide text-emerald-800 mb-2">
+              Можно отправить деталь
+              <span class="font-semibold normal-case tracking-normal text-emerald-700">· {{ skuAllowedCount }}</span>
+            </p>
+            <div v-if="skuAllowedGroups.length === 0" class="text-sm text-slate-500">
+              {{ skuQuery ? 'В зелёном списке такого артикула нет — только возврат.' : 'Пока ни один товар не отмечен.' }}
+            </div>
+            <div v-else class="space-y-3">
+              <div v-for="g in skuAllowedGroups" :key="'ok-' + g.group">
+                <p class="text-[11px] font-bold text-slate-500 mb-1.5">{{ g.group }}</p>
+                <div class="flex flex-wrap gap-1.5">
+                  <span v-for="art in g.articles" :key="art"
+                    class="inline-flex items-center px-2 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800">
+                    {{ art }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <button type="button" @click="skuShowDenied = !skuShowDenied"
+              class="flex items-center gap-2 text-xs font-black uppercase tracking-wide text-rose-800">
+              <ChevronDown v-if="!(skuShowDenied || skuQuery)" class="w-3.5 h-3.5" />
+              <ChevronUp v-else class="w-3.5 h-3.5" />
+              Только возврат
+              <span class="font-semibold normal-case tracking-normal text-rose-700">· {{ skuDeniedCount }}</span>
+            </button>
+            <div v-if="skuShowDenied || skuQuery" class="mt-2">
+              <div v-if="skuDeniedGroups.length === 0" class="text-sm text-slate-500">
+                {{ skuQuery ? 'Этого артикула нет и в списке «нельзя» — тоже только возврат.' : 'Отдельный список «нельзя» пуст.' }}
+              </div>
+              <div v-else class="space-y-3">
+                <div v-for="g in skuDeniedGroups" :key="'no-' + g.group">
+                  <p class="text-[11px] font-bold text-slate-500 mb-1.5">{{ g.group }}</p>
+                  <div class="flex flex-wrap gap-1.5">
+                    <span v-for="art in g.articles" :key="art"
+                      class="inline-flex items-center px-2 py-1 rounded-lg bg-rose-50 border border-rose-200 text-xs font-medium text-rose-800">
+                      {{ art }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="flex items-center justify-between">

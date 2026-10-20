@@ -21,16 +21,20 @@ export function useCxQueueActions(queueItems, showToast) {
     const path = resolveEndpoint(item)
     if (!path) { showToast('Этот тип нельзя отправить', 'error'); return }
     try {
-      await apiFetch(`${CX_BASE}${path}`, {
+      const res = await apiFetch(`${CX_BASE}${path}`, {
         method: 'POST',
         body: JSON.stringify({ text: txt }),
       })
-      showToast('Ответ отправлен', 'ok')
+      let via = ''
+      try { via = (await res.json())?.via || '' } catch { via = '' }
+      showToast(via === 'cabinet_bot' ? 'Бот отправит клиенту' : 'Ответ отправлен', 'ok')
       queueItems.value = queueItems.value.filter(i =>
         !(i.mp === item.mp && i.item_type === item.item_type && String(i.id) === String(item.id))
       )
+      return true
     } catch (e) {
       showToast('Ошибка отправки: ' + (e?.message || ''), 'error')
+      return false
     }
   }
 

@@ -15,10 +15,15 @@
 """
 import os
 import re
+import time
 import asyncio
 from typing import Optional
+import requests
 from backend.database import db_session
 from backend import wb_client
+
+_CHATS_CACHE_TTL = 20
+_chats_cache: dict = {"ts": 0.0, "data": None}
 
 TOKEN_PATTERN  = re.compile(
     r'(?:https?://)?box\.vidovito\.com(?:/reshipment/form)?\?t=([\w\-]+)',
@@ -49,36 +54,113 @@ def _trigger() -> str:
 
 # ── API вызовы ────────────────────────────────────────────────────────────────
 
-def get_chats() -> list[dict]:
-    """Список всех чатов продавца."""
-    return wb_client.get_chats(key=_key())
+def invalidate_chats_cache() -> None:
+    _chats_cache["ts"] = 0.0
+    _chats_cache["data"] = None
+
+
+def get_chats(*, timeout: int = 90) -> list[dict]:
+    """Список всех чатов продавца. Короткий кэш, чтобы не ловить 429 WB."""
+    now = time.time()
+    cached = _chats_cache.get("data")
+    if cached is not None and (now - float(_chats_cache.get("ts") or 0)) < _CHATS_CACHE_TTL:
+        return cached
+    last_err = None
+    for attempt in range(4):
+        try:
+            data = wb_client.get_chats(key=_key(), timeout=timeout)
+            _chats_cache["ts"] = time.time()
+            _chats_cache["data"] = data
+            return data
+        except requests.HTTPError as e:
+            last_err = e
+            if getattr(e.response, "status_code", 0) == 429:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
+        except Exception as e:
+            last_err = e
+            break
+    if cached is not None:
+        return cached
+    if last_err:
+        raise last_err
+    return []
 
 
 def ensure_chat_order_rid_column(engine_or_conn) -> None:
     """Колонка order_rid: srid заказа из goodCard чата WB (не всегда есть в событиях сообщений)."""
     from sqlalchemy import text as sql_text
+    from .database import add_column_if_missing, index_exists
     conn = engine_or_conn
     close = False
     if hasattr(engine_or_conn, "connect"):
         conn = engine_or_conn.connect()
         close = True
     try:
-        exists = conn.execute(sql_text("""
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'wb_chats' AND column_name = 'order_rid'
-        """)).scalar()
-        if not exists:
-            conn.execute(sql_text("ALTER TABLE wb_chats ADD COLUMN order_rid TEXT"))
+        added_rid = add_column_if_missing(
+            conn, "wb_chats", "order_rid",
+            "ALTER TABLE wb_chats ADD COLUMN order_rid TEXT",
+        )
+        if added_rid:
             conn.commit()
-        # индекс — отдельно; IF NOT EXISTS не требует ACCESS EXCLUSIVE на всю таблицу так же жёстко
-        conn.execute(sql_text("""
-            CREATE INDEX IF NOT EXISTS idx_wb_chats_order_rid
-            ON wb_chats (order_rid) WHERE order_rid IS NOT NULL AND order_rid <> ''
-        """))
+        if not index_exists(conn, "idx_wb_chats_order_rid"):
+            conn.execute(sql_text("""
+                CREATE INDEX idx_wb_chats_order_rid
+                ON wb_chats (order_rid) WHERE order_rid IS NOT NULL AND order_rid <> ''
+            """))
+        add_column_if_missing(
+            conn, "wb_chats", "pre_purchase",
+            "ALTER TABLE wb_chats ADD COLUMN pre_purchase BOOLEAN",
+        )
         conn.commit()
     finally:
         if close:
             conn.close()
+
+
+def refresh_pre_purchase_flags(chats: list | None) -> dict:
+    """Пометить чаты, которых нет в GET /seller/chats, хотя по времени они туда должны попадать.
+
+    Гипотеза «До покупки»: WB отдаёт в список только чаты с заказом (лимит ~5000),
+    а чаты с карточки товара в тот же список не кладёт.
+    """
+    from sqlalchemy import bindparam
+    from sqlalchemy import text as sql_text
+
+    ids = [str(c.get("chatID") or "") for c in (chats or []) if c.get("chatID")]
+    ts = []
+    for c in chats or []:
+        t = int(((c.get("lastMessage") or {}).get("addTimestamp")) or 0)
+        if t > 0:
+            ts.append(t)
+    if len(ids) < 10 or not ts:
+        return {"ok": False, "listed": len(ids), "marked": 0}
+
+    tmin, tmax = min(ts), max(ts)
+    marked = 0
+    cleared = 0
+    with db_session() as db:
+        ensure_chat_order_rid_column(db.bind)
+        cleared = db.execute(sql_text("""
+            UPDATE wb_chats SET pre_purchase = false
+            WHERE chat_id IN :ids AND pre_purchase IS DISTINCT FROM false
+        """).bindparams(bindparam("ids", expanding=True)), {"ids": ids}).rowcount or 0
+        marked = db.execute(sql_text("""
+            UPDATE wb_chats SET pre_purchase = true
+            WHERE last_ts BETWEEN :tmin AND :tmax
+              AND chat_id NOT IN :ids
+              AND pre_purchase IS DISTINCT FROM true
+        """).bindparams(bindparam("ids", expanding=True)), {
+            "ids": ids, "tmin": tmin, "tmax": tmax,
+        }).rowcount or 0
+        db.commit()
+    try:
+        from . import chat_realtime
+        chat_realtime.invalidate_chats_queue_cache("wb")
+    except Exception:
+        pass
+    return {"ok": True, "listed": len(ids), "cleared": int(cleared), "marked": int(marked)}
 
 
 def backfill_order_rids_from_wb(db=None) -> dict:
@@ -170,6 +252,11 @@ def backfill_order_rids_from_wb(db=None) -> dict:
     except Exception:
         pass
     print(f"[WB Chat] backfill_order_rids: chats={len(chats or [])} touched={updated} with_rid={with_rid}")
+    try:
+        flags = refresh_pre_purchase_flags(chats)
+        print(f"[WB Chat] pre_purchase flags: {flags}")
+    except Exception as e:
+        print(f"[WB Chat] pre_purchase flags error: {e}")
     return {"ok": True, "chats": len(chats or []), "updated": updated, "with_rid": with_rid}
 
 
@@ -195,15 +282,15 @@ def send_message(reply_sign: str, text: str) -> dict:
     return r.json() or {}
 
 
-def resolve_reply_sign(chat_id: str) -> str:
+def resolve_reply_sign(chat_id: str, *, timeout: int = 25) -> str:
     """
-    Актуальный replySign для чата.
-    WB требует свежую подпись из GET /seller/chats — без неё сообщение не уйдёт.
+    Актуальный replySign для чата из GET /seller/chats.
+    Нужен, если сохранённая подпись пустая или WB её отверг.
     """
     if not chat_id or not _key():
         return ""
     try:
-        chats = get_chats()
+        chats = get_chats(timeout=timeout)
     except Exception as e:
         print(f"[WB Chat] resolve_reply_sign get_chats error: {e}")
         return ""
@@ -491,6 +578,11 @@ async def start_worker(get_db) -> None:
     что и аналогичное сканирование в wb_mini_sync.
     """
     print("[WB Chat] Worker started (messages every 60s, full chat scan every ~5 min)")
+    await asyncio.sleep(20)
+    try:
+        await asyncio.to_thread(scan_chats_for_tokens, get_db)
+    except Exception as e:
+        print(f"[WB Chat] Startup scan error: {e}")
     cycle = 0
     while True:
         await asyncio.sleep(60)
@@ -517,6 +609,12 @@ def scan_chats_for_tokens(get_db) -> int:
     except Exception as e:
         print(f"[WB Chat] scan_chats_for_tokens: get_chats error: {e}")
         return 0
+
+    try:
+        flags = refresh_pre_purchase_flags(chats)
+        print(f"[WB Chat] pre_purchase flags: {flags}")
+    except Exception as e:
+        print(f"[WB Chat] pre_purchase flags error: {e}")
 
     linked = 0
     for chat in chats:

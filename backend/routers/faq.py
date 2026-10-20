@@ -91,3 +91,39 @@ def faq_by_card(
             "topics":   r.topics or [],
         })
     return {"cards": result}
+
+
+@router.get("/reshipment-skus")
+def faq_reshipment_skus(
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """Живой список: кому шлём детали, кому только возврат. Тот же источник, что у бота."""
+    rows = db.execute(text("""
+        SELECT DISTINCT ON (lower(replace(s.supplier_article, ' ', '')))
+            s.supplier_article,
+            s.enabled,
+            COALESCE(g.name, '') AS group_name
+        FROM cx_reshipment_skus s
+        LEFT JOIN cx_kb_articles ka
+               ON ka.article = lower(replace(s.supplier_article, ' ', ''))
+        LEFT JOIN cx_kb_groups g ON g.id = ka.group_id
+        ORDER BY lower(replace(s.supplier_article, ' ', '')), s.enabled DESC, s.supplier_article
+    """)).mappings().all()
+    allowed, denied = [], []
+    for r in rows:
+        item = {
+            "article": r["supplier_article"],
+            "group_name": r["group_name"] or "",
+        }
+        if r["enabled"]:
+            allowed.append(item)
+        else:
+            denied.append(item)
+    allowed.sort(key=lambda x: ((x["group_name"] or "яяя").lower(), x["article"]))
+    denied.sort(key=lambda x: ((x["group_name"] or "яяя").lower(), x["article"]))
+    return {
+        "allowed": allowed,
+        "denied": denied,
+        "ozon_reshipment": False,
+    }

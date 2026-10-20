@@ -1,0 +1,14 @@
+name = "lingering-recipe-b1b3"
+main = "telegram-worker.js"
+compatibility_date = "2024-11-12"
+
+# Внешний монитор: каждые 2 минуты пингуем cxvo.ru со стороны Cloudflare.
+[triggers]
+crons = ["*/2 * * * *"]
+
+# Память между запусками (алерт один раз + напоминания + «снова в строю»).
+# Создать один раз: Cloudflare → Storage & Databases → KV → namespace,
+# затем привязать к Worker под именем CX_MONITOR.
+# [[kv_namespaces]]
+# binding = "CX_MONITOR"
+# id = "СЮДА_ID_НЕЙМСПЕЙСА"

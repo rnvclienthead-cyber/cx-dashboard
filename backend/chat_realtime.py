@@ -90,6 +90,28 @@ def publish_chat_removed(chat_id: str, mp: str = "wb") -> bool:
     })
 
 
+def publish_chat_seen(chat_id: str, mp: str, seen_ts: int) -> bool:
+    """Кто-то открыл чат — для всей команды он больше не «новый»."""
+    if not chat_id:
+        return False
+    invalidate_chats_queue_cache(mp)
+    return centrifugo.publish(CHANNEL, {
+        "type": "chat_seen",
+        "chat_id": str(chat_id),
+        "mp": (mp or "wb").lower(),
+        "seen_ts": int(seen_ts or 0),
+    })
+
+
+def publish_chats_seen_all(mp: str = "all") -> bool:
+    """«Все прочитано» — сбросить «новые» у всей команды."""
+    invalidate_chats_queue_cache(mp)
+    return centrifugo.publish(CHANNEL, {
+        "type": "chats_seen_all",
+        "mp": (mp or "all").lower(),
+    })
+
+
 def schedule_suggest_precompute(mp: str, chat_id: str) -> None:
     """Фоном считает подсказку и кладёт в cx_chat_bot_suggest_cache."""
     mp = (mp or "wb").lower()

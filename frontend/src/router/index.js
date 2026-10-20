@@ -1,40 +1,10 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { usePermissionsStore } from '../stores/permissions'
-
-import SynchronizerView from '../views/SynchronizerView.vue'
-import AITaggingView from '../views/AITaggingView.vue'
-import ModerationView from '../views/ModerationView.vue'
-import AITrainingView from '../views/AITrainingView.vue'
-import SystemLogsView from '../views/SystemLogsView.vue'
-import ProductionView from '../views/ProductionView.vue'
-import PPMView from '../views/PPMView.vue'
-import RatingsView from '../views/RatingsView.vue'
-import LoginView from '../views/LoginView.vue'
-import AdminView from '../views/AdminView.vue'
-import FinancialLossView from '../views/FinancialLossView.vue'
-import VocView from '../views/VocView.vue'
-import CxControlView from '../views/CxControlView.vue'
-import ExecutiveDashboardView from '../views/ExecutiveDashboardView.vue'
-import RegistryView from '../views/RegistryView.vue'
-import ReshipmentView from '../views/ReshipmentView.vue'
-import ReshipmentFormView from '../views/ReshipmentFormView.vue'
-import ReshipmentConfirmView from '../views/ReshipmentConfirmView.vue'
-import ResetPasswordView from '../views/ResetPasswordView.vue'
-import DocsView from '../views/DocsView.vue'
-import FAQView from '../views/FAQView.vue'
-import ReturnScanView from '../views/ReturnScanView.vue'
-import ReturnCardView from '../views/ReturnCardView.vue'
-import ReturnBatchView from '../views/ReturnBatchView.vue'
-import PnLView from '../views/PnLView.vue'
-import ReviewsView from '../views/ReviewsView.vue'
-import QuestionsView from '../views/QuestionsView.vue'
-import ChatsView from '../views/ChatsView.vue'
-import ReturnsView from '../views/ReturnsView.vue'
+import { getAuthToken, getAuthRole, rememberAfterLogin, markSessionUse } from '../authStorage'
 
 // Порядок совпадает с порядком в сайдбаре — первый доступный модуль станет стартовой страницей
 export const MODULE_ROUTES = [
   { module: 'dashboard',   path: '/' },
-  { module: 'admin_panel', path: '/admin' },
   { module: 'sync',        path: '/sync' },
   { module: 'ai_tagging',  path: '/ai-tagging' },
   { module: 'moderation',  path: '/moderation' },
@@ -48,12 +18,15 @@ export const MODULE_ROUTES = [
   { module: 'ratings',     path: '/ratings' },
   { module: 'finances',    path: '/finances' },
   { module: 'reshipment',  path: '/reshipment' },
+  { module: 'warehouse_intake', path: '/intake' },
+  { module: 'shop_orders', path: '/shop-orders' },
   { module: 'pnl',         path: '/pnl' },
   { module: 'faq',         path: '/faq' },
   { module: 'docs',        path: '/docs' },
   { module: 'cx_responses', path: '/reviews' },
   { module: 'cx_responses', path: '/questions' },
   { module: 'cx_responses', path: '/chats' },
+  { module: 'tshopping', path: '/tshopping' },
   { module: 'cx_responses', path: '/returns' },
   { module: 'quality_questions', path: '/questions/quality' },
 ]
@@ -64,51 +37,79 @@ const router = createRouter({
     {
       path: '/',
       name: 'dashboard',
-      component: window.location.hostname.includes('vidovito.com') ? ReshipmentFormView : ExecutiveDashboardView,
+      component: () => window.location.hostname.includes('vidovito.com')
+        ? import('../views/ReshipmentFormView.vue')
+        : import('../views/ExecutiveDashboardView.vue'),
       meta: window.location.hostname.includes('vidovito.com') ? { public: true } : { requiresAuth: true },
     },
-    { path: '/sync',                     name: 'sync',              component: SynchronizerView,       meta: { requiresAuth: true } },
-    { path: '/ai-tagging',               name: 'tagging',           component: AITaggingView,          meta: { requiresAuth: true } },
-    { path: '/moderation',               name: 'moderation',        component: ModerationView,         meta: { requiresAuth: true } },
-    { path: '/ai-training',              name: 'training',          component: AITrainingView,         meta: { requiresAuth: true } },
-    { path: '/logs',                     name: 'logs',              component: SystemLogsView,         meta: { requiresAuth: true } },
-    { path: '/production',               name: 'production',        component: ProductionView,         meta: { requiresAuth: true } },
-    { path: '/ratings',                  name: 'ratings',           component: RatingsView,            meta: { requiresAuth: true } },
-    { path: '/ppm',                      name: 'ppm',               component: PPMView,                meta: { requiresAuth: true } },
-    { path: '/login',                    name: 'login',             component: LoginView },
-    { path: '/admin',                    name: 'admin',             component: AdminView,              meta: { requiresAuth: true } },
-    { path: '/finances',                 name: 'finances',          component: FinancialLossView,      meta: { requiresAuth: true } },
-    { path: '/voc',                      name: 'voc',               component: VocView,                meta: { requiresAuth: true } },
-    { path: '/cx-control',               name: 'cx-control',         component: CxControlView,          meta: { requiresAuth: true } },
-    { path: '/registry',                 name: 'registry',          component: RegistryView,           meta: { requiresAuth: true } },
-    { path: '/reshipment',               name: 'reshipment',        component: ReshipmentView,         meta: { requiresAuth: true } },
-    { path: '/reshipment/form',          name: 'reshipment-form',   component: ReshipmentFormView,     meta: { public: true } },
-    { path: '/reshipment/confirm/:token',name: 'reshipment-confirm',component: ReshipmentConfirmView,  meta: { public: true } },
-    { path: '/reset-password',           name: 'reset-password',    component: ResetPasswordView,      meta: { public: true } },
-    { path: '/docs',                      name: 'docs',              component: DocsView,               meta: { requiresAuth: true } },
-    { path: '/pnl',                       name: 'pnl',               component: PnLView,                meta: { requiresAuth: true } },
-    { path: '/faq',                       name: 'faq',               component: FAQView,                meta: { requiresAuth: true } },
-    { path: '/reviews',                  name: 'reviews',           component: ReviewsView,            meta: { requiresAuth: true } },
-    { path: '/questions',                name: 'questions',         component: QuestionsView,          meta: { requiresAuth: true } },
-    { path: '/questions/quality',        name: 'quality-questions', component: QuestionsView,          meta: { requiresAuth: true } },
-    { path: '/chats',                    name: 'chats',             component: ChatsView,              meta: { requiresAuth: true } },
-    { path: '/returns',                  name: 'returns',           component: ReturnsView,            meta: { requiresAuth: true } },
-    { path: '/return/scan',              name: 'return-scan',       component: ReturnScanView,         meta: { public: true } },
-    { path: '/return/batch/:incomeId',   name: 'return-batch',      component: ReturnBatchView,        meta: { public: true } },
-    { path: '/return/:srid',             name: 'return-card',       component: ReturnCardView,         meta: { public: true } },
+    { path: '/sync',                     name: 'sync',              component: () => import('../views/SynchronizerView.vue'),       meta: { requiresAuth: true } },
+    { path: '/ai-tagging',               name: 'tagging',           component: () => import('../views/AITaggingView.vue'),          meta: { requiresAuth: true } },
+    { path: '/moderation',               name: 'moderation',        component: () => import('../views/ModerationView.vue'),         meta: { requiresAuth: true } },
+    { path: '/ai-training',              name: 'training',          component: () => import('../views/AITrainingView.vue'),         meta: { requiresAuth: true } },
+    { path: '/logs',                     name: 'logs',              component: () => import('../views/SystemLogsView.vue'),         meta: { requiresAuth: true } },
+    { path: '/production',               name: 'production',        component: () => import('../views/ProductionView.vue'),         meta: { requiresAuth: true } },
+    { path: '/ratings',                  name: 'ratings',           component: () => import('../views/RatingsView.vue'),            meta: { requiresAuth: true } },
+    { path: '/ppm',                      name: 'ppm',               component: () => import('../views/PPMView.vue'),                meta: { requiresAuth: true } },
+    { path: '/login',                    name: 'login',             component: () => import('../views/LoginView.vue') },
+    {
+      path: '/admin',
+      name: 'admin',
+      meta: { public: true },
+      beforeEnter() {
+        window.location.replace('https://hub.cxvo.ru')
+        return false
+      },
+      component: { render: () => null },
+    },
+    { path: '/finances',                 name: 'finances',          component: () => import('../views/FinancialLossView.vue'),      meta: { requiresAuth: true } },
+    { path: '/voc',                      name: 'voc',               component: () => import('../views/VocView.vue'),                meta: { requiresAuth: true } },
+    { path: '/cx-control',               name: 'cx-control',         component: () => import('../views/CxControlView.vue'),          meta: { requiresAuth: true } },
+    { path: '/registry',                 name: 'registry',          component: () => import('../views/RegistryView.vue'),           meta: { requiresAuth: true } },
+    { path: '/reshipment',               name: 'reshipment',        component: () => import('../views/ReshipmentView.vue'),         meta: { requiresAuth: true } },
+    { path: '/intake',                   name: 'intake',            component: () => import('../views/IntakeView.vue'),             meta: { requiresAuth: true, adminOnly: true } },
+    { path: '/shop-orders',              name: 'shop-orders',       component: () => import('../views/ShopOrdersView.vue'),         meta: { requiresAuth: true } },
+    { path: '/reshipment/form',          name: 'reshipment-form',   component: () => import('../views/ReshipmentFormView.vue'),     meta: { public: true } },
+    { path: '/reshipment/confirm/:token',name: 'reshipment-confirm',component: () => import('../views/ReshipmentConfirmView.vue'),  meta: { public: true } },
+    { path: '/reset-password',           name: 'reset-password',    component: () => import('../views/ResetPasswordView.vue'),      meta: { public: true } },
+    { path: '/docs',                      name: 'docs',              component: () => import('../views/DocsView.vue'),               meta: { requiresAuth: true } },
+    { path: '/pnl',                       name: 'pnl',               component: () => import('../views/PnLView.vue'),                meta: { requiresAuth: true } },
+    { path: '/faq',                       name: 'faq',               component: () => import('../views/FAQView.vue'),                meta: { requiresAuth: true } },
+    { path: '/reviews',                  name: 'reviews',           component: () => import('../views/ReviewsView.vue'),            meta: { requiresAuth: true } },
+    { path: '/questions',                name: 'questions',         component: () => import('../views/QuestionsView.vue'),          meta: { requiresAuth: true } },
+    { path: '/questions/quality',        name: 'quality-questions', component: () => import('../views/QuestionsView.vue'),          meta: { requiresAuth: true } },
+    { path: '/chats',                    name: 'chats',             component: () => import('../views/ChatsView.vue'),              meta: { requiresAuth: true } },
+    { path: '/tshopping',                name: 'tshopping',         component: () => import('../views/TShoppingView.vue'),          meta: { requiresAuth: true } },
+    { path: '/returns',                  name: 'returns',           component: () => import('../views/ReturnsView.vue'),            meta: { requiresAuth: true } },
+    { path: '/return/scan',              name: 'return-scan',       component: () => import('../views/ReturnScanView.vue'),         meta: { public: true } },
+    { path: '/return/batch/:incomeId',   name: 'return-batch',      component: () => import('../views/ReturnBatchView.vue'),        meta: { public: true } },
+    { path: '/return/:srid',             name: 'return-card',       component: () => import('../views/ReturnCardView.vue'),         meta: { public: true } },
   ]
 })
 
 router.beforeEach(async (to, from, next) => {
-  const token = localStorage.getItem('token')
+  const token = getAuthToken()
+  if (token && to.path !== '/login') markSessionUse()
 
   if (!token) {
-    if (to.meta.requiresAuth) return next('/login')
+    if (to.meta.requiresAuth) {
+      rememberAfterLogin(to.fullPath)
+      return next('/login')
+    }
+    return next()
+  }
+
+  if (getAuthRole() === 'tshopping_partner' && (to.path === '/' || to.path === '/login')) {
+    if (to.path === '/') return next('/tshopping')
+  }
+
+  const permStore = usePermissionsStore()
+  // Сканер и другие открытые страницы не ждут права — на телефоне это может висеть долго.
+  if (to.meta.public) {
+    if (!permStore.loaded) permStore.load()
     return next()
   }
 
   // Грузим права один раз — до первого рендера защищённой страницы
-  const permStore = usePermissionsStore()
   if (!permStore.loaded) {
     await permStore.load()
   }
@@ -123,6 +124,11 @@ router.beforeEach(async (to, from, next) => {
     }
     const qualityRoleFallback =
       to.path === '/questions/quality' && permStore.role === 'qa_manager'
+    if (to.meta.adminOnly && !permStore.isAdmin) {
+      const first = MODULE_ROUTES.find(r => permStore.can(r.module))
+      if (first) return next(first.path)
+      return next('/login')
+    }
     if (moduleRoute && !permStore.can(moduleRoute.module) && !qualityRoleFallback) {
       // Ищем первый доступный модуль для редиректа
       const first = MODULE_ROUTES.find(r => permStore.can(r.module))

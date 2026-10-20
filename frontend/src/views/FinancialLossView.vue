@@ -4,6 +4,7 @@ import { TrendingDown, Package, AlertCircle, Calendar, ChevronLeft, ChevronRight
 import Plotly from 'plotly.js-dist-min'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+import MetricNote from '../components/MetricNote.vue'
 
 const RubleIcon = {
   template: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4h6a4 4 0 0 1 0 8H7V4z"/><line x1="7" y1="4" x2="7" y2="20"/><line x1="5" y1="16" x2="14" y2="16"/></svg>`
@@ -171,7 +172,7 @@ const pendingLoss = computed(() => {
     .reduce((sum, r) => sum + Number(r.cost), 0)
 })
 
-// Недополученный доход: цена продажи × одобренные возвраты
+// Выручка по отказам: цена продажи × одобренные возвраты
 const lostRevenue = computed(() => {
   return skuFilteredData.value
     .filter(r => r.status === 'Одобрено' && r.has_retail_price)
@@ -271,7 +272,7 @@ const skuTableData = computed(() => {
 })
 
 const tableAmountLabel = computed(() => {
-  if (activeFilter.value === 'revenue') return 'Недопол. доход'
+  if (activeFilter.value === 'revenue') return 'Выручка по отказам'
   if (activeFilter.value === 'profit')  return 'Недопол. прибыль'
   if (activeFilter.value === 'risk')    return 'В риске (с/с)'
   return 'Потери по с/с'
@@ -509,19 +510,21 @@ onMounted(loadFinances)
       
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
 
-        <!-- Недополученный доход -->
+        <!-- Выручка по отказам -->
         <div @click="toggleFilter('revenue')"
              :class="['rounded-3xl p-6 shadow-sm relative overflow-hidden border cursor-pointer transition-all select-none',
                       activeFilter === 'revenue' ? 'ring-2 ring-indigo-400 border-indigo-400 bg-indigo-50' : hasRetailPrices ? 'bg-white border-indigo-200 hover:border-indigo-400' : 'bg-slate-50 border-slate-200 opacity-60']">
           <div class="flex items-center gap-2 mb-2">
             <RubleIcon class="w-5 h-5 text-indigo-500" />
-            <span class="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Недополученный доход</span>
+            <span class="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Выручка по отказам</span>
           </div>
           <div v-if="hasRetailPrices" class="text-3xl font-black text-slate-900 tracking-tight">{{ formatMoney(lostRevenue) }}</div>
           <div v-else class="text-base font-bold text-slate-400">Нет данных о ценах</div>
-          <div class="text-[10px] font-semibold text-slate-400 mt-2">
-            <span v-if="hasRetailPrices">Цена продажи × одобренные возвраты ({{ retailPriceCoverage }}% покрытие)</span>
-            <span v-else>Заполнится после синхронизации продаж</span>
+          <div class="mt-3">
+            <MetricNote
+              how="Розничные цены товаров, по которым возврат одобрили."
+              why="Видно, сколько продаж потеряли, когда согласились на возврат."
+            />
           </div>
         </div>
 
@@ -535,9 +538,11 @@ onMounted(loadFinances)
           </div>
           <div v-if="hasRetailPrices" class="text-3xl font-black text-slate-900 tracking-tight">{{ formatMoney(lostProfit) }}</div>
           <div v-else class="text-base font-bold text-slate-400">Нет данных о ценах</div>
-          <div class="text-[10px] font-semibold text-slate-400 mt-2">
-            <span v-if="hasRetailPrices">(Цена − с/с) × одобренные возвраты</span>
-            <span v-else>Заполнится после синхронизации продаж</span>
+          <div class="mt-3">
+            <MetricNote
+              how="Цена продажи минус себестоимость по одобренным возвратам."
+              why="Сколько маржи не заработали на этих возвратах."
+            />
           </div>
         </div>
 
@@ -550,7 +555,12 @@ onMounted(loadFinances)
             <span class="text-[10px] font-black text-rose-500 uppercase tracking-widest">Потери по себестоимости</span>
           </div>
           <div class="text-3xl font-black text-slate-900 tracking-tight">{{ formatMoney(totalLoss) }}</div>
-          <div class="text-[10px] font-semibold text-slate-400 mt-2">Одобренные возвраты × с/с</div>
+          <div class="mt-3">
+            <MetricNote
+              how="Себестоимость товаров по одобренным возвратам."
+              why="Прямые потери на брак — что реально «сгорело»."
+            />
+          </div>
         </div>
 
         <!-- В риске -->
@@ -562,28 +572,49 @@ onMounted(loadFinances)
             <span class="text-[10px] font-black text-amber-600 uppercase tracking-widest">В риске</span>
           </div>
           <div class="text-3xl font-black text-slate-900 tracking-tight">{{ formatMoney(pendingLoss) }}</div>
-          <div class="text-[10px] font-semibold text-slate-400 mt-2">На рассмотрении × с/с</div>
+          <div class="mt-3">
+            <MetricNote
+              how="Себестоимость заявок, которые ещё на рассмотрении."
+              why="Сколько может уйти в потери, если эти возвраты одобрят."
+            />
+          </div>
         </div>
 
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div class="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
-          <h3 class="text-sm font-black text-slate-800 flex items-center gap-2 mb-4"><Grid class="w-4 h-4 text-blue-500"/> Финансовая матрица (ABC-XYZ)</h3>
+          <h3 class="text-sm font-black text-slate-800 flex items-center gap-2 mb-2"><Grid class="w-4 h-4 text-blue-500"/> Финансовая матрица (ABC-XYZ)</h3>
+          <div class="mb-3">
+            <MetricNote
+              how="Артикулы по важности продаж (ABC) и стабильности спроса (XYZ)."
+              why="Где брак больнее всего: на хитах или на редких позициях."
+            />
+          </div>
           <div ref="abcXyzChart" class="w-full"></div>
         </div>
         <div class="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm">
-          <h3 class="text-sm font-black text-slate-800 flex items-center gap-2 mb-4"><BarChart3 class="w-4 h-4 text-blue-500"/> График потерь (последние 6 мес.)</h3>
+          <h3 class="text-sm font-black text-slate-800 flex items-center gap-2 mb-2"><BarChart3 class="w-4 h-4 text-blue-500"/> График потерь (последние 6 мес.)</h3>
+          <div class="mb-3">
+            <MetricNote
+              how="Потери по месяцам — в той же логике, что выбранная карточка сверху."
+              why="Видно, растут потери или снижаются."
+            />
+          </div>
           <div ref="trendChart" class="w-full"></div>
         </div>
       </div>
 
       <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
-        <div class="p-5 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
-          <div class="flex items-center gap-3">
+        <div class="p-5 border-b border-slate-100 bg-slate-50/50">
+          <div class="flex items-center gap-3 mb-2">
             <Package class="w-5 h-5 text-slate-500"/>
             <h2 class="text-sm font-black text-slate-800 tracking-wide">Рейтинг потерь по артикулам</h2>
           </div>
+          <MetricNote
+            how="Артикулы, отсортированные по сумме выбранной карточки сверху (выручка, прибыль, себестоимость или риск)."
+            why="Какие товары дают основной объём потерь — с чего начинать разбор."
+          />
         </div>
         
         <div class="overflow-y-auto max-h-[600px] custom-scroll">
@@ -654,7 +685,7 @@ onMounted(loadFinances)
                             <Package class="w-3 h-3 text-blue-500" />
                             Детализация по инвойсам ·
                             <span :class="activeFilter === 'revenue' ? 'text-indigo-600' : activeFilter === 'profit' ? 'text-purple-600' : 'text-rose-600'">
-                              {{ activeFilter === 'revenue' ? 'Недопол. доход' : activeFilter === 'profit' ? 'Недопол. прибыль' : 'Убытки по с/с' }}
+                              {{ activeFilter === 'revenue' ? 'Выручка по отказам' : activeFilter === 'profit' ? 'Недопол. прибыль' : 'Убытки по с/с' }}
                             </span>
                          </h4>
                          <div v-if="row.invoicesList.length > 0" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3">
@@ -682,8 +713,13 @@ onMounted(loadFinances)
       </div>
 
       <div class="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm mt-6">
-        <h3 class="text-sm font-black text-slate-800 flex items-center gap-2 mb-4"><BarChart3 class="w-4 h-4 text-blue-500"/> Рейтинг убытков по инвойсам (Топ 10)</h3>
-        <p class="text-xs text-slate-400 mb-2">Отображаются одобренные возвраты с привязанными инвойсами за выбранный период.</p>
+        <h3 class="text-sm font-black text-slate-800 flex items-center gap-2 mb-2"><BarChart3 class="w-4 h-4 text-blue-500"/> Рейтинг убытков по инвойсам (Топ 10)</h3>
+        <div class="mb-4">
+          <MetricNote
+            how="Топ-10 инвойсов по сумме одобренных возвратов за выбранный период."
+            why="Какие поставки дают больше всего брака и потерь."
+          />
+        </div>
         <div ref="invoiceChart" class="w-full"></div>
       </div>
 

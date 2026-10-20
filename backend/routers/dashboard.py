@@ -4,6 +4,8 @@ from sqlalchemy import text
 from datetime import datetime
 import calendar
 from ..database import get_db
+from ..ppm_defects import ppm_defect_sql, ym_not_plain_refusal_sql, ym_reship_refusal_sql
+from ..wb_return_logistics import FALLBACK, fetch_global_fallback, sku_return_log_cte
 from .auth import get_current_user
 
 router = APIRouter(
@@ -11,6 +13,19 @@ router = APIRouter(
     tags=["Executive Dashboard / Главная панель управления"],
     dependencies=[Depends(get_current_user)]
 )
+
+# Фактическая стоимость доставки в воронке и экономике.
+# Яндекс/Ozon: подтверждённая цена заказа, иначе оценка калькулятора.
+# СДЭК и старые заявки без перевозчика: факт СДЭК, иначе оценка.
+RESHIPMENT_DELIVERY_COST_SQL = """
+    CASE WHEN delivery_method = 'yandex'
+         THEN COALESCE(shipping_cost, yandex_cost, 0)
+         WHEN delivery_method = 'ozon'
+         THEN COALESCE(ozon_cost_actual, shipping_cost, ozon_cost, 0)
+         ELSE COALESCE(cdek_cost_actual, cdek_cost, 0)
+    END
+"""
+
 
 def _prev_month(dt: datetime) -> datetime:
     """Тот же день/время, но месяц назад. Если в прошлом месяце меньше дней — берём последний."""
@@ -48,6 +63,18 @@ _WB_NOT_PLAIN_REFUSAL = """(
           AND LOWER(TRIM(r.matched_srid)) = LOWER(TRIM(wb_claims.srid))
     )
 )"""
+
+# Отказ из инструмента «Отправка деталей»: автокомментарий или заявка с этим SRID.
+_WB_RESHIP_REFUSAL_PRED = """(
+    COALESCE(c.status_ex, '') ILIKE '%доотправк%'
+    OR EXISTS (
+        SELECT 1 FROM reshipment_requests r
+        WHERE r.matched_srid IS NOT NULL AND TRIM(r.matched_srid) <> ''
+          AND LOWER(TRIM(r.matched_srid)) = LOWER(TRIM(c.srid))
+    )
+)"""
+
+_YM_RESHIP_REFUSAL_PRED = ym_reship_refusal_sql("r")
 
 
 def _score_problem_sku(defects: int, orders: int, cost, rating) -> dict:
@@ -284,14 +311,15 @@ def _build_top_sku_by_problem(conn, params: dict, platform: str) -> tuple[list, 
 
     if platform in ("ym", "all"):
         rows = conn.execute(text(f"""
-            SELECT TRIM(supplier_article) AS sku,
+            SELECT TRIM(r.supplier_article) AS sku,
                    {overall_expr},
                    {cat_sum_exprs}
-            FROM ym_returns
-            WHERE created_at >= :start AND created_at <= :end
-              AND supplier_article IS NOT NULL
-              AND TRIM(supplier_article) NOT IN ('', 'Без артикула')
-            GROUP BY TRIM(supplier_article)
+            FROM ym_returns r
+            WHERE r.created_at >= :start AND r.created_at <= :end
+              AND {ym_not_plain_refusal_sql("r")}
+              AND r.supplier_article IS NOT NULL
+              AND TRIM(r.supplier_article) NOT IN ('', 'Без артикула')
+            GROUP BY TRIM(r.supplier_article)
         """), params).mappings().all()
         for row in rows:
             sku = row["sku"]
@@ -386,31 +414,29 @@ def _build_top_sku_by_problem(conn, params: dict, platform: str) -> tuple[list, 
 
 
 _WB_CLAIMS_SQL = text("""
-    WITH filtered_claims AS MATERIALIZED (
-        SELECT *
+    WITH filtered_claims AS (
+        SELECT srid, TRIM(supplier_article) AS supplier_article
         FROM wb_claims
         WHERE created_dt >= :start AND created_dt <= :end
           AND (LOWER(TRIM(status)) IN ('одобрено','2','2.0','да','true')
                OR LOWER(TRIM(status_ex)) IN ('одобрено','2','2.0','да','true'))
           AND supplier_article IS NOT NULL
           AND TRIM(supplier_article) NOT IN ('', 'Без артикула')
-    ),
-    log_costs AS (
-        SELECT
-            d.srid,
-            COALESCE(SUM(d.delivery_rub), 0) + COALESCE(SUM(d.rebill_logistic_cost), 0) AS logistic_cost
-        FROM wb_report_detail d
-        JOIN (SELECT DISTINCT srid FROM filtered_claims) c ON c.srid = d.srid
-        WHERE d.doc_type_name = '' AND d.rebill_logistic_cost > 0
-        GROUP BY d.srid
     )
     SELECT
-        TRIM(c.supplier_article) AS sku,
+        c.supplier_article AS sku,
         COUNT(c.srid) AS defects,
         SUM(COALESCE(cog.cost_value, cog_latest.cost_value, 0)
             + COALESCE(lc.logistic_cost, 0)) AS direct_loss
     FROM filtered_claims c
     LEFT JOIN wb_logistics l ON l.srid = c.srid
+    LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(d.delivery_rub), 0) + COALESCE(SUM(d.rebill_logistic_cost), 0) AS logistic_cost
+        FROM wb_report_detail d
+        WHERE d.srid = c.srid
+          AND d.doc_type_name = ''
+          AND d.rebill_logistic_cost > 0
+    ) lc ON true
     LEFT JOIN (
         SELECT DISTINCT ON (supply_id, supplier_article)
             supply_id, supplier_article, invoice_num
@@ -428,16 +454,23 @@ _WB_CLAIMS_SQL = text("""
         FROM wb_cogs WHERE cost_value > 0
         ORDER BY TRIM(supplier_article), id DESC
     ) cog_latest ON cog_latest.supplier_article = TRIM(c.supplier_article)
-    LEFT JOIN log_costs lc ON lc.srid = c.srid
-    GROUP BY TRIM(c.supplier_article)
+    GROUP BY c.supplier_article
 """)
 
 _WB_FIN_SQL = text("""
     WITH avg_prices AS (
-        SELECT TRIM(supplier_article) AS sku, AVG(finish_price) AS avg_price
-        FROM wb_logistics
-        WHERE doc_type = 'SALE' AND finish_price IS NOT NULL AND finish_price > 0
-        GROUP BY TRIM(supplier_article)
+        SELECT TRIM(l.supplier_article) AS sku, AVG(l.finish_price) AS avg_price
+        FROM wb_logistics l
+        WHERE l.doc_type = 'SALE' AND l.finish_price IS NOT NULL AND l.finish_price > 0
+          AND l.supplier_article IN (
+              SELECT TRIM(supplier_article) FROM wb_claims
+              WHERE created_dt BETWEEN :start AND :end
+                AND (LOWER(TRIM(status)) IN ('одобрено','2','2.0','да','true')
+                     OR LOWER(TRIM(status_ex)) IN ('одобрено','2','2.0','да','true'))
+                AND supplier_article IS NOT NULL
+                AND TRIM(supplier_article) NOT IN ('', 'Без артикула')
+          )
+        GROUP BY TRIM(l.supplier_article)
     ),
     cog_latest AS (
         SELECT DISTINCT ON (TRIM(supplier_article))
@@ -513,6 +546,102 @@ _YM_FIN_SQL = text("""
       AND r.supplier_article IS NOT NULL
 """)
 
+# Экономия по отказам — зеркало недополученного дохода:
+# сумма розничных цен заявок со статусом «Отказ» (прибыль в API есть, на карточке не показываем).
+_WB_SAVED_SQL = text(f"""
+    WITH avg_prices AS (
+        SELECT TRIM(l.supplier_article) AS sku, AVG(l.finish_price) AS avg_price
+        FROM wb_logistics l
+        WHERE l.doc_type = 'SALE' AND l.finish_price IS NOT NULL AND l.finish_price > 0
+          AND l.supplier_article IN (
+              SELECT TRIM(supplier_article) FROM wb_claims
+              WHERE created_dt BETWEEN :start AND :end
+                AND (LOWER(TRIM(status)) IN ('отказ','отклонено','1','1.0','3','3.0')
+                     OR LOWER(TRIM(status_ex)) IN ('отказ','отклонено','1','1.0','3','3.0'))
+                AND supplier_article IS NOT NULL
+                AND TRIM(supplier_article) NOT IN ('', 'Без артикула')
+          )
+        GROUP BY TRIM(l.supplier_article)
+    ),
+    cog_latest AS (
+        SELECT DISTINCT ON (TRIM(supplier_article))
+            TRIM(supplier_article) AS sku, cost_value
+        FROM wb_cogs WHERE cost_value > 0
+        ORDER BY TRIM(supplier_article), id DESC
+    )
+    SELECT
+        COUNT(*) AS cnt,
+        COALESCE(SUM(ap.avg_price) FILTER (WHERE ap.avg_price IS NOT NULL), 0) AS saved_revenue,
+        COALESCE(SUM(
+            CASE WHEN ap.avg_price IS NOT NULL
+                      AND COALESCE(cog_exact.cost_value, cl.cost_value) IS NOT NULL
+                      AND ap.avg_price > COALESCE(cog_exact.cost_value, cl.cost_value)
+                 THEN ap.avg_price - COALESCE(cog_exact.cost_value, cl.cost_value) END
+        ), 0) AS saved_profit,
+        COUNT(*) FILTER (WHERE {_WB_RESHIP_REFUSAL_PRED}) AS reship_cnt,
+        COALESCE(SUM(ap.avg_price) FILTER (
+            WHERE ap.avg_price IS NOT NULL AND {_WB_RESHIP_REFUSAL_PRED}
+        ), 0) AS reship_revenue,
+        COUNT(*) FILTER (WHERE NOT {_WB_RESHIP_REFUSAL_PRED}) AS other_cnt,
+        COALESCE(SUM(ap.avg_price) FILTER (
+            WHERE ap.avg_price IS NOT NULL AND NOT {_WB_RESHIP_REFUSAL_PRED}
+        ), 0) AS other_revenue
+    FROM wb_claims c
+    LEFT JOIN wb_logistics l ON l.srid = c.srid
+    LEFT JOIN (
+        SELECT DISTINCT ON (supply_id, supplier_article)
+            supply_id, supplier_article, invoice_num
+        FROM wb_invoices
+    ) inv
+        ON SPLIT_PART(l.income_id::text, '.', 1) = SPLIT_PART(inv.supply_id::text, '.', 1)
+       AND TRIM(c.supplier_article) = TRIM(inv.supplier_article)
+    LEFT JOIN wb_cogs cog_exact
+        ON TRIM(cog_exact.supplier_article) = TRIM(c.supplier_article)
+       AND TRIM(cog_exact.invoice_num) = TRIM(COALESCE(inv.invoice_num, ''))
+       AND cog_exact.cost_value > 0
+    LEFT JOIN cog_latest cl ON cl.sku = TRIM(c.supplier_article)
+    LEFT JOIN avg_prices ap ON ap.sku = TRIM(c.supplier_article)
+    WHERE c.created_dt BETWEEN :start AND :end
+      AND (LOWER(TRIM(c.status)) IN ('отказ','отклонено','1','1.0','3','3.0')
+           OR LOWER(TRIM(c.status_ex)) IN ('отказ','отклонено','1','1.0','3','3.0'))
+      AND c.supplier_article IS NOT NULL
+      AND TRIM(c.supplier_article) NOT IN ('', 'Без артикула')
+""")
+
+_YM_SAVED_SQL = text(f"""
+    WITH avg_costs AS (
+        SELECT DISTINCT ON (TRIM(supplier_article))
+            TRIM(supplier_article) AS sku, cost_value
+        FROM wb_cogs WHERE cost_value > 0
+        ORDER BY TRIM(supplier_article), id DESC
+    )
+    SELECT
+        COUNT(*) AS cnt,
+        COALESCE(SUM(o.buyer_total) FILTER (WHERE o.buyer_total > 0), 0) AS saved_revenue,
+        COALESCE(SUM(
+            CASE WHEN o.buyer_total > 0 AND ac.cost_value IS NOT NULL AND o.buyer_total > ac.cost_value
+                 THEN o.buyer_total - ac.cost_value END
+        ), 0) AS saved_profit,
+        COUNT(*) FILTER (WHERE {_YM_RESHIP_REFUSAL_PRED}) AS reship_cnt,
+        COALESCE(SUM(o.buyer_total) FILTER (
+            WHERE o.buyer_total > 0 AND {_YM_RESHIP_REFUSAL_PRED}
+        ), 0) AS reship_revenue,
+        COUNT(*) FILTER (WHERE NOT {_YM_RESHIP_REFUSAL_PRED}) AS other_cnt,
+        COALESCE(SUM(o.buyer_total) FILTER (
+            WHERE o.buyer_total > 0 AND NOT {_YM_RESHIP_REFUSAL_PRED}
+        ), 0) AS other_revenue
+    FROM ym_returns r
+    LEFT JOIN ym_orders o ON o.order_id = r.order_id
+                         AND o.supplier_article = TRIM(r.supplier_article)
+    LEFT JOIN avg_costs ac ON ac.sku = TRIM(r.supplier_article)
+    WHERE r.created_at BETWEEN :start AND :end
+      AND r.supplier_article IS NOT NULL
+      AND (
+            UPPER(TRIM(COALESCE(r.status, ''))) = 'REJECTED'
+         OR LOWER(TRIM(COALESCE(r.status_ru, ''))) IN ('отказ', 'отклонено')
+      )
+""")
+
 
 @router.get("/executive")
 def get_executive_summary(
@@ -553,6 +682,17 @@ def get_executive_summary(
         prev_lost_revenue = 0.0
         prev_lost_profit  = 0.0
 
+        saved_revenue      = 0.0
+        saved_profit       = 0.0
+        saved_count        = 0
+        saved_reship_count = 0
+        saved_reship_revenue = 0.0
+        saved_other_count  = 0
+        saved_other_revenue = 0.0
+        prev_saved_revenue = 0.0
+        prev_saved_profit  = 0.0
+        prev_saved_count   = 0
+
         with db.bind.connect() as conn:
 
             # ── WB ─────────────────────────────────────────────────────────
@@ -579,10 +719,10 @@ def get_executive_summary(
                     prev_total_loss    += float(row["direct_loss"] or 0)
                     prev_total_defects += int(row["defects"] or 0)
 
-                # PPM-метрика по методу PPM-раздела: cat_* = true.
+                # PPM-метрика по методу PPM-раздела (с августа 2026 — только теги акта).
                 # Обычные отказы не считаем; отказы из‑за доотправки детали — считаем
                 # (брак закрыт внутренним инструментом, но не исчез).
-                _cat_filter = "(cat_1 OR cat_2 OR cat_3 OR cat_4 OR cat_5 OR cat_6 OR cat_7 OR cat_8 OR cat_9 OR cat_10 OR cat_11 OR cat_12 OR cat_13)"
+                _cat_filter = ppm_defect_sql("created_dt")
                 _not_plain_refusal = """(
                     LOWER(TRIM(COALESCE(status::text, ''))) != 'отказ'
                     OR COALESCE(status_ex, '') ILIKE '%доотправк%'
@@ -652,6 +792,19 @@ def get_executive_summary(
                 prev_lost_revenue += float(wb_fin_prev[0] or 0)
                 prev_lost_profit  += float(wb_fin_prev[1] or 0)
 
+                wb_saved = conn.execute(_WB_SAVED_SQL, params).mappings().first()
+                saved_count          += int(wb_saved["cnt"] or 0)
+                saved_revenue        += float(wb_saved["saved_revenue"] or 0)
+                saved_profit         += float(wb_saved["saved_profit"] or 0)
+                saved_reship_count   += int(wb_saved["reship_cnt"] or 0)
+                saved_reship_revenue += float(wb_saved["reship_revenue"] or 0)
+                saved_other_count    += int(wb_saved["other_cnt"] or 0)
+                saved_other_revenue  += float(wb_saved["other_revenue"] or 0)
+                wb_saved_prev = conn.execute(_WB_SAVED_SQL, prev_params).mappings().first()
+                prev_saved_count     += int(wb_saved_prev["cnt"] or 0)
+                prev_saved_revenue   += float(wb_saved_prev["saved_revenue"] or 0)
+                prev_saved_profit    += float(wb_saved_prev["saved_profit"] or 0)
+
             # ── YM ─────────────────────────────────────────────────────────
             if platform in ("ym", "all"):
                 orders_count += conn.execute(text("""
@@ -703,6 +856,19 @@ def get_executive_summary(
                 prev_lost_revenue += float(ym_fin_prev[0] or 0)
                 prev_lost_profit  += float(ym_fin_prev[1] or 0)
 
+                ym_saved = conn.execute(_YM_SAVED_SQL, params).mappings().first()
+                saved_count          += int(ym_saved["cnt"] or 0)
+                saved_revenue        += float(ym_saved["saved_revenue"] or 0)
+                saved_profit         += float(ym_saved["saved_profit"] or 0)
+                saved_reship_count   += int(ym_saved["reship_cnt"] or 0)
+                saved_reship_revenue += float(ym_saved["reship_revenue"] or 0)
+                saved_other_count    += int(ym_saved["other_cnt"] or 0)
+                saved_other_revenue  += float(ym_saved["other_revenue"] or 0)
+                ym_saved_prev = conn.execute(_YM_SAVED_SQL, prev_params).mappings().first()
+                prev_saved_count     += int(ym_saved_prev["cnt"] or 0)
+                prev_saved_revenue   += float(ym_saved_prev["saved_revenue"] or 0)
+                prev_saved_profit    += float(ym_saved_prev["saved_profit"] or 0)
+
         csat_pct      = round((positive_fb / total_fb) * 100, 1) if total_fb > 0 else 100.0
         prev_csat_pct = round((prev_positive_fb / prev_total_fb) * 100, 1) if prev_total_fb > 0 else None
         ppm           = round((total_defects_ppm / orders_count) * 100, 2) if orders_count > 0 else 0.0
@@ -723,45 +889,13 @@ def get_executive_summary(
         reshipment_funnel = {
             "sent": 0, "form_submitted": 0,
             "approved": 0,
+            "approved_ozon": 0, "approved_ozon_cost": 0,
             "approved_wb": 0, "approved_wb_cost": 0,
             "approved_yandex": 0, "approved_yandex_cost": 0,
             "shipped": 0, "returns_prevented": 0, "delivered": 0,
             "total_cost": 0,
             "reviews_left": 0,
         }
-        reshipment_economics = {
-            "requests_with_data": 0,
-            "stay_with_client_count": 0,
-            "return_to_stock_count": 0,
-            "total_ppvz": 0,
-            "saved_sales_amount": 0,
-            "total_wb_return_costs": 0,
-            "total_cog": 0,
-            "total_delivery_cost": 0,
-            "stay_with_client_cog": 0,
-            "return_to_stock_cog": 0,
-            "return_logistics": 0,
-            "ret_logistics": 0,
-            "loss_if_return_v1": 0,
-            "loss_if_return_v2": 0,
-            "benefit_vs_v1": 0,
-            "benefit_vs_v2": 0,
-            "avg_benefit_vs_v1": 0,
-            "avg_benefit_vs_v2": 0,
-            "counterfactual_return_loss": 0,
-            "real_benefit": 0,
-            "avg_real_benefit": 0,
-            "avg_return_delivery": 372,
-        }
-        # Формула фактической стоимости доставки (у Яндекс-заявок cdek_cost — лишь оценка-кандидат):
-        # delivery_method='yandex' → shipping_cost (подтверждённая) или yandex_cost (оценка)
-        # иначе (cdek или NULL/старые) → cdek_cost
-        _delivery_cost_expr = """
-            CASE WHEN delivery_method = 'yandex'
-                 THEN COALESCE(shipping_cost, yandex_cost, 0)
-                 ELSE COALESCE(cdek_cost, 0)
-            END
-        """
         try:
             with db.bind.connect() as conn:
                 # Воронка доотправок — строго в выбранном периоде дашборда
@@ -777,8 +911,16 @@ def get_executive_summary(
                         (SELECT COUNT(*) FROM reshipment_requests
                             WHERE created_at >= :start AND created_at <= :end
                               AND status NOT IN ('new', 'rejected')
+                              AND delivery_method = 'ozon') AS approved_ozon,
+                        (SELECT COALESCE(SUM(COALESCE(ozon_cost_actual, shipping_cost, ozon_cost, 0)), 0) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')
+                              AND delivery_method = 'ozon') AS approved_ozon_cost,
+                        (SELECT COUNT(*) FROM reshipment_requests
+                            WHERE created_at >= :start AND created_at <= :end
+                              AND status NOT IN ('new', 'rejected')
                               AND (delivery_method = 'cdek' OR delivery_method IS NULL)) AS approved_wb,
-                        (SELECT COALESCE(SUM(COALESCE(cdek_cost, 0)), 0) FROM reshipment_requests
+                        (SELECT COALESCE(SUM(COALESCE(cdek_cost_actual, cdek_cost, 0)), 0) FROM reshipment_requests
                             WHERE created_at >= :start AND created_at <= :end
                               AND status NOT IN ('new', 'rejected')
                               AND (delivery_method = 'cdek' OR delivery_method IS NULL)) AS approved_wb_cost,
@@ -804,7 +946,7 @@ def get_executive_summary(
                         (SELECT COUNT(*) FROM reshipment_requests
                             WHERE created_at >= :start AND created_at <= :end
                               AND status = 'delivered') AS delivered,
-                        (SELECT COALESCE(SUM({_delivery_cost_expr}), 0)
+                        (SELECT COALESCE(SUM({RESHIPMENT_DELIVERY_COST_SQL}), 0)
                             FROM reshipment_requests
                             WHERE created_at >= :start AND created_at <= :end
                               AND status NOT IN ('new', 'rejected')) AS total_cost,
@@ -817,152 +959,23 @@ def get_executive_summary(
                 """), params).fetchone()
                 if row:
                     reshipment_funnel.update({
-                        "sent":                int(row[0] or 0),
-                        "form_submitted":      int(row[1] or 0),
-                        "approved":            int(row[2] or 0),
-                        "approved_wb":         int(row[3] or 0),
-                        "approved_wb_cost":    round(float(row[4] or 0)),
-                        "approved_yandex":     int(row[5] or 0),
-                        "approved_yandex_cost": round(float(row[6] or 0)),
-                        "shipped":             int(row[7] or 0),
-                        "returns_prevented":   int(row[8] or 0),
-                        "delivered":           int(row[9] or 0),
-                        "total_cost":          round(float(row[10] or 0)),
-                        "reviews_left":        int(row[11] or 0),
+                        "sent":                 int(row[0] or 0),
+                        "form_submitted":       int(row[1] or 0),
+                        "approved":             int(row[2] or 0),
+                        "approved_ozon":        int(row[3] or 0),
+                        "approved_ozon_cost":   round(float(row[4] or 0)),
+                        "approved_wb":          int(row[5] or 0),
+                        "approved_wb_cost":     round(float(row[6] or 0)),
+                        "approved_yandex":      int(row[7] or 0),
+                        "approved_yandex_cost": round(float(row[8] or 0)),
+                        "shipped":              int(row[9] or 0),
+                        "returns_prevented":    int(row[10] or 0),
+                        "delivered":            int(row[11] or 0),
+                        "total_cost":           round(float(row[12] or 0)),
+                        "reviews_left":         int(row[13] or 0),
                     })
-
-                # Средняя стоимость обратной доставки WB→ПВЗ (глобально)
-                avg_ret_row = conn.execute(text("""
-                    SELECT COALESCE(AVG(delivery_rub), 372.0) AS v
-                    FROM wb_report_detail WHERE srid LIKE 'mp.%.r' AND delivery_rub > 0
-                """)).fetchone()
-                avg_ret_global = float(avg_ret_row[0] or 372.0)
-
-                def _eco_query(date_filter=""):
-                    """Агрегатная экономика по фактически отправленным заявкам."""
-                    return conn.execute(text(f"""
-                        WITH shipped_requests AS (
-                            SELECT r.id, r.matched_srid, r.delivery_method,
-                                   r.product_category,
-                                   {_delivery_cost_expr} AS delivery_cost
-                            FROM reshipment_requests r
-                            WHERE r.status IN ('ready_for_pickup', 'in_transit', 'shipped', 'delivered', 'returned')
-                            {date_filter}
-                        ),
-                        sale_data AS (
-                            SELECT DISTINCT ON (a.id) a.id,
-                                   COALESCE(d.ppvz_for_pay, 0) AS ppvz,
-                                   COALESCE(d.retail_amount, 0) AS retail,
-                                   d.sa_name
-                            FROM shipped_requests a
-                            JOIN wb_report_detail d
-                              ON d.srid = a.matched_srid
-                             AND d.doc_type_name = 'Продажа'
-                            WHERE a.matched_srid IS NOT NULL
-                            ORDER BY a.id, (COALESCE(d.ppvz_for_pay, 0) > 0) DESC, d.rrd_id DESC
-                        ),
-                        return_data AS (
-                            SELECT DISTINCT ON (a.id) a.id,
-                                   COALESCE(d.acquiring_fee, 0) AS acq_return
-                            FROM shipped_requests a
-                            JOIN wb_report_detail d
-                              ON d.srid = a.matched_srid
-                             AND d.doc_type_name = 'Возврат'
-                            WHERE a.matched_srid IS NOT NULL
-                            ORDER BY a.id, (COALESCE(d.acquiring_fee, 0) > 0) DESC, d.rrd_id DESC
-                        ),
-                        empty_data AS (
-                            SELECT a.id,
-                                   COALESCE(SUM(d.rebill_logistic_cost), 0) AS rebill,
-                                   COALESCE(SUM(d.penalty), 0)              AS penalty,
-                                   COALESCE(SUM(d.delivery_rub), 0)         AS delivery
-                            FROM shipped_requests a
-                            JOIN wb_report_detail d
-                              ON d.srid = a.matched_srid
-                             AND d.doc_type_name = ''
-                            WHERE a.matched_srid IS NOT NULL
-                            GROUP BY a.id
-                        ),
-                        sa_data AS (
-                            SELECT a.id,
-                                   COALESCE(
-                                       NULLIF(TRIM(sd.sa_name), ''),
-                                       (SELECT l.supplier_article
-                                          FROM wb_logistics l
-                                         WHERE a.matched_srid IS NOT NULL
-                                           AND l.srid = a.matched_srid
-                                           AND l.supplier_article IS NOT NULL
-                                           AND TRIM(l.supplier_article) != ''
-                                         LIMIT 1),
-                                       a.product_category,
-                                       ''
-                                   ) AS sa_name
-                            FROM shipped_requests a
-                            LEFT JOIN sale_data sd ON sd.id = a.id
-                        ),
-                        article_data AS (
-                            SELECT id, sa_name,
-                                   LOWER(REPLACE(REPLACE(REPLACE(TRIM(sa_name), '-', ''), '_', ''), ' ', '')) AS article_key
-                            FROM sa_data
-                        ),
-                        cog_data AS (
-                            SELECT DISTINCT ON (s.id) s.id, wc.cost_value AS cog
-                            FROM sa_data s
-                            JOIN wb_cogs wc
-                              ON LOWER(TRIM(wc.supplier_article)) = LOWER(TRIM(s.sa_name))
-                             AND wc.cost_value > 0
-                            ORDER BY s.id, wc.id DESC
-                        ),
-                        per_req AS (
-                            SELECT
-                                a.delivery_cost,
-                                sd.ppvz,
-                                sd.retail,
-                                CASE
-                                    WHEN COALESCE(rd.acq_return, 0) > 0 THEN rd.acq_return
-                                    WHEN sd.retail > 0 THEN ROUND(sd.retail * 0.04, 2)
-                                    ELSE 0
-                                END AS acq_return,
-                                COALESCE(ed.rebill, 0)  AS rebill,
-                                COALESCE(ed.penalty, 0) AS penalty,
-                                COALESCE(ed.delivery, 0) AS wb_delivery,
-                                COALESCE(cd.cog, 0)     AS cog,
-                                (
-                                    (ad.article_key LIKE '2сб%' OR ad.article_key LIKE '2sb%')
-                                    AND ad.article_key NOT LIKE '%fullblack%'
-                                ) AS stays_with_client,
-                                :avg_return_delivery AS return_delivery
-                            FROM shipped_requests a
-                            LEFT JOIN sale_data sd  ON sd.id = a.id
-                            LEFT JOIN return_data rd ON rd.id = a.id
-                            LEFT JOIN empty_data ed  ON ed.id = a.id
-                            LEFT JOIN article_data ad ON ad.id = a.id
-                            LEFT JOIN cog_data cd    ON cd.id = a.id
-                            WHERE sd.ppvz IS NOT NULL
-                        )
-                        SELECT
-                            COUNT(*) AS requests_with_data,
-                            COUNT(*) FILTER (WHERE stays_with_client) AS stay_with_client_count,
-                            COUNT(*) FILTER (WHERE NOT stays_with_client) AS return_to_stock_count,
-                            COALESCE(SUM(ppvz), 0) AS total_ppvz,
-                            COALESCE(SUM(retail), 0) AS saved_sales_amount,
-                            COALESCE(SUM(acq_return + rebill + penalty + wb_delivery), 0) AS total_wb_return_costs,
-                            COALESCE(SUM(cog), 0) AS total_cog,
-                            COALESCE(SUM(delivery_cost), 0) AS total_delivery_cost,
-                            COALESCE(SUM(cog) FILTER (WHERE stays_with_client), 0) AS stay_with_client_cog,
-                            COALESCE(SUM(cog) FILTER (WHERE NOT stays_with_client), 0) AS return_to_stock_cog,
-                            COALESCE(SUM(return_delivery) FILTER (WHERE NOT stays_with_client), 0) AS return_logistics
-                        FROM per_req
-                    """), {**params, "avg_return_delivery": avg_ret_global}).fetchone()
-
-                eco_period = _parse_reshipment_economics(
-                    _eco_query("AND r.created_at >= :start AND r.created_at <= :end"),
-                    avg_ret_global
-                )
-                if eco_period:
-                    reshipment_economics.update(eco_period)
         except Exception as e:
-            print(f"Ошибка экономики доотправок: {e}")
+            print(f"Ошибка воронки доотправок: {e}")
 
         def _ppm_period_stats(conn, date_filter=""):
             where = f"WHERE status != 'Аннулирован' {date_filter}"
@@ -1005,22 +1018,11 @@ def get_executive_summary(
         except Exception:
             pass
 
-        top_sku_by_problem = []
-        sku_problem_index = []
-        try:
-            with db.bind.connect() as conn:
-                top_sku_by_problem, sku_problem_index = _build_top_sku_by_problem(conn, params, platform)
-        except Exception as e:
-            print(f"Ошибка top_sku_by_problem: {e}")
-
         return {
             "status": "success",
             "prev_period_label": prev_label,
             "reshipment_funnel": reshipment_funnel,
-            "reshipment_economics": reshipment_economics,
             "ppm_realization": ppm_realization,
-            "top_sku_by_problem": top_sku_by_problem,
-            "sku_problem_index": sku_problem_index,
             "metrics": {
                 "total_loss":           round(total_loss),
                 "total_loss_delta":     _delta_pct(total_loss, prev_total_loss),
@@ -1042,9 +1044,219 @@ def get_executive_summary(
                 "prev_lost_profit":     round(prev_lost_profit),
                 "lost_revenue_delta":   _delta_pct(lost_revenue, prev_lost_revenue),
                 "lost_profit_delta":    _delta_pct(lost_profit, prev_lost_profit),
+                "saved_revenue":        round(saved_revenue),
+                "saved_profit":         round(saved_profit),
+                "saved_count":          saved_count,
+                "saved_reship_count":   saved_reship_count,
+                "saved_reship_revenue": round(saved_reship_revenue),
+                "saved_other_count":    saved_other_count,
+                "saved_other_revenue":  round(saved_other_revenue),
+                "prev_saved_revenue":   round(prev_saved_revenue),
+                "prev_saved_profit":    round(prev_saved_profit),
+                "prev_saved_count":     prev_saved_count,
+                "saved_revenue_delta":  _delta_pct(saved_revenue, prev_saved_revenue),
+                "saved_profit_delta":   _delta_pct(saved_profit, prev_saved_profit),
             },
             "top_problem_sku": top_sku,
         }
     except Exception as e:
         print(f"Ошибка формирования главного дашборда: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _period_bounds(start_date: str, end_date: str) -> dict:
+    start_dt = datetime.strptime(f"{start_date} 00:00:00", "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(f"{end_date} 23:59:59", "%Y-%m-%d %H:%M:%S")
+    return {"start": start_dt, "end": end_dt}
+
+
+def _empty_reshipment_economics() -> dict:
+    return {
+        "requests_with_data": 0,
+        "stay_with_client_count": 0,
+        "return_to_stock_count": 0,
+        "total_ppvz": 0,
+        "saved_sales_amount": 0,
+        "total_wb_return_costs": 0,
+        "total_cog": 0,
+        "total_delivery_cost": 0,
+        "stay_with_client_cog": 0,
+        "return_to_stock_cog": 0,
+        "return_logistics": 0,
+        "ret_logistics": 0,
+        "loss_if_return_v1": 0,
+        "loss_if_return_v2": 0,
+        "benefit_vs_v1": 0,
+        "benefit_vs_v2": 0,
+        "avg_benefit_vs_v1": 0,
+        "avg_benefit_vs_v2": 0,
+        "counterfactual_return_loss": 0,
+        "real_benefit": 0,
+        "avg_real_benefit": 0,
+        "net_v3": 0,
+        "avg_return_delivery": FALLBACK,
+    }
+
+
+def load_reshipment_economics(db, params: dict) -> dict:
+    """Экономика доотправок — отдельно от сводки, чтобы главная открывалась быстрее."""
+    empty = _empty_reshipment_economics()
+    delivery_cost_expr = RESHIPMENT_DELIVERY_COST_SQL
+    try:
+        with db.bind.connect() as conn:
+            avg_ret_global = fetch_global_fallback(conn)
+            row = conn.execute(text(f"""
+                WITH {sku_return_log_cte()},
+                shipped_requests AS (
+                    SELECT r.id, r.matched_srid, r.delivery_method,
+                           r.product_category,
+                           {delivery_cost_expr} AS delivery_cost
+                    FROM reshipment_requests r
+                    WHERE r.status IN ('ready_for_pickup', 'in_transit', 'shipped', 'delivered', 'returned')
+                      AND r.created_at >= :start AND r.created_at <= :end
+                ),
+                sale_data AS (
+                    SELECT DISTINCT ON (a.id) a.id,
+                           COALESCE(d.ppvz_for_pay, 0) AS ppvz,
+                           COALESCE(d.retail_amount, 0) AS retail,
+                           d.sa_name
+                    FROM shipped_requests a
+                    JOIN wb_report_detail d
+                      ON d.srid = a.matched_srid
+                     AND d.doc_type_name = 'Продажа'
+                    WHERE a.matched_srid IS NOT NULL
+                    ORDER BY a.id, (COALESCE(d.ppvz_for_pay, 0) > 0) DESC, d.rrd_id DESC
+                ),
+                return_data AS (
+                    SELECT DISTINCT ON (a.id) a.id,
+                           COALESCE(d.acquiring_fee, 0) AS acq_return
+                    FROM shipped_requests a
+                    JOIN wb_report_detail d
+                      ON d.srid = a.matched_srid
+                     AND d.doc_type_name = 'Возврат'
+                    WHERE a.matched_srid IS NOT NULL
+                    ORDER BY a.id, (COALESCE(d.acquiring_fee, 0) > 0) DESC, d.rrd_id DESC
+                ),
+                empty_data AS (
+                    SELECT a.id,
+                           COALESCE(SUM(d.rebill_logistic_cost), 0) AS rebill,
+                           COALESCE(SUM(d.penalty), 0)              AS penalty,
+                           COALESCE(SUM(d.delivery_rub), 0)         AS delivery
+                    FROM shipped_requests a
+                    JOIN wb_report_detail d
+                      ON d.srid = a.matched_srid
+                     AND d.doc_type_name = ''
+                    WHERE a.matched_srid IS NOT NULL
+                    GROUP BY a.id
+                ),
+                sa_data AS (
+                    SELECT a.id,
+                           COALESCE(
+                               NULLIF(TRIM(sd.sa_name), ''),
+                               (SELECT l.supplier_article
+                                  FROM wb_logistics l
+                                 WHERE a.matched_srid IS NOT NULL
+                                   AND l.srid = a.matched_srid
+                                   AND l.supplier_article IS NOT NULL
+                                   AND TRIM(l.supplier_article) != ''
+                                 LIMIT 1),
+                               a.product_category,
+                               ''
+                           ) AS sa_name
+                    FROM shipped_requests a
+                    LEFT JOIN sale_data sd ON sd.id = a.id
+                ),
+                article_data AS (
+                    SELECT id, sa_name,
+                           LOWER(REPLACE(REPLACE(REPLACE(TRIM(sa_name), '-', ''), '_', ''), ' ', '')) AS article_key
+                    FROM sa_data
+                ),
+                cog_data AS (
+                    SELECT DISTINCT ON (s.id) s.id, wc.cost_value AS cog
+                    FROM sa_data s
+                    JOIN wb_cogs wc
+                      ON LOWER(TRIM(wc.supplier_article)) = LOWER(TRIM(s.sa_name))
+                     AND wc.cost_value > 0
+                    ORDER BY s.id, wc.id DESC
+                ),
+                per_req AS (
+                    SELECT
+                        a.delivery_cost,
+                        sd.ppvz,
+                        sd.retail,
+                        CASE
+                            WHEN COALESCE(rd.acq_return, 0) > 0 THEN rd.acq_return
+                            WHEN sd.retail > 0 THEN ROUND(sd.retail * 0.04, 2)
+                            ELSE 0
+                        END AS acq_return,
+                        COALESCE(ed.rebill, 0)  AS rebill,
+                        COALESCE(ed.penalty, 0) AS penalty,
+                        COALESCE(ed.delivery, 0) AS wb_delivery,
+                        COALESCE(cd.cog, 0)     AS cog,
+                        (
+                            (ad.article_key LIKE '2сб%' OR ad.article_key LIKE '2sb%')
+                            AND ad.article_key NOT LIKE '%fullblack%'
+                        ) AS stays_with_client,
+                        COALESCE(srl.avg_delivery, :avg_return_delivery) AS return_delivery
+                    FROM shipped_requests a
+                    LEFT JOIN sale_data sd  ON sd.id = a.id
+                    LEFT JOIN return_data rd ON rd.id = a.id
+                    LEFT JOIN empty_data ed  ON ed.id = a.id
+                    LEFT JOIN article_data ad ON ad.id = a.id
+                    LEFT JOIN cog_data cd    ON cd.id = a.id
+                    LEFT JOIN sku_return_log srl ON srl.sku_l = LOWER(TRIM(ad.sa_name))
+                    WHERE sd.ppvz IS NOT NULL
+                )
+                SELECT
+                    COUNT(*) AS requests_with_data,
+                    COUNT(*) FILTER (WHERE stays_with_client) AS stay_with_client_count,
+                    COUNT(*) FILTER (WHERE NOT stays_with_client) AS return_to_stock_count,
+                    COALESCE(SUM(ppvz), 0) AS total_ppvz,
+                    COALESCE(SUM(retail), 0) AS saved_sales_amount,
+                    COALESCE(SUM(acq_return + rebill + penalty + wb_delivery), 0) AS total_wb_return_costs,
+                    COALESCE(SUM(cog), 0) AS total_cog,
+                    COALESCE(SUM(delivery_cost), 0) AS total_delivery_cost,
+                    COALESCE(SUM(cog) FILTER (WHERE stays_with_client), 0) AS stay_with_client_cog,
+                    COALESCE(SUM(cog) FILTER (WHERE NOT stays_with_client), 0) AS return_to_stock_cog,
+                    COALESCE(SUM(return_delivery) FILTER (WHERE NOT stays_with_client), 0) AS return_logistics
+                FROM per_req
+            """), {**params, "avg_return_delivery": avg_ret_global}).fetchone()
+        parsed = _parse_reshipment_economics(row, avg_ret_global)
+        return parsed or empty
+    except Exception as e:
+        print(f"Ошибка экономики доотправок: {e}")
+        return empty
+
+
+@router.get("/executive/sku-problems")
+def get_executive_sku_problems(
+    start_date: str, end_date: str,
+    platform: str = Query("wb", pattern="^(wb|ym|ozon|all)$"),
+    db: Session = Depends(get_db),
+):
+    params = _period_bounds(start_date, end_date)
+    by_type, overall = [], []
+    try:
+        with db.bind.connect() as conn:
+            by_type, overall = _build_top_sku_by_problem(conn, params, platform)
+    except Exception as e:
+        print(f"Ошибка top_sku_by_problem: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "status": "success",
+        "top_sku_by_problem": by_type,
+        "sku_problem_index": overall,
+    }
+
+
+@router.get("/executive/reshipment-economics")
+def get_executive_reshipment_economics(
+    start_date: str, end_date: str,
+    platform: str = Query("wb", pattern="^(wb|ym|ozon|all)$"),
+    db: Session = Depends(get_db),
+):
+    params = _period_bounds(start_date, end_date)
+    return {
+        "status": "success",
+        "reshipment_economics": load_reshipment_economics(db, params),
+    }

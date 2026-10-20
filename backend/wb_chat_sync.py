@@ -20,6 +20,7 @@ import logging
 import requests
 from sqlalchemy import text
 from . import centrifugo, wb_client
+from .database import db_session
 
 logger = logging.getLogger("wb_chat_sync")
 
@@ -213,8 +214,13 @@ def _upsert_event(conn, e: dict):
                 UPDATE wb_chats SET needs_answer = false, waiting_since = NULL, updated_at = now()
                 WHERE chat_id = :cid
             """), {"cid": cid})
+            try:
+                from .chat_bot import set_bot_disabled
+                set_bot_disabled(conn, cid)
+            except Exception:
+                pass
         else:
-            # Клиент написал с вопросом — вернуть чат из архива в работу
+            # Клиент написал с вопросом — вернуть чат из архива в работу (бот остаётся выключен)
             conn.execute(text("""
                 DELETE FROM cx_dismissed_items
                 WHERE mp = 'wb' AND item_type = 'chat' AND item_id = :cid
@@ -317,7 +323,9 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
         if last_ts > _get_cursor(conn):
             _set_cursor(conn, last_ts)
 
-        # Автоархив: наше последнее сообщение, клиент молчит >2 дней
+        # Автоархив: тишина 3 дня, если мы уже писали.
+        # 1) последнее наше, клиент не ответил
+        # 2) мы писали, клиент ответил, потом никто не пишет
         archived_ids = [
             str(r[0]) for r in conn.execute(text("""
             WITH targets AS (
@@ -326,14 +334,18 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
               LEFT JOIN cx_dismissed_items d
                 ON d.item_id = c.chat_id AND d.mp = 'wb' AND d.item_type = 'chat'
               WHERE d.item_id IS NULL
-                AND lower(COALESCE(c.last_sender, '')) = 'seller'
                 AND to_timestamp(COALESCE(c.last_ts, 0) / 1000.0)
-                    < now() - interval '2 days'
+                    < now() - interval '3 days'
+                AND lower(COALESCE(c.last_sender, '')) = 'seller'
+                AND EXISTS (
+                  SELECT 1 FROM wb_chat_messages s
+                  WHERE s.chat_id = c.chat_id AND s.sender = 'seller'
+                )
             ),
             ins AS (
               INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
               SELECT 'chat', chat_id, 'wb', 'wb_chat_sync',
-                     'Авто: нет ответа клиента >2 дн после нашего'
+                     'Авто: нет общения >3 дн после нашего ответа'
               FROM targets
               ON CONFLICT (item_type, item_id, mp) DO NOTHING
               RETURNING item_id
@@ -352,7 +364,14 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
                   AND c.needs_answer = true
             """))
             conn.commit()
-            logger.info("[WBChatSync] auto-archived seller-silent>2d: %s", len(archived_ids))
+            logger.info("[WBChatSync] auto-archived silent>3d: %s", len(archived_ids))
+            try:
+                from .chat_bot import set_bot_disabled
+                for cid in archived_ids:
+                    set_bot_disabled(conn, cid)
+                conn.commit()
+            except Exception as e:
+                logger.warning("[WBChatSync] bot disable: %s", e)
             try:
                 from . import chat_realtime
                 for cid in archived_ids:
@@ -388,6 +407,13 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
             conn.commit()
             logger.info("[WBChatSync] auto-archived thanks/closing: %s", len(thanks_ids))
             try:
+                from .chat_bot import set_bot_disabled
+                for cid in thanks_ids:
+                    set_bot_disabled(conn, cid)
+                conn.commit()
+            except Exception as e:
+                logger.warning("[WBChatSync] bot disable thanks: %s", e)
+            try:
                 from . import chat_realtime
                 for cid in thanks_ids:
                     chat_realtime.publish_chat_removed(cid, "wb")
@@ -397,6 +423,13 @@ def sync_events(db, since_ts: int = None, max_pages: int = MAX_PAGES) -> tuple[i
         logger.info("[WBChatSync] processed %d events, %d pages, cursor=%d",
                     processed, pages, last_ts)
         return processed, last_ts
+
+
+def _sync_events_isolated(backfill_from=None):
+    with db_session() as db:
+        if backfill_from is None:
+            return sync_events(db)
+        return sync_events(db, backfill_from)
 
 
 async def start_chat_sync_worker(get_db_func) -> None:
@@ -418,7 +451,7 @@ async def start_chat_sync_worker(get_db_func) -> None:
             if cursor == 0:
                 backfill_from = int((time.time() - BACKFILL_DAYS * 86400) * 1000)
                 logger.info("[WBChatSync] backfill from %d days", BACKFILL_DAYS)
-                await asyncio.to_thread(sync_events, db, backfill_from)
+                await asyncio.to_thread(_sync_events_isolated, backfill_from)
         finally:
             db.close()
     except Exception as e:
@@ -428,11 +461,7 @@ async def start_chat_sync_worker(get_db_func) -> None:
     while True:
         await asyncio.sleep(SYNC_INTERVAL)
         try:
-            db = next(get_db_func())
-            try:
-                # Блокирующий синк (HTTP к API WB) — в отдельном потоке
-                await asyncio.to_thread(sync_events, db)
-            finally:
-                db.close()
+            # Блокирующий синк (HTTP к API WB) — в отдельном потоке, своя сессия
+            await asyncio.to_thread(_sync_events_isolated)
         except Exception as e:
             logger.error("[WBChatSync] cycle error: %s", e)

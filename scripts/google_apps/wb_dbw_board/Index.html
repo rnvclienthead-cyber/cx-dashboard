@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top" />
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --bg: #f1f5f9;
+        --card: #ffffff;
+        --line: #dbe3ef;
+        --text: #0f172a;
+        --muted: #64748b;
+        --accent: #1d4ed8;
+        --accent-soft: #eff6ff;
+        --warn: #b45309;
+        --warn-bg: #fff7ed;
+        --warn-line: #fdba74;
+        --ok: #166534;
+        --ok-bg: #dcfce7;
+        --wait: #475569;
+        --wait-bg: #f1f5f9;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background:
+          radial-gradient(1200px 400px at 10% -10%, #dbeafe 0%, transparent 55%),
+          linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+        color: var(--text);
+        min-height: 100vh;
+        padding: 20px 14px 48px;
+      }
+      .wrap { max-width: 1180px; margin: 0 auto; }
+      .brand {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+      h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
+      .sub {
+        margin: 8px 0 16px;
+        color: #475569;
+        line-height: 1.45;
+        max-width: 720px;
+      }
+      .panel {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 14px;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+      }
+      .filters {
+        display: grid;
+        grid-template-columns: 1.1fr 1fr auto auto;
+        gap: 10px;
+        align-items: end;
+      }
+      @media (max-width: 820px) {
+        .filters { grid-template-columns: 1fr; }
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        font-weight: 700;
+        color: #334155;
+        margin-bottom: 6px;
+      }
+      input[type="search"] {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 11px 12px;
+        font-size: 15px;
+        background: #fff;
+      }
+      input:focus {
+        outline: 2px solid #93c5fd;
+        border-color: #60a5fa;
+      }
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 11px 14px;
+        font-size: 14px;
+        font-weight: 650;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      .primary { background: var(--accent); color: #fff; }
+      .ghost { background: #e2e8f0; color: var(--text); }
+      .meta-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 16px;
+        align-items: center;
+        margin: 14px 0 10px;
+        color: #475569;
+        font-size: 14px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #e2e8f0;
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .pill.warn { background: var(--warn-bg); color: var(--warn); }
+      .error { margin: 10px 0 0; color: #b91c1c; }
+      .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 12px;
+      }
+      .tile {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 14px;
+        text-align: left;
+        cursor: pointer;
+        transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+        width: 100%;
+        font: inherit;
+        color: inherit;
+      }
+      .tile:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+        border-color: #bfdbfe;
+      }
+      .tile.open {
+        border-color: #93c5fd;
+        background: var(--accent-soft);
+        grid-column: 1 / -1;
+      }
+      .tile.has-change {
+        border-color: var(--warn-line);
+        background: linear-gradient(180deg, #fffbeb 0%, #fff 70%);
+      }
+      .tile.has-change.open { background: #fff7ed; }
+      .tile-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .tile-name {
+        font-size: 16px;
+        font-weight: 750;
+        line-height: 1.25;
+        margin: 0;
+      }
+      .count {
+        min-width: 34px;
+        height: 28px;
+        padding: 0 8px;
+        border-radius: 999px;
+        background: #0f172a;
+        color: #fff;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 750;
+        flex-shrink: 0;
+      }
+      .tile-meta {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      .badge {
+        display: inline-block;
+        margin-top: 10px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .badge.ok { background: var(--ok-bg); color: var(--ok); }
+      .badge.warn { background: var(--warn-bg); color: var(--warn); }
+      .badge.wait { background: var(--wait-bg); color: var(--wait); }
+      .orders {
+        margin-top: 14px;
+        border-top: 1px dashed #cbd5e1;
+        padding-top: 12px;
+        display: none;
+      }
+      .tile.open .orders { display: block; }
+      .order {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: #fff;
+        margin-bottom: 8px;
+      }
+      .order:last-child { margin-bottom: 0; }
+      .order.changed {
+        border-color: var(--warn-line);
+        background: #fffbeb;
+      }
+      .order-head {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .mono {
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+        color: #1e3a8a;
+        background: none;
+        border: 0;
+        padding: 0;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 700;
+      }
+      .order-body {
+        margin-top: 6px;
+        font-size: 13px;
+        color: #334155;
+        line-height: 1.4;
+      }
+      .muted { color: var(--muted); }
+      .change-note {
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--warn);
+        font-weight: 650;
+      }
+      .empty {
+        margin-top: 18px;
+        padding: 28px 16px;
+        text-align: center;
+        color: var(--muted);
+        border: 1px dashed #cbd5e1;
+        border-radius: 14px;
+        background: rgba(255,255,255,.6);
+      }
+      .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">Google Sheets · WB DBW</div>
+      <h1>Курьеры и заказы</h1>
+      <p class="sub">
+        Плитки — все курьеры из листа «В доставке». Нажмите плитку, чтобы увидеть заказы.
+        Жёлтая метка — курьер по этому заказу менялся.
+      </p>
+
+      <div class="panel">
+        <div class="filters">
+          <div>
+            <label for="qCourier">Курьер</label>
+            <input id="qCourier" type="search" placeholder="ФИО или часть имени" autocomplete="off" />
+          </div>
+          <div>
+            <label for="qOrder">Заказ</label>
+            <input id="qOrder" type="search" placeholder="Номер заказа" autocomplete="off" />
+          </div>
+          <button id="btnApply" class="primary" type="button">Найти</button>
+          <button id="btnReset" class="ghost" type="button">Сбросить</button>
+        </div>
+        <p id="error" class="error" style="display:none;"></p>
+        <p class="hint">Можно искать сразу по курьеру и по номеру заказа. Данные обновляются кнопкой «Обновить».</p>
+      </div>
+
+      <div class="meta-bar">
+        <span id="meta">Загрузка…</span>
+        <span id="pillChanged" class="pill warn" style="display:none;"></span>
+      </div>
+
+      <div class="toolbar">
+        <button id="btnReload" class="ghost" type="button">Обновить</button>
+        <button id="btnExport" class="primary" type="button">Выгрузить в Excel</button>
+        <button id="btnOnlyChanged" class="ghost" type="button">Только со сменой</button>
+      </div>
+
+      <div id="grid" class="grid"></div>
+      <div id="empty" class="empty" style="display:none;">Ничего не найдено по фильтру.</div>
+    </div>
+
+    <script>
+      var board = { couriers: [], total: 0 };
+      var openKey = null;
+      var onlyChanged = false;
+
+      function $(id) { return document.getElementById(id); }
+
+      function esc(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      function norm(s) {
+        return String(s || '')
+          .toLowerCase()
+          .replace(/ё/g, 'е')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      function showError(msg) {
+        var el = $('error');
+        if (!msg) {
+          el.style.display = 'none';
+          el.textContent = '';
+          return;
+        }
+        el.style.display = 'block';
+        el.textContent = msg;
+      }
+
+      function copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+          return;
+        }
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+
+      function filteredCouriers() {
+        var qC = norm($('qCourier').value);
+        var qO = String($('qOrder').value || '').replace(/\D/g, '');
+        var out = [];
+
+        (board.couriers || []).forEach(function (c) {
+          if (qC) {
+            var hay = norm(c.name + ' ' + (c.phone || '') + ' ' + (c.car || '') + ' ' + (c.raw || ''));
+            var tokens = qC.split(' ').filter(Boolean);
+            var ok = tokens.every(function (t) { return hay.indexOf(t) !== -1; });
+            if (!ok) return;
+          }
+
+          var orders = (c.orders || []).slice();
+          if (qO) {
+            orders = orders.filter(function (o) {
+              return String(o.order_id || '').indexOf(qO) !== -1;
+            });
+            if (!orders.length) return;
+          }
+          if (onlyChanged) {
+            orders = orders.filter(function (o) { return !!o.changed; });
+            if (!orders.length) return;
+          }
+
+          out.push({
+            key: c.key,
+            name: c.name,
+            phone: c.phone,
+            car: c.car,
+            raw: c.raw,
+            waiting: c.waiting,
+            changed_count: orders.filter(function (o) { return o.changed; }).length,
+            order_count: orders.length,
+            orders: orders
+          });
+        });
+        return out;
+      }
+
+      function flatOrders(couriers) {
+        var rows = [];
+        couriers.forEach(function (c) {
+          c.orders.forEach(function (o) {
+            rows.push({
+              courier_name: c.name,
+              courier_phone: c.phone || '',
+              courier_car: c.car || '',
+              order_id: o.order_id,
+              article: o.article,
+              name: o.name,
+              delivery: o.delivery,
+              status: o.status,
+              courier_raw: o.courier,
+              courier_change: o.courier_change,
+              changed: o.changed ? 'Да' : ''
+            });
+          });
+        });
+        return rows;
+      }
+
+      function render() {
+        var list = filteredCouriers();
+        var orderTotal = list.reduce(function (n, c) { return n + c.order_count; }, 0);
+        var changedTotal = list.reduce(function (n, c) { return n + c.changed_count; }, 0);
+
+        $('meta').innerHTML =
+          'Курьеров: <strong>' + list.length + '</strong> · заказов: <strong>' + orderTotal + '</strong>' +
+          (board.updated_at ? ' · снимок ' + esc(board.updated_at) + ' МСК' : '');
+
+        if (changedTotal) {
+          $('pillChanged').style.display = 'inline-flex';
+          $('pillChanged').textContent = 'Со сменой курьера: ' + changedTotal;
+        } else {
+          $('pillChanged').style.display = 'none';
+        }
+
+        var grid = $('grid');
+        grid.innerHTML = '';
+        if (!list.length) {
+          $('empty').style.display = 'block';
+          return;
+        }
+        $('empty').style.display = 'none';
+
+        list.forEach(function (c) {
+          var open = openKey === c.key;
+          var tile = document.createElement('button');
+          tile.type = 'button';
+          tile.className = 'tile' +
+            (open ? ' open' : '') +
+            (c.changed_count ? ' has-change' : '');
+          tile.setAttribute('data-key', c.key);
+
+          var metaBits = [];
+          if (c.phone) metaBits.push(esc(c.phone));
+          if (c.car) metaBits.push(esc(c.car));
+
+          var badge = '';
+          if (c.waiting) {
+            badge = '<span class="badge wait">Нет данных курьера</span>';
+          } else if (c.changed_count) {
+            badge = '<span class="badge warn">Смена: ' + c.changed_count + '</span>';
+          } else {
+            badge = '<span class="badge ok">Без смен</span>';
+          }
+
+          var ordersHtml = '';
+          if (open) {
+            ordersHtml = '<div class="orders">' + c.orders.map(function (o) {
+              var stClass = o.status === 'В доставке' ? 'ok' : 'wait';
+              return (
+                '<div class="order' + (o.changed ? ' changed' : '') + '">' +
+                  '<div class="order-head">' +
+                    '<button class="mono" type="button" data-copy="' + esc(o.order_id) + '">' + esc(o.order_id) + '</button>' +
+                    '<span class="badge ' + stClass + '">' + esc(o.status || '—') + '</span>' +
+                  '</div>' +
+                  '<div class="order-body">' +
+                    '<div><strong>' + esc(o.article || '—') + '</strong> · ' + esc(o.name || '') + '</div>' +
+                    '<div class="muted">Доставим: ' + esc(o.delivery || '—') + '</div>' +
+                    (o.changed
+                      ? '<div class="change-note">⚠ ' + esc(o.courier_change || 'Курьер менялся') + '</div>'
+                      : (o.courier_change
+                          ? '<div class="muted" style="margin-top:6px;font-size:12px;">' + esc(o.courier_change) + '</div>'
+                          : '')) +
+                  '</div>' +
+                '</div>'
+              );
+            }).join('') + '</div>';
+          }
+
+          tile.innerHTML =
+            '<div class="tile-top">' +
+              '<p class="tile-name">' + esc(c.name) + '</p>' +
+              '<span class="count">' + c.order_count + '</span>' +
+            '</div>' +
+            (metaBits.length ? '<div class="tile-meta">' + metaBits.join(' · ') + '</div>' : '') +
+            badge +
+            ordersHtml;
+
+          tile.addEventListener('click', function (e) {
+            var copyBtn = e.target.closest('[data-copy]');
+            if (copyBtn) {
+              e.stopPropagation();
+              copyText(copyBtn.getAttribute('data-copy'));
+              return;
+            }
+            openKey = openKey === c.key ? null : c.key;
+            render();
+            if (openKey) {
+              var tiles = grid.querySelectorAll('.tile');
+              for (var ti = 0; ti < tiles.length; ti++) {
+                if (tiles[ti].getAttribute('data-key') === openKey) {
+                  tiles[ti].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                  break;
+                }
+              }
+            }
+          });
+
+          grid.appendChild(tile);
+        });
+      }
+
+      function loadBoard() {
+        showError('');
+        $('meta').textContent = 'Загрузка…';
+        $('btnReload').disabled = true;
+        google.script.run
+          .withSuccessHandler(function (data) {
+            $('btnReload').disabled = false;
+            board = data || { couriers: [], total: 0 };
+            if (openKey) {
+              var still = (board.couriers || []).some(function (c) { return c.key === openKey; });
+              if (!still) openKey = null;
+            }
+            render();
+          })
+          .withFailureHandler(function (err) {
+            $('btnReload').disabled = false;
+            showError(err && err.message ? err.message : 'Не удалось загрузить лист');
+            $('meta').textContent = 'Ошибка загрузки';
+          })
+          .getBoard();
+      }
+
+      function triggerDownload(blob, fileName) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      /** Excel без Drive (SpreadsheetML) — открывается в Excel / Numbers. */
+      function downloadExcel() {
+        var rows = flatOrders(filteredCouriers());
+        if (!rows.length) {
+          showError('Нечего выгружать — нет строк по фильтру');
+          return;
+        }
+        showError('');
+
+        function cellXml(v) {
+          var s = String(v == null ? '' : v);
+          return '<Cell><Data ss:Type="String">' +
+            s.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;') +
+            '</Data></Cell>';
+        }
+        function rowXml(values) {
+          return '<Row>' + values.map(cellXml).join('') + '</Row>';
+        }
+
+        var header = [
+          'Курьер', 'Телефон', 'Машина', 'Заказ', 'Артикул', 'Наименование',
+          'Доставим покупателю', 'Статус', 'Данные курьера', 'Смена курьера', 'Была смена'
+        ];
+        var xmlRows = [rowXml(header)];
+        rows.forEach(function (r) {
+          xmlRows.push(rowXml([
+            r.courier_name, r.courier_phone, r.courier_car, r.order_id, r.article,
+            r.name, r.delivery, r.status, r.courier_raw, r.courier_change, r.changed
+          ]));
+        });
+
+        var xml =
+          '<?xml version="1.0"?>\n' +
+          '<?mso-application progid="Excel.Sheet"?>\n' +
+          '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"\n' +
+          ' xmlns:o="urn:schemas-microsoft-com:office:office"\n' +
+          ' xmlns:x="urn:schemas-microsoft-com:office:excel"\n' +
+          ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"\n' +
+          ' xmlns:html="http://www.w3.org/TR/REC-html40">\n' +
+          '<Worksheet ss:Name="Курьеры">\n' +
+          '<Table>\n' +
+          xmlRows.join('\n') + '\n' +
+          '</Table>\n' +
+          '</Worksheet>\n' +
+          '</Workbook>';
+
+        var stamp = (board.updated_at || '').replace(/[^\d]/g, '').slice(0, 12) || 'now';
+        var blob = new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+        triggerDownload(blob, 'WB_курьеры_' + stamp + '.xls');
+      }
+
+      $('btnApply').onclick = function () { render(); };
+      $('btnReset').onclick = function () {
+        $('qCourier').value = '';
+        $('qOrder').value = '';
+        onlyChanged = false;
+        $('btnOnlyChanged').textContent = 'Только со сменой';
+        openKey = null;
+        render();
+      };
+      $('btnReload').onclick = loadBoard;
+      $('btnExport').onclick = downloadExcel;
+      $('btnOnlyChanged').onclick = function () {
+        onlyChanged = !onlyChanged;
+        $('btnOnlyChanged').textContent = onlyChanged ? 'Показать все' : 'Только со сменой';
+        render();
+      };
+      ['qCourier', 'qOrder'].forEach(function (id) {
+        $(id).addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') render();
+        });
+      });
+
+      loadBoard();
+    </script>
+  </body>
+</html>

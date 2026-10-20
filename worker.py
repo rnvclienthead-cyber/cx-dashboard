@@ -11,7 +11,21 @@ import boto3 # type: ignore
 import gspread # type: ignore
 from PIL import Image # type: ignore
 from dotenv import load_dotenv # type: ignore
-from backend import wb_client
+from backend import wb_client, wb_finance
+from backend.invoice_match import (
+    clean_supply_id,
+    logistics_upsert_sql,
+    normalize_invoice_key,
+    parse_invoice_sheet_rows,
+    prefer_real_supply_rows,
+)
+from backend.review_updates import WB_UNANSWERED_MARK
+from backend.wb_item_rating import (
+    ITEM_RATING_URL,
+    extract_items,
+    keep_raw_columns,
+    request_body as item_rating_body,
+)
 from sync_roi_reshipment_sheet import sync_roi_reshipment_sheet
 
 load_dotenv()
@@ -38,9 +52,20 @@ def log_to_system(action, status, details=""):
         print(f"Не удалось записать лог: {e}")
 
 # --- НАСТРОЙКИ ДЛЯ ИНВОЙСОВ ---
-PATH_TO_GOOGLE_CREDS = os.getenv("GOOGLE_CREDS_PATH", "/root/cx-dashboard/bot_api_key.json") 
+PATH_TO_GOOGLE_CREDS = os.getenv("GOOGLE_CREDS_PATH", "/root/cx-dashboard/bot_api_key.json")
+# Лист «Отгрузки» в Товародвижении — исходник поставок. Шлюз IMPORTRANGE не используем.
+# Ключ: бот Альбины (только чтение Google), пишет в нашу БД. Её код не трогаем.
+PATH_TO_TOVARODV_CREDS = os.getenv(
+    "GOOGLE_CREDS_TOVARODV_PATH",
+    "/root/kontrolmp/gs-credentials.json",
+)
 SPREADSHEET_ID_INVOICES = os.getenv("SPREADSHEET_ID_INVOICES")
 SPREADSHEET_ID_FINANCES = os.getenv("SPREADSHEET_ID_FINANCES")
+SPREADSHEET_ID_TOVARODV = os.getenv(
+    "SPREADSHEET_ID_TOVARODV",
+    "1CAcTOipm-ciJZWRFGzeeONpWyHauFflyswSF_YoR1k0",
+)
+TOVARODV_SHEET_NAME = os.getenv("TOVARODV_SHEET_NAME", "Отгрузки")
 
 if not os.path.exists(PATH_TO_GOOGLE_CREDS):
     print(f"❌ ФАЙЛ НЕ НАЙДЕН ПО ПУТИ: {PATH_TO_GOOGLE_CREDS}")
@@ -262,7 +287,14 @@ def fetch_wb_claims():
                 time.sleep(10)
                 
     df = pd.DataFrame(all_claims)
-    if not df.empty: df = df.drop_duplicates(subset=['srid'], keep='last')
+    if not df.empty:
+        # Сначала активные, потом архив — keep=first оставляет живую претензию,
+        # если по одному srid WB открыл новую заявку после отказа.
+        if "is_archive" in df.columns:
+            df["_arch"] = df["is_archive"].astype(str).str.lower().isin(["true", "1", "t"])
+            df = df.sort_values("_arch", kind="mergesort")
+            df = df.drop(columns=["_arch"])
+        df = df.drop_duplicates(subset=["srid"], keep="first")
     return df
 
 def sync_claims_to_db(df):
@@ -272,8 +304,11 @@ def sync_claims_to_db(df):
     upsert_sql = """
     INSERT INTO wb_claims (srid, claim_id, created_dt, supplier_article, nm_id, user_comment, status, status_ex, claim_type, is_archive, last_sync, photos, video_paths, order_date, claim_date)
     SELECT DISTINCT ON (srid) srid, claim_id, CAST(created_dt AS TIMESTAMP), supplier_article, nm_id, user_comment, status, status_ex, claim_type, CAST(is_archive AS BOOLEAN), CAST(last_sync AS TIMESTAMP), photos, video_paths, CAST(order_date AS TIMESTAMP), CAST(claim_date AS TIMESTAMP)
-    FROM temp_wb_claims ORDER BY srid
+    FROM temp_wb_claims t
+    WHERE NOT EXISTS (SELECT 1 FROM cx_purged_claims p WHERE p.srid = t.srid)
+    ORDER BY srid
     ON CONFLICT (srid) DO UPDATE SET
+        claim_id = COALESCE(NULLIF(EXCLUDED.claim_id, ''), wb_claims.claim_id),
         status = EXCLUDED.status, status_ex = EXCLUDED.status_ex, is_archive = EXCLUDED.is_archive, last_sync = EXCLUDED.last_sync,
         photos = CASE WHEN EXCLUDED.photos != '' THEN EXCLUDED.photos ELSE wb_claims.photos END,
         video_paths = CASE WHEN EXCLUDED.video_paths != '' THEN EXCLUDED.video_paths ELSE wb_claims.video_paths END,
@@ -386,10 +421,12 @@ def fetch_new_feedbacks():
         ON CONFLICT (id)
         DO UPDATE SET
             valuation   = EXCLUDED.valuation,
+            text        = COALESCE(EXCLUDED.text, wb_feedbacks.text),
             answer_text = EXCLUDED.answer_text,
             state       = EXCLUDED.state,
             photos      = COALESCE(EXCLUDED.photos, wb_feedbacks.photos),
-            nm_id       = COALESCE(EXCLUDED.nm_id,  wb_feedbacks.nm_id)
+            nm_id       = COALESCE(EXCLUDED.nm_id,  wb_feedbacks.nm_id),
+            """ + WB_UNANSWERED_MARK + """
     """)
 
     skip = 0
@@ -561,14 +598,12 @@ def fetch_and_save_logistics(url, doc_type):
                       "supplier_article": safe_str(i.get("supplierArticle") or i.get("saName")), "nm_id": i.get("nmId"),
                       "warehouse_name": i.get("warehouseName"), "category": i.get("category"), "subject": i.get("subject"),
                       "brand": i.get("brand"), "is_cancel": i.get("isCancel", False), "last_change_date": i.get("lastChangeDate"),
-                      "income_id": i.get("incomeID"),
+                      "income_id": clean_supply_id(i.get("incomeID")),
                       "finish_price": next((float(v) for v in [i.get("finishedPrice"), i.get("priceWithDisc"), i.get("priceWithDiscount"), i.get("finishPrice")] if v is not None and float(v) > 0), None)
                       } for i in res if safe_str(i.get("srid") or i.get("saleID"))]
-            df = pd.DataFrame(chunk).drop_duplicates(subset=['srid'], keep='last')
+            df = prefer_real_supply_rows(pd.DataFrame(chunk))
             df['last_sync'] = pd.Timestamp.now()
-            sql = """INSERT INTO wb_logistics (srid, doc_type, dt, supplier_article, nm_id, warehouse_name, category, subject, brand, is_cancel, last_change_date, income_id, finish_price, last_sync)
-                     SELECT DISTINCT ON (srid) srid, doc_type, CAST(dt AS TIMESTAMP), supplier_article, nm_id, warehouse_name, category, subject, brand, CAST(is_cancel AS BOOLEAN), CAST(last_change_date AS TIMESTAMP), income_id, CAST(NULLIF(finish_price::text,'None') AS NUMERIC), CAST(last_sync AS TIMESTAMP) FROM temp_wb_logistics ORDER BY srid, last_change_date DESC
-                     ON CONFLICT (srid) DO UPDATE SET is_cancel=EXCLUDED.is_cancel, nm_id=COALESCE(EXCLUDED.nm_id, wb_logistics.nm_id), last_change_date=EXCLUDED.last_change_date, income_id=COALESCE(EXCLUDED.income_id, wb_logistics.income_id), finish_price=COALESCE(EXCLUDED.finish_price, wb_logistics.finish_price), last_sync=EXCLUDED.last_sync;"""
+            sql = logistics_upsert_sql()
             sync_chunk(df, 'wb_logistics', sql)
             total_rows += len(df)
             last_change = res[-1].get("lastChangeDate")
@@ -614,46 +649,35 @@ def fetch_and_save_orders(url):
             time.sleep(30)
     log_to_system("Синхронизатор Заказов", "SUCCESS", f"Синхронизация заказов завершена. Всего: {total_rows} записей.")
 
+def _tovarodv_creds_path():
+    if PATH_TO_TOVARODV_CREDS and os.path.exists(PATH_TO_TOVARODV_CREDS):
+        return PATH_TO_TOVARODV_CREDS
+    return PATH_TO_GOOGLE_CREDS
+
+
 def sync_invoices():
-    print("⏳ Синхронизация инвойсов из Google Sheets (WB + ЯМ)...")
-    log_to_system("Синхронизатор Инвойсов", "INFO", "Парсинг Google-таблицы инвойсов")
+    print("⏳ Синхронизация инвойсов из Товародвижение / Отгрузки...")
+    log_to_system("Синхронизатор Инвойсов", "INFO", "Парсинг листа Отгрузки (Товародвижение)")
     try:
-        sheet = gspread.service_account(filename=PATH_TO_GOOGLE_CREDS).open_by_key(SPREADSHEET_ID_INVOICES).get_worksheet(0)
-        df = pd.DataFrame(sheet.get_all_records())
-
-        # Нормализуем заголовки, сохраняя оригинальный регистр для поиска
-        df.columns = df.columns.str.strip()
-        cols_lower  = {c.lower(): c for c in df.columns}
-
-        sup_col = cols_lower.get('номер поставки')
-        art_col = cols_lower.get('артикул')
-        inv_col = cols_lower.get('инвойс')
-        mp_col  = cols_lower.get('мп')   # маркетплейс: "ВБ" / "Яндекс" / "ОЗОН" ...
-
-        if not sup_col or not art_col or not inv_col:
-            log_to_system("Синхронизатор Инвойсов", "FAIL", "Не найдены нужные столбцы в таблице")
+        creds = _tovarodv_creds_path()
+        sheet = (
+            gspread.service_account(filename=creds)
+            .open_by_key(SPREADSHEET_ID_TOVARODV)
+            .worksheet(TOVARODV_SHEET_NAME)
+        )
+        factory_keys = set()
+        try:
+            with engine_local.connect() as conn:
+                for (num,) in conn.execute(text("SELECT invoice_num FROM wb_factories")):
+                    key = normalize_invoice_key(num)
+                    if key:
+                        factory_keys.add(key)
+        except Exception:
+            factory_keys = set()
+        rows = parse_invoice_sheet_rows(sheet.get_all_records(), factory_keys=factory_keys)
+        if not rows:
+            log_to_system("Синхронизатор Инвойсов", "FAIL", "Не найдены нужные столбцы или пустой лист Отгрузки")
             return
-
-        # Оставляем строки где есть инвойс И номер поставки
-        df_clean = df[
-            (df[sup_col].astype(str).str.strip() != '') &
-            (~df[inv_col].astype(str).str.lower().isin(['nan', 'none', '', '0', '0.0', '-']))
-        ].copy()
-
-        df_clean['s_id'] = df_clean[sup_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df_clean['a_id'] = df_clean[art_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df_clean['inv']  = df_clean[inv_col].astype(str).str.strip()
-
-        # Определяем маркетплейс по столбцу МП
-        _MP_MAP = {'яндекс': 'ym', 'вб': 'wb', 'wb': 'wb',
-                   'озон': 'ozon', 'ozon': 'ozon', 'магнит': 'other'}
-        if mp_col:
-            df_clean['marketplace'] = (
-                df_clean[mp_col].astype(str).str.strip().str.lower()
-                .map(lambda x: _MP_MAP.get(x, 'wb'))
-            )
-        else:
-            df_clean['marketplace'] = 'wb'
 
         sql = text("""
             INSERT INTO wb_invoices (supply_id, supplier_article, invoice_num, marketplace, last_sync)
@@ -668,18 +692,16 @@ def sync_invoices():
             with engine_local.begin() as conn:
                 try: conn.execute(text("SELECT setval(pg_get_serial_sequence('wb_invoices', 'id'), (SELECT COALESCE(MAX(id), 1) FROM wb_invoices));"))
                 except: pass
-                for _, r in df_clean.iterrows():
-                    conn.execute(sql, {
-                        "sid": r['s_id'], "art": r['a_id'],
-                        "inv": r['inv'],  "mp":  r['marketplace'],
-                    })
+                for r in rows:
+                    conn.execute(sql, r)
         except Exception as e:
             print(f"  Ошибка записи инвойсов: {e}")
 
-        ym_cnt = (df_clean['marketplace'] == 'ym').sum()
-        wb_cnt = (df_clean['marketplace'] == 'wb').sum()
+        ym_cnt = sum(1 for r in rows if r["mp"] == "ym")
+        wb_cnt = sum(1 for r in rows if r["mp"] == "wb")
+        oz_cnt = sum(1 for r in rows if r["mp"] == "ozon")
         log_to_system("Синхронизатор Инвойсов", "SUCCESS",
-                      f"Данные по инвойсам обновлены: WB={wb_cnt}, ЯМ={ym_cnt}")
+                      f"Отгрузки: WB={wb_cnt}, ЯМ={ym_cnt}, Ozon={oz_cnt}")
     except Exception as e:
         log_to_system("Синхронизатор Инвойсов", "FAIL", f"Ошибка Google Sheets: {e}")
 
@@ -939,7 +961,7 @@ def fetch_and_save_ratings_raw():
 
     if not mapping: return
 
-    url = "https://seller-analytics-api.wildberries.ru/api/analytics/v1/item-rating"
+    url = ITEM_RATING_URL
     nm_ids_list = list(mapping.keys())
     
     start_date = datetime(2026, 1, 1)
@@ -960,20 +982,19 @@ def fetch_and_save_ratings_raw():
 
         for i in range(0, len(nm_ids_list), 50):
             chunk = nm_ids_list[i:i + 50]
-            payload = {
-                "currentPeriod": {"start": target_date, "end": target_date},
-                "nmIds": chunk, "orderBy": {"field": "feedbackCount", "mode": "desc"},
-                "isNotIncludeNMsWithoutSales": False, "limit": 100, "offset": 0
-            }
+            payload = item_rating_body(target_date, target_date, chunk)
             try:
                 res = requests.post(url, headers=headers, json=payload, timeout=30)
                 if res.status_code == 429:
                     time.sleep(30); res = requests.post(url, headers=headers, json=payload, timeout=30)
                 if res.status_code == 200:
-                    cards = res.json().get("data", {}).get("cards", [])
-                    all_raw_cards.extend(cards)
-                time.sleep(22) 
-            except Exception: time.sleep(10)
+                    all_raw_cards.extend(extract_items(res.json()))
+                else:
+                    print(f"   item-rating {target_date} HTTP {res.status_code}: {res.text[:200]}")
+                time.sleep(22)
+            except Exception as ex:
+                print(f"   item-rating {target_date} error: {ex}")
+                time.sleep(10)
 
         if not all_raw_cards: continue
 
@@ -986,6 +1007,8 @@ def fetch_and_save_ratings_raw():
             try: return mapping.get(int(nm), "Unknown")
             except: return "Unknown"
         df_raw['sys_article'] = df_raw.apply(get_art, axis=1)
+        keep = keep_raw_columns(df_raw.columns)
+        df_raw = df_raw[keep]
 
         try:
             with engine_local.begin() as conn:
@@ -996,7 +1019,12 @@ def fetch_and_save_ratings_raw():
             print(f"   ❌ Ошибка записи рейтингов: {e}")
         total_days_processed += 1
         
-    log_to_system("Синхронизатор Рейтингов", "SUCCESS", f"Синхронизировано {total_days_processed} дней с оценками.")
+    status = "SUCCESS" if total_days_processed else "ERROR"
+    log_to_system(
+        "Синхронизатор Рейтингов",
+        status,
+        f"Синхронизировано {total_days_processed} дней с оценками.",
+    )
 
 
 # =========================================================================
@@ -1030,36 +1058,40 @@ def sync_wb_ratings_totals():
     nm_ids_list = list(mapping.keys())
 
     # ── Шаг 1: item-rating за последние 12 месяцев ────────────────────────────
-    rating_url = "https://seller-analytics-api.wildberries.ru/api/analytics/v1/item-rating"
+    rating_url = ITEM_RATING_URL
     end_date   = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=364)).strftime("%Y-%m-%d")
     cards_by_nm = {}
+    last_status, last_body = None, ""
 
     for i in range(0, len(nm_ids_list), 50):
         chunk = nm_ids_list[i:i + 50]
-        payload = {
-            "currentPeriod": {"start": start_date, "end": end_date},
-            "nmIds": chunk,
-            "orderBy": {"field": "feedbackCount", "mode": "desc"},
-            "isNotIncludeNMsWithoutSales": False, "limit": 100, "offset": 0
-        }
+        payload = item_rating_body(start_date, end_date, chunk)
         try:
             res = requests.post(rating_url, headers=headers, json=payload, timeout=30)
             if res.status_code == 429:
                 time.sleep(60)
                 res = requests.post(rating_url, headers=headers, json=payload, timeout=30)
+            last_status = res.status_code
             if res.status_code == 200:
-                for card in res.json().get("data", {}).get("cards", []):
+                for card in extract_items(res.json()):
                     nm = card.get("nmId") or card.get("nm_id")
                     if nm:
                         cards_by_nm[int(nm)] = card
+            else:
+                last_body = res.text[:200]
             time.sleep(22)
         except Exception as ex:
             print(f"  item-rating chunk error: {ex}")
+            last_body = str(ex)
             time.sleep(10)
 
     if not cards_by_nm:
-        log_to_system("Итоги Рейтингов ВБ", "WARNING", "Нет данных item-rating")
+        log_to_system(
+            "Итоги Рейтингов ВБ",
+            "ERROR",
+            f"Нет данных item-rating (HTTP {last_status}): {last_body}",
+        )
         return
 
     # ── Шаг 2: feedbacks API — all-time total per nm_id ──────────────────────
@@ -1127,14 +1159,19 @@ def sync_wb_ratings_totals():
 
 
 # =========================================================================
-# ДЕТАЛЬНЫЙ ФИНАНСОВЫЙ ОТЧЁТ WB (reportDetailByPeriod)
-# Курсорная пагинация через rrd_id — тянем инкрементально
+# ДЕТАЛЬНЫЙ ФИНАНСОВЫЙ ОТЧЁТ WB (sales-reports/detailed v1)
+# Курсорная пагинация через rrdId — тянем инкрементально
 # =========================================================================
 def sync_wb_report_detail():
     """Синхронизирует детальный еженедельный отчёт WB (продажи, возвраты, штрафы, хранение).
     Использует rrd_id как курсор — при каждом запуске докачивает только новые строки."""
     print("📊 Синк детального финотчёта WB...")
-    log_to_system("Финотчёт WB", "INFO", "Старт синхронизации reportDetailByPeriod")
+    log_to_system("Финотчёт WB", "INFO", "Старт синхронизации sales-reports/detailed")
+    with engine_local.begin() as conn:
+        conn.execute(text("ALTER TABLE wb_report_detail ADD COLUMN IF NOT EXISTS shk_id BIGINT"))
+        conn.execute(text("ALTER TABLE wb_report_detail ADD COLUMN IF NOT EXISTS sticker_id TEXT"))
+        conn.execute(text("ALTER TABLE wb_report_detail ADD COLUMN IF NOT EXISTS trbx_id TEXT"))
+        conn.execute(text("ALTER TABLE wb_report_detail ADD COLUMN IF NOT EXISTS gi_id BIGINT"))
 
     # Берём последний сохранённый rrd_id как курсор
     with engine_local.connect() as conn:
@@ -1145,65 +1182,34 @@ def sync_wb_report_detail():
     date_from = "2026-04-01T00:00:00"
 
     date_to = datetime.now().strftime("%Y-%m-%dT23:59:59")
-    url = "https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod"
-    limit = 1000
+    limit = 10000
     cursor = last_rrd_id
     total_saved = 0
     page = 0
 
     while True:
         page += 1
-        params = {"dateFrom": date_from, "dateTo": date_to, "rrdid": cursor, "limit": limit}
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=120)
+            resp = wb_finance.sales_reports_detailed_raw(
+                date_from=date_from, date_to=date_to, rrd_id=cursor, limit=limit,
+            )
             if resp.status_code == 429:
                 print("  ⏳ rate limit, жду 61с")
                 time.sleep(61)
                 continue
+            if resp.status_code == 204:
+                break
             if resp.status_code != 200:
                 print(f"  ❌ HTTP {resp.status_code}: {resp.text[:200]}")
                 break
-            rows = resp.json()
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = None
+            records = wb_finance.parse_rows(payload, resp.status_code)
         except Exception as e:
             print(f"  ❌ Ошибка запроса: {e}")
             break
-
-        if not rows or not isinstance(rows, list):
-            break
-
-        def _f(v):
-            try: return float(v or 0)
-            except: return 0.0
-
-        records = []
-        for r in rows:
-            records.append({
-                "rrd_id":                int(r.get("rrd_id", 0)),
-                "realizationreport_id":  r.get("realizationreport_id"),
-                "date_from":             r.get("date_from"),
-                "date_to":               r.get("date_to"),
-                "rr_dt":                 r.get("rr_dt"),
-                "doc_type_name":         str(r.get("doc_type_name") or ""),
-                "sa_name":               str(r.get("sa_name") or ""),
-                "nm_id":                 r.get("nm_id"),
-                "barcode":               str(r.get("barcode") or ""),
-                "srid":                  str(r.get("srid") or ""),
-                "quantity":              int(r.get("quantity") or 0),
-                "retail_price":          _f(r.get("retail_price")),
-                "retail_amount":         _f(r.get("retail_amount")),
-                "ppvz_for_pay":          _f(r.get("ppvz_for_pay")),
-                "ppvz_sales_commission": _f(r.get("ppvz_sales_commission")),
-                "delivery_rub":          _f(r.get("delivery_rub")),
-                "storage_fee":           _f(r.get("storage_fee")),
-                "penalty":               _f(r.get("penalty")),
-                "deduction":             _f(r.get("deduction")),
-                "acceptance":            _f(r.get("acceptance")),
-                "rebill_logistic_cost":  _f(r.get("rebill_logistic_cost")),
-                "acquiring_fee":         _f(r.get("acquiring_fee")),
-                "supplier_promo":        _f(r.get("supplier_promo")),
-                "additional_payment":    _f(r.get("additional_payment")),
-                "commission_percent":    _f(r.get("commission_percent")),
-            })
 
         if not records:
             break
@@ -1218,16 +1224,29 @@ def sync_wb_report_detail():
                         retail_price, retail_amount, ppvz_for_pay, ppvz_sales_commission,
                         delivery_rub, storage_fee, penalty, deduction, acceptance,
                         rebill_logistic_cost, acquiring_fee, supplier_promo,
-                        additional_payment, commission_percent
+                        additional_payment, commission_percent,
+                        uuid_promocode, sale_price_promocode_discount_prc,
+                        shk_id, sticker_id, trbx_id, gi_id
                     ) VALUES (
                         :rrd_id, :realizationreport_id, :date_from, :date_to, :rr_dt,
                         :doc_type_name, :sa_name, :nm_id, :barcode, :srid, :quantity,
                         :retail_price, :retail_amount, :ppvz_for_pay, :ppvz_sales_commission,
                         :delivery_rub, :storage_fee, :penalty, :deduction, :acceptance,
                         :rebill_logistic_cost, :acquiring_fee, :supplier_promo,
-                        :additional_payment, :commission_percent
+                        :additional_payment, :commission_percent,
+                        :uuid_promocode, :sale_price_promocode_discount_prc,
+                        :shk_id, :sticker_id, :trbx_id, :gi_id
                     )
-                    ON CONFLICT (rrd_id) DO NOTHING
+                    ON CONFLICT (rrd_id) DO UPDATE SET
+                        uuid_promocode = COALESCE(EXCLUDED.uuid_promocode, wb_report_detail.uuid_promocode),
+                        sale_price_promocode_discount_prc = COALESCE(
+                            NULLIF(EXCLUDED.sale_price_promocode_discount_prc, 0),
+                            wb_report_detail.sale_price_promocode_discount_prc
+                        ),
+                        shk_id = COALESCE(EXCLUDED.shk_id, wb_report_detail.shk_id),
+                        sticker_id = COALESCE(EXCLUDED.sticker_id, wb_report_detail.sticker_id),
+                        trbx_id = COALESCE(EXCLUDED.trbx_id, wb_report_detail.trbx_id),
+                        gi_id = COALESCE(NULLIF(EXCLUDED.gi_id, 0), wb_report_detail.gi_id)
                 """), rec)
 
         total_saved += len(records)
@@ -1237,7 +1256,7 @@ def sync_wb_report_detail():
         if len(records) < limit:
             break
         cursor = max_rrd
-        time.sleep(1)
+        time.sleep(61)
 
     log_to_system("Финотчёт WB", "SUCCESS", f"Синхронизировано {total_saved} строк")
     print(f"✅ Финотчёт WB: {total_saved} строк загружено")
@@ -1269,9 +1288,16 @@ if __name__ == "__main__":
     from backend import cron_lock
     mode = sys.argv[1] if len(sys.argv) > 1 else "full"
 
-    # Защита от повторного запуска: если предыдущий вызов worker.py (любой
-    # режим) ещё не завершился, новый процесс тут же выходит — см. Фазу 5.
-    _lock_conn = cron_lock.acquire_or_exit(engine_local, "worker", log_db=log_to_system)
+    # У рейтингов и логистики свои замки: зависшая логистика не должна
+    # глушить ежедневный сбор оценок (как было 25–31.08.2026).
+    _WB_TASK_LOCKS = {
+        "ratings": "worker_ratings",
+        "logistics": "worker_logistics",
+        "logistics_backfill": "worker_logistics",
+    }
+    _lock_conn = cron_lock.acquire_or_exit(
+        engine_local, _WB_TASK_LOCKS.get(mode, "worker"), log_db=log_to_system
+    )
 
     def run(fn, *args, label=None, **kwargs):
         """Сбой одной задачи не должен обрывать остальные (как в ym_worker.py/ozon_worker.py)."""
@@ -1337,14 +1363,12 @@ if __name__ == "__main__":
                           "supplier_article": safe_str(i.get("supplierArticle") or i.get("saName")), "nm_id": i.get("nmId"),
                           "warehouse_name": i.get("warehouseName"), "category": i.get("category"), "subject": i.get("subject"),
                           "brand": i.get("brand"), "is_cancel": i.get("isCancel", False), "last_change_date": i.get("lastChangeDate"),
-                          "income_id": i.get("incomeID"),
+                          "income_id": clean_supply_id(i.get("incomeID")),
                           "finish_price": next((float(v) for v in [i.get("finishedPrice"), i.get("priceWithDisc"), i.get("priceWithDiscount"), i.get("finishPrice")] if v is not None and float(v) > 0), None)
                           } for i in res if safe_str(i.get("srid") or i.get("saleID"))]
-                df = pd.DataFrame(chunk).drop_duplicates(subset=['srid'], keep='last')
+                df = prefer_real_supply_rows(pd.DataFrame(chunk))
                 df['last_sync'] = pd.Timestamp.now()
-                sql = """INSERT INTO wb_logistics (srid, doc_type, dt, supplier_article, nm_id, warehouse_name, category, subject, brand, is_cancel, last_change_date, income_id, finish_price, last_sync)
-                         SELECT DISTINCT ON (srid) srid, doc_type, CAST(dt AS TIMESTAMP), supplier_article, nm_id, warehouse_name, category, subject, brand, CAST(is_cancel AS BOOLEAN), CAST(last_change_date AS TIMESTAMP), income_id, CAST(NULLIF(finish_price::text,'None') AS NUMERIC), CAST(last_sync AS TIMESTAMP) FROM temp_wb_logistics ORDER BY srid, last_change_date DESC
-                         ON CONFLICT (srid) DO UPDATE SET finish_price=COALESCE(EXCLUDED.finish_price, wb_logistics.finish_price), last_change_date=EXCLUDED.last_change_date, last_sync=EXCLUDED.last_sync;"""
+                sql = logistics_upsert_sql()
                 sync_chunk(df, 'wb_logistics', sql)
                 total_rows += len(df)
                 last_change = res[-1].get("lastChangeDate")
@@ -1361,7 +1385,7 @@ if __name__ == "__main__":
 
     if mode == "report_detail":
         print("📊 СИНК ДЕТАЛЬНОГО ФИНОТЧЁТА WB")
-        log_to_system("Финотчёт WB", "INFO", "Ручной запуск синхронизации reportDetailByPeriod")
+        log_to_system("Финотчёт WB", "INFO", "Ручной запуск синхронизации sales-reports/detailed")
         try:
             sync_wb_report_detail()
         except Exception as e:

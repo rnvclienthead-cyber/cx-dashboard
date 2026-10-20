@@ -22,6 +22,17 @@ ROOT = Path(__file__).resolve().parent.parent
 TMP = ROOT / "tmp"
 EMPTY_TAGS = json.dumps({"processed": True, "tags": [], "suggestion": ""}, ensure_ascii=False)
 
+
+def unsaved_action(clean_batch: bool) -> str:
+    """Что делать с записью, которую ИИ не вернул в пачке.
+
+    "empty" — пачка отработала без ошибок, ИИ осознанно не дал тегов: закрываем
+              пустым (запись видели, это не потеря).
+    "defer" — в пачке была ошибка (лимит/таймаут/сбой): НЕ трогаем запись,
+              откладываем до следующего запуска, иначе потеряли бы данные.
+    """
+    return "empty" if clean_batch else "defer"
+
 # Совместимость со старыми импортами/тестами
 FEEDBACK_FREE_MODELS = FREE_QWEN_MODELS
 resolve_feedback_models = resolve_free_qwen_models
@@ -69,7 +80,15 @@ def spawn_feedback_job(platform: str, model: str, batch_size: int) -> tuple[bool
         return False, "Неизвестная площадка"
     if is_feedback_job_running(platform):
         return False, "already_running"
-    model = resolve_feedback_models(model)[0]
+    chain = resolve_feedback_models(model)
+    if not chain:
+        from backend.qwen_quota import is_yandex_lite, qwen_pause_message
+        if is_yandex_lite(model):
+            return False, qwen_pause_message() or "Бесплатный лимит Qwen закончился. Запусти позже или выбери YandexGPT Lite."
+        # Qwen выгорел — отзывы всё равно размечаем запасной моделью.
+        model = "yandex-lite"
+        chain = ["yandex-lite"]
+    model = chain[0]
 
     TMP.mkdir(exist_ok=True)
     unit = _unit_name(platform)
@@ -172,6 +191,21 @@ async def _loop_table(
 
     batch_size = max(5, min(int(batch_size or 20), 40))
     models = resolve_feedback_models(model_key)
+    if not models:
+        from backend.qwen_quota import is_yandex_lite, qwen_pause_message
+        if is_yandex_lite(model_key):
+            from backend.database import SessionLocal
+            from backend.routers.ai import add_system_log_db
+            db = SessionLocal()
+            try:
+                add_system_log_db(
+                    db, f"{log_prefix}: STOP", "ERROR",
+                    qwen_pause_message() or "Бесплатный лимит Qwen закончился.",
+                )
+            finally:
+                db.close()
+            return
+        models = ["yandex-lite"]
     model_i = 0
     current_model = models[model_i]
     db = SessionLocal()
@@ -188,11 +222,28 @@ async def _loop_table(
             db, f"{log_prefix}: Старт", "INFO",
             f"Короткие 5★ закрыты без ИИ: {skipped}. Дальше {current_model} пачками по {batch_size}.",
         )
+        # Сводка смотрит пару «ошибка / успех» с одним именем. Иначе STOP
+        # висит в дайджесте, хотя разметка уже снова идёт.
+        add_system_log_db(
+            db, f"{log_prefix}: STOP", "SUCCESS",
+            f"снято: обработка продолжена на {current_model}",
+        )
 
         examples_text = _examples(db)
         done_ai = 0
+        # Записи, чью пачку ИИ не осилил (лимит/таймаут/сбой). Их НЕ хороним
+        # пустым тегом — оставляем нетронутыми на следующий запуск. Чтобы они
+        # не выбирались снова в этом же прогоне и цикл не завис — держим их тут.
+        deferred: set[str] = set()
         async with aiohttp.ClientSession() as session:
             while True:
+                params = {"lim": batch_size}
+                defer_sql = ""
+                if deferred:
+                    # id в wb_feedbacks — text, в ym_feedbacks — integer.
+                    # Сравнение с bigint[] падает: operator does not exist: text <> bigint.
+                    defer_sql = "AND (id::text <> ALL(CAST(:defer AS text[])))"
+                    params["defer"] = list(deferred)
                 rows = db.execute(text(f"""
                     SELECT id, ({text_sql}) AS body, valuation
                       FROM {table}
@@ -201,11 +252,15 @@ async def _loop_table(
                             COALESCE(valuation, 5) = 5
                             AND length(btrim(coalesce(({text_sql}), ''))) < 60
                        )
+                       {defer_sql}
                      ORDER BY id
                      LIMIT :lim
-                """), {"lim": batch_size}).fetchall()
+                """), params).fetchall()
                 if not rows:
                     break
+                # Postgres рвёт idle-in-transaction за 30с — не держим SELECT
+                # открытым, пока ждём нейросеть.
+                db.commit()
 
                 batch, id_map = [], {}
                 for idx, row in enumerate(rows):
@@ -238,6 +293,15 @@ async def _loop_table(
                 if rotated:
                     continue
                 if should_rotate_feedback_model(last_err) and model_i + 1 >= len(models):
+                    if current_model != "yandex-lite" and "yandex-lite" not in models:
+                        models.append("yandex-lite")
+                        model_i += 1
+                        current_model = "yandex-lite"
+                        add_system_log_db(
+                            db, f"{log_prefix}: смена модели", "WARNING",
+                            "Qwen выгорел. Дальше YandexGPT Lite.",
+                        )
+                        continue
                     add_system_log_db(
                         db, f"{log_prefix}: STOP", "ERROR",
                         "Бесплатный лимит на запасных моделях кончился. Очередь не трогаем — запусти позже с другой моделью.",
@@ -267,14 +331,19 @@ async def _loop_table(
                     saved.add(fid)
                     done_ai += 1
 
-                # Чтобы одна плохая пачка не крутилась вечно — помечаем остальные закрытыми.
+                # Разбираем записи, которые ИИ не вернул.
+                action = unsaved_action(not error_details and not last_err)
                 for fid in id_map.values():
                     if fid in saved:
                         continue
-                    db.execute(
-                        text(f"UPDATE {table} SET ai_tags = CAST(:t AS jsonb) WHERE id = :id"),
-                        {"t": EMPTY_TAGS, "id": fid},
-                    )
+                    if action == "empty":
+                        db.execute(
+                            text(f"UPDATE {table} SET ai_tags = CAST(:t AS jsonb) WHERE id = :id"),
+                            {"t": EMPTY_TAGS, "id": fid},
+                        )
+                    else:
+                        # Была ошибка — оставляем запись нетронутой на следующий запуск.
+                        deferred.add(str(fid))
                 db.commit()
 
                 left = db.execute(text(f"""

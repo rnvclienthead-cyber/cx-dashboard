@@ -1,10 +1,11 @@
 """
-Экспорт рейтингов WB и YM в Google Sheets — матричный формат.
+Экспорт рейтингов WB, YM и Ozon в Google Sheets — матричный формат.
 Строки = артикулы, столбцы = даты, ячейки = рейтинг за день.
 Запуск: python3 export_ratings_to_sheets.py
 """
 
 import os
+import sys
 from datetime import datetime, timedelta
 from collections import defaultdict
 from sqlalchemy import create_engine, text
@@ -15,6 +16,9 @@ from google.oauth2.service_account import Credentials
 BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
 CREDS_FILE     = os.path.join(BASE_DIR, "bot_api_key.json")
 ID_FILE        = os.path.join(BASE_DIR, ".sheets_id")
+# «Рейтинги для Артема». Файл .sheets_id на сервере однажды пропал,
+# и ежедневная выгрузка молча падала. ID держим в коде.
+SPREADSHEET_ID = "1Bp-iVm4eGCS3Xym2fgbPPcX9v3j5o8TnrGwjlBJd5Xw"
 DB_URL         = "postgresql://db_user:RDB_r6o_BA0qSlVVGjb_2026@127.0.0.1:5432/cx_dashboard"
 SCOPES         = ["https://spreadsheets.google.com/feeds",
                   "https://www.googleapis.com/auth/drive"]
@@ -174,11 +178,14 @@ def build_matrix(data: dict) -> list[list]:
 
 # ─── Sheets ──────────────────────────────────────────────────────────────────
 def get_spreadsheet(gc):
-    if os.path.exists(ID_FILE):
+    sheet_id = SPREADSHEET_ID
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        sheet_id = sys.argv[1].strip()
+    elif os.path.exists(ID_FILE):
         saved_id = open(ID_FILE).read().strip()
         if saved_id:
-            return gc.open_by_key(saved_id)
-    raise RuntimeError("Файл .sheets_id не найден. Запустите с аргументом ID таблицы.")
+            sheet_id = saved_id
+    return gc.open_by_key(sheet_id)
 
 def get_or_add_sheet(sh, title):
     try:
@@ -198,6 +205,135 @@ def update_matrix_sheet(ws, matrix):
         ws.freeze(rows=1, cols=1)
     except Exception:
         pass
+    hide_columns_through_last_filled_day(ws, matrix)
+
+
+def hide_columns_through_last_filled_day(ws, matrix):
+    """Скрыть столбцы с датами до последнего дня, в котором уже есть оценка.
+
+    Сам последний заполненный день и столбец артикула остаются видимыми.
+    После новой выгрузки прячется предыдущий последний день.
+    """
+    if not matrix or len(matrix[0]) < 2:
+        return
+    width = len(matrix[0])
+    last = 0
+    for row in matrix[1:]:
+        for idx in range(1, min(len(row), width)):
+            if row[idx] not in ("", None):
+                last = max(last, idx)
+    if last < 1:
+        return
+    end_unhide = max(getattr(ws, "col_count", 0) or 0, last + 1)
+    requests = []
+    if last >= 2:
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": ws.id,
+                    "dimension": "COLUMNS",
+                    "startIndex": 1,
+                    "endIndex": last,
+                },
+                "properties": {"hiddenByUser": True},
+                "fields": "hiddenByUser",
+            }
+        })
+    requests.append({
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": ws.id,
+                "dimension": "COLUMNS",
+                "startIndex": last,
+                "endIndex": end_unhide,
+            },
+            "properties": {"hiddenByUser": False},
+            "fields": "hiddenByUser",
+        }
+    })
+    ws.spreadsheet.batch_update({"requests": requests})
+
+
+def fetch_ozon_summary():
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            WITH days AS (
+                SELECT
+                    report_date,
+                    sku,
+                    COALESCE(NULLIF(TRIM(supplier_article), ''), sku::text) AS supplier_article,
+                    COALESCE(average_rating, 0) AS average_rating,
+                    COALESCE(review_count, 0) AS review_count
+                FROM ozon_ratings_report
+            ),
+            ranked AS (
+                SELECT days.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY supplier_article
+                           ORDER BY report_date DESC, sku
+                       ) AS rn
+                FROM days
+            ),
+            stars AS (
+                SELECT
+                    TRIM(supplier_article) AS supplier_article,
+                    COUNT(*) FILTER (WHERE rating = 5) AS stars_5,
+                    COUNT(*) FILTER (WHERE rating = 4) AS stars_4,
+                    COUNT(*) FILTER (WHERE rating = 3) AS stars_3,
+                    COUNT(*) FILTER (WHERE rating = 2) AS stars_2,
+                    COUNT(*) FILTER (WHERE rating = 1) AS stars_1
+                FROM ozon_reviews
+                WHERE supplier_article IS NOT NULL
+                  AND TRIM(supplier_article) <> ''
+                  AND rating BETWEEN 1 AND 5
+                GROUP BY TRIM(supplier_article)
+            ),
+            yday AS (
+                SELECT TRIM(supplier_article) AS supplier_article, COUNT(*) AS cnt
+                FROM ozon_reviews
+                WHERE supplier_article IS NOT NULL
+                  AND created_at::date = CURRENT_DATE - 1
+                GROUP BY TRIM(supplier_article)
+            )
+            SELECT
+                l.supplier_article,
+                ROUND(l.average_rating::numeric, 2) AS rating,
+                l.review_count AS total,
+                COALESCE(y.cnt, 0) AS new_today,
+                COALESCE(s.stars_5, 0) AS stars_5,
+                COALESCE(s.stars_4, 0) AS stars_4,
+                COALESCE(s.stars_3, 0) AS stars_3,
+                COALESCE(s.stars_2, 0) AS stars_2,
+                COALESCE(s.stars_1, 0) AS stars_1,
+                TO_CHAR(l.report_date, 'DD.MM.YYYY') AS updated
+            FROM ranked l
+            LEFT JOIN stars s ON s.supplier_article = l.supplier_article
+            LEFT JOIN yday y ON y.supplier_article = l.supplier_article
+            WHERE l.rn = 1
+            ORDER BY l.review_count DESC NULLS LAST
+        """)).fetchall()
+    return rows
+
+
+def fetch_ozon_matrix():
+    """Возвращает {supplier_article: {date_str: rating}}"""
+    since = (datetime.now() - timedelta(days=DAYS_BACK)).strftime("%Y-%m-%d")
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT
+                COALESCE(NULLIF(TRIM(supplier_article), ''), sku::text) AS sku,
+                report_date::text AS dt,
+                ROUND(COALESCE(average_rating, 0)::numeric, 2) AS rating
+            FROM ozon_ratings_report
+            WHERE report_date >= :since
+            ORDER BY report_date
+        """), {"since": since}).fetchall()
+
+    data = defaultdict(dict)
+    for r in rows:
+        if r.sku and r.rating and r.rating > 0:
+            data[r.sku][r.dt] = float(r.rating)
+    return data
 
 # ─── Главное ─────────────────────────────────────────────────────────────────
 def main():
@@ -231,6 +367,19 @@ def main():
     ws_ym     = get_or_add_sheet(sh, "YM — По дням")
     update_matrix_sheet(ws_ym, ym_matrix)
     print(f"[{now}] YM матрица: {len(ym_data)} артикулов, {len(ym_matrix[0])-1 if ym_matrix else 0} дней → «YM — По дням»")
+
+    # ── Ozon сводная ──
+    oz_sum = fetch_ozon_summary()
+    ws     = get_or_add_sheet(sh, "OZON — Рейтинги")
+    update_summary_sheet(ws, build_summary(oz_sum))
+    print(f"[{now}] Ozon сводная: {len(oz_sum)} строк → «OZON — Рейтинги»")
+
+    # ── Ozon по дням ──
+    oz_data   = fetch_ozon_matrix()
+    oz_matrix = build_matrix(oz_data)
+    ws_oz     = get_or_add_sheet(sh, "OZON — По дням")
+    update_matrix_sheet(ws_oz, oz_matrix)
+    print(f"[{now}] Ozon матрица: {len(oz_data)} артикулов, {len(oz_matrix[0])-1 if oz_matrix else 0} дней → «OZON — По дням»")
 
     print(f"Таблица: https://docs.google.com/spreadsheets/d/{sh.id}")
 

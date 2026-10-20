@@ -1,20 +1,25 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { apiFetch } from '../api'
+import { getAuthRole, getAuthToken, getAuthUsername } from '../authStorage'
+import { onAppClick, sameQuery } from '../utils/nav'
 import { usePlatformStore } from '../stores/platform'
+import { usePermissionsStore } from '../stores/permissions'
+import { code128Svg } from '../utils/code128'
 import {
   PackageCheck, RefreshCw, X, CheckCircle2, XCircle,
   Truck, ExternalLink, Star, Loader2, Search,
   Info, AlertTriangle, Phone, Mail, MapPin, CheckSquare, Square,
-  MessageCircle, FileDown, Printer, LinkIcon, History, ShoppingCart, RotateCcw, Settings2, TrendingUp, Tag
+  MessageCircle, Printer, LinkIcon, ShoppingCart, RotateCcw, Settings2, TrendingUp, Tag, ScanLine
 } from 'lucide-vue-next'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 const route = useRoute()
 const router = useRouter()
-const userRole = ref(localStorage.getItem('role') || '')
-const username = ref(localStorage.getItem('username') || '')
+const permissionsStore = usePermissionsStore()
+const userRole = computed(() => permissionsStore.role || getAuthRole() || '')
+const username = computed(() => getAuthUsername() || '')
 const platformStore = usePlatformStore()
 const currentMp = computed(() => String(platformStore.platform || 'all').toLowerCase())
 
@@ -24,7 +29,7 @@ const statsByCarrier  = ref([])
 const loading         = ref(false)
 const selected        = ref(null)
 const filterStatus    = ref('all')
-const filterCarrier   = ref('all')  // 'all' | 'cdek' | 'yandex'
+const filterCarrier   = ref('all')  // 'all' | 'cdek' | 'yandex' | 'ozon'
 const searchQuery     = ref('')
 
 // ── Роль-зависимые флаги ─────────────────────────────────────────────────────
@@ -33,7 +38,6 @@ const isWarehouse    = computed(() => ['warehouse_manager', 'admin', 'moderator'
 const isAdmin        = computed(() => ['admin', 'moderator'].includes(userRole.value))
 const isWarehouseOnly = computed(() => userRole.value === 'warehouse_manager')
 const canManageYandexActs = computed(() => ['warehouse_manager', 'admin'].includes(userRole.value))
-const canDeleteYandexActs = computed(() => userRole.value === 'admin')
 
 const defaultStatus = computed(() => {
   if (userRole.value === 'cs_manager')        return 'new'
@@ -162,8 +166,6 @@ const loadWbContext = async (reqId) => {
   wbCtx.value = null
   showFbHistory.value = false
   showProductClaims.value = false
-  showEconomics.value = false
-  economicsData.value = null
   if (!reqId) return
   wbCtxLoading.value = true
   try {
@@ -205,14 +207,16 @@ const wbChatUrl = (chatId) => {
   return `https://seller.wildberries.ru/chat-with-clients?chatId=${uuid}`
 }
 
-const ymChatUrl = (req) => {
-  const biz = '203987989'
-  const camp = '146194774'
-  const group = String(req?.ym_context_type || 'DIRECT').toUpperCase()
-  const q = new URLSearchParams({ campaignId: camp, chatGroup: group })
-  const cab = String(req?.ym_cabinet_chat_id || '').trim()
-  if (cab.includes('/')) q.set('chatId', cab)
-  return `https://partner.market.yandex.ru/business/${biz}/arbiter?${q}`
+const ymChatRoute = (req) => {
+  const id = String(req?.ym_chat_id || '').trim()
+  if (!id) return null
+  return { path: '/chats', query: { chat: id, mp: 'ym' } }
+}
+
+const ozonChatRoute = (req) => {
+  const id = String(req?.ozon_chat_id || '').trim()
+  if (!id) return null
+  return { path: '/chats', query: { chat: id, mp: 'ozon' } }
 }
 
 const marketplaceLabel = (req) => {
@@ -258,7 +262,7 @@ const selectedTariffCost = computed(() => {
   return t ? Number(t.cost_total || t.cost || 0) : 0
 })
 const cogValue = computed(() => Number(economicsData.value?.cog || 0))
-const COST_LIMIT_NO_COG = 650  // порог доставки, если себестоимость неизвестна
+const COST_LIMIT_NO_COG = 550  // порог доставки, если себестоимость неизвестна
 const costRisk = computed(() => {
   const delivery = selectedTariffCost.value
   const cog = cogValue.value
@@ -268,7 +272,7 @@ const costRisk = computed(() => {
     if (delivery > cog) return { mode: 'cog', delivery, cog, diff: delivery - cog }
     return null
   }
-  // Себестоимость неизвестна — порог 650 ₽
+  // Себестоимость неизвестна — порог 550 ₽
   if (delivery > COST_LIMIT_NO_COG) {
     return { mode: 'limit', delivery, limit: COST_LIMIT_NO_COG, diff: delivery - COST_LIMIT_NO_COG }
   }
@@ -287,7 +291,12 @@ const lastShipResult = ref(null)
 
 const copiedTemplate = ref(false)
 const templateLoading = ref(false)
-const YANDEX_SOURCE_PVZ = 'Казань, Тульская 40'
+const yandexDefaultSourcePvz = ref('Казань, Тульская 40')
+const yandexSourcePvz = computed(() =>
+  selected.value?.yandex_source_pvz
+  || yandexDefaultSourcePvz.value
+  || 'Казань, Тульская 40'
+)
 const copyTemplate = async () => {
   templateLoading.value = true
   try {
@@ -369,7 +378,7 @@ const doConfirmSingleWithTariff = async () => {
     )
     panel.value = null
     await reload()
-    selected.value = requests.value.find(r => r.id === id) || null
+    selected.value = pickSelected(id)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
 }
@@ -380,13 +389,30 @@ const rejectForm          = ref({ moderator_comment: '' })
 const currentPromoCode    = ref('')
 const promoCodeInput      = ref('')
 const promoExpiresInput   = ref('')
+const promoUuidInput      = ref('')
 const promoCodeUpdatedAt  = ref(null)
 const promoCodeUpdatedBy  = ref('')
 const promoExpiresAt      = ref(null)
 const promoCodeSaving     = ref(false)
 const showPromoSettings   = ref(false)
+const promoHistory        = ref([])
+const promoHistoryLoading = ref(false)
+
+const fmtPromoMoney = (n) => {
+  if (n == null || n === '') return '—'
+  return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(n)
+}
+
+const fmtPromoDate = (d) => {
+  if (!d) return '—'
+  const s = String(d).slice(0, 10)
+  const [y, m, day] = s.split('-')
+  if (!y || !m || !day) return s
+  return `${day}.${m}.${y.slice(2)}`
+}
 
 const loadPromoCode = async () => {
+  promoHistoryLoading.value = true
   try {
     const res = await apiFetch(`${API_BASE}/api/v1/reshipment/promo-code`)
     const data = await res.json()
@@ -396,25 +422,36 @@ const loadPromoCode = async () => {
     promoCodeUpdatedBy.value = data.updated_by || ''
     promoExpiresAt.value     = data.expires_at || null
     promoExpiresInput.value  = data.expires_at || ''
+    promoUuidInput.value     = data.wb_uuid || ''
+    promoHistory.value       = Array.isArray(data.history) ? data.history : []
   } catch (e) { /* тихо игнорируем */ }
+  finally { promoHistoryLoading.value = false }
 }
 
 const savePromoCode = async () => {
   if (!promoCodeInput.value.trim()) { alert('Укажите код'); return }
   promoCodeSaving.value = true
   try {
-    await apiFetch(`${API_BASE}/api/v1/reshipment/promo-code`, {
+    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/promo-code`, {
       method: 'POST',
       body: JSON.stringify({
         code: promoCodeInput.value.trim().toUpperCase(),
         expires_at: promoExpiresInput.value || null,
+        wb_uuid: promoUuidInput.value.trim() || null,
         processed_by: username.value,
       }),
     })
+    const data = await res.json().catch(() => ({}))
+    if (Array.isArray(data.history)) promoHistory.value = data.history
     await loadPromoCode()
     showPromoSettings.value = false
   } catch (e) { alert(e.message) }
   finally { promoCodeSaving.value = false }
+}
+
+const openPromoSettings = async () => {
+  showPromoSettings.value = true
+  await loadPromoCode()
 }
 
 // ── Товары, по которым разрешена доотправка деталей ──────────────────────────
@@ -468,83 +505,31 @@ const saveSkus = async () => {
 
 const warehouseRejectForm = ref({ rejection_reason: '' })
 const yandexForm          = ref({ track_number: '', shipping_cost: '' })
-const yandexActs          = ref([])
-const yandexActsLoading   = ref(false)
-const yandexActGenerating = ref(false)
-const yandexActPending    = ref(0)
-const yandexActHasStamp   = ref(false)
-const showYandexActsRegistry = ref(false)
-const yandexActDeletingId = ref(null)
+const ozonDropoff         = ref(null)
+const ozonDropoffLoading  = ref(false)
+const showOzonDropoff     = ref(false)
 
-const loadYandexActs = async () => {
+const loadOzonDropoff = async () => {
   if (!canManageYandexActs.value) return
-  yandexActsLoading.value = true
+  ozonDropoffLoading.value = true
   try {
-    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts`)
-    const data = await res.json()
-    yandexActs.value = data.data || []
-    yandexActPending.value = data.pending_count || 0
-    yandexActHasStamp.value = !!data.has_auto_stamp
+    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/ozon-dropoff`)
+    ozonDropoff.value = await res.json()
   } catch (e) {
     console.error(e)
+    ozonDropoff.value = null
   } finally {
-    yandexActsLoading.value = false
+    ozonDropoffLoading.value = false
   }
 }
 
-const downloadYandexAct = async (actId, format = 'pdf') => {
-  const token = localStorage.getItem('token')
-  const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts/${actId}/download?format=${format}`, {
-    headers: { 'Authorization': `Bearer ${token}` }
-  })
-  const blob = await res.blob()
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.target = '_blank'
-  a.click()
-  URL.revokeObjectURL(url)
+const openOzonDropoff = async () => {
+  showOzonDropoff.value = true
+  if (!ozonDropoff.value) await loadOzonDropoff()
 }
 
-const generateYandexAct = async () => {
-  if (!yandexActPending.value) {
-    alert('Нет собранных Яндекс-заявок без акта')
-    return
-  }
-  yandexActGenerating.value = true
-  try {
-    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts/generate?processed_by=${encodeURIComponent(username.value)}`, {
-      method: 'POST'
-    })
-    const data = await res.json()
-    const actId = data?.data?.id
-    await Promise.all([reload(), loadYandexActs()])
-    if (actId) await downloadYandexAct(actId, 'pdf')
-  } catch (e) {
-    alert(e.message)
-  } finally {
-    yandexActGenerating.value = false
-  }
-}
-
-const openYandexActsRegistry = async () => {
-  showYandexActsRegistry.value = true
-  await loadYandexActs()
-}
-
-const deleteYandexAct = async (actId) => {
-  if (!canDeleteYandexActs.value) return
-  if (!confirm('Удалить акт из системы? Это действие необратимо, а заявки снова станут без акта.')) return
-  yandexActDeletingId.value = actId
-  try {
-    await apiFetch(`${API_BASE}/api/v1/reshipment/warehouse/yandex-acts/${actId}`, { method: 'DELETE' })
-    await Promise.all([loadYandexActs(), load()])
-  } catch (e) {
-    alert(e.message)
-  } finally {
-    yandexActDeletingId.value = null
-  }
-}
+const closeOzonDropoff = () => { showOzonDropoff.value = false }
+const ozonDropoffSvg = computed(() => code128Svg(ozonDropoff.value?.barcode || ''))
 
 // ── Ручная смена статуса (только admin/moderator) ────────────────────────────
 const statusOptions = [
@@ -577,7 +562,7 @@ const doSetStatus = async () => {
     panel.value = null
     setStatusForm.value = { status: '', comment: '' }
     await reload()
-    selected.value = requests.value.find(r => r.id === selected.value?.id) || null
+    selected.value = pickSelected(selected.value?.id)
     if (selected.value) loadStatusHistory(selected.value.id)
   } catch (e) { alert(e.message) }
   finally { setStatusLoading.value = false }
@@ -613,7 +598,7 @@ const filteredRequests = computed(() => {
         return r.delivery_method === 'cdek' || (
           !r.delivery_method
           && !['new', 'matched'].includes(r.status)
-          && !r.yandex_cost && !r.yandex_pvz_code
+          && !r.yandex_cost && !r.yandex_pvz_code && !r.ozon_cost
         )
       }
       return r.delivery_method === filterCarrier.value
@@ -638,6 +623,7 @@ const filteredRequests = computed(() => {
         (r.customer_phone      || '').includes(q) ||
         (r.wb_chat_id          || '').toLowerCase().includes(q) ||
         (r.ym_chat_id          || '').toLowerCase().includes(q) ||
+        (r.ozon_chat_id        || '').toLowerCase().includes(q) ||
         (r.chat_token          || '').toLowerCase().includes(q) ||
         (r.confirmation_token  || '').toLowerCase().includes(q)
       )
@@ -658,20 +644,22 @@ const statsByStatus = computed(() => {
 
 // Соотношение СДЭК/Яндекс среди заявок текущей площадки, где перевозчик уже определён
 const carrierRatio = computed(() => {
-  const map = { cdek: 0, yandex: 0 }
+  const map = { cdek: 0, yandex: 0, ozon: 0 }
   for (const r of requestsForMp.value) {
     if (r.status === 'rejected') continue
     if (r.delivery_method === 'yandex') map.yandex += 1
+    else if (r.delivery_method === 'ozon') map.ozon += 1
     else if (r.delivery_method === 'cdek') map.cdek += 1
-    else if (!r.delivery_method && !['new', 'matched'].includes(r.status) && !r.yandex_cost && !r.yandex_pvz_code) {
+    else if (!r.delivery_method && !['new', 'matched'].includes(r.status) && !r.yandex_cost && !r.yandex_pvz_code && !r.ozon_cost) {
       map.cdek += 1
     }
   }
-  const total = map.cdek + map.yandex
+  const total = map.cdek + map.yandex + map.ozon
   return {
-    cdek: map.cdek, yandex: map.yandex, total,
+    cdek: map.cdek, yandex: map.yandex, ozon: map.ozon, total,
     cdekPct:   total ? Math.round((map.cdek / total) * 100) : 0,
     yandexPct: total ? Math.round((map.yandex / total) * 100) : 0,
+    ozonPct:   total ? Math.round((map.ozon / total) * 100) : 0,
   }
 })
 
@@ -682,10 +670,19 @@ const mpStripeClass = (req) => {
   return 'bg-violet-500'
 }
 
-const carrierLabel = (req) => {
-  if (req?.delivery_method === 'yandex') return 'Яндекс'
-  if (req?.delivery_method === 'cdek') return 'СДЭК'
+const carrierName = (method) => {
+  if (method === 'ozon') return 'Ozon'
+  if (method === 'yandex') return 'Яндекс'
+  if (method === 'cdek') return 'СДЭК'
   return ''
+}
+
+const carrierLabel = (req) => carrierName(req?.delivery_method)
+
+const carrierBadgeClass = (method) => {
+  if (method === 'ozon') return 'bg-blue-100 text-blue-700'
+  if (method === 'yandex') return 'bg-amber-100 text-amber-700'
+  return 'bg-emerald-100 text-emerald-700'
 }
 
 const emptyListHint = computed(() => {
@@ -702,10 +699,11 @@ const emptyListHint = computed(() => {
 // фактический delivery_method. Старые СДЭК-заявки (до dual-carrier) имеют delivery_method=null,
 // но у них cdek_cost — реальная цена доставки, а не оценка кандидата.
 const realCost = (r) => {
-  if (r.delivery_method === 'yandex') return parseFloat(r.shipping_cost || 0)
-  if (r.delivery_method === 'cdek')   return parseFloat(r.cdek_cost || 0)
+  if (r.delivery_method === 'ozon') return parseFloat(r.ozon_cost_actual || r.shipping_cost || r.ozon_cost || 0)
+  if (r.delivery_method === 'yandex') return parseFloat(r.shipping_cost || r.yandex_cost || 0)
+  if (r.delivery_method === 'cdek')   return parseFloat(r.cdek_cost_actual || r.cdek_cost || 0)
   // Устаревшие СДЭК-заявки без delivery_method: если прошли одобрение — реальные расходы есть
-  if (!['new', 'matched'].includes(r.status)) return parseFloat(r.cdek_cost || 0)
+  if (!['new', 'matched'].includes(r.status)) return parseFloat(r.cdek_cost_actual || r.cdek_cost || 0)
   return 0  // new/matched — перевозчик ещё не выбран, cdek_cost — лишь оценка кандидата
 }
 const totalShippingCost = computed(() =>
@@ -723,18 +721,73 @@ const load = async () => {
     const d1 = await r1.json()
     const d2 = await r2.json()
     requests.value   = d1.data || []
+    if (d1.yandex_default_source_pvz) {
+      yandexDefaultSourcePvz.value = d1.yandex_default_source_pvz
+    }
     stats.value      = d2.data || []
     statsByCarrier.value = d2.by_carrier || []
   } catch (e) { console.error(e) }
   finally { loading.value = false }
 }
 
+const LIST_QUERY_KEYS = ['id', 'req', 'status', 'carrier', 'q']
+let listQueryReady = false
+let searchSyncTimer = null
+
+function applyListQuery() {
+  const st = String(route.query.status || '')
+  const allowed = new Set(visibleFilters.value.map(f => f.value))
+  filterStatus.value = allowed.has(st) ? st : defaultStatus.value
+  const car = String(route.query.carrier || '')
+  filterCarrier.value = ['all', 'cdek', 'yandex', 'ozon'].includes(car) ? car : 'all'
+  if (typeof route.query.q === 'string') searchQuery.value = route.query.q
+}
+
+function listQueryFromState() {
+  const q = { ...route.query }
+  q.status = filterStatus.value
+  q.carrier = filterCarrier.value
+  const s = searchQuery.value.trim()
+  if (s) q.q = s
+  else delete q.q
+  if (selected.value?.id) {
+    q.id = String(selected.value.id)
+    delete q.req
+  } else {
+    delete q.id
+    delete q.req
+  }
+  return q
+}
+
+function syncListQuery() {
+  if (!listQueryReady) return
+  const next = listQueryFromState()
+  if (sameQuery(next, route.query, LIST_QUERY_KEYS)) return
+  router.replace({ query: next })
+}
+
+function clearSelected() {
+  selected.value = null
+  syncListQuery()
+}
+
+function requestTo(req) {
+  return {
+    path: '/reshipment',
+    query: { ...listQueryFromState(), id: String(req.id) },
+  }
+}
+
+function requestHref(req) {
+  return router.resolve(requestTo(req)).href
+}
+
 async function openFromQuery() {
   const raw = route.query.id || route.query.req
   const id = Number(raw || 0)
   if (!id) return
-  // Сбрасываем фильтр статуса — иначе заявка может быть скрыта
-  if (filterStatus.value !== 'all') filterStatus.value = 'all'
+  if (selected.value && Number(selected.value.id) === id) return
   if (!requests.value.length) await load()
   let req = requests.value.find(r => Number(r.id) === id)
   if (!req) {
@@ -761,15 +814,32 @@ const select = async (req) => {
   rejectForm.value          = { moderator_comment: '' }
   warehouseRejectForm.value = { rejection_reason: '' }
   yandexForm.value          = { track_number: '', shipping_cost: '' }
+  // Для Яндекса подтягиваем РЕАЛЬНУЮ точку сдачи из ЛК (в списке её нет — раньше в UI была захардкожена Тульская)
+  if (req.delivery_method === 'yandex' && req.track_number) {
+    try {
+      const res = await apiFetch(`${API_BASE}/api/v1/reshipment/requests/${req.id}`)
+      const d = await res.json()
+      const full = d.data || d
+      if (full && typeof full === 'object') {
+        selected.value = { ...selected.value, ...full }
+        const idx = requests.value.findIndex(r => Number(r.id) === Number(req.id))
+        if (idx !== -1) requests.value[idx] = { ...requests.value[idx], ...full }
+      }
+      if (full?.yandex_default_source_pvz) {
+        yandexDefaultSourcePvz.value = full.yandex_default_source_pvz
+      }
+    } catch { /* оставляем дефолт */ }
+  }
   // Сразу подгружаем оба варианта доставки (СДЭК + Яндекс) для КС, чтобы видеть
   // стоимость и согласовать перевозчика до одобрения
   tariffOptions.value = []
   selectedTariff.value = null
-  candidatesData.value = null
+  candidatesData.value = candidatesFromReq(req)
+  applyCarrierFromCandidates(candidatesData.value)
   if (isCS.value && ['new', 'matched'].includes(req.status)) {
     await loadCandidates()
     if (selectedCarrier.value === 'cdek') loadTariffs()
-  } else {
+  } else if (!['new', 'matched'].includes(req.status)) {
     // Уже одобрена (или на складе) — перевозчик зафиксирован, экономика должна
     // считаться именно по нему, а не по значению, оставшемуся от прошлой заявки
     selectedCarrier.value = req.delivery_method || 'cdek'
@@ -778,20 +848,27 @@ const select = async (req) => {
   if (!isWarehouseOnly.value) loadEconomics(req.id)
   showStatusHistory.value = false
   loadStatusHistory(req.id)
+  syncListQuery()
+}
+
+function pickSelected(id) {
+  if (!id) return null
+  const row = requests.value.find(r => Number(r.id) === Number(id)) || null
+  if (!row) return null
+  if (filterStatus.value !== 'all' && row.status !== filterStatus.value) return null
+  return row
 }
 
 const reload = async () => {
+  const id = selected.value?.id
   await load()
-  if (canManageYandexActs.value) await loadYandexActs()
-  if (selected.value) {
-    selected.value = requests.value.find(r => r.id === selected.value.id) || null
-  }
+  selected.value = pickSelected(id)
 }
 
 // ── Оба кандидата доставки (СДЭК + Яндекс), КС сам согласовывает выгодный ────
-const candidatesData = ref(null)   // { client, cdek, yandex }
+const candidatesData = ref(null)   // { client, cdek, yandex, ozon }
 const candidatesLoading = ref(false)
-const selectedCarrier = ref('cdek')  // 'cdek' | 'yandex' — выбор КС на этапе одобрения
+const selectedCarrier = ref('cdek')  // 'cdek' | 'yandex' | 'ozon'
 const pvzMapEl = ref(null)
 const pvzMapError = ref('')
 let pvzMap = null
@@ -809,34 +886,41 @@ const fmtDistance = (km) => {
 const hasPvzMapPoints = computed(() => {
   const d = candidatesData.value
   if (!d) return false
-  const clientOk = d.client?.lat != null && d.client?.lon != null
-  const cdekOk = d.cdek?.available && d.cdek?.lat != null && d.cdek?.lng != null
-  const ydOk = d.yandex?.available && d.yandex?.lat != null && d.yandex?.lng != null
-  return clientOk && (cdekOk || ydOk)
+  // Показываем карту даже без ПВЗ (например Казахстан) — хотя бы точка клиента
+  return d.client?.lat != null && d.client?.lon != null
 })
 
 const loadYmaps = () => {
   if (typeof window !== 'undefined' && window.ymaps) {
     return new Promise((resolve) => window.ymaps.ready(() => resolve(window.ymaps)))
   }
-  if (!YANDEX_MAPS_KEY) {
-    return Promise.reject(new Error('Нет VITE_YANDEX_MAPS_KEY'))
-  }
   if (!ymapsLoadPromise) {
-    ymapsLoadPromise = new Promise((resolve, reject) => {
-      const s = document.createElement('script')
-      s.src = `https://api-maps.yandex.ru/2.1/?apikey=${encodeURIComponent(YANDEX_MAPS_KEY)}&lang=ru_RU`
-      s.async = true
-      s.onload = () => {
-        if (!window.ymaps) {
-          reject(new Error('ymaps не загрузился'))
-          return
-        }
-        window.ymaps.ready(() => resolve(window.ymaps))
+    ymapsLoadPromise = (async () => {
+      let key = YANDEX_MAPS_KEY
+      if (!key) {
+        const r = await apiFetch(`${API_BASE}/api/v1/reshipment/maps-config`)
+        const d = await r.json()
+        key = String(d?.apikey || '').trim()
       }
-      s.onerror = () => reject(new Error('Не удалось загрузить Яндекс.Карты'))
-      document.head.appendChild(s)
-    })
+      if (!key) {
+        throw new Error('Карта недоступна')
+      }
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script')
+        s.src = `https://api-maps.yandex.ru/2.1/?apikey=${encodeURIComponent(key)}&lang=ru_RU`
+        s.async = true
+        s.onload = () => {
+          if (!window.ymaps) {
+            reject(new Error('Карта не загрузилась'))
+            return
+          }
+          window.ymaps.ready(() => resolve())
+        }
+        s.onerror = () => reject(new Error('Не удалось загрузить Яндекс.Карты'))
+        document.head.appendChild(s)
+      })
+      return window.ymaps
+    })()
   }
   return ymapsLoadPromise
 }
@@ -867,6 +951,9 @@ const renderPvzMap = async () => {
     }
     if (d.yandex?.available && d.yandex.lat != null && d.yandex.lng != null) {
       points.push([d.yandex.lat, d.yandex.lng])
+    }
+    if (d.ozon?.available && d.ozon.lat != null && d.ozon.lng != null) {
+      points.push([d.ozon.lat, d.ozon.lng])
     }
 
     pvzMap = new ymaps.Map(pvzMapEl.value, {
@@ -914,6 +1001,16 @@ const renderPvzMap = async () => {
       )
     }
 
+    if (d.ozon?.available && d.ozon.lat != null && d.ozon.lng != null) {
+      const sel = selectedCarrier.value === 'ozon'
+      addMark(
+        [d.ozon.lat, d.ozon.lng],
+        sel ? '#1D4ED8' : '#3B82F6',
+        sel ? 'Ozon ✓' : 'Ozon',
+        `Ozon${d.ozon.distance_km != null ? ` · ${fmtDistance(d.ozon.distance_km)}` : ''}<br>${d.ozon.pvz_address || ''}`,
+      )
+    }
+
     if (points.length > 1) {
       pvzMap.setBounds(pvzMap.geoObjects.getBounds(), {
         checkZoomRange: true,
@@ -922,34 +1019,84 @@ const renderPvzMap = async () => {
     }
   } catch (e) {
     destroyPvzMap()
-    pvzMapError.value = e?.message || 'Карта недоступна'
+    pvzMapError.value = 'Карта недоступна'
   }
 }
 
 watch([candidatesData, selectedCarrier, hasPvzMapPoints], () => { renderPvzMap() })
 
+const hasCost = (value) => value != null && value !== ''
+
+const candidatesFromReq = (req) => {
+  if (!req) return null
+  const ozonAvailable = hasCost(req.ozon_cost)
+  return {
+    delivery_method: req.delivery_method || null,
+    client: {
+      lat: req.client_lat ?? null,
+      lon: req.client_lon ?? null,
+      address: req.shipping_address || req.address_city || req.client_pvz_city || '',
+    },
+    cdek: {
+      available: hasCost(req.cdek_cost),
+      cost: req.cdek_cost ?? null,
+      pvz_address: req.client_pvz_address || '',
+    },
+    yandex: {
+      available: hasCost(req.yandex_cost),
+      cost: req.yandex_cost ?? null,
+      pvz_address: req.yandex_pvz_address || '',
+      pvz_name: req.yandex_pvz_name || '',
+    },
+    ozon: {
+      available: ozonAvailable,
+      cost: req.ozon_cost ?? null,
+      pvz_address: req.ozon_pvz_address || '',
+      pvz_name: req.ozon_pvz_name || '',
+      client_ok: req.ozon_client_ok,
+      reason: req.ozon_reason || '',
+      from_pvz_address: req.ozon_from_pvz_address || '',
+      recommended: ozonAvailable,
+    },
+  }
+}
+
+const applyCarrierFromCandidates = (data) => {
+  if (!data) return
+  if (data.delivery_method) {
+    selectedCarrier.value = data.delivery_method
+  } else if (data.ozon?.available) {
+    selectedCarrier.value = 'ozon'
+  } else if (data.cdek?.available && !data.yandex?.available) {
+    selectedCarrier.value = 'cdek'
+  } else if (data.yandex?.available && !data.cdek?.available) {
+    selectedCarrier.value = 'yandex'
+  } else {
+    selectedCarrier.value = 'cdek'
+  }
+}
+
 const loadCandidates = async () => {
   if (!selected.value) return
   candidatesLoading.value = true
-  candidatesData.value = null
-  destroyPvzMap()
+  if (!candidatesData.value) candidatesData.value = candidatesFromReq(selected.value)
+  try { destroyPvzMap() } catch { /* ignore */ }
   try {
     const res = await apiFetch(`${API_BASE}/api/v1/reshipment/requests/${selected.value.id}/cost`)
     const data = await res.json()
     candidatesData.value = data
-    // Уже одобрена — фиксируем реальный перевозчик; иначе по умолчанию берём доступный
-    if (data.delivery_method) {
-      selectedCarrier.value = data.delivery_method
-    } else if (data.cdek?.available && !data.yandex?.available) {
-      selectedCarrier.value = 'cdek'
-    } else if (data.yandex?.available && !data.cdek?.available) {
-      selectedCarrier.value = 'yandex'
-    } else {
-      selectedCarrier.value = 'cdek'
-    }
-  } catch { /* ignore */ }
-  finally { candidatesLoading.value = false }
+    applyCarrierFromCandidates(data)
+  } catch { /* оставляем цены из заявки, если /cost не ответил */ }
+  finally { candidatesLoading.value = false   }
 }
+
+watch(isCS, async (ok) => {
+  const req = selected.value
+  if (!ok || !req || !['new', 'matched'].includes(req.status)) return
+  if (candidatesLoading.value) return
+  await loadCandidates()
+  if (selectedCarrier.value === 'cdek') loadTariffs()
+})
 
 const refreshingCandidates = ref(false)
 const refreshCandidates = async () => {
@@ -968,6 +1115,9 @@ const refreshCandidates = async () => {
       yandex: data.yandex?.available
         ? { ...data.yandex, available: true }
         : (candidatesData.value?.yandex || { available: false }),
+      ozon: data.ozon
+        ? { ...data.ozon, available: !!data.ozon.available }
+        : (candidatesData.value?.ozon || { available: false }),
     }
     if (data.cdek?.available) {
       selected.value.cdek_cost = data.cdek.cost
@@ -977,6 +1127,12 @@ const refreshCandidates = async () => {
       selected.value.yandex_cost = data.yandex.cost
       selected.value.yandex_pvz_address = data.yandex.pvz_address
     }
+    if (data.ozon?.available) {
+      selected.value.ozon_cost = data.ozon.cost
+      selected.value.ozon_pvz_address = data.ozon.pvz_address
+      selected.value.ozon_from_pvz_address = data.ozon.from_pvz_address
+    }
+    if (data.ozon?.available) selectedCarrier.value = 'ozon'
     // Обновляем и список заявок
     const idx = requests.value.findIndex(r => r.id === selected.value.id)
     if (idx !== -1) requests.value[idx] = { ...requests.value[idx], ...selected.value }
@@ -990,6 +1146,7 @@ const refreshCandidates = async () => {
 const pickCarrier = (carrier) => {
   selectedCarrier.value = carrier
   loadEconomics(selected.value.id)
+  if (carrier === 'cdek') loadTariffs()
 }
 
 // ── КС: загрузка тарифов СДЭК (показываем сразу при выборе заявки) ────────────
@@ -1017,6 +1174,12 @@ const doApprove = async (force = false) => {
   if (selectedCarrier.value === 'cdek' && !selectedTariff.value) {
     alert('Сначала выберите тариф СДЭК'); return
   }
+  if (selectedCarrier.value === 'ozon' && !candidatesData.value?.ozon?.available) {
+    alert('Ozon для этой заявки недоступен — выберите СДЭК или Яндекс'); return
+  }
+  if (selectedCarrier.value === 'yandex' && !candidatesData.value?.yandex?.available) {
+    alert('Яндекс для этой заявки недоступен'); return
+  }
   // Риск: стоимость доставки превышает себестоимость товара (только для СДЭК-тарифа)
   if (selectedCarrier.value === 'cdek' && !force && costRisk.value) { showCostRiskModal.value = true; return }
   showCostRiskModal.value = false
@@ -1036,7 +1199,7 @@ const doApprove = async (force = false) => {
     const data = await res.json()
     panel.value = null
     await reload()
-    selected.value = requests.value.find(r => r.id === selected.value?.id) || null
+    selected.value = pickSelected(selected.value?.id)
     if (data.cdek_warning) alert(`⚠️ ${data.cdek_warning}`)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
@@ -1047,15 +1210,24 @@ const doReject = async () => {
   if (!rejectForm.value.moderator_comment.trim()) { alert('Укажите причину'); return }
   panelLoading.value = true
   try {
-    await apiFetch(`${API_BASE}/api/v1/reshipment/requests/${selected.value.id}/reject`, {
+    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/requests/${selected.value.id}/reject`, {
       method: 'POST',
       body: JSON.stringify({
         moderator_comment: rejectForm.value.moderator_comment,
         processed_by:      username.value,
       }),
     })
+    const data = await res.json()
     panel.value = null
     await reload()
+    const bits = []
+    if (data.promo_scheduled) bits.push('промокод уйдёт клиенту через 10 секунд')
+    const claim = data.claim || {}
+    if (claim.ok && claim.skipped === 'already_approved') bits.push('возврат WB уже был одобрен')
+    else if (claim.ok) bits.push('возврат WB одобрен')
+    else if (claim.skipped === 'no_claim') bits.push('заявки на возврат WB нет — одобрять было нечего')
+    else if (claim.error || claim.skipped) bits.push('возврат WB автоматически одобрить не удалось')
+    if (bits.length) alert('Заявка отклонена: ' + bits.join('; '))
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
 }
@@ -1076,7 +1248,7 @@ const doWarehouseReject = async () => {
     panel.value = 'warehouse_rejected'
     lastShipResult.value = data
     await reload()
-    selected.value = requests.value.find(r => r.id === selected.value?.id) || null
+    selected.value = pickSelected(selected.value?.id)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
 }
@@ -1091,7 +1263,7 @@ const doMarkPacked = async (id) => {
     )
     panel.value = null
     await reload()
-    selected.value = requests.value.find(r => r.id === id) || null
+    selected.value = pickSelected(id)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
 }
@@ -1106,7 +1278,22 @@ const doYandexRetry = async (id) => {
     })
     const data = await res.json()
     await reload()
-    selected.value = requests.value.find(r => r.id === id) || null
+    selected.value = pickSelected(id)
+    if (data.warning) alert(`⚠️ ${data.warning}`)
+  } catch (e) { alert(e.message) }
+  finally { panelLoading.value = false }
+}
+
+const doOzonRetry = async (id) => {
+  panelLoading.value = true
+  try {
+    const res = await apiFetch(`${API_BASE}/api/v1/reshipment/requests/${id}/ozon-create`, {
+      method: 'POST',
+      body: JSON.stringify({ processed_by: username.value }),
+    })
+    const data = await res.json()
+    await reload()
+    selected.value = pickSelected(id)
     if (data.warning) alert(`⚠️ ${data.warning}`)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
@@ -1128,7 +1315,7 @@ const doShipYandex = async (id) => {
     yandexForm.value = { track_number: '', shipping_cost: '' }
     panel.value = null
     await reload()
-    selected.value = requests.value.find(r => r.id === id) || null
+    selected.value = pickSelected(id)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
 }
@@ -1144,7 +1331,7 @@ const doMarkShipped = async (id) => {
     )
     panel.value = null
     await reload()
-    selected.value = requests.value.find(r => r.id === id) || null
+    selected.value = pickSelected(id)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
 }
@@ -1155,7 +1342,7 @@ const bulkResults = ref([])
 
 // ── Склад: скачать список к упаковке ─────────────────────────────────────────
 const downloadPacklist = async () => {
-  const token = localStorage.getItem('token')
+  const token = getAuthToken()
   const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/packlist`, {
     headers: { 'Authorization': `Bearer ${token}` }
   })
@@ -1170,22 +1357,25 @@ const downloadPacklist = async () => {
 
 // ── Склад: печать этикеток PDF 80×58 ─────────────────────────────────────────
 const downloadLabels = async (ids = []) => {
-  const token = localStorage.getItem('token')
+  const token = getAuthToken()
   const idsParam = ids.length ? `?ids=${ids.join(',')}` : ''
   const res = await fetch(`${API_BASE}/api/v1/reshipment/warehouse/labels${idsParam}`, {
     headers: { 'Authorization': `Bearer ${token}` }
   })
   if (!res.ok) {
-    alert('Не удалось сформировать этикетку')
+    let msg = 'Не удалось сформировать этикетку'
+    try {
+      const data = await res.json()
+      if (data?.detail) msg = String(data.detail)
+    } catch { /* blob/html */ }
+    alert(msg)
     return
   }
   const blob = await res.blob()
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.target = '_blank'
-  a.click()
-  URL.revokeObjectURL(url)
+  const pdf = new Blob([blob], { type: 'application/pdf' })
+  const url = URL.createObjectURL(pdf)
+  window.open(url, '_blank', 'noopener')
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 // ── Склад: отметить посылку как вернувшуюся ──────────────────────────────────
@@ -1198,7 +1388,7 @@ const doMarkReturned = async () => {
     )
     panel.value = null
     await reload()
-    selected.value = requests.value.find(r => r.id === selected.value?.id) || null
+    selected.value = pickSelected(selected.value?.id)
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
 }
@@ -1215,7 +1405,7 @@ const doRecreateShipment = async (id) => {
     const data = await res.json()
     panel.value = null
     await reload()
-    selected.value = requests.value.find(r => r.id === id) || null
+    selected.value = pickSelected(id)
     alert(data.message || 'Повторный заказ создан')
   } catch (e) { alert(e.message) }
   finally { panelLoading.value = false }
@@ -1226,7 +1416,7 @@ const doRequestReview = async () => {
   try {
     await apiFetch(`${API_BASE}/api/v1/reshipment/requests/${selected.value.id}/request-review`, { method: 'POST' })
     await reload()
-    selected.value = requests.value.find(r => r.id === selected.value?.id) || null
+    selected.value = pickSelected(selected.value?.id)
   } catch (e) { alert(e.message) }
 }
 
@@ -1236,7 +1426,10 @@ const copyUrl = async (url) => {
   setTimeout(() => { copied.value = false }, 2000)
 }
 
-const cdekTrackUrl = (num) => num ? `https://www.cdek.ru/track.html?order_id=${num}` : null
+const yandexTrackUrl = computed(() => {
+  const url = String(selected.value?.yandex_sharing_url || '').trim()
+  return url.startsWith('http') ? url : ''
+})
 
 const fmt = (d) => {
   if (!d) return '—'
@@ -1249,17 +1442,30 @@ const fmt = (d) => {
 
 const fmtCost = (v) => v != null ? `${Number(v).toLocaleString('ru-RU')} ₽` : '—'
 
-const onKeydown = (e) => { if (e.key === 'Escape') closeLightbox() }
+const onKeydown = (e) => {
+  if (e.key !== 'Escape') return
+  if (showOzonDropoff.value) closeOzonDropoff()
+  else closeLightbox()
+}
 onMounted(async () => {
-  filterStatus.value = defaultStatus.value
+  applyListQuery()
   await load()
   if (isCS.value) loadPromoCode()
-  if (canManageYandexActs.value) loadYandexActs()
   await openFromQuery()
+  listQueryReady = true
+  syncListQuery()
   window.addEventListener('keydown', onKeydown)
 })
 watch(() => route.query.id || route.query.req, () => {
   openFromQuery()
+})
+watch([filterStatus, filterCarrier], () => {
+  syncListQuery()
+  selected.value = pickSelected(selected.value?.id)
+})
+watch(searchQuery, () => {
+  clearTimeout(searchSyncTimer)
+  searchSyncTimer = setTimeout(syncListQuery, 300)
 })
 watch(currentMp, () => {
   // При смене площадки в сайдбаре — сбросить карточку, если её нет в новом списке
@@ -1296,13 +1502,19 @@ onUnmounted(() => {
             </button>
           </div>
           <div class="mt-2 flex max-w-full flex-wrap items-center gap-1">
+            <RouterLink to="/return/scan"
+              title="Сканер возвратов: этикетка коробки → претензия, проблема и фото"
+              class="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap no-underline">
+              <ScanLine class="h-3.5 w-3.5" />
+              <span>Сканер возвратов</span>
+            </RouterLink>
             <button v-if="isAdmin" @click="openSkuSettings"
               title="Товары, по которым можно предлагать доотправку деталей (только администратор)"
               class="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
               <PackageCheck class="h-3.5 w-3.5" />
               <span>Товары</span>
             </button>
-            <button v-if="isCS" @click="showPromoSettings = true"
+            <button v-if="isCS" @click="openPromoSettings"
               title="Промокод на следующую покупку (для отказов)"
               class="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 whitespace-nowrap">
               <Tag class="h-3.5 w-3.5" />
@@ -1319,27 +1531,15 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div v-if="canManageYandexActs"
-          class="mb-3 rounded-xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-1 shadow-[0_10px_24px_-24px_rgba(217,119,6,0.5)]">
-          <div class="grid grid-cols-2 gap-1.5">
-            <button @click="generateYandexAct" :disabled="yandexActGenerating || !yandexActPending"
-              :title="yandexActPending ? `Без акта: ${yandexActPending}` : 'Нет заявок без акта'"
-              class="inline-flex min-h-[36px] w-full items-center justify-center gap-1 rounded-lg bg-amber-500 px-2.5 py-2 text-[12px] font-semibold text-white shadow-sm transition-all hover:bg-amber-600 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-amber-500 whitespace-nowrap">
-              <Loader2 v-if="yandexActGenerating" class="h-3 w-3 animate-spin" />
-              <FileDown v-else class="h-3 w-3" />
-              <span>Сформировать акт</span>
-            </button>
-            <button @click="openYandexActsRegistry"
-              class="inline-flex min-h-[36px] w-full items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[12px] font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:shadow-md whitespace-nowrap">
-              <History class="h-3 w-3" />
-              <span>Реестр актов Яндекс</span>
-            </button>
-          </div>
-        </div>
+        <button v-if="canManageYandexActs" @click="openOzonDropoff"
+          class="mb-3 inline-flex min-h-[36px] w-full items-center justify-center gap-1 rounded-xl border border-blue-200 bg-blue-50 px-2.5 py-2 text-[12px] font-semibold text-blue-800 shadow-sm transition-all hover:bg-blue-100">
+          <span>Штрихкод сдачи Ozon</span>
+        </button>
 
         <div class="relative mb-3">
           <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-          <input v-model="searchQuery" type="text" placeholder="ID заявки, имя, номер, телефон, чат, токен..."
+          <input v-model="searchQuery" type="search" name="reshipment-search" autocomplete="off"
+            placeholder="ID заявки, имя, номер, телефон, чат, токен..."
             class="w-full pl-8 pr-3 py-2 text-xs rounded-lg border border-slate-200 focus:border-emerald-400 focus:outline-none" />
         </div>
 
@@ -1355,7 +1555,7 @@ onUnmounted(() => {
         <!-- Фильтр по перевозчику + соотношение СДЭК/Яндекс -->
         <div class="flex items-center gap-2 flex-wrap">
           <div class="flex gap-1">
-            <button v-for="c in [{v:'all',l:'Все ТК'},{v:'cdek',l:'СДЭК'},{v:'yandex',l:'Яндекс'}]" :key="c.v"
+            <button v-for="c in [{v:'all',l:'Все ТК'},{v:'ozon',l:'Ozon'},{v:'cdek',l:'СДЭК'},{v:'yandex',l:'Яндекс'}]" :key="c.v"
               @click="filterCarrier = c.v"
               :class="['px-2 py-0.5 text-[11px] rounded-full font-medium border transition-colors',
                 filterCarrier === c.v
@@ -1365,7 +1565,7 @@ onUnmounted(() => {
             </button>
           </div>
           <span v-if="carrierRatio.total > 0" class="text-[10px] text-slate-400 ml-auto">
-            СДЭК {{ carrierRatio.cdek }} ({{ carrierRatio.cdekPct }}%) · Яндекс {{ carrierRatio.yandex }} ({{ carrierRatio.yandexPct }}%)
+            СДЭК {{ carrierRatio.cdek }} ({{ carrierRatio.cdekPct }}%) · Яндекс {{ carrierRatio.yandex }} ({{ carrierRatio.yandexPct }}%) · Ozon {{ carrierRatio.ozon }} ({{ carrierRatio.ozonPct }}%)
           </span>
         </div>
       </div>
@@ -1395,7 +1595,9 @@ onUnmounted(() => {
             :class="mpStripeClass(req)"
             :title="marketplaceLabel(req)" />
 
-          <button class="flex-1 text-left pl-4 pr-4 py-3 min-w-0" @click="select(req)">
+          <a class="flex-1 text-left pl-4 pr-4 py-3 min-w-0 no-underline text-inherit"
+            :href="requestHref(req)"
+            @click="onAppClick($event, () => select(req))">
             <div class="flex items-start justify-between gap-2 mb-1">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="text-sm font-medium text-slate-800 truncate">{{ req.customer_name }}</span>
@@ -1414,8 +1616,7 @@ onUnmounted(() => {
               <span v-if="req.order_number">· {{ req.order_number }}</span>
               <span v-if="realCost(req) > 0" class="text-emerald-600 font-medium">· {{ fmtCost(realCost(req)) }}</span>
               <span v-if="carrierLabel(req)"
-                :class="['text-[9px] font-bold px-1.5 py-0.5 rounded-full',
-                  req.delivery_method === 'yandex' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700']">
+                :class="['text-[9px] font-bold px-1.5 py-0.5 rounded-full', carrierBadgeClass(req.delivery_method)]">
                 {{ carrierLabel(req) }}
               </span>
               <template v-if="req.status === 'delivered' && (req.wb_before_rating || req.wb_after_rating)">
@@ -1432,7 +1633,7 @@ onUnmounted(() => {
               </template>
               <span class="ml-auto">{{ fmt(req.created_at) }}</span>
             </div>
-          </button>
+          </a>
         </div>
       </div>
     </div>
@@ -1450,7 +1651,7 @@ onUnmounted(() => {
         <div class="flex items-start justify-between mb-5 gap-4">
           <div class="flex items-start gap-2 min-w-0">
             <!-- Кнопка Назад (только мобильный) -->
-            <button @click="selected = null" class="md:hidden mt-0.5 p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 flex-shrink-0">
+            <button @click="clearSelected" class="md:hidden mt-0.5 p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 flex-shrink-0">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
             </button>
             <div class="min-w-0">
@@ -1507,7 +1708,7 @@ onUnmounted(() => {
               <p class="text-sm text-slate-400">Заявка #{{ selected.id }}</p>
             </div>
           </div>
-          <button @click="selected = null" class="hidden md:block p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 flex-shrink-0">
+          <button @click="clearSelected" class="hidden md:block p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 flex-shrink-0">
             <X class="w-5 h-5" />
           </button>
         </div>
@@ -1529,22 +1730,27 @@ onUnmounted(() => {
             </div>
           </div>
           <!-- Для склада: стоимость доставки рядом с контактами -->
-          <div v-if="isWarehouseOnly && (realCost(selected) > 0 || selected.cdek_number)"
+          <div v-if="isWarehouseOnly && (realCost(selected) > 0 || selected.cdek_number || selected.track_number)"
             class="bg-emerald-50 rounded-xl border border-emerald-200 p-3 flex items-center gap-2">
             <div class="w-7 h-7 bg-emerald-100 rounded-lg flex items-center justify-center flex-shrink-0">
               <Truck class="w-3.5 h-3.5 text-emerald-600" />
             </div>
-            <div>
+            <div class="flex-1 min-w-0">
               <p class="text-[10px] text-emerald-600 font-semibold uppercase tracking-wider">
-                Доставка {{ selected.delivery_method === 'yandex' ? 'Яндекс' : 'СДЭК' }}
+                Доставка {{ carrierName(selected.delivery_method) || 'СДЭК' }}
               </p>
               <p class="text-base font-bold text-emerald-800">{{ fmtCost(realCost(selected)) }}</p>
-              <p v-if="selected.delivery_method === 'yandex' && selected.track_number" class="text-[10px] font-mono text-emerald-600 mt-0.5">{{ selected.track_number }}</p>
+              <p v-if="['yandex','ozon'].includes(selected.delivery_method) && selected.track_number" class="text-[10px] font-mono text-emerald-600 mt-0.5">{{ selected.track_number }}</p>
               <p v-else-if="selected.cdek_number" class="text-[10px] font-mono text-emerald-600 mt-0.5">{{ selected.cdek_number }}</p>
             </div>
+            <button v-if="selected.cdek_number || selected.track_number"
+              @click="downloadLabels([selected.id])"
+              class="flex items-center gap-1.5 px-3 py-2 bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors shrink-0">
+              <Printer class="w-3.5 h-3.5" /> Этикетка
+            </button>
           </div>
-          <!-- Чаты WB / ЯМ (только для КС/админа, не для склада) -->
-          <div v-if="!isWarehouseOnly && (selected.wb_chat_id || selected.ym_chat_id)" class="bg-violet-50 rounded-xl border border-violet-200 p-3">
+          <!-- Чаты WB / ЯМ / Ozon (только для КС/админа, не для склада) -->
+          <div v-if="!isWarehouseOnly && (selected.wb_chat_id || selected.ym_chat_id || selected.ozon_chat_id)" class="bg-violet-50 rounded-xl border border-violet-200 p-3">
             <p class="text-[10px] font-bold text-violet-500 uppercase tracking-wider mb-2 flex items-center gap-1">
               <MessageCircle class="w-3 h-3" /> Чаты
             </p>
@@ -1566,6 +1772,15 @@ onUnmounted(() => {
                   :class="selected.ym_chat_id ? 'text-yellow-700' : 'text-slate-400'">ЯМ</span>
                 <span class="text-[11px] font-bold" :class="selected.ym_chat_id ? 'text-yellow-700' : 'text-slate-300'">
                   {{ selected.ym_chat_id ? '✓' : '✗' }}
+                </span>
+              </div>
+              <!-- Ozon -->
+              <div class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border py-1"
+                :class="selected.ozon_chat_id ? 'border-blue-200 bg-blue-50' : 'border-slate-200 bg-slate-50'">
+                <span class="text-[10px] font-bold uppercase tracking-wider"
+                  :class="selected.ozon_chat_id ? 'text-blue-700' : 'text-slate-400'">Ozon</span>
+                <span class="text-[11px] font-bold" :class="selected.ozon_chat_id ? 'text-blue-700' : 'text-slate-300'">
+                  {{ selected.ozon_chat_id ? '✓' : '✗' }}
                 </span>
               </div>
               <!-- TG -->
@@ -1596,20 +1811,33 @@ onUnmounted(() => {
                 class="flex items-center justify-center gap-1.5 text-[10px] px-2 py-1.5 bg-violet-600 hover:bg-violet-700 text-white font-semibold rounded-lg transition-colors flex-1">
                 <ExternalLink class="w-3 h-3" /> Открыть чат WB
               </a>
-              <a v-if="selected.ym_chat_id" :href="ymChatUrl(selected)" target="_blank"
+              <RouterLink v-if="selected.ym_chat_id" :to="ymChatRoute(selected)"
                 class="flex items-center justify-center gap-1.5 text-[10px] px-2 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white font-semibold rounded-lg transition-colors flex-1">
-                <ExternalLink class="w-3 h-3" /> Открыть чат ЯМ
-              </a>
+                <MessageCircle class="w-3 h-3" /> Открыть чат ЯМ
+              </RouterLink>
+              <RouterLink v-if="selected.ozon_chat_id" :to="ozonChatRoute(selected)"
+                class="flex items-center justify-center gap-1.5 text-[10px] px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors flex-1">
+                <MessageCircle class="w-3 h-3" /> Открыть чат Ozon
+              </RouterLink>
             </div>
             <p v-if="displayArticle(selected)" class="text-[10px] text-slate-500 mt-1.5">
               Товар: <span class="font-mono font-semibold text-slate-700">{{ displayArticle(selected) }}</span>
-              <span v-if="selected.ym_order_id || selected.order_number"> · заказ {{ selected.ym_order_id || selected.order_number }}</span>
+              <span v-if="selected.ym_order_id || selected.order_number || selected.ozon_chat_order_number"> · заказ {{ selected.ym_order_id || selected.order_number || selected.ozon_chat_order_number }}</span>
             </p>
           </div>
           <div v-else-if="!isWarehouseOnly" class="bg-slate-50 rounded-xl border border-slate-200 p-3 flex items-center justify-center">
             <span class="text-[10px] text-slate-400 italic">Чат не привязан</span>
           </div>
         </div>
+
+        <a v-if="yandexTrackUrl"
+          :href="yandexTrackUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex items-center justify-center gap-2 mb-3 px-4 py-2.5 rounded-xl border border-yellow-200 bg-yellow-50 hover:bg-yellow-100 text-yellow-800 text-sm font-semibold transition-colors">
+          <ExternalLink class="w-4 h-4 flex-shrink-0" />
+          Отследить в Яндексе
+        </a>
 
         <!-- ── WB: заказ + претензия + отзыв ─── -->
         <div v-if="selected.wb_chat_id || selected.wb_nm_id" class="mb-3">
@@ -1738,10 +1966,29 @@ onUnmounted(() => {
         <div v-if="!isWarehouseOnly && isCS && ['new','matched'].includes(selected.status)" class="mb-3">
           <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Варианты доставки — выберите выгодный</p>
           <div v-if="candidatesLoading" class="flex items-center gap-2 text-slate-400 text-xs py-2">
-            <Loader2 class="w-3.5 h-3.5 animate-spin" /> Считаем оба варианта...
+            <Loader2 class="w-3.5 h-3.5 animate-spin" /> Считаем варианты доставки...
           </div>
           <div v-else-if="candidatesData" class="space-y-2">
-            <div class="grid grid-cols-2 gap-2">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <button type="button" :disabled="!candidatesData.ozon?.available"
+                @click="pickCarrier('ozon')"
+                class="text-left p-3 rounded-xl border-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed relative"
+                :class="selectedCarrier === 'ozon' && candidatesData.ozon?.available ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white hover:border-blue-300'">
+                <div class="flex items-center gap-1.5 mb-1">
+                  <Truck class="w-3.5 h-3.5 text-blue-600" />
+                  <span class="text-xs font-bold text-slate-700">Ozon</span>
+                  <span v-if="candidatesData.ozon?.available || candidatesData.ozon?.recommended"
+                    class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700">выгоднее</span>
+                  <CheckCircle2 v-if="selectedCarrier === 'ozon' && candidatesData.ozon?.available" class="w-3.5 h-3.5 text-blue-600 ml-auto" />
+                </div>
+                <p v-if="candidatesData.ozon?.available" class="text-base font-bold text-blue-800">{{ fmtCost(candidatesData.ozon.cost) }}</p>
+                <p v-else class="text-xs text-slate-400 italic">{{ candidatesData.ozon?.reason || 'не подобрано' }}</p>
+                <p v-if="candidatesData.ozon?.pvz_address" class="text-[10px] text-slate-500 mt-0.5 leading-snug line-clamp-2">{{ candidatesData.ozon.pvz_address }}</p>
+                <p v-if="candidatesData.ozon?.distance_km != null" class="text-[10px] text-blue-700 mt-1 font-medium flex items-center gap-0.5">
+                  <MapPin class="w-2.5 h-2.5 flex-shrink-0" />{{ fmtDistance(candidatesData.ozon.distance_km) }}
+                </p>
+                <p v-if="candidatesData.ozon?.from_pvz_address" class="text-[9px] text-slate-400 mt-1 leading-snug">Сдача: {{ candidatesData.ozon.from_pvz_address }}</p>
+              </button>
               <button type="button" :disabled="!candidatesData.cdek?.available"
                 @click="pickCarrier('cdek')"
                 class="text-left p-3 rounded-xl border-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1780,6 +2027,7 @@ onUnmounted(() => {
               <p v-if="pvzMapError" class="px-2.5 py-1.5 text-[10px] text-rose-600 bg-white border-t border-slate-100">{{ pvzMapError }}</p>
               <div v-else class="px-2.5 py-1.5 bg-white border-t border-slate-100 flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-slate-500">
                 <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-slate-600"></span>Адрес клиента</span>
+                <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-blue-600"></span>Ozon</span>
                 <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-600"></span>СДЭК</span>
                 <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-500"></span>Яндекс</span>
                 <span class="ml-auto text-slate-400">Яндекс.Карты</span>
@@ -1803,14 +2051,21 @@ onUnmounted(() => {
             <div class="w-7 h-7 bg-emerald-100 rounded-lg flex items-center justify-center flex-shrink-0">
               <Truck class="w-3.5 h-3.5 text-emerald-600" />
             </div>
-            <div>
+            <div class="flex-1">
               <p class="text-[10px] text-emerald-600 font-semibold uppercase tracking-wider">
-                Доставка {{ selected.delivery_method === 'yandex' ? 'Яндекс' : 'СДЭК' }}
+                Доставка {{ carrierName(selected.delivery_method) || 'СДЭК' }}
               </p>
               <p class="text-base font-bold text-emerald-800">
                 {{ fmtCost(realCost(selected)) }}
               </p>
+              <p v-if="selected.cdek_number" class="text-[10px] font-mono text-emerald-700 mt-0.5">{{ selected.cdek_number }}</p>
+              <p v-else-if="selected.track_number" class="text-[10px] font-mono text-emerald-700 mt-0.5">{{ selected.track_number }}</p>
             </div>
+            <button v-if="selected.cdek_number || selected.track_number"
+              @click="downloadLabels([selected.id])"
+              class="flex items-center gap-1.5 px-3 py-2 bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors shrink-0">
+              <Printer class="w-3.5 h-3.5" /> Этикетка
+            </button>
           </div>
         </div>
 
@@ -1827,7 +2082,9 @@ onUnmounted(() => {
 
           <template v-if="showEconomics && economicsData">
             <div class="mt-2 mb-2 flex items-center gap-1.5 flex-wrap">
-              <span v-if="economicsData.has_report_data"
+              <span v-if="economicsData.ppvz_estimated"
+                class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">выплата по последней продаже артикула — заказ ещё не в финотчёте</span>
+              <span v-else-if="economicsData.has_report_data"
                 class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium">данные из финотчёта WB</span>
               <span v-else
                 class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">нет данных финотчёта</span>
@@ -1848,8 +2105,17 @@ onUnmounted(() => {
                   <span class="font-medium">{{ economicsData.variants.v3.breakdown.cog > 0 ? '−' : '' }}{{ fmtCost(economicsData.variants.v3.breakdown.cog) }}</span>
                 </div>
                 <div class="flex justify-between text-rose-500">
-                  <span>Доставка {{ economicsData.carrier === 'yandex' ? 'Яндекс' : 'СДЭК' }} клиенту</span>
+                  <span>Доставка {{ carrierName(economicsData.carrier) || 'СДЭК' }} клиенту
+                    <span v-if="economicsData.delivery_cost_fact != null" class="text-[10px] font-normal opacity-70">(факт)</span>
+                  </span>
                   <span class="font-medium">−{{ fmtCost(economicsData.variants.v3.breakdown.delivery_cost ?? economicsData.delivery_cost) }}</span>
+                </div>
+                <div v-if="economicsData.delivery_cost_plan != null && economicsData.delivery_cost_fact != null && economicsData.delivery_cost_diff"
+                  class="flex justify-between text-[10px] text-slate-500">
+                  <span>План (калькулятор) {{ fmtCost(economicsData.delivery_cost_plan) }}</span>
+                  <span :class="economicsData.delivery_cost_diff > 0 ? 'text-rose-500' : 'text-emerald-600'">
+                    {{ economicsData.delivery_cost_diff > 0 ? '+' : '' }}{{ fmtCost(economicsData.delivery_cost_diff) }} к плану
+                  </span>
                 </div>
                 <div v-if="economicsData.variants.v3.net_profit != null"
                   :class="['flex justify-between font-bold border-t mt-1.5 pt-1.5',
@@ -1913,7 +2179,14 @@ onUnmounted(() => {
                   <span class="font-medium">{{ economicsData.variants.v2.breakdown.acquiring > 0 ? '−' : '' }}{{ fmtCost(economicsData.variants.v2.breakdown.acquiring) }}</span>
                 </div>
                 <div class="flex justify-between text-amber-600">
-                  <span>Доставка WB → наш ПВЗ <span class="text-[10px] font-normal opacity-70">(~среднее)</span></span>
+                  <span>Обратная логистика
+                    <span class="text-[10px] font-normal opacity-70">
+                      <template v-if="economicsData.avg_return_delivery_source === 'sku'">
+                        (последние {{ economicsData.avg_return_delivery_n }} возвратов артикула)
+                      </template>
+                      <template v-else>(нет данных по артикулу, общая средняя)</template>
+                    </span>
+                  </span>
                   <span class="font-medium">−{{ fmtCost(economicsData.variants.v2.breakdown.return_delivery) }}</span>
                 </div>
                 <div v-if="economicsData.variants.v2.breakdown.rebill > 0" class="flex justify-between text-amber-500">
@@ -1974,7 +2247,7 @@ onUnmounted(() => {
           <!-- ПВЗ назначен (после одобрения) -->
           <div v-if="selected.delivery_method" class="bg-white rounded-xl border border-slate-200 p-3">
             <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-              ПВЗ клиента ({{ selected.delivery_method === 'yandex' ? 'Яндекс' : 'СДЭК' }})
+              ПВЗ клиента ({{ carrierName(selected.delivery_method) || 'СДЭК' }})
             </p>
             <div class="flex items-start gap-1.5">
               <MapPin class="w-3.5 h-3.5 text-emerald-500 flex-shrink-0 mt-0.5" />
@@ -2115,7 +2388,7 @@ onUnmounted(() => {
             <button @click="doApprove()" :disabled="panelLoading"
               class="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-xl transition-colors">
               <Loader2 v-if="panelLoading" class="w-3.5 h-3.5 animate-spin" />
-              <CheckCircle2 v-else class="w-3.5 h-3.5" /> Одобрить {{ selectedCarrier === 'cdek' ? 'СДЭК' : 'Яндекс' }}
+              <CheckCircle2 v-else class="w-3.5 h-3.5" /> Одобрить {{ carrierName(selectedCarrier) || 'СДЭК' }}
             </button>
             <button @click="panel = 'reject'" :disabled="panelLoading"
               class="flex items-center gap-2 px-4 py-2.5 bg-white hover:bg-rose-50 text-rose-600 text-sm font-semibold rounded-xl border border-rose-200 transition-colors">
@@ -2136,13 +2409,20 @@ onUnmounted(() => {
               <textarea v-model="rejectForm.moderator_comment" rows="3" placeholder="Возврат не подтверждён / дубль заявки..."
                 class="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-rose-400 focus:outline-none resize-none" />
             </div>
-            <div class="border-t border-rose-200 pt-3 text-xs">
+            <div class="border-t border-rose-200 pt-3 text-xs space-y-1">
               <template v-if="currentPromoCode">
-                <span class="text-slate-500">Клиенту через 10 сек придёт промокод </span>
-                <span class="font-mono font-bold text-violet-700">{{ currentPromoCode }}</span>
-                <span class="text-slate-500"> (скидка 15%)</span>
+                <p>
+                  <span class="text-slate-500">Через 10 сек уйдёт одно сообщение: не отправим деталь, возврат одобрен, промокод </span>
+                  <span class="font-mono font-bold text-violet-700">{{ currentPromoCode }}</span>
+                  <span class="text-slate-500"> (скидка 15%)</span>
+                </p>
               </template>
               <span v-else class="text-amber-600">Промокод не задан — сообщение с промокодом не будет отправлено. Задать можно в настройках раздела.</span>
+              <p v-if="wbCtx?.claim" class="text-slate-600">
+                Возврат WB сейчас: <span class="font-semibold">{{ wbCtx.claim.status }}</span>.
+                При отклонении система попробует одобрить его автоматически.
+              </p>
+              <p v-else class="text-slate-500">Связанной заявки на возврат WB не видно — одобрять будет нечего.</p>
             </div>
             <button @click="doReject" :disabled="panelLoading"
               class="flex items-center gap-2 px-5 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-sm font-semibold rounded-xl transition-colors">
@@ -2157,21 +2437,43 @@ onUnmounted(() => {
           <div :class="['rounded-xl border p-4', selected.status === 'packed' ? 'bg-teal-50 border-teal-200' : 'bg-violet-50 border-violet-200']">
             <p :class="['text-xs font-bold uppercase tracking-wider mb-2', selected.status === 'packed' ? 'text-teal-600' : 'text-violet-500']">
               {{ selected.status === 'packed'
-                ? (selected.delivery_method === 'yandex' ? '✓ Собрано — готово к сдаче в ПВЗ' : '✓ Собрано — готово к сдаче')
+                ? (['yandex','ozon'].includes(selected.delivery_method) ? '✓ Собрано — готово к сдаче в ПВЗ' : '✓ Собрано — готово к сдаче')
                 : 'К отправке' }}
             </p>
             <p v-if="selected.moderator_comment" class="text-sm text-slate-700 mb-3 italic">«{{ selected.moderator_comment }}»</p>
 
+            <!-- Ozon: заказ создан при одобрении -->
+            <div v-if="selected.delivery_method === 'ozon' && selected.track_number" class="mb-3 text-xs bg-white/70 rounded-lg px-3 py-2 text-slate-600 font-mono">
+              Ozon заказ создан ✓ ({{ selected.track_number }})
+              <template v-if="selected.ozon_posting_number"><br>Отправление: {{ selected.ozon_posting_number }}</template>
+              <br class="font-sans">
+              <span class="font-sans">Сдайте в ПВЗ Ozon: <strong>{{ selected.ozon_from_pvz_address || 'Казань, улица Глазунова, 10' }}</strong>.<br>
+              Получатель: <strong>{{ selected.client_pvz_address || selected.ozon_pvz_address || '—' }}</strong></span>
+            </div>
+            <div v-else-if="selected.delivery_method === 'ozon'" class="mb-3 text-xs bg-blue-50 rounded-lg px-3 py-2 text-blue-800 border border-blue-200">
+              ⚠️ Заказ Ozon не создался автоматически.<br>
+              Сдача в ПВЗ: <strong>{{ selected.ozon_from_pvz_address || 'Казань, улица Глазунова, 10' }}</strong>.<br>
+              Получатель: <strong>{{ selected.client_pvz_address || selected.ozon_pvz_address || '—' }}</strong>
+              <button @click="doOzonRetry(selected.id)" :disabled="panelLoading"
+                class="mt-2 flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
+                <Loader2 v-if="panelLoading" class="w-3 h-3 animate-spin" />
+                <RefreshCw v-else class="w-3 h-3" /> Создать заказ Ozon
+              </button>
+            </div>
             <!-- Яндекс: заказ уже создан автоматически при одобрении -->
-            <div v-if="selected.delivery_method === 'yandex' && selected.track_number" class="mb-3 text-xs bg-white/70 rounded-lg px-3 py-2 text-slate-600 font-mono">
+            <div v-else-if="selected.delivery_method === 'yandex' && selected.track_number" class="mb-3 text-xs bg-white/70 rounded-lg px-3 py-2 text-slate-600 font-mono">
               Яндекс заказ создан ✓ ({{ selected.track_number }})<br class="font-sans">
-              <span class="font-sans">Точка отправки: <strong>{{ YANDEX_SOURCE_PVZ }}</strong>.<br>
+              <span class="font-sans">Точка отправки: <strong>{{ yandexSourcePvz }}</strong>.<br>
               Получатель: <strong>{{ selected.client_pvz_address || '—' }}</strong></span>
+              <a v-if="yandexTrackUrl" :href="yandexTrackUrl" target="_blank" rel="noopener noreferrer"
+                class="mt-2 inline-flex items-center gap-1.5 font-sans text-yellow-800 bg-yellow-50 border border-yellow-200 hover:bg-yellow-100 px-2.5 py-1.5 rounded-lg font-semibold">
+                <ExternalLink class="w-3.5 h-3.5" /> Отследить в Яндексе
+              </a>
             </div>
             <!-- Яндекс: автосоздание не удалось — кнопка повтора -->
             <div v-else-if="selected.delivery_method === 'yandex'" class="mb-3 text-xs bg-amber-50 rounded-lg px-3 py-2 text-amber-700 border border-amber-200">
               ⚠️ Заказ Яндекс не создался автоматически.<br>
-              После создания сдайте посылку в ПВЗ: <strong>{{ YANDEX_SOURCE_PVZ }}</strong>.<br>
+              После создания сдайте посылку в ПВЗ: <strong>{{ yandexSourcePvz }}</strong>.<br>
               Получатель: <strong>{{ selected.client_pvz_address || '—' }}</strong>
               <button @click="doYandexRetry(selected.id)" :disabled="panelLoading"
                 class="mt-2 flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
@@ -2191,8 +2493,7 @@ onUnmounted(() => {
                   <Loader2 v-if="panelLoading" class="w-4 h-4 animate-spin" />
                   <CheckSquare v-else class="w-4 h-4" /> Отметить собранной
                 </button>
-                <!-- Этикетка 80×58: СДЭК — по cdek_number, Яндекс — по track_number -->
-                <button v-if="selected.delivery_method !== 'yandex' && selected.cdek_number" @click="downloadLabels([selected.id])"
+                <button v-if="selected.cdek_number" @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-slate-500 hover:bg-slate-600 text-white text-sm font-semibold rounded-xl transition-colors">
                   <Printer class="w-4 h-4" /> Этикетка 80×58
                 </button>
@@ -2200,11 +2501,24 @@ onUnmounted(() => {
                   class="flex items-center gap-2 px-3 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-xl transition-colors">
                   <Printer class="w-4 h-4" /> Этикетка 80×58
                 </button>
+                <button v-else-if="selected.delivery_method === 'ozon' && selected.track_number" @click="downloadLabels([selected.id])"
+                  class="flex items-center gap-2 px-3 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition-colors">
+                  <Printer class="w-4 h-4" /> Этикетка Ozon
+                </button>
+              </template>
+
+              <!-- Статус "Собраны", Ozon: сдать в ПВЗ — статус после приёмки обновится сам -->
+              <template v-else-if="selected.status === 'packed' && selected.delivery_method === 'ozon' && selected.track_number">
+                <p class="text-xs text-slate-500 italic self-center">Сдайте посылку в ПВЗ Ozon: {{ selected.ozon_from_pvz_address || 'Казань, улица Глазунова, 10' }}. После приёмки статус обновится сам</p>
+                <button @click="downloadLabels([selected.id])"
+                  class="flex items-center gap-2 px-3 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition-colors">
+                  <Printer class="w-4 h-4" /> Этикетка Ozon
+                </button>
               </template>
 
               <!-- Статус "Собраны", Яндекс: нужно сдать в исходный ПВЗ -->
               <template v-else-if="selected.status === 'packed' && selected.delivery_method === 'yandex' && selected.track_number">
-                <p class="text-xs text-slate-500 italic self-center">Сдайте посылку в ПВЗ Яндекс: {{ YANDEX_SOURCE_PVZ }}. После приёмки статус обновится сам</p>
+                <p class="text-xs text-slate-500 italic self-center">Сдайте посылку в ПВЗ Яндекс: {{ yandexSourcePvz }}. После приёмки статус обновится сам</p>
                 <button @click="downloadLabels([selected.id])"
                   class="flex items-center gap-2 px-3 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-xl transition-colors">
                   <Printer class="w-4 h-4" /> Этикетка 80×58
@@ -2309,6 +2623,29 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+
+  <!-- Штрихкод сдачи Ozon: картинка на экране, без печати -->
+  <Teleport to="body">
+    <div v-if="showOzonDropoff" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" @click="closeOzonDropoff"></div>
+      <div class="relative w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl">
+        <button @click="closeOzonDropoff" class="absolute top-3 right-3 text-slate-400 hover:text-slate-600">
+          <X class="w-5 h-5" />
+        </button>
+        <p class="text-sm font-bold text-slate-800 mb-1">Штрихкод сдачи Ozon</p>
+        <p class="text-xs text-slate-500 mb-3">{{ ozonDropoff?.address || 'Казань, улица Глазунова, 10' }}</p>
+        <div v-if="ozonDropoffLoading" class="flex justify-center py-10 text-slate-400">
+          <Loader2 class="h-6 w-6 animate-spin" />
+        </div>
+        <div v-else class="rounded-xl border border-slate-200 bg-white px-3 py-5">
+          <div v-if="ozonDropoffSvg"
+            class="h-40 w-full overflow-hidden [&_svg]:block [&_svg]:h-full [&_svg]:w-full"
+            v-html="ozonDropoffSvg"></div>
+          <p class="mt-4 text-center font-mono text-lg font-semibold tracking-wide text-slate-800">{{ ozonDropoff?.barcode || '—' }}</p>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 
   <!-- ── Лайтбокс ──────────────────────────────────────────────────────────── -->
   <Teleport to="body">
@@ -2517,87 +2854,17 @@ onUnmounted(() => {
     </div>
   </Teleport>
 
-  <!-- Реестр актов Яндекс -->
-  <Teleport to="body">
-    <div v-if="showYandexActsRegistry" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col" style="max-height: 85vh">
-        <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
-          <div>
-            <h3 class="text-sm font-bold text-slate-700 flex items-center gap-2">
-              <History class="w-4 h-4 text-amber-600" /> Реестр актов Яндекс
-            </h3>
-            <p class="text-[11px] text-slate-400 mt-0.5">
-              Всего актов: {{ yandexActs.length }} · без акта сейчас: {{ yandexActPending }}
-            </p>
-          </div>
-          <div class="flex items-center gap-2">
-            <button @click="loadYandexActs" :disabled="yandexActsLoading"
-              class="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 transition-colors">
-              <RefreshCw :class="['w-4 h-4', yandexActsLoading ? 'animate-spin' : '']" />
-            </button>
-            <button @click="showYandexActsRegistry = false" class="text-slate-400 hover:text-slate-600">
-              <X class="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        <div class="flex-1 overflow-y-auto px-5 py-3">
-          <div v-if="yandexActsLoading && !yandexActs.length" class="flex justify-center py-10">
-            <Loader2 class="w-6 h-6 animate-spin text-amber-600" />
-          </div>
-          <div v-else-if="!yandexActs.length" class="text-center py-10 text-sm text-slate-400">
-            Актов пока нет
-          </div>
-          <div v-else class="space-y-2">
-            <div v-for="act in yandexActs" :key="act.id" class="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-3">
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <p class="text-sm font-semibold text-slate-800">{{ act.act_number }}</p>
-                  <p class="text-[11px] text-slate-500 mt-0.5">
-                    {{ fmt(act.created_at) }} · {{ act.requests_count }} шт. · {{ fmtCost(act.total_shipping_cost) }}
-                  </p>
-                </div>
-                <div class="flex items-center gap-2 flex-shrink-0">
-                  <button @click="downloadYandexAct(act.id, 'pdf')"
-                    class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold border border-slate-200 transition-colors">
-                    <FileDown class="w-3.5 h-3.5" /> PDF
-                  </button>
-                  <button v-if="canDeleteYandexActs" @click="deleteYandexAct(act.id)"
-                    :disabled="yandexActDeletingId === act.id"
-                    class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 text-xs font-semibold border border-rose-200 transition-colors">
-                    <Loader2 v-if="yandexActDeletingId === act.id" class="w-3.5 h-3.5 animate-spin" />
-                    <X v-else class="w-3.5 h-3.5" /> Удалить
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="px-5 py-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center gap-3 shrink-0">
-          <p class="text-[11px] text-slate-400">
-            Удаление акта доступно только администратору.
-          </p>
-          <button @click="showYandexActsRegistry = false"
-            class="px-4 py-2.5 bg-white hover:bg-slate-100 text-slate-700 text-sm font-semibold rounded-xl border border-slate-300 transition-colors">
-            Закрыть
-          </button>
-        </div>
-      </div>
-    </div>
-  </Teleport>
-
   <!-- Модалка: настройка промокода на следующую покупку -->
   <Teleport to="body">
     <div v-if="showPromoSettings" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden">
-        <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+      <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden flex flex-col" style="max-height: 90vh">
+        <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
           <h3 class="text-sm font-bold text-slate-700 flex items-center gap-2"><Tag class="w-4 h-4" /> Промокод (отказы)</h3>
           <button @click="showPromoSettings = false" class="text-slate-400 hover:text-slate-600"><X class="w-4 h-4" /></button>
         </div>
-        <div class="px-5 py-4 space-y-3">
+        <div class="px-5 py-4 space-y-3 overflow-y-auto">
           <p class="text-xs text-slate-500">
-            Отправляется клиенту через 10 сек после отказа в заявке. Скидка фиксированная — 15%.
+            После отказа клиенту уходит одно сообщение: не сможем отправить деталь, возврат одобрен, плюс скидка 15%.
             Код меняйте вручную раз в неделю.
           </p>
           <div>
@@ -2610,11 +2877,67 @@ onUnmounted(() => {
             <input v-model="promoExpiresInput" type="date"
               class="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-emerald-400 focus:outline-none" />
           </div>
+          <div>
+            <label class="text-xs font-medium text-slate-600 block mb-1">ID промокода WB</label>
+            <input v-model="promoUuidInput" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              class="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-emerald-400 focus:outline-none font-mono text-[12px]" />
+            <p class="text-[10px] text-slate-400 mt-1">
+              Из кабинета WB: Акции → Промокоды. Нужен, чтобы считать заказы и сумму скидки.
+            </p>
+          </div>
           <p v-if="promoCodeUpdatedAt" class="text-[10px] text-slate-400">
             Обновлён {{ fmt(promoCodeUpdatedAt) }}{{ promoCodeUpdatedBy ? ` — ${promoCodeUpdatedBy}` : '' }}
           </p>
+
+          <div class="pt-2 border-t border-slate-100">
+            <div class="flex items-center justify-between mb-2">
+              <p class="text-xs font-semibold text-slate-600">История промокодов</p>
+              <Loader2 v-if="promoHistoryLoading" class="w-3.5 h-3.5 animate-spin text-slate-400" />
+            </div>
+            <div v-if="!promoHistory.length && !promoHistoryLoading" class="text-[11px] text-slate-400 py-2">
+              Пока нет сохранённых кодов
+            </div>
+            <div v-else class="space-y-2">
+              <div v-for="item in promoHistory" :key="item.id"
+                class="rounded-xl border px-3 py-2.5"
+                :class="item.is_active ? 'border-violet-200 bg-violet-50/60' : 'border-slate-150 bg-slate-50/80'">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                      <span class="font-mono text-sm font-bold text-slate-800">{{ item.code }}</span>
+                      <span v-if="item.is_active"
+                        class="text-[10px] font-semibold uppercase tracking-wide text-violet-700 bg-violet-100 px-1.5 py-0.5 rounded">
+                        активный
+                      </span>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mt-0.5">
+                      {{ fmtPromoDate(item.valid_from) }} — {{ fmtPromoDate(item.expires_at) }}
+                      <span v-if="item.discount_percent"> · {{ item.discount_percent }}%</span>
+                    </p>
+                  </div>
+                </div>
+                <div class="mt-2 grid grid-cols-3 gap-1.5 text-center">
+                  <div class="rounded-lg bg-white/80 border border-slate-100 px-1.5 py-1.5">
+                    <p class="text-[10px] text-slate-400 leading-tight">Отправили</p>
+                    <p class="text-sm font-bold text-slate-700">{{ item.sent_count ?? 0 }}</p>
+                  </div>
+                  <div class="rounded-lg bg-white/80 border border-slate-100 px-1.5 py-1.5">
+                    <p class="text-[10px] text-slate-400 leading-tight">Заказов WB</p>
+                    <p class="text-sm font-bold text-slate-700">{{ item.orders_count == null ? '—' : item.orders_count }}</p>
+                  </div>
+                  <div class="rounded-lg bg-white/80 border border-slate-100 px-1.5 py-1.5">
+                    <p class="text-[10px] text-slate-400 leading-tight">Скидка</p>
+                    <p class="text-sm font-bold text-slate-700">{{ fmtPromoMoney(item.discount_sum) }}</p>
+                  </div>
+                </div>
+                <p v-if="item.orders_count == null" class="text-[10px] text-amber-600 mt-1.5">
+                  Нет ID WB — заказы не считаются. Добавьте ID и сохраните код.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="px-5 py-4 bg-slate-50 border-t border-slate-200 flex gap-2">
+        <div class="px-5 py-4 bg-slate-50 border-t border-slate-200 flex gap-2 shrink-0">
           <button @click="showPromoSettings = false"
             class="flex-1 px-4 py-2.5 bg-white hover:bg-slate-100 text-slate-700 text-sm font-semibold rounded-xl border border-slate-300 transition-colors">
             Отмена

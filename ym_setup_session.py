@@ -52,22 +52,25 @@ with sync_playwright() as p:
     # Проверяем — нужен ли 2FA
     current_url = page.url
     print(f"[4] Текущий URL: {current_url}")
+    needs_2fa = bool(page.query_selector(
+        "input[type='number'], input[name='code'], input[autocomplete='one-time-code']"
+    ))
 
-    if "passport.yandex" in current_url:
+    if "passport.yandex" in current_url and needs_2fa:
         body = page.inner_text("body")
         print(f"[!] Яндекс требует подтверждение. Текст страницы:\n{body[:500]}")
         print(f"\n>>> Напишите код из SMS/push-уведомления в файл: {CODE_FILE}")
-        print(">>> Ожидаем код (до 3 минут)...")
+        print(">>> Ожидаем код (до 20 минут)...")
 
         # Ждём файл с кодом
         waited = 0
         code = None
-        while waited < 180:
+        while waited < 1200:
             if os.path.exists(CODE_FILE):
                 with open(CODE_FILE) as f:
                     code = f.read().strip()
                 if code:
-                    print(f"[5] Получили код: {code}")
+                    print(f"[5] Получили код ({len(code)} символов)")
                     break
             time.sleep(3)
             waited += 3
@@ -90,6 +93,8 @@ with sync_playwright() as p:
         page.wait_for_load_state("domcontentloaded", timeout=30000)
         time.sleep(4)
         print(f"[6] После кода URL: {page.url}")
+    elif "passport.yandex" in current_url:
+        print("[4] Страница паспорта без поля кода — пробуем сразу кабинет ЯМ")
 
     # Идём в кабинет ЯМ
     print("[7] Переходим в кабинет ЯМ...")

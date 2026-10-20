@@ -15,7 +15,7 @@
         <!-- Товар + оценка + статус -->
         <div class="flex gap-4">
           <div class="w-24 h-32 rounded-lg overflow-hidden bg-gray-100 border border-gray-200 shrink-0">
-            <img v-if="r.product_photo" :src="r.product_photo" class="w-full h-full object-cover" />
+            <img v-if="photoSrc" :src="photoSrc" class="w-full h-full object-cover" />
             <span v-else class="w-full h-full flex items-center justify-center text-gray-300">
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
             </span>
@@ -27,9 +27,8 @@
                 <svg v-for="i in 5" :key="i" width="15" height="15" viewBox="0 0 24 24"
                   :fill="i <= r.rating ? '#f59e0b' : '#e5e7eb'"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
               </span>
-              <span :class="['text-xs px-2 py-0.5 rounded-full font-medium border',
-                r.state === 'answered' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200']">
-                {{ r.state === 'answered' ? 'Отвечено' : 'Ждёт ответа' }}
+              <span :class="['text-xs px-2 py-0.5 rounded-full font-medium border', cardStatusCls]">
+                {{ cardStatusLabel }}
               </span>
             </div>
             <p class="text-sm text-gray-500 mt-2">
@@ -51,6 +50,24 @@
           <p v-if="r.cons" class="text-xs text-gray-600 mt-1"><span class="text-red-500 font-medium">Минусы:</span> {{ r.cons }}</p>
         </div>
 
+        <div v-if="r.update_label" class="rounded-xl border border-violet-200 bg-violet-50 px-3 py-2.5">
+          <p class="text-xs font-semibold text-violet-700">{{ r.update_label }}
+            <span v-if="r.buyer_updated_at" class="font-normal text-violet-500"> · {{ fmtDateTime(r.buyer_updated_at) }}</span>
+          </p>
+          <div class="mt-1.5 grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <p class="text-[10px] uppercase tracking-wide text-slate-400 mb-0.5">Было</p>
+              <p v-if="r.prev_valuation != null" class="text-slate-500">{{ r.prev_valuation }}★</p>
+              <p class="text-slate-600 whitespace-pre-wrap">{{ r.prev_text || '—' }}</p>
+            </div>
+            <div>
+              <p class="text-[10px] uppercase tracking-wide text-slate-400 mb-0.5">Стало</p>
+              <p v-if="r.rating != null" class="text-slate-700">{{ r.rating }}★</p>
+              <p class="text-slate-800 whitespace-pre-wrap">{{ r.body && r.body !== '—' ? r.body : '—' }}</p>
+            </div>
+          </div>
+        </div>
+
         <!-- Фото из отзыва -->
         <div v-if="r.photos && r.photos.length">
           <p class="text-xs font-medium text-gray-500 mb-1.5">Фото покупателя</p>
@@ -69,45 +86,61 @@
           </p>
           <p class="text-sm text-green-900 whitespace-pre-wrap">{{ r.answer_text }}</p>
         </div>
+        <p v-else-if="r.state === 'answered'" class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+          На Wildberries этот отзыв уже не в очереди, но продавец ничего не писал.
+          Так площадка делает с оценками без текста.
+        </p>
 
         <!-- Связка с этим клиентом (по заказу), не «по товару» -->
-        <div v-if="linkedChat || linkedReturn" class="space-y-2 pt-1 border-t border-gray-100">
+        <div v-if="linkedChat || linkedReturn || linkedReshipment" class="space-y-2 pt-1 border-t border-gray-100">
           <p class="text-xs font-medium text-gray-500">Связано с этим заказом</p>
-          <button
-            v-if="linkedChat"
-            type="button"
-            @click="goToChat"
-            class="w-full flex items-center justify-between gap-2 text-sm font-medium px-3 py-2.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-900 hover:bg-violet-100 text-left"
+          <RouterLink
+            v-if="linkedChat && chatTo"
+            :to="chatTo"
+            @click="$emit('close')"
+            class="w-full flex items-center justify-between gap-2 text-sm font-medium px-3 py-2.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-900 hover:bg-violet-100 text-left no-underline"
           >
             <span>
               Чат{{ linkedChat.client_name ? `: ${linkedChat.client_name}` : '' }}
               <span v-if="linkedChat.needs_answer" class="text-violet-600 font-normal"> · ждёт ответа</span>
             </span>
             <span class="shrink-0">→</span>
-          </button>
-          <button
-            v-if="linkedReturn"
-            type="button"
-            @click="goToReturn"
-            class="w-full flex items-center justify-between gap-2 text-sm font-medium px-3 py-2.5 rounded-lg border border-orange-200 bg-orange-50 text-orange-900 hover:bg-orange-100 text-left"
+          </RouterLink>
+          <RouterLink
+            v-if="linkedReturn && returnTo"
+            :to="returnTo"
+            @click="$emit('close')"
+            class="w-full flex items-center justify-between gap-2 text-sm font-medium px-3 py-2.5 rounded-lg border border-orange-200 bg-orange-50 text-orange-900 hover:bg-orange-100 text-left no-underline"
           >
             <span>
               Возврат{{ linkedReturn.claim_date_ru ? ` от ${linkedReturn.claim_date_ru}` : '' }}
               <span v-if="linkedReturn.status_label" class="font-normal text-orange-700"> · {{ linkedReturn.status_label }}</span>
             </span>
             <span class="shrink-0">→</span>
-          </button>
+          </RouterLink>
+          <RouterLink
+            v-if="linkedReshipment && reshipmentTo"
+            :to="reshipmentTo"
+            @click="$emit('close')"
+            class="w-full flex items-center justify-between gap-2 text-sm font-medium px-3 py-2.5 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-900 hover:bg-indigo-100 text-left no-underline"
+          >
+            <span>
+              Доотправка #{{ linkedReshipment.id }}
+              <span v-if="linkedReshipment.status" class="font-normal text-indigo-700"> · {{ linkedReshipment.status }}</span>
+            </span>
+            <span class="shrink-0">→</span>
+          </RouterLink>
         </div>
         <p v-else-if="!loading && data && mp === 'wb'" class="text-xs text-gray-400">
           Чат или возврат по этому заказу не найдены (покупатель мог не писать).
         </p>
 
-        <button
+        <RouterLink
           v-if="showGoToReviews"
-          type="button"
-          @click="goToReviews"
-          class="w-full text-sm font-medium px-3 py-2.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100 text-left"
-        >Открыть в разделе «Отзывы» →</button>
+          :to="reviewsTo"
+          @click="$emit('close')"
+          class="w-full text-sm font-medium px-3 py-2.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100 text-left no-underline block"
+        >Открыть в разделе «Отзывы» →</RouterLink>
       </div>
     </div>
 
@@ -124,8 +157,9 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink } from 'vue-router'
 import { apiFetch } from '../api'
+import { reviewProductPhoto } from '../utils/cx'
 
 const props = defineProps({
   mp: String,
@@ -133,16 +167,53 @@ const props = defineProps({
   /** true = открыто из чата: показать переход в раздел отзывов */
   showGoToReviews: { type: Boolean, default: false },
 })
-const emit = defineEmits(['close'])
-const router = useRouter()
+defineEmits(['close'])
 
 const loading = ref(true)
 const data = ref(null)
 const lb = ref({ show: false, i: 0 })
 const mp = computed(() => props.mp)
 const r = computed(() => data.value?.review || {})
+const photoSrc = computed(() => reviewProductPhoto({
+  mp: mp.value,
+  nm_id: r.value.nm_id,
+  product_photo: r.value.product_photo,
+}))
+const hasAnswerText = computed(() => !!(r.value.answer_text || '').trim())
+const cardStatusLabel = computed(() => {
+  if (hasAnswerText.value) return 'Отвечено'
+  if (r.value.state === 'answered') return 'На WB без ответа'
+  return 'Ждёт ответа'
+})
+const cardStatusCls = computed(() => {
+  if (hasAnswerText.value) return 'bg-green-50 text-green-700 border-green-200'
+  if (r.value.state === 'answered') return 'bg-amber-50 text-amber-700 border-amber-200'
+  return 'bg-amber-50 text-amber-700 border-amber-200'
+})
 const linkedChat = computed(() => data.value?.linked_chat || null)
 const linkedReturn = computed(() => data.value?.linked_return || null)
+const linkedReshipment = computed(() => data.value?.linked_reshipment || null)
+const chatTo = computed(() => {
+  const id = linkedChat.value?.chat_id
+  if (!id) return null
+  return { path: '/chats', query: { chat: id, mp: props.mp || 'wb' } }
+})
+const returnTo = computed(() => {
+  const claimId = linkedReturn.value?.claim_id
+  if (!claimId) return null
+  const q = { claim: claimId, mp: props.mp || 'wb' }
+  if (linkedReturn.value?.is_archive) q.tab = 'archive'
+  return { path: '/returns', query: q }
+})
+const reshipmentTo = computed(() => {
+  const id = linkedReshipment.value?.id
+  if (!id) return null
+  return { path: '/reshipment', query: { id: String(id) } }
+})
+const reviewsTo = computed(() => ({
+  path: '/reviews',
+  query: { review: `${props.mp}:${props.reviewId}` },
+}))
 
 const mpCls = { wb: 'bg-purple-100 text-purple-700', ym: 'bg-yellow-100 text-yellow-700', ozon: 'bg-blue-100 text-blue-700' }
 
@@ -151,27 +222,6 @@ function fmtDateTime(s) {
   const d = new Date(s)
   return d.toLocaleDateString('ru', { day: '2-digit', month: '2-digit', year: '2-digit' }) +
     ' ' + d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
-}
-
-function goToReviews() {
-  emit('close')
-  router.push({ path: '/reviews', query: { review: `${props.mp}:${props.reviewId}` } })
-}
-
-function goToChat() {
-  const id = linkedChat.value?.chat_id
-  if (!id) return
-  emit('close')
-  router.push({ path: '/chats', query: { chat: id, mp: props.mp || 'wb' } })
-}
-
-function goToReturn() {
-  const claimId = linkedReturn.value?.claim_id
-  if (!claimId) return
-  emit('close')
-  const q = { claim: claimId, mp: props.mp || 'wb' }
-  if (linkedReturn.value?.is_archive) q.tab = 'archive'
-  router.push({ path: '/returns', query: q })
 }
 
 async function load() {

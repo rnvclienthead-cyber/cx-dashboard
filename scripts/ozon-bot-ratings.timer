@@ -1,0 +1,11 @@
+[Unit]
+Description=Ozon ratings once a night at 05:20 MSK
+
+[Timer]
+# 05:20 МСК = 02:20 UTC. Между ночными сборами отзывов (02:00 и 03:00 UTC).
+OnCalendar=*-*-* 02:20:00 UTC
+Persistent=true
+Unit=ozon-bot-ratings.service
+
+[Install]
+WantedBy=timers.target

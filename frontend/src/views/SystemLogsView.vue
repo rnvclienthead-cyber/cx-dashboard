@@ -54,7 +54,7 @@ onMounted(fetchData)
       </button>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
       <div class="bg-white border border-slate-200 p-5 rounded-xl shadow-sm flex items-center gap-4">
         <div class="p-3 bg-blue-50 text-blue-600 rounded-full"><Cpu class="w-6 h-6"/></div>
         <div>
@@ -74,6 +74,14 @@ onMounted(fetchData)
         <div>
           <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Диск (Свободно)</div>
           <div class="text-xl font-black text-slate-800">{{ sysMetrics?.disk?.free_gb || '0' }} GB</div>
+        </div>
+      </div>
+      <div class="bg-white border border-slate-200 p-5 rounded-xl shadow-sm flex items-center gap-4">
+        <div class="p-3 bg-amber-50 text-amber-600 rounded-full"><Activity class="w-6 h-6"/></div>
+        <div>
+          <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Задержка ответа</div>
+          <div class="text-xl font-black text-slate-800">{{ Math.round(sysMetrics?.loop_lag_ms || 0) }} мс</div>
+          <div class="text-[10px] text-slate-400 mt-0.5">медленных запросов: {{ sysMetrics?.slow_requests || 0 }}</div>
         </div>
       </div>
     </div>

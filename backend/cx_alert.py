@@ -25,6 +25,8 @@ import requests
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import text
 
+from . import telegram_proxy
+
 logger = logging.getLogger("cx_alert")
 
 TG_BOT_TOKEN = os.getenv("TG_ALERT_BOT_TOKEN", "")
@@ -43,7 +45,7 @@ def send_tg(message: str) -> bool:
     try:
         resp = requests.post(
             CF_WORKER_URL,
-            json={"chat_id": TG_CHAT_ID, "text": message},
+            json={"chat_id": TG_CHAT_ID, "text": telegram_proxy.strip_tg_html(message)},
             timeout=15,
         )
         if resp.ok:

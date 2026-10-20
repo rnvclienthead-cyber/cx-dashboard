@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from ..database import get_db
+from ..factory_ratings import factory_ratings_report
 from .auth import get_current_user
 
 router = APIRouter(prefix="/api/ratings", tags=["Ratings"], dependencies=[Depends(get_current_user)])
@@ -206,6 +207,110 @@ def get_ym_ratings_summary(
         return []
 
 
+@router.get("/ozon/summary")
+def get_ozon_ratings_summary(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Сводка Ozon: оценка с карточки и звёзды по отзывам, которые уже есть в системе."""
+    try:
+        rows = db.execute(text("""
+            WITH days AS (
+                SELECT
+                    report_date,
+                    sku,
+                    COALESCE(NULLIF(TRIM(supplier_article), ''), sku::text) AS supplier_article,
+                    product_name,
+                    COALESCE(average_rating, 0) AS average_rating,
+                    COALESCE(review_count, 0) AS review_count
+                FROM ozon_ratings_report
+            ),
+            ranked AS (
+                SELECT
+                    days.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY supplier_article
+                        ORDER BY report_date DESC, sku
+                    ) AS rn
+                FROM days
+            ),
+            stars AS (
+                SELECT
+                    TRIM(supplier_article) AS supplier_article,
+                    COUNT(*) FILTER (WHERE rating = 5) AS stars_5,
+                    COUNT(*) FILTER (WHERE rating = 4) AS stars_4,
+                    COUNT(*) FILTER (WHERE rating = 3) AS stars_3,
+                    COUNT(*) FILTER (WHERE rating = 2) AS stars_2,
+                    COUNT(*) FILTER (WHERE rating = 1) AS stars_1
+                FROM ozon_reviews
+                WHERE supplier_article IS NOT NULL
+                  AND TRIM(supplier_article) <> ''
+                  AND rating BETWEEN 1 AND 5
+                GROUP BY TRIM(supplier_article)
+            ),
+            yday AS (
+                SELECT TRIM(supplier_article) AS supplier_article, COUNT(*) AS cnt
+                FROM ozon_reviews
+                WHERE supplier_article IS NOT NULL
+                  AND created_at::date = CURRENT_DATE - 1
+                GROUP BY TRIM(supplier_article)
+            )
+            SELECT
+                l.supplier_article,
+                l.sku,
+                l.product_name,
+                l.average_rating,
+                l.review_count AS total_reviews,
+                COALESCE(y.cnt, 0) AS new_today,
+                COALESCE(s.stars_5, 0) AS stars_5,
+                COALESCE(s.stars_4, 0) AS stars_4,
+                COALESCE(s.stars_3, 0) AS stars_3,
+                COALESCE(s.stars_2, 0) AS stars_2,
+                COALESCE(s.stars_1, 0) AS stars_1,
+                l.report_date::text AS snapshot_date,
+                COALESCE(a.is_new, FALSE) AS is_new
+            FROM ranked l
+            LEFT JOIN stars s ON s.supplier_article = l.supplier_article
+            LEFT JOIN yday y ON y.supplier_article = l.supplier_article
+            LEFT JOIN wb_assortment a ON a.supplier_article = l.supplier_article
+            WHERE l.rn = 1
+            ORDER BY l.review_count DESC NULLS LAST
+        """)).fetchall()
+        return [
+            {
+                "supplier_article": r.supplier_article,
+                "sku": str(r.sku) if r.sku else None,
+                "product_name": r.product_name or "",
+                "average_rating": float(r.average_rating or 0),
+                "total_reviews": int(r.total_reviews or 0),
+                "new_today": int(r.new_today or 0),
+                "stars_5": int(r.stars_5 or 0), "stars_4": int(r.stars_4 or 0),
+                "stars_3": int(r.stars_3 or 0), "stars_2": int(r.stars_2 or 0),
+                "stars_1": int(r.stars_1 or 0),
+                "snapshot_date": str(r.snapshot_date or ""),
+                "is_new": bool(r.is_new),
+            }
+            for r in rows if r.supplier_article
+        ]
+    except Exception as e:
+        print(f"Ошибка Ozon summary: {e}")
+        return []
+
+
+@router.get("/factories")
+def get_factory_ratings(
+    platform: str = Query("all", pattern="^(wb|ym|ozon|all)$"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Средний рейтинг по заводу. Товары с двумя заводами в среднюю не входят."""
+    try:
+        return factory_ratings_report(db, platform)
+    except Exception as e:
+        print(f"Ошибка рейтинга заводов: {e}")
+        return {"platform": platform, "groups": []}
+
+
 @router.get("/")
 def get_ratings(
     platform: str = Query("wb", pattern="^(wb|ym|ozon|all)$"),
@@ -219,6 +324,45 @@ def get_ratings(
         if platform == "ym":
             rows = db.execute(_YM_REPORT_SQL).fetchall()
             return _ym_rows_to_dicts(rows)
+
+        if platform == "ozon":
+            # Витринные рейтинги с карточек ozon.ru (бот → ozon_ratings_report), все дни снимков.
+            try:
+                rows = db.execute(text("""
+                    SELECT
+                        r.report_date::text AS date,
+                        COALESCE(NULLIF(TRIM(r.supplier_article), ''), r.sku::text) AS supplier_article,
+                        COALESCE(r.average_rating, 0) AS average_rating,
+                        COALESCE(r.review_count, 0) AS review_count,
+                        GREATEST(
+                            COALESCE(r.review_count, 0) - COALESCE(
+                                LAG(r.review_count) OVER (PARTITION BY r.sku ORDER BY r.report_date),
+                                r.review_count
+                            ),
+                            0
+                        ) AS daily_new,
+                        COALESCE(a.is_new, FALSE) AS is_new,
+                        COALESCE(a.category_1, 'Прочее') AS category
+                    FROM ozon_ratings_report r
+                    LEFT JOIN wb_assortment a ON a.supplier_article = r.supplier_article
+                    ORDER BY r.report_date, supplier_article
+                """)).fetchall()
+                return [
+                    {
+                        "date": str(r.date),
+                        "supplier_article": r.supplier_article,
+                        "average_rating": float(r.average_rating or 0),
+                        "review_count": int(r.review_count or 0),
+                        "daily_new": int(r.daily_new or 0),
+                        "stars_1": 0, "stars_2": 0, "stars_3": 0, "stars_4": 0, "stars_5": 0,
+                        "is_new": bool(r.is_new),
+                        "category": r.category or "Прочее",
+                    }
+                    for r in rows if r.supplier_article
+                ]
+            except Exception as e:
+                print(f"Ошибка Ozon ratings: {e}")
+                return []
 
         # ── WB ────────────────────────────────────────────────────────────────
         existing_cols = [r[0] for r in db.execute(columns_query).fetchall()]

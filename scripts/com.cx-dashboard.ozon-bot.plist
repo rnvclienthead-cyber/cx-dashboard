@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cx-dashboard.ozon-bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/user/bin/ozon-bot-tick</string>
+    </array>
+
+    <!-- каждые 4 часа, пока ноутбук включён -->
+    <key>StartInterval</key>
+    <integer>14400</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/user/Library/Logs/ozon-bot-tick.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/user/Library/Logs/ozon-bot-tick.log</string>
+</dict>
+</plist>

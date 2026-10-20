@@ -97,6 +97,9 @@ def ensure_schema(conn_or_engine) -> None:
         "ALTER TABLE ozon_returns ADD COLUMN IF NOT EXISTS status_changed_at timestamptz",
         "ALTER TABLE ozon_returns ADD COLUMN IF NOT EXISTS source_id bigint",
         "ALTER TABLE ozon_returns ADD COLUMN IF NOT EXISTS compensation_status text",
+        "ALTER TABLE ozon_returns ADD COLUMN IF NOT EXISTS buyer_comment text",
+        "ALTER TABLE ozon_returns ADD COLUMN IF NOT EXISTS photos text",
+        "ALTER TABLE ozon_returns ADD COLUMN IF NOT EXISTS cabinet_synced_at timestamptz",
     ]
 
     def _run(conn):
@@ -445,3 +448,123 @@ def decision_capability(return_id: str | int, *, status_sys: str | None = None) 
         "needs_cabinet": False,
         "decision_note": "",
     }
+
+
+_RESHIP_CLOSED_SYS = {
+    "Rejected", "Cancelled", "Approved", "CancelledByClient", "CancelledByOzon",
+    "MoneyReturned", "Compensated",
+}
+_RESHIP_CLOSED_RU = {"Отказ", "Отказано", "Одобрено", "Отменено"}
+RESHIPMENT_DECLINE_COMMENT = (
+    "Недостающая деталь уже направлена вам отдельным отправлением. "
+    "Возврат закрываем — товар можно оставить у себя."
+)
+
+
+def _ozon_return_row(db: Session, return_id: str | None) -> dict | None:
+    rid = str(return_id or "").strip()
+    if not rid:
+        return None
+    return db.execute(text("""
+        SELECT return_id::text AS return_id,
+               order_id::text AS order_id,
+               order_number, posting_number,
+               status_sys, status_ru, is_opened
+        FROM ozon_returns WHERE return_id::text = :rid LIMIT 1
+    """), {"rid": rid}).mappings().first()
+
+
+def find_return_for_reshipment(
+    db: Session,
+    *,
+    return_id: str | None = None,
+    order_id: str | None = None,
+    ozon_chat_id: str | None = None,
+) -> dict | None:
+    """Ищет возврат Ozon, который надо закрыть при одобрении доотправки."""
+    row = _ozon_return_row(db, return_id)
+    if row:
+        return dict(row)
+
+    chat_id = str(ozon_chat_id or "").strip()
+    if chat_id:
+        chat = db.execute(text("""
+            SELECT order_number FROM ozon_chats WHERE chat_id = :c LIMIT 1
+        """), {"c": chat_id}).mappings().first()
+        if chat and chat.get("order_number"):
+            order_id = order_id or chat.get("order_number")
+
+    oid = str(order_id or "").strip()
+    if not oid:
+        return None
+    row = db.execute(text("""
+        SELECT return_id::text AS return_id,
+               order_id::text AS order_id,
+               order_number, posting_number,
+               status_sys, status_ru, is_opened
+        FROM ozon_returns
+        WHERE posting_number = :oid
+           OR order_number = :oid
+           OR posting_number LIKE :oid || '-%'
+           OR order_number LIKE :oid || '-%'
+           OR order_id::text = :oid
+        ORDER BY CASE
+            WHEN status_sys = 'OnSellerApproval' THEN 0
+            WHEN COALESCE(is_opened, FALSE) IS TRUE THEN 1
+            ELSE 2
+        END, return_date DESC NULLS LAST
+        LIMIT 1
+    """), {"oid": oid}).mappings().first()
+    return dict(row) if row else None
+
+
+def decline_return_for_reshipment(
+    db: Session,
+    *,
+    return_id: str | None = None,
+    order_id: str | None = None,
+    ozon_chat_id: str | None = None,
+) -> dict[str, Any]:
+    """Отказать в возврате Ozon, когда деталь уже одобрена к отправке."""
+    row = find_return_for_reshipment(
+        db, return_id=return_id, order_id=order_id, ozon_chat_id=ozon_chat_id,
+    )
+    if not row or not row.get("return_id"):
+        return {"ok": False, "skipped": "no_return"}
+
+    st = str(row.get("status_sys") or "").strip()
+    ru = str(row.get("status_ru") or "").strip()
+    if st in _RESHIP_CLOSED_SYS or ru in _RESHIP_CLOSED_RU:
+        return {
+            "ok": True,
+            "skipped": "already_closed",
+            "return_id": row["return_id"],
+            "status": st,
+        }
+
+    try:
+        db.commit()
+    except Exception:
+        pass
+    cap = decision_capability(row["return_id"], status_sys=st)
+    reject = next(
+        (a for a in (cap.get("actions") or []) if a.get("kind") == "reject"),
+        None,
+    )
+    if not reject:
+        return {
+            "ok": False,
+            "skipped": "no_reject_action",
+            "return_id": row["return_id"],
+            "status": st,
+        }
+    result = decide_return(
+        db,
+        str(row["return_id"]),
+        reject["action"],
+        RESHIPMENT_DECLINE_COMMENT,
+    )
+    result.setdefault("return_id", row["return_id"])
+    result.setdefault("order_id", row.get("order_number") or row.get("order_id"))
+    return result
+

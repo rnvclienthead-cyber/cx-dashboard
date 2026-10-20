@@ -1,0 +1,20 @@
+[Unit]
+Description=CX Dashboard background workers (sync, chats, delivery)
+After=network.target postgresql.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/cx-dashboard
+Environment=PYTHONPATH=/root/cx-dashboard
+ExecStart=/root/cx-dashboard/venv/bin/python /root/cx-dashboard/backend_bg.py
+Restart=always
+RestartSec=5
+MemoryMax=1500M
+OOMPolicy=kill
+StandardOutput=append:/root/cx-dashboard/backend-bg.log
+StandardError=append:/root/cx-dashboard/backend-bg.log
+
+[Install]
+WantedBy=multi-user.target

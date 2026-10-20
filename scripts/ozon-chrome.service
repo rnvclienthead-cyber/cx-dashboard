@@ -1,0 +1,16 @@
+[Unit]
+Description=Ozon seller Chrome CDP inside VPN netns
+After=ozon-vpn.service
+Requires=ozon-vpn.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=150
+Restart=on-failure
+RestartSec=20
+ExecStart=/root/cx-dashboard/scripts/ozon_chrome_start.sh
+ExecStop=/root/cx-dashboard/scripts/ozon_chrome_stop.sh
+
+[Install]
+WantedBy=multi-user.target

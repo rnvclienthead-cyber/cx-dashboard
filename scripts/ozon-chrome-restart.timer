@@ -1,0 +1,13 @@
+[Unit]
+Description=Ozon Chrome restart every 3 nights at 03:07 MSK
+
+[Timer]
+# 03:07 МСК = 00:07 UTC. Сбор отзывов идёт в :00, :05, :10…
+# К 00:07 предыдущий сбор уже кончился, следующий ещё не начался.
+# Дни месяца 1, 4, 7, 10, 13, 16, 19, 22, 25, 28.
+OnCalendar=*-*-1/3 00:07:00 UTC
+Persistent=true
+Unit=ozon-chrome-restart.service
+
+[Install]
+WantedBy=timers.target

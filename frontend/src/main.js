@@ -1,9 +1,9 @@
-import './assets/main.css' // <-- ЭТА СТРОЧКА ОБЯЗАТЕЛЬНА!
-
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
+import { getAuthToken, takeAfterLogin } from './authStorage'
+import { bootstrapTelegram, isProbablyTelegramShell } from './telegramWebApp'
 
 const app = createApp(App)
 
@@ -23,4 +23,21 @@ app.directive('click-outside', {
   }
 })
 
-app.mount('#app')
+async function start() {
+  const boot = bootstrapTelegram().catch(() => {})
+  if (isProbablyTelegramShell()) {
+    await Promise.race([
+      boot,
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ])
+  }
+  app.mount('#app')
+  await router.isReady()
+  if (!getAuthToken()) return
+  const here = router.currentRoute.value
+  if (here.path === '/login' || here.name === 'login') {
+    router.replace(takeAfterLogin() || '/chats')
+  }
+}
+
+start()

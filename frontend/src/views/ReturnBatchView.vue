@@ -1,7 +1,7 @@
 <template>
   <div class="batch-page">
     <div class="batch-header">
-      <button class="back-btn" @click="$router.push('/return/scan')">← Сканировать</button>
+      <RouterLink class="back-btn" to="/return/scan">← Сканировать</RouterLink>
       <div class="batch-logo">CX Dashboard</div>
     </div>
 
@@ -17,7 +17,7 @@
       <p class="error-title">Партия не найдена</p>
       <p class="error-sub">income_id: {{ route.params.incomeId }}</p>
       <p class="error-hint">Данные появятся после ночной синхронизации</p>
-      <button class="retry-btn" @click="$router.push('/return/scan')">Сканировать снова</button>
+      <RouterLink class="retry-btn" to="/return/scan">Сканировать снова</RouterLink>
     </div>
 
     <!-- Список карточек -->
@@ -28,11 +28,11 @@
         <div class="summary-count">{{ batch.count }} претензий</div>
       </div>
 
-      <div
+      <RouterLink
         v-for="item in batch.items"
         :key="item.srid"
         class="claim-card"
-        @click="$router.push(`/return/${encodeURIComponent(item.srid)}`)"
+        :to="`/return/${encodeURIComponent(item.srid)}`"
       >
         <div class="claim-top">
           <div class="claim-name">{{ item.product_name || item.supplier_article }}</div>
@@ -58,14 +58,14 @@
           <span v-if="item.photos.length > 3" class="photo-more">+{{ item.photos.length - 3 }}</span>
         </div>
         <div class="claim-date">{{ formatDate(item.claim_date) }}</div>
-      </div>
+      </RouterLink>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 
 const route = useRoute()
 const loading = ref(true)
@@ -124,6 +124,7 @@ function formatDate(iso) {
   font-size: 15px;
   cursor: pointer;
   padding: 4px 0;
+  text-decoration: none;
 }
 
 .batch-logo {
@@ -166,6 +167,8 @@ function formatDate(iso) {
   background: #1e3a5f; border: 1px solid #2563eb;
   color: #93c5fd; border-radius: 8px;
   padding: 10px 20px; cursor: pointer; font-size: 14px;
+  text-decoration: none;
+  display: inline-block;
 }
 
 /* Body */
@@ -199,6 +202,8 @@ function formatDate(iso) {
   flex-direction: column;
   gap: 8px;
   transition: background 0.15s;
+  text-decoration: none;
+  color: inherit;
 }
 .claim-card:active { background: #273549; }
 
@@ -267,8 +272,8 @@ function formatDate(iso) {
   align-items: center;
 }
 .claim-photo-thumb {
-  width: 52px; height: 52px;
-  border-radius: 6px;
+  width: 36px; height: 36px;
+  border-radius: 5px;
   object-fit: cover;
   background: #0f172a;
 }

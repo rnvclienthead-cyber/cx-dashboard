@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 import gspread  # type: ignore
 from sqlalchemy import create_engine, text  # type: ignore
 
-from backend.routers.dashboard import _parse_reshipment_economics
+from backend.routers.dashboard import RESHIPMENT_DELIVERY_COST_SQL, _parse_reshipment_economics
+from backend.wb_return_logistics import fetch_global_fallback, sku_return_log_cte
 
 
 DB_URL = os.getenv(
@@ -38,15 +39,11 @@ ROW_LABELS = {
     "actual_result": "Фактический результат",
 }
 
-DELIVERY_COST_SQL = """
-    CASE WHEN delivery_method = 'yandex'
-         THEN COALESCE(shipping_cost, yandex_cost, 0)
-         ELSE COALESCE(cdek_cost, 0)
-    END
-"""
+DELIVERY_COST_SQL = RESHIPMENT_DELIVERY_COST_SQL
 
 ECONOMICS_SQL = f"""
-    WITH shipped_requests AS (
+    WITH {sku_return_log_cte()},
+    shipped_requests AS (
         SELECT r.id, r.matched_srid, r.delivery_method, r.product_category,
                {DELIVERY_COST_SQL} AS delivery_cost
         FROM reshipment_requests r
@@ -97,7 +94,8 @@ ECONOMICS_SQL = f"""
         LEFT JOIN sale_data sd ON sd.id = a.id
     ),
     article_data AS (
-        SELECT id, LOWER(REPLACE(REPLACE(REPLACE(TRIM(sa_name), '-', ''), '_', ''), ' ', '')) AS article_key
+        SELECT id, sa_name,
+               LOWER(REPLACE(REPLACE(REPLACE(TRIM(sa_name), '-', ''), '_', ''), ' ', '')) AS article_key
         FROM sa_data
     ),
     cog_data AS (
@@ -120,13 +118,14 @@ ECONOMICS_SQL = f"""
                COALESCE(cd.cog, 0) AS cog,
                ((ad.article_key LIKE '2сб%' OR ad.article_key LIKE '2sb%')
                  AND ad.article_key NOT LIKE '%fullblack%') AS stays_with_client,
-               :avg_return_delivery AS return_delivery
+               COALESCE(srl.avg_delivery, :avg_return_delivery) AS return_delivery
         FROM shipped_requests a
         LEFT JOIN sale_data sd ON sd.id = a.id
         LEFT JOIN return_data rd ON rd.id = a.id
         LEFT JOIN empty_data ed ON ed.id = a.id
         LEFT JOIN article_data ad ON ad.id = a.id
         LEFT JOIN cog_data cd ON cd.id = a.id
+        LEFT JOIN sku_return_log srl ON srl.sku_l = LOWER(TRIM(ad.sa_name))
         WHERE sd.ppvz IS NOT NULL
     )
     SELECT COUNT(*),
@@ -174,11 +173,7 @@ def sync_roi_reshipment_sheet(now: datetime | None = None) -> dict:
     engine = create_engine(DB_URL)
     monthly = {}
     with engine.connect() as conn:
-        avg_return_delivery = float(conn.execute(text("""
-            SELECT COALESCE(AVG(delivery_rub), 372.0)
-            FROM wb_report_detail
-            WHERE srid LIKE 'mp.%.r' AND delivery_rub > 0
-        """)).scalar() or 372.0)
+        avg_return_delivery = fetch_global_fallback(conn)
         for month in range(1, now.month + 1):
             monthly[month] = _fetch_month(conn, now.year, month, avg_return_delivery)
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import requests
 
+from . import http_client
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -34,10 +36,19 @@ def headers(client_id_: str | None = None, key: str | None = None) -> dict:
     }
 
 
-def post(path: str, body: dict, *, timeout: int = 30) -> dict:
-    """POST helper. 429 -> RuntimeError понятного вида (как было в ozon_worker.py);
-    остальные ошибки — обычный requests.HTTPError через raise_for_status()."""
-    r = requests.post(f"{BASE}{path}", headers=headers(), json=body, timeout=timeout)
+def post(path: str, body: dict, *, timeout: int = 30, idempotent: bool = False) -> dict:
+    """POST helper. Раньше 429 сразу ронял запрос; теперь общий http_client
+    повторяет временное (429 с учётом Retry-After, обрыв связи; для чтений —
+    ещё таймаут и 5xx). Если после повторов всё равно 429 — как и прежде,
+    поднимаем понятный RuntimeError, чтобы воркер-пагинация притормозила.
+
+    idempotent=True ставим для чтений (списки/история) — их повтор безопасен.
+    Для отправок (ответы, сообщения, файлы) оставляем False, чтобы обрыв ответа
+    не задвоил сообщение покупателю."""
+    r = http_client.request(
+        "POST", f"{BASE}{path}", headers=headers(), json=body,
+        timeout=timeout, idempotent=idempotent,
+    )
     if r.status_code == 429:
         raise RuntimeError(f"Rate limit (429) на {path}")
     r.raise_for_status()
@@ -46,16 +57,41 @@ def post(path: str, body: dict, *, timeout: int = 30) -> dict:
 
 # ── Отзывы ────────────────────────────────────────────────────────────────────
 
+def review_info(review_id: str, *, timeout: int = 20) -> dict:
+    """Карточка отзыва через Seller API — без отметки «просмотрено» в ЛК.
+
+    Кабинетный ``/api/v2/review/detail`` как раз помечает отзыв просмотренным.
+    """
+    rid = (review_id or "").strip()
+    if not rid:
+        raise ValueError("review_id пустой")
+    data = post("/v1/review/info", {"review_id": rid}, timeout=timeout, idempotent=True)
+    return data.get("result") or data
+
+
 def answer_review(review_id: str, text: str, *, timeout: int = 20) -> dict:
-    """POST — ответить на отзыв Ozon (требует подписку Premium Plus / «Управление отзывами»)."""
-    return post("/v1/review/comment/create", {"review_uuid": review_id, "text": text}, timeout=timeout)
+    """POST — ответить на отзыв Ozon (требует подписку Premium Plus / «Управление отзывами»).
+
+    Поле в Seller API — ``review_id`` (не review_uuid). Без подписки будет 403.
+    """
+    rid = (review_id or "").strip()
+    txt = (text or "").strip()
+    if not rid:
+        raise ValueError("review_id пустой")
+    if not txt:
+        raise ValueError("текст ответа пустой")
+    return post(
+        "/v1/review/comment/create",
+        {"review_id": rid, "text": txt, "mark_review_as_processed": True},
+        timeout=timeout,
+    )
 
 
 # ── Вопросы о товарах ────────────────────────────────────────────────────────
 
 def list_questions_page(*, body: dict, timeout: int = 25) -> dict:
     """Одна страница вопросов Ozon; пагинацию ведёт ``ozon_worker.py``."""
-    return post("/v1/question/list", body, timeout=timeout)
+    return post("/v1/question/list", body, timeout=timeout, idempotent=True)
 
 
 def answer_question(question_id: str, sku: int, text: str, *, timeout: int = 20) -> dict:
@@ -84,11 +120,11 @@ def answer_question(question_id: str, sku: int, text: str, *, timeout: int = 20)
 def list_chats_page(*, body: dict, timeout: int = 25) -> dict:
     """Одна страница /v3/chat/list. Пагинация (cursor/has_next) остаётся на
     стороне ozon_chat_sync.py — здесь только сам вызов."""
-    return post("/v3/chat/list", body, timeout=timeout)
+    return post("/v3/chat/list", body, timeout=timeout, idempotent=True)
 
 
 def fetch_chat_history(chat_id: str, *, limit: int = 50, timeout: int = 25) -> dict:
-    return post("/v3/chat/history", {"chat_id": chat_id, "limit": limit}, timeout=timeout)
+    return post("/v3/chat/history", {"chat_id": chat_id, "limit": limit}, timeout=timeout, idempotent=True)
 
 
 def start_chat(posting_number: str, *, timeout: int = 25) -> dict:
@@ -139,6 +175,8 @@ def send_chat_file(
 def download_chat_file(url: str, *, timeout: int = 30) -> requests.Response:
     """Прокси вложений чата: url — полный адрес api-seller.ozon.ru/v2/chat/file/...
     (не REST-путь, поэтому не через post())."""
-    r = requests.get(url, headers={"Client-Id": client_id(), "Api-Key": api_key()}, timeout=timeout)
+    r = http_client.request(
+        "GET", url, headers={"Client-Id": client_id(), "Api-Key": api_key()}, timeout=timeout,
+    )
     r.raise_for_status()
     return r

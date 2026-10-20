@@ -3,12 +3,17 @@ import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 import vueDevTools from 'vite-plugin-vue-devtools'
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
     vue(),
     tailwindcss(),
-    vueDevTools(),
+    ...(command === 'serve' ? [vueDevTools()] : []),
   ],
+  build: {
+    target: ['es2020', 'safari15'],
+    cssCodeSplit: false,
+    modulePreload: false,
+  },
   server: {
     proxy: {
       // Локальная разработка: фронт и бэк на разных портах (в проде — один домен через nginx).
@@ -23,4 +28,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

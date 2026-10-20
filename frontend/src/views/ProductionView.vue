@@ -88,6 +88,7 @@ const smartSkus       = ref([])
 const smartDateFrom   = ref('')
 const smartDateTo     = ref('')
 const smartOnlyVideo  = ref(false)
+const smartOnlyPhoto  = ref(false)
 const smartPage       = ref(1)
 const SMART_PAGE_SIZE = 20
 const showSmartSkuDropdown = ref(false)
@@ -106,6 +107,11 @@ const toggleSmartSku = (sku) => {
   else smartSkus.value.splice(idx, 1)
 }
 
+const smartHasActiveFilters = computed(() =>
+  !!(smartQuery.value.trim() || smartCategory.value !== 'Все' || smartSkus.value.length
+    || smartDateFrom.value || smartDateTo.value || smartOnlyVideo.value || smartOnlyPhoto.value)
+)
+
 const smartResults = computed(() => {
   const q = smartQuery.value.trim().toLowerCase()
   return claims.value.filter(c => {
@@ -116,9 +122,12 @@ const smartResults = computed(() => {
     if (q) {
       const comment = (c['Комментарий покупателя'] || '').toLowerCase()
       const похожий = (c['Похожий отзыв'] || '').toLowerCase()
-      if (!comment.includes(q) && !похожий.includes(q)) return false
+      const reason = (c['Причина'] || c.reason || c.return_reason || '').toLowerCase()
+      const srid = String(c.SRID || c.srid || '').toLowerCase()
+      if (!comment.includes(q) && !похожий.includes(q) && !reason.includes(q) && !srid.includes(q)) return false
     }
     if (smartOnlyVideo.value && !parseVideos(c.videos || c.db_videos || '').length) return false
+    if (smartOnlyPhoto.value && !parsePhotos(c.photos || '').length) return false
     return true
   })
 })
@@ -126,7 +135,7 @@ const smartResults = computed(() => {
 const smartResultsPaged = computed(() => smartResults.value.slice(0, smartPage.value * SMART_PAGE_SIZE))
 const hasMoreSmartResults = computed(() => smartResultsPaged.value.length < smartResults.value.length)
 
-watch([smartQuery, smartCategory, smartSkus, smartDateFrom, smartDateTo, smartOnlyVideo], () => { smartPage.value = 1 }, { deep: true })
+watch([smartQuery, smartCategory, smartSkus, smartDateFrom, smartDateTo, smartOnlyVideo, smartOnlyPhoto], () => { smartPage.value = 1 }, { deep: true })
 
 const openSmartClaim = async (claim) => {
   modalData.value = {
@@ -531,7 +540,7 @@ const openMatrixDetails = async (sku, catId, catName) => {
   })
   modalData.value = { isOpen: true, title: `📦 ${sku} | 🛠 ${catName}`, claims: details, rawSku: sku, catId }
 
-  // Ozon FBO: фото/инвойс недоступны — не дергаем media API
+  // Ozon: фото/комментарий уже в production-claims (бот кабинета). WB — lazy claim-media.
   if (platformStore.platform === 'ozon') return
 
   for (let c of details) {
@@ -796,7 +805,7 @@ onMounted(() => {
       </div>
 
       <!-- ══ УМНЫЙ ПОИСК ПО КОММЕНТАРИЯМ ══ -->
-      <div v-if="!isOzon" class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
+      <div class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-100 bg-slate-50/60 flex items-center justify-between">
           <div class="flex items-center gap-2">
             <MessageSquare class="w-4 h-4 text-violet-500" />
@@ -815,7 +824,7 @@ onMounted(() => {
             <input
               v-model="smartQuery"
               type="text"
-              placeholder="Поиск по тексту комментария..."
+              :placeholder="isOzon ? 'Поиск по комментарию, причине или номеру возврата...' : 'Поиск по тексту комментария...'"
               class="w-full pl-10 pr-4 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition"
             />
             <button v-if="smartQuery" @click="smartQuery = ''" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-red-400 transition">
@@ -872,17 +881,24 @@ onMounted(() => {
               class="px-3 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition text-slate-700" />
           </div>
 
-          <!-- Только с видео -->
-          <button @click="smartOnlyVideo = !smartOnlyVideo"
-            :class="['flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition',
-              smartOnlyVideo ? 'bg-violet-600 border-violet-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100']">
-            🎥 Только с видео
-          </button>
+          <!-- Только с фото / видео -->
+          <div class="flex flex-wrap gap-2">
+            <button @click="smartOnlyPhoto = !smartOnlyPhoto"
+              :class="['flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition',
+                smartOnlyPhoto ? 'bg-violet-600 border-violet-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100']">
+              📷 Только с фото
+            </button>
+            <button v-if="!isOzon" @click="smartOnlyVideo = !smartOnlyVideo"
+              :class="['flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition',
+                smartOnlyVideo ? 'bg-violet-600 border-violet-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100']">
+              🎥 Только с видео
+            </button>
+          </div>
         </div>
 
         <!-- Результаты -->
         <div class="divide-y divide-slate-50">
-          <div v-if="!smartQuery && smartCategory === 'Все' && smartSkus.length === 0 && !smartDateFrom && !smartDateTo"
+          <div v-if="!smartHasActiveFilters"
             class="py-12 text-center text-slate-400 text-sm font-medium">
             Введите слово или выберите фильтр — найдём все подходящие возвраты с комментариями
           </div>
@@ -994,7 +1010,7 @@ onMounted(() => {
                     <ExternalLink class="w-3 h-3" /> Открыть в ЛК
                   </a>
                 </div>
-                <p v-if="!isOzon" class="text-sm text-slate-700 leading-relaxed font-medium bg-white p-4 rounded-xl border border-slate-100 shadow-sm italic">"{{ claim['Комментарий покупателя'] || 'Без комментария' }}"</p>
+                <p class="text-sm text-slate-700 leading-relaxed font-medium bg-white p-4 rounded-xl border border-slate-100 shadow-sm italic">"{{ claim['Комментарий покупателя'] || 'Без комментария' }}"</p>
                 <!-- Похожий отзыв по этому SKU (справочно, жёсткой связи с возвратом нет) -->
                 <div v-if="claim['Похожий отзыв']" class="mt-2 text-xs bg-amber-50/60 border border-amber-100 rounded-xl p-3">
                   <div class="text-[10px] font-black text-amber-600 uppercase tracking-tight mb-1">💬 Похожий отзыв по этому SKU<span v-if="claim['Похожий отзыв оценка']"> · {{ claim['Похожий отзыв оценка'] }}★</span></div>
@@ -1002,12 +1018,13 @@ onMounted(() => {
                 </div>
               </div>
 
-              <div v-if="!isOzon" class="grid grid-cols-4 gap-2 content-start sm:w-[280px] md:w-[380px]">
+              <div class="grid grid-cols-4 gap-2 content-start sm:w-[280px] md:w-[380px]">
                 <div v-for="(img, idx) in parsePhotos(claim.photos)" :key="idx" class="relative group aspect-square rounded-lg overflow-hidden border border-white shadow-sm cursor-zoom-in" @click="openLightbox(parsePhotos(claim.photos), idx)">
                   <img :src="img" class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" />
                   <button @click.stop="downloadImg(img, `claim_${claim.SRID || claim.srid}_${idx+1}.jpg`)" class="absolute bottom-1 right-1 p-1 bg-black/50 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity"><Download class="w-3 h-3" /></button>
                 </div>
                 <div v-if="claim.photos === undefined || claim.photos === null" class="col-span-4 py-4 text-center text-xs text-slate-400 animate-pulse">Загрузка фото...</div>
+                <div v-else-if="isOzon && !parsePhotos(claim.photos || '').length" class="col-span-4 py-4 text-center text-xs text-slate-400">Нет фото (бот ещё не подтянул из кабинета)</div>
                 <a v-for="(vid, idx) in parseVideos(claim.videos || claim.db_videos)" :key="`v${idx}`" :href="vid" target="_blank" rel="noopener"
                   class="relative group aspect-square rounded-lg overflow-hidden border border-white shadow-sm bg-slate-800 flex items-center justify-center col-span-2">
                   <span class="text-white text-[10px] font-bold flex flex-col items-center gap-1">

@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from . import ym_client
+from . import product_fasteners, ym_client
 
 
 CACHE_TTL_SECONDS = 12 * 60 * 60
@@ -211,10 +211,13 @@ def _store_card(db, article: str, payload: dict) -> None:
 def get_product_card(db, article: str) -> dict:
     article = _text(article)
     if not article:
-        return {"status": "not_found", "article": "", "source": "yandex_market"}
+        return product_fasteners.attach_fasteners(
+            {"status": "not_found", "article": "", "source": "yandex_market"},
+            "",
+        )
     cached = _cached_card(db, article)
     if cached:
-        return cached
+        return product_fasteners.attach_fasteners(cached, article)
     try:
         data = ym_client.post(
             f"/v2/businesses/{ym_client.business_id()}/offer-mappings",
@@ -223,7 +226,13 @@ def get_product_card(db, article: str) -> dict:
         )
     except Exception:
         # Токены и технические детали API не попадают в интерфейс КС.
-        return {"status": "unavailable", "article": article, "source": "yandex_market"}
+        return product_fasteners.attach_fasteners(
+            {"status": "unavailable", "article": article, "source": "yandex_market"},
+            article,
+        )
     payload = parse_offer_card(data, article)
     _store_card(db, article, payload)
-    return {**_normalize_payload(payload), "cached": False}
+    return product_fasteners.attach_fasteners(
+        {**_normalize_payload(payload), "cached": False},
+        article,
+    )

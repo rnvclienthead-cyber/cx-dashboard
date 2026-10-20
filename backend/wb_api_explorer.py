@@ -95,6 +95,8 @@ def post(url, body, params=None, pause=3):
     try:
         r = requests.post(url, headers=H, json=body, params=params, timeout=90)
         time.sleep(pause)
+        if r.status_code == 204:
+            return []
         if r.status_code not in (200, 201):
             print(f"    ❌ HTTP {r.status_code}: {r.text[:120]}")
             return None
@@ -139,34 +141,42 @@ def run():
             r
         )
 
-    # reportDetailByPeriod — 90 дней, чтобы поймать Возвраты
-    print("  ⏳ reportDetailByPeriod (90 дней, может быть медленно)...")
-    r = get("https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod",
-            {"dateFrom": DATE_FROM_90, "dateTo": DATE_TO, "rrdid": 0, "limit": 1000},
-            pause=5)
+    # sales-reports/detailed v1 — 90 дней, чтобы поймать Возвраты
+    print("  ⏳ sales-reports/detailed (90 дней, может быть медленно)...")
+    r = post(
+        "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed",
+        {
+            "dateFrom": DATE_FROM_90,
+            "dateTo": DATE_TO,
+            "rrdId": 0,
+            "limit": 1000,
+            "period": "weekly",
+        },
+        pause=5,
+    )
     if r:
         types = {}
         for row in r:
-            t = row.get("doc_type_name", "?")
+            t = row.get("docTypeName") or row.get("doc_type_name") or "?"
             types[t] = types.get(t, 0) + 1
         print(f"    ℹ️  Типы строк: {types}")
 
-        sale_rows = [x for x in r if x.get("doc_type_name") == "Продажа"]
+        sale_rows = [x for x in r if (x.get("docTypeName") or x.get("doc_type_name")) == "Продажа"]
         total += save_samples(
-            "statistics-api", "/api/v5/reportDetailByPeriod [Продажа]",
-            "Детальный отчёт — Продажа. Поля: rrd_id, gi_id, shk_id, srid, barcode, nm_id, sa_name, trbx_id, order_uid, sticker_id",
+            "finance-api", "/api/finance/v1/sales-reports/detailed [Продажа]",
+            "Детальный отчёт — Продажа. Поля: rrdId, giId, shkId, srid, sku, nmId, vendorCode, trbxId, orderUid, stickerId",
             sale_rows
         )
 
-        ret_rows = [x for x in r if x.get("doc_type_name") == "Возврат"]
+        ret_rows = [x for x in r if (x.get("docTypeName") or x.get("doc_type_name")) == "Возврат"]
         if ret_rows:
             total += save_samples(
-                "statistics-api", "/api/v5/reportDetailByPeriod [Возврат]",
-                "Детальный отчёт — Возврат. КЛЮЧЕВЫЕ ПОЛЯ ДЛЯ ПРИВЯЗКИ: gi_id, shk_id, srid, barcode, trbx_id, order_uid, sticker_id",
+                "finance-api", "/api/finance/v1/sales-reports/detailed [Возврат]",
+                "Детальный отчёт — Возврат. КЛЮЧЕВЫЕ ПОЛЯ ДЛЯ ПРИВЯЗКИ: giId, shkId, srid, sku, trbxId, orderUid, stickerId",
                 ret_rows
             )
         else:
-            print("  ⚠️  Возвратов в reportDetailByPeriod за 90 дней не найдено")
+            print("  ⚠️  Возвратов в sales-reports/detailed за 90 дней не найдено")
 
     # =========================================================
     print("\n📋 RETURNS/CLAIMS API — претензии покупателей")

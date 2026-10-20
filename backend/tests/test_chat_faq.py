@@ -50,6 +50,11 @@ class ChatFaqTests(unittest.TestCase):
         self.assertTrue(oz_out)
         self.assertNotIn("ozon.ru", oz_out[0].lower())
 
+    def test_paint_holes_fallback_matches_template(self):
+        from backend.review_policy import PAINT_HOLES_REPLY
+        self.assertEqual(chat_faq.faq_fallback("tech_otverstiya", "wb"), PAINT_HOLES_REPLY)
+        self.assertEqual(chat_faq.faq_fallback("tech_otverstiya", "ozon"), PAINT_HOLES_REPLY)
+
 
 if __name__ == "__main__":
     unittest.main()

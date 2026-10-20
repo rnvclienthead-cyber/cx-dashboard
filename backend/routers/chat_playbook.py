@@ -10,6 +10,7 @@
 Таблицы: cx_chat_themes, cx_chat_theme_zones, cx_chat_variants, cx_chat_settings.
 """
 import random
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,10 +20,30 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .auth import get_current_user
+from .. import ym_parts
+from ..review_policy import PAINT_HOLES_REPLY
 
 router = APIRouter(prefix="/api/v1/chat-playbook", tags=["chat-playbook"])
 
 ZONES = ("auto", "draft", "human")
+
+# Служебная тема для шаблонов «без темы» (менеджер не выбрал группу).
+# Неактивна — не попадает в чипы и автоответы, только в очередь проверки.
+UNASSIGNED_THEME_KEY = "__unassigned__"
+
+# Задержка на нашей стороне (FBS / не приняли поставку) — не путать с «доставкой WB».
+_DOSTAVKA_OUR_DELAY_KEY = "nasha_zaderzhka"
+_DOSTAVKA_OUR_DELAY_LABEL = "Наша задержка"
+_DOSTAVKA_OUR_DELAY_1 = (
+    "Здравствуйте! Мы делаем всё возможное, чтобы ускорить отгрузку. "
+    "Информацию уже передали в отдел логистики. "
+    "Как только заказ уйдёт в доставку — статус в приложении обновится."
+)
+_DOSTAVKA_OUR_DELAY_2 = (
+    "Здравствуйте! Понимаем, что ожидание неприятно. "
+    "Со своей стороны делаем всё возможное, чтобы товар скорее ушёл в доставку. "
+    "Передали задачу логистам — при изменении статуса напишем."
+)
 
 # ── Стартовое наполнение (черновик 1, 2026-07-22) ────────────────────────────
 # (theme_key, name, when_text, zone, action, note, sort)
@@ -36,6 +57,11 @@ SEED_THEMES = [
     ("soglasie", "Согласие на доотправку",
      "Клиент соглашается на отправку детали: «да», «отправляйте», «актуально», «заполнила», «давайте».",
      "auto", "send_form_link", "", 20),
+    ("kupit_detal", "Купить деталь за 1 ₽",
+     "ЯМ: клиент согласился купить недостающую деталь в нашем магазине на Маркете. "
+     "Шлём артикул карточки, цену 1 ₽ и промокод сразу.",
+     "auto", "send_buy_link",
+     "Только Яндекс Маркет. Промокод заводят в кабинете ЯМ, код и артикулы — в настройках бота.", 22),
     ("otkaz_dootpravki", "Отказ от доотправки",
      "«Не актуально», «не надо», «хочу вернуть», «уже перезаказал», угрозы/суд — человеку.",
      "human", "handoff_to_manager",
@@ -57,7 +83,8 @@ SEED_THEMES = [
      "draft", "",
      "Правило только WB (сушилки и др. по списку категорий). На Ozon/ЯМ не применять.", 70),
     ("dostavka_wb", "Где мой заказ",
-     "«Когда придёт заказ WB», «статус оформлен N дней», «где посылка», перенос доставки WB.",
+     "«Когда придёт заказ», «статус оформлен N дней», «где посылка», перенос доставки. "
+     "Ветка «Наша задержка»: заказ ещё у нас — делаем всё возможное, передали логистам.",
      "auto", "", "", 80),
     ("otmena_zakaza", "Отменить заказ",
      "Клиент просит отменить заказ или доставку.",
@@ -66,9 +93,9 @@ SEED_THEMES = [
      "«Как собрать», «трубки не подходят / короче», «болт не входит», «накладки молотком», инструкция.",
      "auto", "", "Часто это не брак, а неверный порядок сборки — ответ снимает возврат.", 100),
     ("ekspluataciya", "Товар не работает",
-     "Только швабры/вёдра Видовито (артикулы Mop-*): собрано, но не увлажняется, "
-     "не крутится, вода не сливается. На другие товары не применять.",
-     "auto", "", "Видео и текст — только для швабр/вёдер. Иначе → меню уточнения.", 110),
+     "Только швабры/вёдра Видовито 1S (артикулы Mop-*): собрано, но не увлажняется, "
+     "не крутится, вода не сливается. Высокие вёдра 2S — не эта тема.",
+     "auto", "", "Видео и текст — только для швабр/вёдер 1S. Иначе → меню уточнения.", 110),
     ("ssylka", "Ссылка не открывается",
      "«Ссылка не работает», «ведёт на главную», «адрес не находит», «что за сайт».",
      "auto", "resend_form_link", "", 120),
@@ -86,6 +113,10 @@ SEED_THEMES = [
     ("cheque", "Где взять чек",
      "«Нужен чек», «где чек», «чек на покупку», «кассовый чек».",
      "auto", "", "Из старых шаблонов «Чат продавца».", 140),
+    ("promokody", "Промокоды",
+     "Извинение клиенту: промокод на следующую покупку на Wildberries. Только вручную, бот сам не шлёт.",
+     "human", "",
+     "Только чаты WB. Два кода: 5% U4FZT091 и 15% CQ4GYW7H.", 145),
     ("srok_hraneniya", "Продлить хранение на ПВЗ",
      "«Продлить срок хранения», «продлить выдачу», «не успеваю забрать».",
      "auto", "", "Это зона WB, не продавца.", 150),
@@ -96,6 +127,14 @@ SEED_THEMES = [
      "«Какая высота/ширина/глубина», «какая нагрузка», «диаметр труб», "
      "«подойдёт ли в нишу», «выдержит ли». Без явной проблемы со сборкой.",
      "auto", "", "FAQ + характеристики. При сборке — тема sborka.", 170),
+    ("tech_otverstiya", "Технологические отверстия",
+     "Дырки / отверстия на полке, подносе, сбоку — не брак и не для сборки. "
+     "Столики, полки, этажерки, цветочные подставки. "
+     "Фразы: «для чего отверстия», «зачем дырочка», «на фото нет дырок». "
+     "Не путать с «нет отверстия под болт», «отверстия не совпадают», "
+     "«отверстие не там» — это брак или сборка.",
+     "auto", "",
+     "За них деталь вешают на линии покраски. Собирать через них не нужно.", 172),
     ("dengi", "Сроки возврата денег",
      "«Когда вернутся деньги», «срок возврата средств», «где деньги за возврат» — "
      "без запроса детали. Красная зона / человек.",
@@ -148,7 +187,7 @@ SEED_VARIANTS = [
      "{form_url}", 1),
     ("soglasie", "", "",
      "Хорошо, оформим! Опишите в форме, чего не хватает, и укажите адрес — это быстро.\n\n"
-     "Ссылка в приложении WB часто не кликабельна: скопируйте её и откройте в браузере (Chrome, Safari и т.п.):\n"
+     "Ссылка в приложении WB часто не кликабельна: скопируйте её и откройте в браузере:\n"
      "{form_url}", 2),
 
     ("otkaz_dootpravki", "", "", "Понял вас. Передаю обращение коллеге — он свяжется с вами и всё решит.", 1),
@@ -192,6 +231,10 @@ SEED_VARIANTS = [
      "Здравствуйте! По пути до пункта выдачи информация обновляется в заказе на маркетплейсе. "
      "По срокам и задержке удобнее уточнить в поддержке: профиль → «Задать вопрос» → доставка. "
      "Если вопрос по товару — пишите нам, разберёмся.", 2),
+    ("dostavka_wb", _DOSTAVKA_OUR_DELAY_KEY, _DOSTAVKA_OUR_DELAY_LABEL,
+     _DOSTAVKA_OUR_DELAY_1, 1),
+    ("dostavka_wb", _DOSTAVKA_OUR_DELAY_KEY, _DOSTAVKA_OUR_DELAY_LABEL,
+     _DOSTAVKA_OUR_DELAY_2, 2),
 
     ("otmena_zakaza", "", "", "Здравствуйте! Отменить заказ можно в первый час после оформления или пока продавец не начал сборку — смотря что наступит раньше. С нашей стороны маркетплейс отменять заказы не позволяет. Если срок уже прошёл, товар можно не забирать из пункта выдачи — тогда деньги вернутся автоматически.", 1),
 
@@ -204,7 +247,7 @@ SEED_VARIANTS = [
     ("ekspluataciya", "", "", "Здравствуйте! Чаще всего причина в одном из двух: не до конца наполнен отсек для чистой воды или неправильно встал крутящий механизм. Посмотрите, пожалуйста, это видео — там наглядно: https://drive.google.com/file/d/1wyyjqKCyyqF_AxXInQkBzmHDhMLWZIl7/view?usp=sharing Если не поможет, напишите — разберёмся дальше.", 2),
 
     ("ssylka", "", "", "Скопируйте, пожалуйста, ссылку целиком и вставьте её в адресную строку браузера — внутри приложения маркетплейса она не открывается. Вот она ещё раз: {form_url}", 1),
-    ("ssylka", "", "", "Так бывает: внутри приложения ссылка не срабатывает. Скопируйте её и откройте в браузере — Chrome, Safari, любом. Держите ссылку: {form_url}", 2),
+    ("ssylka", "", "", "Так бывает: внутри приложения ссылка не срабатывает. Скопируйте её и откройте в браузере. Держите ссылку: {form_url}", 2),
 
     ("blagodarnost", "problem_solved", "Проблема решена",
      "Рады, что всё сложилось! Если найдёте минуту и обновите отзыв о товаре — нам это очень поможет. Хорошего дня!", 1),
@@ -226,6 +269,15 @@ SEED_VARIANTS = [
     ("cheque", "", "",
      "Чек можно скачать в личном кабинете WB: откройте профиль через браузер → раздел «Чеки». "
      "В мобильном приложении путь может отличаться — удобнее именно через браузер.", 1),
+
+    ("promokody", "pct5", "Скидка 5%",
+     "В качестве извинений подготовили промокод на скидку 5% на следующую покупку: U4FZT091. "
+     "Применить его можно при оформлении заказа на Wildberries.\n"
+     "Будем рады снова видеть вас среди покупателей Видовито!", 1),
+    ("promokody", "pct15", "Скидка 15%",
+     "В качестве извинений подготовили промокод на скидку 15% на следующую покупку: CQ4GYW7H. "
+     "Применить его можно при оформлении заказа на Wildberries. "
+     "Будем рады снова видеть вас среди покупателей Видовито!", 2),
 
     ("srok_hraneniya", "", "",
      "Продлить срок хранения на пункте выдачи с нашей стороны нельзя — этим управляет Wildberries. "
@@ -260,6 +312,8 @@ SEED_VARIANTS = [
      "Здравствуйте! Заглушки, защёлки и другой мелкий крепёж отдельно мы не продаём. "
      "Их можно поискать в хозяйственном магазине. Если деталь не пришла в комплекте или брак — "
      "оформите возврат во вкладке «Покупки» с пометкой «брак».", 1),
+
+    ("tech_otverstiya", "", "", PAINT_HOLES_REPLY, 1),
 ]
 
 # Шаблоны Ozon (инструкции «куда нажать» — как отвечают менеджеры / Альфред).
@@ -276,6 +330,57 @@ SEED_OZON_VARIANTS = [
      "Разложите детали по длине и сверьте с инструкцией. Если чего-то действительно нет — "
      "пришлите фото полученного комплекта, подскажем следующий шаг. "
      "Отдельно выслать деталь на Ozon мы не можем.", 2),
+
+    ("nekomplekt", "wheels", "Не хватает колёс",
+     "Здравствуйте! Если в комплекте не оказалось колёс — отдельно прислать их на Ozon мы не можем. "
+     "Оформите возврат в разделе «Заказы»: товар → «Вернуть» → причина «неполная комплектация». "
+     "К заявке лучше приложить фото полученного комплекта. Решение принимает Ozon.", 1),
+    ("nekomplekt", "bolts", "Не хватает крепежа",
+     "Здравствуйте! Если не хватает болтов, винтов или другого крепежа — отдельно выслать его на Ozon мы не можем. "
+     "Оформите возврат в разделе «Заказы»: товар → «Вернуть» → причина «неполная комплектация» "
+     "(по возможности с фото комплекта). Решение по заявке принимает Ozon.", 1),
+    ("nekomplekt", "legs", "Не хватает ножек",
+     "Здравствуйте! Если в комплекте нет ножек — отдельно прислать их на Ozon мы не можем. "
+     "Оформите возврат в разделе «Заказы»: товар → «Вернуть» → причина «неполная комплектация». "
+     "К заявке лучше приложить фото. Решение принимает Ozon.", 1),
+
+    ("nekomplekt", "sku_allowed", "Можно выслать деталь",
+     "Здравствуйте! Очень жаль, что в коробке оказалось не всё — понимаем, как это неприятно, когда собрать не получается. "
+     "Мы можем бесплатно выслать недостающую деталь. Отправляем?", 1),
+    ("nekomplekt", "sku_allowed", "Можно выслать деталь",
+     "Здравствуйте! Извините за эту ситуацию, комплект должен был приехать полным. "
+     "Недостающую деталь отправим бесплатно. Подскажите, актуально?", 2),
+    ("nekomplekt", "sku_denied", "Товара нет в списке",
+     "Здравствуйте! Извините, что деталь не приехала. По этому товару отдельно выслать её не получится. "
+     "Оформите возврат в разделе «Заказы»: товар → «Вернуть» → причина «неполная комплектация». "
+     "К заявке лучше приложить фото комплекта. Решение принимает Ozon.", 1),
+
+    ("soglasie", "", "",
+     "Отлично! Заполните, пожалуйста, короткую форму — укажите, какая деталь нужна и куда её отправить. "
+     "Займёт пару минут.\n\n{form_url}", 1),
+    ("soglasie", "", "",
+     "Хорошо, оформим! Опишите в форме, чего не хватает, и укажите адрес — это быстро.\n\n{form_url}", 2),
+
+    ("ssylka", "", "",
+     "Держите ссылку на форму ещё раз. Если в приложении она не открывается, скопируйте её и вставьте в браузер:\n\n{form_url}", 1),
+
+    ("otkaz_dootpravki", "", "",
+     "Понял вас. Передаю обращение коллеге — он свяжется с вами и всё решит.", 1),
+
+    ("status_zayavki", "new", "Заявка принята",
+     "Здравствуйте! Заявку получили, сейчас проверяем наличие детали. Как только соберём посылку — пришлём трек-номер сюда, в чат.", 1),
+    ("status_zayavki", "approved", "Заявка одобрена",
+     "Здравствуйте! Заявка одобрена, готовим посылку к отправке. Как передадим в доставку — сразу пришлём трек.", 1),
+    ("status_zayavki", "shipped", "Посылка отправлена",
+     "Здравствуйте! Посылка уже в пути. Трек-номер {carrier}: {track}. По нему можно отследить движение.", 1),
+    ("status_zayavki", "ready_for_pickup", "Ждёт в пункте выдачи",
+     "Здравствуйте! Посылка ждёт вас в пункте выдачи {carrier}. Забрать нужно до {storage_until} — после этого её отправят обратно.", 1),
+    ("status_zayavki", "delivered", "Получена",
+     "Здравствуйте! По нашим данным посылка получена. Всё ли подошло?", 1),
+
+    ("brak", "fixable_by_part", "Чинится деталью",
+     "Здравствуйте! Извините, деталь не должна была приехать в таком виде. "
+     "Мы вышлем вам замену бесплатно — возвращать ничего не нужно. Отправляем?", 1),
 
     ("nekomplekt", "no_reship_return", "Без досылки → возврат",
      "Здравствуйте! К сожалению, отдельно прислать или продать недостающую деталь мы не можем. "
@@ -323,6 +428,10 @@ SEED_OZON_VARIANTS = [
      "сроки не меняем и не ускоряем. Если дата изменилась или статус долго стоит на месте, "
      "напишите в поддержку Ozon: профиль → «Сообщения» → «Поддержка Ozon». "
      "Если вопрос по товару — пишите нам, разберёмся.", 2),
+    ("dostavka_wb", _DOSTAVKA_OUR_DELAY_KEY, _DOSTAVKA_OUR_DELAY_LABEL,
+     _DOSTAVKA_OUR_DELAY_1, 1),
+    ("dostavka_wb", _DOSTAVKA_OUR_DELAY_KEY, _DOSTAVKA_OUR_DELAY_LABEL,
+     _DOSTAVKA_OUR_DELAY_2, 2),
 
     ("vozvrat", "", "",
      "Здравствуйте! Оформить возврат можно в личном кабинете Ozon: раздел «Заказы» → "
@@ -415,23 +524,52 @@ SEED_OZON_VARIANTS = [
      "Точные размеры и нагрузка указаны в карточке товара в разделе «Характеристики». "
      "Напишите, пожалуйста, что именно нужно: высота, ширина, глубина или нагрузка — "
      "подскажу цифры по вашей модели.", 1),
+
+    ("tech_otverstiya", "", "", PAINT_HOLES_REPLY, 1),
 ]
 
-# Яндекс Маркет: пути кабинета ЯМ + доотправка детали через чат (как WB).
-# Ozon по-прежнему без доотправки; ЯМ предлагает деталь и ссылку на форму в чате.
+# Яндекс Маркет: сначала покупка детали со скидкой, затем бесплатная (дольше) доотправка.
 SEED_YM_VARIANTS = [
-    ("nekomplekt", "sku_allowed", "Товар в списке разрешённых",
-     "Здравствуйте! Очень жаль, что в коробке оказалось не всё — понимаем, как это неприятно, когда собрать не получается. У нас есть возможность выслать недостающую деталь бесплатно. Отправляем?", 1),
-    ("nekomplekt", "sku_allowed", "Товар в списке разрешённых",
-     "Здравствуйте! Извините за эту ситуацию, комплект должен был приехать полным. Мы можем отправить вам недостающую деталь — доставим бесплатно. Подскажите, актуально?", 2),
-    ("nekomplekt", "sku_allowed", "Товар в списке разрешённых",
-     "Здравствуйте! Досадно, что так вышло с комплектацией. Давайте не будем ничего возвращать — мы просто вышлем недостающую деталь за наш счёт. Отправляем?", 3),
+    ("nekomplekt", "offer_buy", "Купить деталь за 1 ₽",
+     "Очень жаль, что в коробке оказалось не всё. Нужную деталь можно купить "
+     "в нашем магазине на Яндекс Маркете за 1 ₽ — промокод {promo_code}. "
+     "Так обычно быстрее, чем ждать бесплатную досылку. Оформить покупку детали за 1 ₽?", 1),
+    ("nekomplekt", "offer_buy", "Купить деталь за 1 ₽",
+     "Извините за комплектацию. Деталь есть в нашем магазине на Маркете за 1 ₽, "
+     "промокод {promo_code}. Купить недостающую деталь за 1 ₽?", 2),
+    ("kupit_detal", "", "",
+     "Отлично. Детали в нашем магазине на Яндекс Маркете — цена 1 ₽ с промокодом {promo_code}:\n\n"
+     "{part_list}\n\n"
+     "Найдите нужную поиском по артикулу и введите промокод {promo_code} в корзине. "
+     "Промокод одноразовый (один раз на ваш аккаунт Маркета) и действует только на эти карточки.\n\n"
+     "Если в приложении карточка не открывается — скопируйте артикул в поиск на market.yandex.ru.", 1),
+    ("kupit_detal", "", "",
+     "Хорошо. Нужная позиция: {part_name}. Артикул: {part_article}. "
+     "Цена 1 ₽ с промокодом {promo_code} — введите его в корзине. "
+     "Код одноразовый и только на эту деталь. Если не найдётся — напишите, подскажем.", 2),
+    ("nekomplekt", "offer_free_slow", "Бесплатная доотправка дольше",
+     "Понимаем. Тогда отправим недостающую деталь бесплатно — это занимает больше времени, "
+     "чем покупка на Маркете. Оформить бесплатную доотправку?", 1),
+    ("nekomplekt", "offer_free_slow", "Бесплатная доотправка дольше",
+     "Хорошо, без покупки. Можем выслать деталь за наш счёт, но доставка будет дольше. Отправляем?", 2),
+    ("nekomplekt", "to_return", "К возврату",
+     "Тогда удобнее оформить возврат в кабинете Яндекс Маркета: откройте заказ → возврат с пометкой «брак», "
+     "чтобы этот экземпляр не уехал к следующему покупателю. Деньги вернутся полностью.", 1),
     ("nekomplekt", "sku_denied", "Товара нет в списке",
      "Здравствуйте! Извините за эту ситуацию — комплект должен был приехать полным. По этому товару выслать деталь отдельно мы, к сожалению, не можем. "
      "Оформите, пожалуйста, возврат в личном кабинете Яндекс Маркета: откройте заказ → возврат с пометкой «брак» — так товар не уедет к следующему покупателю. Деньги вернутся полностью.", 1),
     ("nekomplekt", "sku_denied", "Товара нет в списке",
      "Здравствуйте! Очень жаль, что не хватило детали. Отдельно выслать её по этому товару у нас нет возможности. "
      "Самое быстрое решение — оформить возврат в кабинете Яндекс Маркета с пометкой «брак», чтобы этот экземпляр не попал к другому человеку. Будем рады видеть вас снова.", 2),
+    ("nekomplekt", "sku_allowed", "Товар в списке разрешённых",
+     "Здравствуйте! Очень жаль, что в коробке оказалось не всё — понимаем, как это неприятно, когда собрать не получается. "
+     "У нас есть возможность выслать недостающую деталь бесплатно. Отправляем?", 1),
+    ("nekomplekt", "sku_allowed", "Товар в списке разрешённых",
+     "Здравствуйте! Извините за эту ситуацию, комплект должен был приехать полным. "
+     "Мы можем отправить вам недостающую деталь — доставим бесплатно. Подскажите, актуально?", 2),
+    ("nekomplekt", "sku_allowed", "Товар в списке разрешённых",
+     "Здравствуйте! Досадно, что так вышло с комплектацией. Давайте не будем ничего возвращать — "
+     "мы просто вышлем недостающую деталь за наш счёт. Отправляем?", 3),
 
     ("soglasie", "", "",
      "Отлично! Заполните, пожалуйста, короткую форму — укажите, какая деталь нужна и куда её отправить. Займёт пару минут.\n\n"
@@ -439,7 +577,7 @@ SEED_YM_VARIANTS = [
      "{form_url}", 1),
     ("soglasie", "", "",
      "Хорошо, оформим! Опишите в форме, чего не хватает, и укажите адрес — это быстро.\n\n"
-     "Ссылка в приложении часто не кликабельна: скопируйте её и откройте в браузере (Chrome, Safari и т.п.):\n"
+     "Ссылка в приложении часто не кликабельна: скопируйте её и откройте в браузере:\n"
      "{form_url}", 2),
 
     ("otkaz_dootpravki", "", "",
@@ -459,7 +597,7 @@ SEED_YM_VARIANTS = [
     ("ssylka", "", "",
      "Скопируйте, пожалуйста, ссылку целиком и вставьте её в адресную строку браузера — внутри приложения маркетплейса она не открывается. Вот она ещё раз: {form_url}", 1),
     ("ssylka", "", "",
-     "Так бывает: внутри приложения ссылка не срабатывает. Скопируйте её и откройте в браузере — Chrome, Safari, любом. Держите ссылку: {form_url}", 2),
+     "Так бывает: внутри приложения ссылка не срабатывает. Скопируйте её и откройте в браузере. Держите ссылку: {form_url}", 2),
 
     ("wrong_item", "", "",
      "Здравствуйте! Приносим извинения за возникшую ситуацию. Откройте заказ в личном кабинете "
@@ -498,6 +636,10 @@ SEED_YM_VARIANTS = [
      "сроки не меняем и не ускоряем. Если дата изменилась или статус долго стоит на месте, "
      "напишите в поддержку Яндекс Маркета: раздел «Помощь» / чат поддержки. "
      "Если вопрос по товару — пишите нам, разберёмся.", 2),
+    ("dostavka_wb", _DOSTAVKA_OUR_DELAY_KEY, _DOSTAVKA_OUR_DELAY_LABEL,
+     _DOSTAVKA_OUR_DELAY_1, 1),
+    ("dostavka_wb", _DOSTAVKA_OUR_DELAY_KEY, _DOSTAVKA_OUR_DELAY_LABEL,
+     _DOSTAVKA_OUR_DELAY_2, 2),
 
     ("vozvrat", "", "",
      "Здравствуйте! Оформить возврат можно в личном кабинете Яндекс Маркета: откройте заказ → "
@@ -568,9 +710,9 @@ SEED_YM_VARIANTS = [
      "Пожалуйста! Если что-то ещё понадобится — пишите сюда.", 1),
 
     ("zapchasti", "in_stock", "В наличии",
-     "Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. "
-     "Если нужна именно замена расходника — попробуйте поиск по маркетплейсу по запросу "
-     "«сменная насадка для швабры».", 1),
+     "Здравствуйте! Сменные насадки Видовито есть на Яндекс Маркете — артикул rag-grey-2 "
+     "(SKU 4333856128). Есть комплект 2 шт.: Rag-gray-2S (SKU 4638431611). "
+     "Найдите карточку поиском по артикулу rag-grey-2.", 1),
     ("zapchasti", "out_of_stock", "Нет в наличии",
      "Сменные насадки к швабре сейчас временно нет в наличии. "
      "Если товар с дефектом — оформите возврат в кабинете Яндекс Маркета.", 1),
@@ -593,21 +735,23 @@ SEED_YM_VARIANTS = [
      "Точные размеры и нагрузка указаны в карточке товара в разделе «Характеристики». "
      "Напишите, пожалуйста, что именно нужно: высота, ширина, глубина или нагрузка — "
      "подскажу цифры по вашей модели.", 1),
+
+    ("tech_otverstiya", "", "", PAINT_HOLES_REPLY, 1),
 ]
 
 SEED_SETTINGS = [
     ("nasadki_in_stock", "true",
      "Сменные насадки в наличии (true/false). Выкл — бот отвечает, что сейчас нет."),
     ("signature", "\n\nАлександр, команда Видовито",
-     "Подпись под содержательным ответом. Под короткими репликами не ставится."),
+     "Подпись под содержательным ответом. Один раз за чат: если уже представлялись — не повторяем."),
     ("red_zone_client_text",
      "Подключаю коллегу — он разберётся в вашей ситуации и ответит здесь же. Отвечаем в рабочее время.",
      "Что бот пишет клиенту, передавая обращение менеджеру."),
     ("red_zone_notify_tg", "true",
      "Слать ли менеджеру уведомление в Telegram при передаче."),
     ("red_zone_manager_text",
-     "🔴 Чат требует менеджера\nПричина: {reason}\nКлиент: {client}\nТовар: {sku}\nСообщение: {message}\nОткрыть: {link}",
-     "Текст уведомления менеджеру. Доступны {reason} {client} {sku} {message} {link}."),
+     "🔴 [{mp}] Чат требует менеджера\nПричина: {reason}\nКлиент: {client}\nТовар: {sku}\nСообщение: {message}\nОткрыть: {link}",
+     "Текст уведомления менеджеру. Доступны {mp} {reason} {client} {sku} {message} {link}."),
     ("closing_question_text",
      "Подскажите, всё ли получилось решить? Если остались вопросы — я на связи.",
      "Уточняющий вопрос, когда непонятно, закрыт ли диалог."),
@@ -615,6 +759,15 @@ SEED_SETTINGS = [
      "Через сколько часов молчания задавать уточняющий вопрос."),
     ("closing_auto_close_hours", "48",
      "Через сколько часов после уточняющего вопроса закрывать диалог без ответа."),
+    ("ym_parts_promo_code", ym_parts.DEFAULT_PROMO_CODE,
+     "ЯМ: один скрытый промокод из кабинета (Продвижение → Акции). Новый на каждый чат система создать не умеет."),
+    ("ym_parts_promo_pct", "50",
+     "ЯМ: процент скидки по промокоду на деталь 2-СБ (обычно максимум 50%)."),
+    ("ym_parts_promo_id", "",
+     "ЯМ: id акции с промокодом — CX добавит в неё карточки деталей 2-СБ. Пусто = только текст в чат."),
+    ("ym_parts_catalog",
+     ym_parts.DEFAULT_CATALOG,
+     "ЯМ: детали только для вешалки 2-СБ. Строка: артикул карточки, название, слова из чата (таб)."),
 ]
 
 
@@ -623,8 +776,15 @@ _PARTS_VARIANTS_CLEANUP = "chat_variants_parts_cleanup_v1"
 _PARTS_MP_SPLIT_CLEANUP = "chat_variants_parts_mp_split_v1"
 _PARTS_WB_OZON_LEAK_FIX = "chat_variants_parts_wb_ozon_leak_v2"
 _NASADKI_STOCK_BRANCHES = "chat_variants_nasadki_stock_v1"
+_YM_NASADKI_ARTICLE = "chat_variants_ym_nasadki_article_v1"
+_YM_PARTS_BUY_FLOW = "chat_variants_ym_parts_buy_flow_v1"
+_YM_PARTS_2SB_CATALOG = "chat_ym_parts_2sb_catalog_v1"
+_YM_PARTS_PROMO_AHAZE8RF = "chat_ym_parts_promo_ahaze8rf_v1"
+_YM_PARTS_1RUB_PROMO = "chat_ym_parts_1rub_promo_v1"
+_YM_SKU_ALLOWED_RESHIP = "chat_variants_ym_sku_allowed_reship_v1"
 _RETURN_EXPIRED_NOTE_WB = "chat_themes_return_expired_note_v1"
 _TEMPLATE_DUPES_CLEANUP = "chat_question_template_dupes_v1"
+_DOSTAVKA_OUR_DELAY_MIGRATION = "chat_variants_dostavka_our_delay_v1"
 
 _WB_ZAPCHASTI_BODY = (
     "Отдельно сменные насадки на Wildberries у нас сейчас не представлены. "
@@ -644,9 +804,9 @@ _OZON_ZAPCHASTI_OUT = (
     "Когда появятся снова — их можно будет заказать в нашем магазине на Ozon."
 )
 _YM_ZAPCHASTI_IN = (
-    "Отдельно сменные насадки у нас сейчас не представлены на Яндекс Маркете. "
-    "Если нужна именно замена расходника — попробуйте поиск по маркетплейсу по запросу "
-    "«сменная насадка для швабры»."
+    "Здравствуйте! Сменные насадки Видовито есть на Яндекс Маркете — артикул rag-grey-2 "
+    "(SKU 4333856128). Есть комплект 2 шт.: Rag-gray-2S (SKU 4638431611). "
+    "Найдите карточку поиском по артикулу rag-grey-2."
 )
 _YM_ZAPCHASTI_OUT = (
     "Сменные насадки к швабре сейчас временно нет в наличии. "
@@ -858,6 +1018,61 @@ def _migrate_return_expired_note(conn) -> int:
     return updated
 
 
+def _migrate_dostavka_our_delay(conn) -> int:
+    """Ветка «Наша задержка» в «Где мой заказ»: заказ ещё у нас, не у площадки."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _DOSTAVKA_OUR_DELAY_MIGRATION}).scalar()
+    if applied:
+        return 0
+
+    added = 0
+    bodies = (
+        (1, _DOSTAVKA_OUR_DELAY_1),
+        (2, _DOSTAVKA_OUR_DELAY_2),
+    )
+    for mp in ("wb", "ozon", "ym"):
+        exists = conn.execute(text("""
+            SELECT 1 FROM cx_chat_variants
+            WHERE theme_key = 'dostavka_wb'
+              AND coalesce(branch_key, '') = :bk
+              AND coalesce(mp, '') = :mp
+            LIMIT 1
+        """), {"bk": _DOSTAVKA_OUR_DELAY_KEY, "mp": mp}).scalar()
+        if exists:
+            continue
+        for sort_order, body in bodies:
+            conn.execute(text("""
+                INSERT INTO cx_chat_variants
+                    (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+                VALUES ('dostavka_wb', :bk, :bl, :body, :s, :mp, true, 'system')
+            """), {
+                "bk": _DOSTAVKA_OUR_DELAY_KEY,
+                "bl": _DOSTAVKA_OUR_DELAY_LABEL,
+                "body": body,
+                "s": sort_order,
+                "mp": mp,
+            })
+            added += 1
+
+    conn.execute(text("""
+        UPDATE cx_chat_themes
+        SET when_text = CASE
+              WHEN when_text ILIKE '%Наша задержка%' THEN when_text
+              ELSE trim(when_text) || ' Ветка «Наша задержка»: заказ ещё у нас, делаем всё возможное.'
+            END,
+            updated_at = now()
+        WHERE theme_key = 'dostavka_wb'
+    """))
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _DOSTAVKA_OUR_DELAY_MIGRATION})
+    return added
+
+
 def _ensure_variant(conn, theme_key, branch_key, branch_label, body, mp, sort_order=1) -> int:
     exists = conn.execute(text("""
         SELECT 1 FROM cx_chat_variants
@@ -928,6 +1143,271 @@ def _migrate_nasadki_stock_branches(conn) -> int:
         ON CONFLICT (key) DO NOTHING
     """), {"key": _NASADKI_STOCK_BRANCHES})
     return updated
+
+
+def _migrate_ym_nasadki_article(conn) -> int:
+    """Насадки на ЯМ уже есть — в шаблон кладём артикул и SKU."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _YM_NASADKI_ARTICLE}).scalar()
+    if applied:
+        return 0
+    n = conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET body = :body, updated_at = now(), updated_by = 'ym-nasadki'
+        WHERE theme_key = 'zapchasti'
+          AND coalesce(mp, '') = 'ym'
+          AND coalesce(branch_key, '') IN ('', 'in_stock')
+    """), {"body": _YM_ZAPCHASTI_IN}).rowcount or 0
+    try:
+        conn.execute(text("""
+            UPDATE cx_question_variants
+            SET body = :body, updated_at = now(), updated_by = 'ym-nasadki'
+            WHERE theme_key = 'zapchasti'
+              AND coalesce(mp, '') = 'ym'
+              AND coalesce(branch_key, '') IN ('', 'in_stock')
+        """), {"body": _YM_ZAPCHASTI_IN})
+    except Exception:
+        pass
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _YM_NASADKI_ARTICLE})
+    return n
+
+
+def _migrate_ym_parts_buy_flow(conn) -> int:
+    """ЯМ: покупка детали со скидкой → бесплатная доотправка → форма / возврат."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _YM_PARTS_BUY_FLOW}).scalar()
+    if applied:
+        return 0
+
+    conn.execute(text("""
+        INSERT INTO cx_chat_themes
+            (theme_key, name, when_text, zone, action, note, sort_order, updated_by)
+        VALUES ('kupit_detal', 'Купить деталь со скидкой',
+                'ЯМ: клиент согласился купить недостающую деталь в нашем магазине.',
+                'auto', 'send_buy_link',
+                'Только Яндекс Маркет. Промокод из кабинета ЯМ, артикулы — в настройках бота.',
+                22, 'system')
+        ON CONFLICT (theme_key) DO NOTHING
+    """))
+    conn.execute(text("""
+        INSERT INTO cx_chat_theme_zones (theme_key, mp, zone, updated_by)
+        SELECT 'kupit_detal', mp, 'auto', 'system'
+        FROM (VALUES ('wb'), ('ozon'), ('ym')) AS t(mp)
+        ON CONFLICT (theme_key, mp) DO NOTHING
+    """))
+
+    n = conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET active = false, updated_at = now(), updated_by = 'ym-parts-buy'
+        WHERE theme_key = 'nekomplekt'
+          AND coalesce(mp, '') = 'ym'
+          AND coalesce(branch_key, '') = 'sku_allowed'
+          AND active
+    """)).rowcount or 0
+
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for item in SEED_YM_VARIANTS:
+        if item[0] in ("nekomplekt", "kupit_detal") and (item[1] or "") in (
+            "offer_buy", "offer_free_slow", "to_return", "",
+        ):
+            groups[(item[0], item[1] or "")].append(item)
+    for (tk, bk), items in groups.items():
+        exists = conn.execute(text("""
+            SELECT 1 FROM cx_chat_variants
+            WHERE theme_key = :tk AND coalesce(branch_key, '') = :bk
+              AND coalesce(mp, '') = 'ym'
+            LIMIT 1
+        """), {"tk": tk, "bk": bk}).scalar()
+        if exists:
+            continue
+        for _tk, _bk, bl, body, s in items:
+            conn.execute(text("""
+                INSERT INTO cx_chat_variants
+                    (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+                VALUES (:tk, :bk, :bl, :body, :s, 'ym', true, 'ym-parts-buy')
+            """), {"tk": tk, "bk": _bk or "", "bl": bl or "", "body": body, "s": s})
+            n += 1
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _YM_PARTS_BUY_FLOW})
+    return n
+
+
+def _migrate_ym_sku_allowed_reship(conn) -> int:
+    """ЯМ: доотправка по списку SKU, не только вешалка 2-СБ."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _YM_SKU_ALLOWED_RESHIP}).scalar()
+    if applied:
+        return 0
+
+    n = conn.execute(text("""
+        UPDATE cx_chat_variants
+        SET active = true, updated_at = now(), updated_by = 'ym-sku-allowed'
+        WHERE theme_key = 'nekomplekt'
+          AND coalesce(mp, '') = 'ym'
+          AND coalesce(branch_key, '') = 'sku_allowed'
+          AND NOT active
+    """)).rowcount or 0
+    groups = [item for item in SEED_YM_VARIANTS if item[0] == "nekomplekt" and item[1] == "sku_allowed"]
+    exists = conn.execute(text("""
+        SELECT 1 FROM cx_chat_variants
+        WHERE theme_key = 'nekomplekt'
+          AND coalesce(branch_key, '') = 'sku_allowed'
+          AND coalesce(mp, '') = 'ym'
+        LIMIT 1
+    """)).scalar()
+    if not exists:
+        for tk, bk, bl, body, s in groups:
+            conn.execute(text("""
+                INSERT INTO cx_chat_variants
+                    (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+                VALUES (:tk, :bk, :bl, :body, :s, 'ym', true, 'ym-sku-allowed')
+            """), {"tk": tk, "bk": bk, "bl": bl, "body": body, "s": s})
+            n += 1
+    else:
+        for tk, bk, bl, body, s in groups:
+            n += conn.execute(text("""
+                UPDATE cx_chat_variants
+                SET body = :body, branch_label = :bl, active = true,
+                    updated_at = now(), updated_by = 'ym-sku-allowed'
+                WHERE theme_key = :tk
+                  AND coalesce(branch_key, '') = :bk
+                  AND coalesce(mp, '') = 'ym'
+                  AND sort_order = :s
+            """), {"tk": tk, "bk": bk, "bl": bl, "body": body, "s": s}).rowcount or 0
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _YM_SKU_ALLOWED_RESHIP})
+    return n
+
+
+def _migrate_ym_parts_2sb_catalog(conn) -> int:
+    """Только детали 2-СБ; один скрытый промокод, не швабра."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _YM_PARTS_2SB_CATALOG}).scalar()
+    if applied:
+        return 0
+
+    current = conn.execute(text(
+        "SELECT value FROM cx_chat_settings WHERE key = 'ym_parts_catalog'"
+    )).scalar()
+    raw = current or ""
+    if (not raw.strip()) or "2-СБ-крепеж" in raw or "rag-grey-2" in raw:
+        conn.execute(text("""
+            INSERT INTO cx_chat_settings (key, value, descr, updated_by, updated_at)
+            VALUES ('ym_parts_catalog', :v, :d, 'ym-parts-2sb', now())
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                descr = EXCLUDED.descr,
+                updated_at = now(),
+                updated_by = 'ym-parts-2sb'
+        """), {
+            "v": ym_parts.DEFAULT_CATALOG,
+            "d": "ЯМ: детали только для вешалки 2-СБ. Строка: артикул, название, слова из чата.",
+        })
+
+    n = 0
+    for tk, bk, bl, body, s in SEED_YM_VARIANTS:
+        if tk not in ("kupit_detal", "nekomplekt"):
+            continue
+        if tk == "nekomplekt" and (bk or "") != "offer_buy":
+            continue
+        n += conn.execute(text("""
+            UPDATE cx_chat_variants
+            SET body = :body, branch_label = :bl, updated_at = now(), updated_by = 'ym-parts-2sb'
+            WHERE theme_key = :tk
+              AND coalesce(branch_key, '') = :bk
+              AND coalesce(mp, '') = 'ym'
+              AND sort_order = :s
+        """), {"body": body, "bl": bl or "", "tk": tk, "bk": bk or "", "s": s}).rowcount or 0
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _YM_PARTS_2SB_CATALOG})
+    return n
+
+
+def _migrate_ym_parts_promo_ahaze8rf(conn) -> int:
+    """Скрытый промокод AHAZE8RF на детали 2-СБ."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _YM_PARTS_PROMO_AHAZE8RF}).scalar()
+    if applied:
+        return 0
+    conn.execute(text("""
+        INSERT INTO cx_chat_settings (key, value, descr, updated_by, updated_at)
+        VALUES ('ym_parts_promo_code', :v, :d, 'ym-parts-promo', now())
+        ON CONFLICT (key) DO UPDATE SET
+            value = EXCLUDED.value,
+            descr = EXCLUDED.descr,
+            updated_at = now(),
+            updated_by = 'ym-parts-promo'
+    """), {
+        "v": ym_parts.DEFAULT_PROMO_CODE,
+        "d": "ЯМ: один скрытый промокод из кабинета. Новый на каждый чат система создать не умеет.",
+    })
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _YM_PARTS_PROMO_AHAZE8RF})
+    return 1
+
+
+def _migrate_ym_parts_1rub_promo(conn) -> int:
+    """ЯМ: деталь за 1 ₽ и промокод сразу в первом сообщении."""
+    applied = conn.execute(text(
+        "SELECT 1 FROM cx_schema_migrations WHERE key = :key"
+    ), {"key": _YM_PARTS_1RUB_PROMO}).scalar()
+    if applied:
+        return 0
+
+    n = 0
+    for tk, bk, bl, body, s in SEED_YM_VARIANTS:
+        if tk not in ("kupit_detal", "nekomplekt"):
+            continue
+        if tk == "nekomplekt" and (bk or "") != "offer_buy":
+            continue
+        n += conn.execute(text("""
+            UPDATE cx_chat_variants
+            SET body = :body, branch_label = :bl, updated_at = now(), updated_by = 'ym-parts-1rub'
+            WHERE theme_key = :tk
+              AND coalesce(branch_key, '') = :bk
+              AND coalesce(mp, '') = 'ym'
+              AND sort_order = :s
+        """), {"body": body, "bl": bl or "", "tk": tk, "bk": bk or "", "s": s}).rowcount or 0
+
+    conn.execute(text("""
+        UPDATE cx_chat_themes
+        SET name = 'Купить деталь за 1 ₽',
+            when_text = 'ЯМ: клиент согласился купить недостающую деталь за 1 ₽ с промокодом.',
+            updated_at = now()
+        WHERE theme_key = 'kupit_detal'
+    """))
+
+    conn.execute(text("""
+        INSERT INTO cx_schema_migrations (key, applied_at)
+        VALUES (:key, now())
+        ON CONFLICT (key) DO NOTHING
+    """), {"key": _YM_PARTS_1RUB_PROMO})
+    return n
 
 
 def _cleanup_template_duplicates(conn) -> int:
@@ -1113,6 +1593,20 @@ def init_playbook_tables(engine):
             ALTER TABLE cx_chat_variants
             ALTER COLUMN mp SET DEFAULT 'wb'
         """))
+        # Метаданные для правок КС и очереди проверки админом
+        for col_sql in (
+            "ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'approved'",
+            "ADD COLUMN IF NOT EXISTS created_by TEXT NOT NULL DEFAULT ''",
+            "ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()",
+            "ADD COLUMN IF NOT EXISTS source_chat_id TEXT NOT NULL DEFAULT ''",
+            "ADD COLUMN IF NOT EXISTS source_mp TEXT NOT NULL DEFAULT ''",
+        ):
+            conn.execute(text(f"ALTER TABLE cx_chat_variants {col_sql}"))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_cx_chat_variants_review
+            ON cx_chat_variants (review_status)
+            WHERE review_status = 'pending'
+        """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_schema_migrations (
                 key        TEXT PRIMARY KEY,
@@ -1125,6 +1619,11 @@ def init_playbook_tables(engine):
         _fix_parts_wb_ozon_leak(conn)
         _migrate_return_expired_note(conn)
         _migrate_nasadki_stock_branches(conn)
+        _migrate_dostavka_our_delay(conn)
+        _migrate_ym_nasadki_article(conn)
+        _migrate_ym_parts_buy_flow(conn)
+        _migrate_ym_sku_allowed_reship(conn)
+        _migrate_ym_parts_2sb_catalog(conn)
         _cleanup_template_duplicates(conn)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cx_chat_settings (
@@ -1154,13 +1653,43 @@ def init_playbook_tables(engine):
                 VALUES (:k, :v, :d, 'system')
                 ON CONFLICT (key) DO UPDATE SET descr = EXCLUDED.descr
             """), {"k": k, "v": v, "d": d})
+        _migrate_ym_parts_promo_ahaze8rf(conn)
         conn.commit()
     # Дозасев новых тем (меню 1–5 и т.п.) без затирания правок из UI
     ensure_new_themes(engine)
     ensure_theme_zones(engine)
+    ensure_chat_theme_usage_order(engine)
     ensure_mp_control_settings(engine)
     ensure_ozon_variants(engine)
     ensure_ym_variants(engine)
+    ensure_ozon_pickup_guide(engine)
+    ensure_theme_zones(engine)
+    ensure_chat_theme_usage_order(engine)
+    ensure_unassigned_theme(engine)
+    with engine.connect() as conn:
+        _migrate_ym_parts_1rub_promo(conn)
+        conn.commit()
+
+
+def ensure_unassigned_theme(engine) -> None:
+    """Служебная группа «Без темы» для шаблонов без выбранной темы."""
+    with engine.connect() as conn:
+        _ensure_unassigned_theme_sql(conn)
+        conn.commit()
+
+
+def _ensure_unassigned_theme_sql(conn) -> None:
+    conn.execute(text("""
+        INSERT INTO cx_chat_themes
+            (theme_key, name, when_text, zone, action, note, sort_order, active, updated_by)
+        VALUES (:k, 'Без темы', '', 'human', '',
+                'Служебная: шаблоны из чата без выбранной группы. Не показывать в чипах.',
+                9990, false, 'system')
+        ON CONFLICT (theme_key) DO UPDATE SET
+            name = EXCLUDED.name,
+            active = false,
+            note = EXCLUDED.note
+    """), {"k": UNASSIGNED_THEME_KEY})
 
 
 def ensure_theme_zones(engine) -> None:
@@ -1192,11 +1721,91 @@ def ensure_theme_zones(engine) -> None:
         conn.commit()
 
 
+# Порядок тем в списке чатов: по частоте ручного выбора (30 дней, без шаблона WB «жду ответа»).
+CHAT_THEME_USAGE_ORDER = [
+    "dostavka_wb",
+    "nekomplekt",
+    "brak",
+    "soglasie",
+    "nevozvratny",
+    "cheque",
+    "promokody",
+    "utochnenie",
+    "krepezh",
+    "otmena_zakaza",
+    "vozvrat",
+    "dengi",
+    "sborka",
+    "ekspluataciya",
+    "status_zayavki",
+    "ozon_pickup",
+    "return_expired",
+    "wrong_item",
+    "zapchasti",
+    "teh_sboi",
+    "srok_hraneniya",
+    "ssylka",
+    "blagodarnost",
+    "parametry",
+    "tech_otverstiya",
+    "otkaz_dootpravki",
+    "kupit_detal",
+]
+
+
+def ensure_chat_theme_usage_order(engine) -> None:
+    """Один и тот же порядок тем во всех чатах. Не двигаем подсказку ИИ наверх."""
+    with engine.connect() as conn:
+        for i, key in enumerate(CHAT_THEME_USAGE_ORDER, start=1):
+            conn.execute(text("""
+                UPDATE cx_chat_themes SET sort_order = :s
+                WHERE theme_key = :k AND sort_order IS DISTINCT FROM :s
+            """), {"s": i * 10, "k": key})
+        conn.commit()
+
+
+def ensure_ozon_pickup_guide(engine) -> None:
+    """Инструкция «как открыть заказ Ozon» — та же, что на сайте. Текст можно править в чатах."""
+    from ..reshipment_notify import format_ozon_pickup_guide
+    body = format_ozon_pickup_guide()
+    when = (
+        "Клиент уже получил доотправку через Ozon Доставку и не видит заказ в обычных покупках: "
+        "где посылка, как забрать, где штрихкод. Не путать с доставкой обычного заказа на WB, ЯМ или Ozon."
+    )
+    note = (
+        "Текст и 6 скриншотов с сайта. В чате кнопка «Как забрать и проверить» вставляет их в ответ. "
+        "Бот сам это не отправляет."
+    )
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO cx_chat_themes
+                (theme_key, name, when_text, zone, action, note, sort_order, active, updated_by)
+            VALUES ('ozon_pickup', 'Как забрать на Ozon', :when, 'human', '', :note, 45, true, 'system')
+            ON CONFLICT (theme_key) DO NOTHING
+        """), {"when": when, "note": note})
+        for mp in ("wb", "ym", "ozon"):
+            exists = conn.execute(text("""
+                SELECT 1 FROM cx_chat_variants
+                WHERE theme_key = 'ozon_pickup'
+                  AND coalesce(mp, '') = :mp
+                LIMIT 1
+            """), {"mp": mp}).scalar()
+            if exists:
+                continue
+            conn.execute(text("""
+                INSERT INTO cx_chat_variants
+                    (theme_key, branch_key, branch_label, body, sort_order, mp, active, updated_by)
+                VALUES ('ozon_pickup', '', 'Как открыть заказ', :body, 1, :mp, true, 'system')
+            """), {"body": body, "mp": mp})
+        conn.commit()
+
+
 def ensure_new_themes(engine):
     """Добавляет темы/варианты, которых ещё нет. Существующие тексты не трогает."""
     NEW = {
         "utochnenie", "cheque", "srok_hraneniya", "teh_sboi", "parametry", "dengi",
-        "zapchasti", "krepezh", "wrong_item", "return_expired",
+        "zapchasti", "krepezh", "wrong_item", "return_expired", "kupit_detal",
+        "promokody", "tech_otverstiya",
     }
     with engine.connect() as conn:
         for k, n, w, z, a, note, s in SEED_THEMES:
@@ -1304,6 +1913,7 @@ BOT_CONTROL_KEYS = (
     "bot_suggest_on_open",
     "bot_ai_draft",
     "bot_test_chat_ids",
+    "bot_auto_confidence_min",
 )
 BOT_MPS = ("wb", "ozon", "ym")
 
@@ -1410,6 +2020,7 @@ def set_theme_zone(db: Session, theme_key: str, mp: str, zone: str,
               updated_at = now(),
               updated_by = EXCLUDED.updated_by
     """), {"k": theme_key, "mp": mp, "z": zone, "u": username})
+    # Legacy-колонка: для WB держим в синхроне
     if mp == "wb":
         db.execute(text("""
             UPDATE cx_chat_themes
@@ -1446,10 +2057,157 @@ def pick_variant(db: Session, theme_key: str, branch_key: str = "",
     """), {"k": theme_key, "b": branch_key}).fetchall()
     if not rows:
         return None
-    return random.choice([r[0] for r in rows])
+    bodies = [r[0] for r in rows]
+    if mp in ("ym", "ozon"):
+        bodies = [
+            b for b in bodies
+            if "wildberries" not in (b or "").lower()
+            and not re.search(r"\bWB\b", b or "", re.I)
+            and "поддержку WB" not in (b or "")
+        ]
+        if not bodies:
+            return None
+    return random.choice(bodies)
 
 
 # ── API ──────────────────────────────────────────────────────────────────────
+
+_TEMPLATE_EDITOR_ROLES = {"admin", "cs_manager"}
+_ADMIN_ROLES = {"admin"}
+
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def _role(user: dict) -> str:
+    return (user or {}).get("role") or ""
+
+
+def _require_template_editor(user: dict) -> None:
+    if _role(user) not in _TEMPLATE_EDITOR_ROLES:
+        raise HTTPException(403, "Нет доступа к правке шаблонов")
+
+
+def _require_admin(user: dict) -> None:
+    if _role(user) not in _ADMIN_ROLES:
+        raise HTTPException(403, "Только для администратора")
+
+
+def _is_cs_manager(user: dict) -> bool:
+    return _role(user) == "cs_manager"
+
+
+def _theme_key_from_name(name: str) -> str:
+    raw = (name or "").strip().lower().replace("ё", "е")
+    out = []
+    for ch in raw:
+        if ch in _TRANSLIT:
+            out.append(_TRANSLIT[ch])
+        elif ch.isalnum():
+            out.append(ch)
+        elif ch in (" ", "-", "_"):
+            out.append("_")
+    key = re.sub(r"_+", "_", "".join(out)).strip("_")
+    if not key:
+        key = "theme"
+    if len(key) > 48:
+        key = key[:48].rstrip("_")
+    return key
+
+
+def _pending_review_status(user: dict) -> str:
+    """Новые шаблоны от КС — сразу active, но в очереди проверки."""
+    return "pending" if _is_cs_manager(user) else "approved"
+
+
+def _normalize_from_manager_theme_key(theme_key: Optional[str]) -> str:
+    key = (theme_key or "").strip().lower()
+    if not key or key in (UNASSIGNED_THEME_KEY, "none", "bez_temy", "без_темы"):
+        return UNASSIGNED_THEME_KEY
+    return key
+
+
+def _create_theme_row(
+    db: Session,
+    *,
+    name: str,
+    when_text: str = "",
+    note: str = "",
+    theme_key: Optional[str] = None,
+    username: str = "",
+) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(400, "Укажите название группы")
+    key = (theme_key or "").strip().lower() or _theme_key_from_name(name)
+    key = re.sub(r"[^a-z0-9_]+", "_", key).strip("_")
+    if not key or key == UNASSIGNED_THEME_KEY:
+        raise HTTPException(400, "Не удалось сделать ключ темы")
+    exists = db.execute(text(
+        "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k"
+    ), {"k": key}).scalar()
+    if exists:
+        base = key
+        for i in range(2, 50):
+            cand = f"{base}_{i}"
+            if not db.execute(text(
+                "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k"
+            ), {"k": cand}).scalar():
+                key = cand
+                break
+        else:
+            raise HTTPException(400, "Тема с таким ключом уже есть")
+
+    nxt = db.execute(text(
+        "SELECT COALESCE(max(sort_order), 0) + 10 FROM cx_chat_themes"
+    )).scalar() or 10
+    db.execute(text("""
+        INSERT INTO cx_chat_themes
+            (theme_key, name, when_text, zone, action, note, sort_order, active, updated_by)
+        VALUES (:k, :n, :w, 'draft', '', :note, :s, true, :u)
+    """), {
+        "k": key, "n": name, "w": (when_text or "").strip(),
+        "note": (note or "").strip(), "s": nxt, "u": username,
+    })
+    for mp in BOT_MPS:
+        set_theme_zone(db, key, mp, "draft", username)
+    return key
+
+
+def _resolve_review_theme_key(
+    db: Session,
+    *,
+    current_theme_key: str,
+    payload: "VariantReview",
+    username: str,
+) -> str:
+    """Тема при проверке: существующая, новая, или уже назначенная (не «без темы»)."""
+    new_name = (payload.new_theme_name or "").strip()
+    if new_name:
+        return _create_theme_row(
+            db,
+            name=new_name,
+            when_text=payload.new_theme_when or "",
+            theme_key=payload.new_theme_key,
+            username=username,
+        )
+    chosen = (payload.theme_key or "").strip().lower()
+    if chosen and chosen != UNASSIGNED_THEME_KEY:
+        ok = db.execute(text(
+            "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k AND theme_key <> :u"
+        ), {"k": chosen, "u": UNASSIGNED_THEME_KEY}).scalar()
+        if not ok:
+            raise HTTPException(404, "Тема не найдена")
+        return chosen
+    if current_theme_key and current_theme_key != UNASSIGNED_THEME_KEY:
+        return current_theme_key
+    raise HTTPException(400, "Укажите тему или создайте новую")
+
 
 class ThemeUpdate(BaseModel):
     name: Optional[str] = None
@@ -1459,6 +2217,13 @@ class ThemeUpdate(BaseModel):
     mp: Optional[str] = None
     note: Optional[str] = None
     active: Optional[bool] = None
+
+
+class ThemeCreate(BaseModel):
+    name: str
+    when_text: str = ""
+    note: str = ""
+    theme_key: Optional[str] = None
 
 
 class VariantIn(BaseModel):
@@ -1471,11 +2236,29 @@ class VariantIn(BaseModel):
     mp: str = "wb"
 
 
+class VariantFromChat(BaseModel):
+    theme_key: str = ""  # пусто / __unassigned__ = без темы
+    body: str
+    mp: str = "wb"
+    chat_id: str = ""
+    branch_key: str = ""
+    branch_label: str = ""
+
+
 class VariantUpdate(BaseModel):
     body: Optional[str] = None
     active: Optional[bool] = None
     branch_label: Optional[str] = None
     mp: Optional[str] = None
+
+
+class VariantReview(BaseModel):
+    status: str = "approved"  # approved
+    body: Optional[str] = None
+    theme_key: Optional[str] = None  # назначить существующую тему
+    new_theme_name: Optional[str] = None  # или создать новую
+    new_theme_when: Optional[str] = None
+    new_theme_key: Optional[str] = None
 
 
 class SettingUpdate(BaseModel):
@@ -1490,7 +2273,14 @@ def get_playbook(db: Session = Depends(get_db), current_user=Depends(get_current
     """)).mappings().all()
     variants = db.execute(text("""
         SELECT id, theme_key, branch_key, branch_label, body, sort_order, active,
-               coalesce(mp,'') AS mp
+               coalesce(mp,'') AS mp,
+               coalesce(review_status, 'approved') AS review_status,
+               coalesce(created_by, '') AS created_by,
+               created_at,
+               coalesce(source_chat_id, '') AS source_chat_id,
+               coalesce(source_mp, '') AS source_mp,
+               coalesce(updated_by, '') AS updated_by,
+               updated_at
         FROM cx_chat_variants ORDER BY theme_key, mp, branch_key, sort_order, id
     """)).mappings().all()
     settings = db.execute(text(
@@ -1505,10 +2295,17 @@ def get_playbook(db: Session = Depends(get_db), current_user=Depends(get_current
 
     by_theme = {}
     for v in variants:
-        by_theme.setdefault(v["theme_key"], []).append(dict(v))
+        row = dict(v)
+        if row.get("created_at") is not None:
+            row["created_at"] = row["created_at"].isoformat()
+        if row.get("updated_at") is not None:
+            row["updated_at"] = row["updated_at"].isoformat()
+        by_theme.setdefault(row["theme_key"], []).append(row)
 
     out_themes = []
     for t in themes:
+        if t["theme_key"] == UNASSIGNED_THEME_KEY:
+            continue
         td = dict(t)
         legacy = td.get("zone") if td.get("zone") in ZONES else "draft"
         per = zones_map.get(td["theme_key"], {})
@@ -1517,24 +2314,50 @@ def get_playbook(db: Session = Depends(get_db), current_user=Depends(get_current
             for mp in BOT_MPS
         }
         td["zones"] = zones
+        # zone = WB (обратная совместимость старых клиентов)
         td["zone"] = zones["wb"]
         td["variants"] = by_theme.get(td["theme_key"], [])
         out_themes.append(td)
 
+    pending_count = db.execute(text("""
+        SELECT count(*) FROM cx_chat_variants
+        WHERE coalesce(review_status, 'approved') = 'pending'
+    """)).scalar() or 0
+
     return {
         "themes": out_themes,
         "settings": [dict(s) for s in settings],
+        "pending_count": int(pending_count),
     }
+
+
+@router.post("/themes")
+def create_theme(payload: ThemeCreate, db: Session = Depends(get_db),
+                 current_user=Depends(get_current_user)):
+    _require_template_editor(current_user)
+    key = _create_theme_row(
+        db,
+        name=payload.name,
+        when_text=payload.when_text or "",
+        note=payload.note or "",
+        theme_key=payload.theme_key,
+        username=current_user["username"],
+    )
+    db.commit()
+    return {"status": "ok", "theme_key": key}
 
 
 @router.put("/themes/{theme_key}")
 def update_theme(theme_key: str, payload: ThemeUpdate, db: Session = Depends(get_db),
                  current_user=Depends(get_current_user)):
+    _require_template_editor(current_user)
     if payload.zone is not None and payload.zone not in ZONES:
         raise HTTPException(400, f"zone должен быть одним из {ZONES}")
     username = current_user["username"]
 
+    # Режим (Авто/Согласование/Менеджер) — только админ
     if payload.zone is not None:
+        _require_admin(current_user)
         mp = (payload.mp or "").strip().lower() or None
         if mp and mp not in BOT_MPS:
             raise HTTPException(400, f"mp должен быть одним из {BOT_MPS}")
@@ -1548,6 +2371,8 @@ def update_theme(theme_key: str, payload: ThemeUpdate, db: Session = Depends(get
         if val is not None:
             fields.append(f"{col} = :{col}")
             params[col] = val
+    # Legacy zone без mp уже обновлён через set_theme_zone(wb);
+    # если zone пришёл без других полей — просто commit.
     if fields:
         res = db.execute(text(f"""
             UPDATE cx_chat_themes SET {', '.join(fields)}, updated_at = now(), updated_by = :u
@@ -1558,6 +2383,7 @@ def update_theme(theme_key: str, payload: ThemeUpdate, db: Session = Depends(get
     elif payload.zone is None:
         return {"status": "noop"}
     else:
+        # только zone — проверить что тема есть
         exists = db.execute(text(
             "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k"
         ), {"k": theme_key}).scalar()
@@ -1571,28 +2397,172 @@ def update_theme(theme_key: str, payload: ThemeUpdate, db: Session = Depends(get
 @router.post("/variants")
 def create_variant(payload: VariantIn, db: Session = Depends(get_db),
                    current_user=Depends(get_current_user)):
+    _require_template_editor(current_user)
     if not payload.body.strip():
         raise HTTPException(400, "Текст не может быть пустым")
     mp = (payload.mp if payload.mp is not None else "wb").strip().lower()
     if mp not in ("", "wb", "ozon", "ym"):
         raise HTTPException(400, "mp: wb|ozon|ym|пусто (общий)")
+    theme_ok = db.execute(text(
+        "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k"
+    ), {"k": payload.theme_key}).scalar()
+    if not theme_ok:
+        raise HTTPException(404, "Тема не найдена")
     nxt = db.execute(text("""
         SELECT COALESCE(max(sort_order), 0) + 1 FROM cx_chat_variants
         WHERE theme_key = :k AND branch_key = :b AND coalesce(mp,'') = :mp
     """), {"k": payload.theme_key, "b": payload.branch_key, "mp": mp}).scalar()
+    review = _pending_review_status(current_user)
+    username = current_user["username"]
     row = db.execute(text("""
-        INSERT INTO cx_chat_variants (theme_key, branch_key, branch_label, body, sort_order, active, mp, updated_by)
-        VALUES (:k, :b, :bl, :body, :s, :a, :mp, :u) RETURNING id
+        INSERT INTO cx_chat_variants
+            (theme_key, branch_key, branch_label, body, sort_order, active, mp,
+             updated_by, review_status, created_by, created_at, source_mp)
+        VALUES (:k, :b, :bl, :body, :s, :a, :mp, :u, :rs, :u, now(), :mp)
+        RETURNING id
     """), {"k": payload.theme_key, "b": payload.branch_key, "bl": payload.branch_label,
            "body": payload.body.strip(), "s": nxt, "a": payload.active, "mp": mp,
-           "u": current_user["username"]}).fetchone()
+           "u": username, "rs": review}).fetchone()
     db.commit()
-    return {"status": "ok", "id": row[0]}
+    return {"status": "ok", "id": row[0], "review_status": review}
+
+
+@router.post("/variants/from-chat")
+def create_variant_from_chat(payload: VariantFromChat, db: Session = Depends(get_db),
+                             current_user=Depends(get_current_user)):
+    """Сохранить ответ менеджера из чата как новый шаблон (сразу active, на проверку)."""
+    _require_template_editor(current_user)
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(400, "Текст не может быть пустым")
+    mp = (payload.mp or "wb").strip().lower()
+    if mp not in ("wb", "ozon", "ym"):
+        raise HTTPException(400, "mp: wb|ozon|ym")
+    _ensure_unassigned_theme_sql(db)
+    theme_key = _normalize_from_manager_theme_key(payload.theme_key)
+    if theme_key != UNASSIGNED_THEME_KEY:
+        theme_ok = db.execute(text(
+            "SELECT 1 FROM cx_chat_themes WHERE theme_key = :k"
+        ), {"k": theme_key}).scalar()
+        if not theme_ok:
+            raise HTTPException(404, "Тема не найдена")
+    nxt = db.execute(text("""
+        SELECT COALESCE(max(sort_order), 0) + 1 FROM cx_chat_variants
+        WHERE theme_key = :k AND branch_key = :b AND coalesce(mp,'') = :mp
+    """), {"k": theme_key, "b": payload.branch_key or "", "mp": mp}).scalar()
+    username = current_user["username"]
+    row = db.execute(text("""
+        INSERT INTO cx_chat_variants
+            (theme_key, branch_key, branch_label, body, sort_order, active, mp,
+             updated_by, review_status, created_by, created_at,
+             source_chat_id, source_mp)
+        VALUES (:k, :b, :bl, :body, :s, true, :mp, :u, 'pending', :u, now(), :cid, :mp)
+        RETURNING id
+    """), {
+        "k": theme_key,
+        "b": payload.branch_key or "",
+        "bl": payload.branch_label or "",
+        "body": body,
+        "s": nxt,
+        "mp": mp,
+        "u": username,
+        "cid": (payload.chat_id or "").strip(),
+    }).fetchone()
+    db.commit()
+    return {
+        "status": "ok",
+        "id": row[0],
+        "review_status": "pending",
+        "theme_key": theme_key,
+        "needs_theme": theme_key == UNASSIGNED_THEME_KEY,
+    }
+
+
+@router.get("/variants/pending")
+def list_pending_variants(db: Session = Depends(get_db),
+                          current_user=Depends(get_current_user)):
+    _require_admin(current_user)
+    rows = db.execute(text("""
+        SELECT v.id, v.theme_key, t.name AS theme_name,
+               v.branch_key, v.branch_label, v.body, v.active,
+               coalesce(v.mp,'') AS mp,
+               coalesce(v.review_status, 'approved') AS review_status,
+               coalesce(v.created_by, '') AS created_by,
+               v.created_at,
+               coalesce(v.source_chat_id, '') AS source_chat_id,
+               coalesce(v.source_mp, '') AS source_mp,
+               coalesce(v.updated_by, '') AS updated_by,
+               v.updated_at
+        FROM cx_chat_variants v
+        LEFT JOIN cx_chat_themes t ON t.theme_key = v.theme_key
+        WHERE coalesce(v.review_status, 'approved') = 'pending'
+        ORDER BY v.created_at DESC NULLS LAST, v.id DESC
+    """)).mappings().all()
+    items = []
+    for r in rows:
+        d = dict(r)
+        if d.get("created_at") is not None:
+            d["created_at"] = d["created_at"].isoformat()
+        if d.get("updated_at") is not None:
+            d["updated_at"] = d["updated_at"].isoformat()
+        d["needs_theme"] = (d.get("theme_key") or "") == UNASSIGNED_THEME_KEY
+        if d["needs_theme"]:
+            d["theme_name"] = "Без темы"
+        items.append(d)
+    return {"items": items, "count": len(items)}
+
+
+@router.put("/variants/{variant_id}/review")
+def review_variant(variant_id: int, payload: VariantReview, db: Session = Depends(get_db),
+                   current_user=Depends(get_current_user)):
+    _require_admin(current_user)
+    status = (payload.status or "approved").strip().lower()
+    if status != "approved":
+        raise HTTPException(400, "status: approved")
+    row = db.execute(text("""
+        SELECT theme_key FROM cx_chat_variants WHERE id = :id
+    """), {"id": variant_id}).fetchone()
+    if not row:
+        raise HTTPException(404, "Вариант не найден")
+    username = current_user["username"]
+    theme_key = _resolve_review_theme_key(
+        db,
+        current_theme_key=row[0] or "",
+        payload=payload,
+        username=username,
+    )
+    fields = [
+        "review_status = :rs",
+        "theme_key = :tk",
+        "updated_at = now()",
+        "updated_by = :u",
+    ]
+    params = {
+        "id": variant_id,
+        "rs": "approved",
+        "tk": theme_key,
+        "u": username,
+    }
+    if payload.body is not None:
+        body = payload.body.strip()
+        if not body:
+            raise HTTPException(400, "Текст не может быть пустым")
+        fields.append("body = :body")
+        params["body"] = body
+    res = db.execute(text(f"""
+        UPDATE cx_chat_variants SET {', '.join(fields)}
+        WHERE id = :id
+    """), params)
+    if not res.rowcount:
+        raise HTTPException(404, "Вариант не найден")
+    db.commit()
+    return {"status": "ok", "theme_key": theme_key}
 
 
 @router.put("/variants/{variant_id}")
 def update_variant(variant_id: int, payload: VariantUpdate, db: Session = Depends(get_db),
                    current_user=Depends(get_current_user)):
+    _require_template_editor(current_user)
     fields, params = [], {"id": variant_id, "u": current_user["username"]}
     for col in ("body", "active", "branch_label", "mp"):
         val = getattr(payload, col)
@@ -1605,6 +2575,9 @@ def update_variant(variant_id: int, payload: VariantUpdate, db: Session = Depend
             params[col] = val
     if not fields:
         return {"status": "noop"}
+    # Правка текста КС снова ставит на проверку
+    if _is_cs_manager(current_user) and payload.body is not None:
+        fields.append("review_status = 'pending'")
     res = db.execute(text(f"""
         UPDATE cx_chat_variants SET {', '.join(fields)}, updated_at = now(), updated_by = :u
         WHERE id = :id
@@ -1618,6 +2591,7 @@ def update_variant(variant_id: int, payload: VariantUpdate, db: Session = Depend
 @router.delete("/variants/{variant_id}")
 def delete_variant(variant_id: int, db: Session = Depends(get_db),
                    current_user=Depends(get_current_user)):
+    _require_template_editor(current_user)
     db.execute(text("DELETE FROM cx_chat_variants WHERE id = :id"), {"id": variant_id})
     db.commit()
     return {"status": "ok"}
@@ -1626,6 +2600,7 @@ def delete_variant(variant_id: int, db: Session = Depends(get_db),
 @router.put("/settings/{key}")
 def update_setting(key: str, payload: SettingUpdate, db: Session = Depends(get_db),
                    current_user=Depends(get_current_user)):
+    _require_admin(current_user)
     # UPSERT — per-mp ключи могут появиться до сида
     db.execute(text("""
         INSERT INTO cx_chat_settings (key, value, descr, updated_by, updated_at)

@@ -148,6 +148,12 @@ def close_chats(payload: CloseRequest, db: Session = Depends(get_db),
             VALUES ('chat', :id, 'wb', :u, :n)
         """), {"id": chat_id, "u": current_user["username"],
                "n": "Массовое закрытие: разбор по корзинам"})
+    try:
+        from .. import chat_bot
+        for chat_id in targets:
+            chat_bot.set_bot_disabled(db, chat_id)
+    except Exception:
+        pass
     db.commit()
     return {"status": "ok", "closed": len(targets), "categories": cats}
 
@@ -173,6 +179,11 @@ def close_one_chat(payload: CloseOneRequest, db: Session = Depends(get_db),
         VALUES ('chat', :id, 'wb', :u, :n)
     """), {"id": payload.chat_id, "u": current_user["username"],
            "n": payload.note or "Закрыт вручную из разбора"})
+    try:
+        from .. import chat_bot
+        chat_bot.set_bot_disabled(db, payload.chat_id)
+    except Exception:
+        pass
     db.commit()
     return {"status": "ok", "chat_id": payload.chat_id}
 

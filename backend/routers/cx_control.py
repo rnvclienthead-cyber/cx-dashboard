@@ -15,7 +15,7 @@ SLA-limity (defolt):
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 
 from ..database import get_db
 from .auth import get_current_user
@@ -25,6 +25,25 @@ def _admin_only(current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Tolko dlya administratorov")
     return current_user
+
+
+ONLINE_AFTER_SEC = 12
+RECENT_AFTER_SEC = 120
+
+
+def classify_activity(last_seen, now=None):
+    """Онлайн — действие в последние ~12 сек, не просто открытая вкладка."""
+    now = now or datetime.now(timezone.utc)
+    if last_seen is None:
+        return "offline", None
+    if getattr(last_seen, "tzinfo", None) is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    sec = max(0, int((now - last_seen).total_seconds()))
+    if sec <= ONLINE_AFTER_SEC:
+        return "online", sec
+    if sec <= RECENT_AFTER_SEC:
+        return "recent", sec
+    return "offline", sec
 
 
 router = APIRouter(
@@ -592,7 +611,7 @@ def send_test_alert(_=Depends(_admin_only), db: Session = Depends(get_db)):
 
 @router.get("/staff")
 def get_staff(db: Session = Depends(get_db)):
-    """Список cs_manager-пользователей с последней активностью."""
+    """Кто на сайте: все пользователи и последняя реальная активность."""
     try:
         with db.bind.connect() as conn:
             rows = conn.execute(text("""
@@ -600,26 +619,14 @@ def get_staff(db: Session = Depends(get_db)):
                        a.last_seen, a.last_path, a.session_start
                 FROM users u
                 LEFT JOIN user_activity a ON a.user_id = u.id
-                WHERE u.role = 'cs_manager'
                 ORDER BY u.id
             """)).mappings().fetchall()
         result = []
+        now = datetime.now(timezone.utc)
         for r in rows:
             last_seen = r["last_seen"]
-            if last_seen:
-                diff_min = int((
-                    __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
-                    - last_seen.replace(tzinfo=__import__("datetime").timezone.utc)
-                ).total_seconds() / 60)
-                if diff_min < 5:
-                    status = "online"
-                elif diff_min < 30:
-                    status = "recent"
-                else:
-                    status = "offline"
-            else:
-                diff_min = None
-                status = "offline"
+            status, diff_sec = classify_activity(last_seen, now)
+            diff_min = None if diff_sec is None else diff_sec // 60
             name = r["username"].split("@")[0].replace(".", " ").title()
             result.append({
                 "id": r["id"],
@@ -630,11 +637,13 @@ def get_staff(db: Session = Depends(get_db)):
                 "tg_linked": bool(r["tg_chat_id"]),
                 "status": status,
                 "last_seen": last_seen.isoformat() if last_seen else None,
+                "last_seen_sec": diff_sec,
                 "last_seen_min": diff_min,
                 "last_path": r["last_path"],
                 "session_start": r["session_start"].isoformat() if r["session_start"] else None,
             })
-        return {"staff": result}
+        result.sort(key=lambda s: ({"online": 0, "recent": 1, "offline": 2}.get(s["status"], 9), s["id"]))
+        return {"staff": result, "online_after_sec": ONLINE_AFTER_SEC}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -679,6 +688,123 @@ def update_sla_settings(body: dict, db: Session = Depends(get_db)):
                 """), {"qid": queue_id, "sla": sla_min})
             conn.commit()
         return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/replies")
+def get_replies(days: int = Query(30, ge=7, le=90), db: Session = Depends(get_db)):
+    """Автоответы, проверки и ответы менеджеров за период."""
+    try:
+        today = date.today()
+        date_from = today - timedelta(days=days)
+        all_dates = [(date_from + timedelta(days=i)).isoformat() for i in range(days + 1)]
+        with db.bind.connect() as conn:
+            bot_tot = conn.execute(text("""
+                SELECT
+                  count(*) FILTER (WHERE sent) AS auto_sent,
+                  count(*) FILTER (WHERE NOT sent AND zone = 'draft') AS need_check,
+                  count(*) FILTER (WHERE need_human OR zone = 'human') AS handoff,
+                  count(*) FILTER (WHERE reason ILIKE 'исправление менеджера%') AS learned_hits,
+                  count(*) AS classified
+                FROM cx_chat_bot_log
+                WHERE created_at::date BETWEEN :df AND :dt
+            """), {"df": date_from, "dt": today}).mappings().first() or {}
+
+            bot_mp = conn.execute(text("""
+                SELECT coalesce(mp, 'wb') AS mp,
+                       count(*) FILTER (WHERE sent) AS auto_sent,
+                       count(*) FILTER (WHERE NOT sent AND zone = 'draft') AS need_check,
+                       count(*) FILTER (WHERE need_human OR zone = 'human') AS handoff
+                FROM cx_chat_bot_log
+                WHERE created_at::date BETWEEN :df AND :dt
+                GROUP BY 1
+                ORDER BY 1
+            """), {"df": date_from, "dt": today}).mappings().all()
+
+            bot_daily = conn.execute(text("""
+                SELECT created_at::date AS day,
+                       count(*) FILTER (WHERE sent) AS auto_sent
+                FROM cx_chat_bot_log
+                WHERE created_at::date BETWEEN :df AND :dt
+                GROUP BY 1
+            """), {"df": date_from, "dt": today}).fetchall()
+
+            mgr = conn.execute(text("""
+                SELECT
+                  count(*) FILTER (WHERE item_type = 'chat'
+                    AND coalesce(answered_by, '') NOT IN ('chat_bot', 'bot')
+                    AND coalesce(answered_by, '') NOT LIKE 'auto_reply%') AS chat_manager,
+                  count(*) FILTER (WHERE item_type = 'review'
+                    AND (answered_by LIKE 'auto_reply%' OR answered_by = 'chat_bot')) AS review_auto,
+                  count(*) FILTER (WHERE item_type = 'review'
+                    AND coalesce(answered_by, '') NOT LIKE 'auto_reply%'
+                    AND coalesce(answered_by, '') NOT IN ('chat_bot', 'bot')) AS review_manager,
+                  count(*) FILTER (WHERE item_type = 'question') AS questions
+                FROM cx_response_log
+                WHERE sent_at::date BETWEEN :df AND :dt
+            """), {"df": date_from, "dt": today}).mappings().first() or {}
+
+            mgr_daily = conn.execute(text("""
+                SELECT sent_at::date AS day,
+                       count(*) FILTER (WHERE item_type = 'chat'
+                         AND coalesce(answered_by, '') NOT IN ('chat_bot', 'bot')
+                         AND coalesce(answered_by, '') NOT LIKE 'auto_reply%') AS chat_manager
+                FROM cx_response_log
+                WHERE sent_at::date BETWEEN :df AND :dt
+                GROUP BY 1
+            """), {"df": date_from, "dt": today}).fetchall()
+
+            mgr_people = conn.execute(text("""
+                SELECT coalesce(answered_by, '—') AS manager, count(*) AS n
+                FROM cx_response_log
+                WHERE sent_at::date BETWEEN :df AND :dt
+                  AND item_type = 'chat'
+                  AND coalesce(answered_by, '') NOT IN ('chat_bot', 'bot')
+                  AND coalesce(answered_by, '') NOT LIKE 'auto_reply%'
+                GROUP BY 1
+                ORDER BY n DESC
+                LIMIT 12
+            """), {"df": date_from, "dt": today}).mappings().all()
+
+            try:
+                corr = conn.execute(text("""
+                    SELECT count(*) FROM cx_chat_bot_corrections
+                    WHERE created_at::date BETWEEN :df AND :dt
+                """), {"df": date_from, "dt": today}).scalar() or 0
+            except Exception:
+                corr = 0
+
+        auto_map = {str(r[0]): int(r[1] or 0) for r in bot_daily}
+        mgr_map = {str(r[0]): int(r[1] or 0) for r in mgr_daily}
+        daily = [
+            {
+                "day": d,
+                "auto_sent": auto_map.get(d, 0),
+                "chat_manager": mgr_map.get(d, 0),
+            }
+            for d in all_dates
+        ]
+        return {
+            "days": days,
+            "chats": {
+                "auto_sent": int(bot_tot.get("auto_sent") or 0),
+                "need_check": int(bot_tot.get("need_check") or 0),
+                "handoff": int(bot_tot.get("handoff") or 0),
+                "classified": int(bot_tot.get("classified") or 0),
+                "manager_sent": int(mgr.get("chat_manager") or 0),
+                "by_mp": [dict(r) for r in bot_mp],
+                "managers": [dict(r) for r in mgr_people],
+            },
+            "reviews": {
+                "auto_sent": int(mgr.get("review_auto") or 0),
+                "manager_sent": int(mgr.get("review_manager") or 0),
+            },
+            "questions": int(mgr.get("questions") or 0),
+            "corrections": int(corr),
+            "learned_hits": int(bot_tot.get("learned_hits") or 0),
+            "daily": daily,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

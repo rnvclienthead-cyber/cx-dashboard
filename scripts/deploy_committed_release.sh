@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# НЕ ШТАТНЫЙ ДЕПЛОЙ. С 19.08.2026 штатный способ — сборка на Mac + rsync
+# (docs/04_ДЕПЛОЙ.md). Этот скрипт выкладывает git-снимок без секретов
+# и уже ломал карту. Не запускать без явной просьбы Рустама.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,6 +35,12 @@ if [[ ! -x "$PROJECT_ROOT/venv/bin/python" ]]; then
 fi
 
 ln -s "$PROJECT_ROOT/frontend/node_modules" "$STAGE_DIR/repo/frontend/node_modules"
+
+# Vite-ключи (карта, DaData) лежат в gitignored frontend/.env.
+# Без копии сборка уезжает на сервер без ключа карты.
+if [[ -f "$PROJECT_ROOT/frontend/.env" ]]; then
+  cp "$PROJECT_ROOT/frontend/.env" "$STAGE_DIR/repo/frontend/.env"
+fi
 
 (
   cd "$STAGE_DIR/repo"

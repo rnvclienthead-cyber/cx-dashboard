@@ -3,7 +3,9 @@
 Поля и структура проверены через прямые curl-тесты 2026-06-09.
 
 Запуск (PYTHONPATH=/root/cx-dashboard):
-  python3 ym_worker.py hourly   — заказы, возвраты, отзывы, вопросы  (cron: 0 */2 * * *)
+  python3 ym_worker.py hourly     — заказы, возвраты, отзывы, вопросы  (cron: ночью)
+  python3 ym_worker.py questions  — только вопросы без ответа (cron: каждые 20 мин)
+  python3 ym_worker.py returns    — свежие возвраты (cron: каждые 20 мин)
   python3 ym_worker.py daily    — ассортимент + цены + запуск фин-отчётов (cron: 0 3 * * *)
   python3 ym_worker.py reports  — опрос статуса и скачивание отчётов (cron: 0 5,9,13 * * *)
 
@@ -32,6 +34,7 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from backend import ym_client
+from backend.review_updates import YM_MARK
 from backend.ym_returns_api import effective_refund_status, status_ru as ym_status_ru
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
@@ -56,15 +59,16 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 # Маппинг refundStatus ЯМ → читаемый статус
 YM_REFUND_STATUS_MAP = {
-    "WAITING_FOR_DECISION":  "На рассмотрении",
-    "PREMODERATION_DECISION_WAITING": "На рассмотрении",
-    "PREMODERATION_SELECT_DELIVERY": "На рассмотрении",
-    "PREMODERATION_DISPUTE": "На рассмотрении",
-    "STARTED_BY_USER":       "На рассмотрении",
+    "WAITING_FOR_DECISION":  "Ждёт нашего решения",
+    "PREMODERATION_DECISION_WAITING": "Ждёт нашего решения",
+    "PREMODERATION_DECISION_MADE": "Ждём Яндекс",
+    "PREMODERATION_SELECT_DELIVERY": "Ожидает возврат",
+    "PREMODERATION_DISPUTE": "Спор",
+    "STARTED_BY_USER":       "Заявка создана",
     "REFUND_IN_PROGRESS":    "Одобрено",
     "REFUNDED":              "Одобрено",
-    "WAITING_FOR_RETURN":    "На рассмотрении",
-    "RETURNED":              "На рассмотрении",
+    "WAITING_FOR_RETURN":    "Ожидает возврат",
+    "RETURNED":              "Ожидает возврат",
     "NOT_RETURNED":          "Отказ",
     "FAILED":                "Отказ",
     "REJECTED":              "Отказ",
@@ -267,7 +271,7 @@ def sync_orders_backfill(from_date_str: str = "2025-01-01"):
 #   • сохраняем только те, у кого ЕСТЬ комментарий ИЛИ фотографии
 #   • cat_1..cat_13 оставляем NULL — заполнит ИИ-тегирование
 
-def _download_ym_photo(order_id, return_id, item_id, image_hash):
+def _download_ym_photo(order_id, return_id, item_id, image_hash, campaign_id=None):
     """
     Скачивает фото возврата ЯМ и сохраняет в статичную папку.
     Возвращает URL-путь для фронтенда или None при ошибке.
@@ -286,8 +290,11 @@ def _download_ym_photo(order_id, return_id, item_id, image_hash):
     if os.path.exists(save_path):
         return f"/static/ym_returns/{filename}"
 
+    camp = str(campaign_id or YM_CAMPAIGN_ID or "").strip()
+    if not camp:
+        return None
     url = (
-        f"{BASE}/v2/campaigns/{YM_CAMPAIGN_ID}"
+        f"{BASE}/v2/campaigns/{camp}"
         f"/orders/{order_id}/returns/{return_id}"
         f"/decision/{item_id}/image/{image_hash}"
     )
@@ -313,150 +320,307 @@ def _download_ym_photo(order_id, return_id, item_id, image_hash):
     return None
 
 
-def sync_returns():
-    log.info("Синхронизация возвратов ЯМ...")
-    page_token = None
+def sync_returns(max_pages: int | None = None):
+    """Тянем возвраты по всем AVAILABLE кампаниям (FBY + FBS), не только YM_CAMPAIGN_ID.
+
+    max_pages — обрезать пагинацию (частый cron). Ночной hourly ходит все страницы.
+    """
+    from backend.ym_returns_api import ensure_schema
+
+    log.info("Синхронизация возвратов ЯМ (все кампании FBY/FBS)...")
+    ensure_schema(engine)
+
+    # Неактуальный «висяк» от 23.03 — в активных не показываем, синк статус не оживит
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE ym_returns
+            SET force_archive = true,
+                status = 'CANCELLED',
+                status_ru = 'Отменено',
+                synced_at = NOW()
+            WHERE return_id::text = '25786228'
+              AND COALESCE(force_archive, false) = false
+        """))
+
+    campaigns = ym_client.available_campaigns()
+    if not campaigns and YM_CAMPAIGN_ID:
+        campaigns = [{"id": int(YM_CAMPAIGN_ID), "placementType": "FBY", "domain": "default"}]
+    log.info(f"  Кампании для возвратов: {[(c.get('id'), c.get('placementType')) for c in campaigns]}")
+
     scanned = 0
-    new_rows = 0   # новые записи (INSERT)
-    updated  = 0   # обновлённые записи (UPDATE)
+    new_rows = 0
+    updated = 0
     skipped_unredeemed = 0
     skipped_no_content = 0
-    skipped_old        = 0
+    skipped_old = 0
 
-    while True:
-        params = {"limit": 50}
-        if page_token:
-            params["page_token"] = page_token
+    for camp in campaigns:
+        camp_id = camp.get("id")
+        placement = str(camp.get("placementType") or "").upper() or "UNKNOWN"
+        if not camp_id:
+            continue
+        log.info(f"  → кампания {camp_id} ({placement})")
+        page_token = None
+        page_no = 0
 
-        data    = _get(f"/v2/campaigns/{YM_CAMPAIGN_ID}/returns", params=params)
-        result  = data.get("result", {})
-        returns = result.get("returns", [])
-        if not returns:
-            break
-
-        for r in returns:
-            scanned += 1
-            return_id   = r.get("id")
-            order_id    = r.get("orderId")
-            return_type = r.get("returnType", "")
-
-            created_str = r.get("creationDate") or ""
-            try:
-                created_dt  = datetime.fromisoformat(created_str)
-                created_utc = created_dt.astimezone(timezone.utc)
-            except Exception:
-                created_dt  = None
-                created_utc = None
-
-            if created_utc and created_utc < YM_RETURNS_FROM:
-                skipped_old += 1
-                continue
-
-            if return_type == "UNREDEEMED":
-                skipped_unredeemed += 1
-                continue
-
-            items = r.get("items") or []
-            if not items:
-                skipped_no_content += 1
-                continue
-
-            article        = ""
-            comments       = []
-            photo_urls     = []
-            reason_type    = None
-            subreason_type = None
-
-            for item in items:
-                if not article:
-                    article = (item.get("shopSku") or "").strip()
-                for decision in (item.get("decisions") or []):
-                    if reason_type is None:
-                        reason_type    = decision.get("reasonType")
-                        subreason_type = decision.get("subreasonType")
-                    c = (decision.get("comment") or "").strip()
-                    if c and c not in comments:
-                        comments.append(c)
-                    for img_hash in (decision.get("images") or []):
-                        url = _download_ym_photo(order_id, return_id,
-                                                 decision.get("returnItemId"), img_hash)
-                        if url:
-                            photo_urls.append(url)
-                        time.sleep(0.15)
-
-            comment = "\n\n".join(comments)
-
-            # Сохраняем даже без текста/фото — reason_type сам по себе информативен.
-            # Пустые без причины всё равно пропускаем.
-            if not comment and not photo_urls and not reason_type:
-                skipped_no_content += 1
-                continue
-
-            photos_str    = " ".join(photo_urls) if photo_urls else None
-            refund_status = effective_refund_status(r) or r.get("refundStatus") or r.get("shipmentStatus") or ""
-            status_ru     = ym_status_ru(refund_status, YM_REFUND_STATUS_MAP.get(refund_status, "На рассмотрении"))
+        while True:
+            page_no += 1
+            params = {"limit": 50}
+            if page_token:
+                params["page_token"] = page_token
 
             try:
-                with engine.begin() as conn:
-                    # xmax = 0 → новая строка (INSERT), иначе UPDATE
-                    row = conn.execute(text("""
-                        INSERT INTO ym_returns
-                            (return_id, order_id, supplier_article,
-                             return_type, status, status_ru,
-                             created_at, updated_at,
-                             return_comment, photos,
-                             reason_type, subreason_type)
-                        VALUES
-                            (:rid, :oid, :article,
-                             :rtype, :status, :status_ru,
-                             :created, :updated,
-                             :comment, :photos,
-                             :reason, :subreason)
-                        ON CONFLICT (return_id) DO UPDATE SET
-                            status         = EXCLUDED.status,
-                            status_ru      = EXCLUDED.status_ru,
-                            updated_at     = EXCLUDED.updated_at,
-                            return_comment = COALESCE(EXCLUDED.return_comment, ym_returns.return_comment),
-                            photos         = COALESCE(EXCLUDED.photos, ym_returns.photos),
-                            reason_type    = COALESCE(EXCLUDED.reason_type, ym_returns.reason_type),
-                            subreason_type = COALESCE(EXCLUDED.subreason_type, ym_returns.subreason_type),
-                            synced_at      = NOW()
-                        RETURNING (xmax = 0) AS is_new
-                    """), {
-                        "rid":       return_id,
-                        "oid":       order_id,
-                        "article":   article,
-                        "rtype":     return_type,
-                        "status":    refund_status,
-                        "status_ru": status_ru,
-                        "created":   created_dt,
-                        "updated":   r.get("updateDate"),
-                        "comment":   comment or None,
-                        "photos":    photos_str,
-                        "reason":    reason_type,
-                        "subreason": subreason_type,
-                    }).fetchone()
-
-                if row and row[0]:
-                    new_rows += 1
-                    log.info(f"  NEW {return_id} | {article} | текст: {'✓' if comment else '–'} | фото: {len(photo_urls)} | {status_ru}")
-                else:
-                    updated += 1
-
+                data = _get(f"/v2/campaigns/{camp_id}/returns", params=params)
             except Exception as e:
-                log.error(f"  Ошибка записи возврата {return_id}: {e}")
+                log.error(f"  Ошибка списка возвратов camp={camp_id}: {e}")
+                break
 
-        page_token = result.get("paging", {}).get("nextPageToken")
-        if not page_token:
-            break
-        time.sleep(0.5)
+            result = data.get("result", {})
+            returns = result.get("returns", [])
+            if not returns:
+                break
+
+            for r in returns:
+                scanned += 1
+                return_id = r.get("id")
+                order_id = r.get("orderId")
+                return_type = r.get("returnType", "")
+
+                created_str = r.get("creationDate") or ""
+                try:
+                    created_dt = datetime.fromisoformat(created_str)
+                    created_utc = created_dt.astimezone(timezone.utc)
+                except Exception:
+                    created_dt = None
+                    created_utc = None
+
+                if created_utc and created_utc < YM_RETURNS_FROM:
+                    skipped_old += 1
+                    continue
+
+                if return_type == "UNREDEEMED":
+                    skipped_unredeemed += 1
+                    continue
+
+                items = r.get("items") or []
+                if not items:
+                    skipped_no_content += 1
+                    continue
+
+                # Уже есть в БД с фото — не качаем снова (иначе FBY-страницы висят часами)
+                existing_photos = None
+                try:
+                    with engine.connect() as conn:
+                        existing_photos = conn.execute(text("""
+                            SELECT photos FROM ym_returns WHERE return_id = :rid LIMIT 1
+                        """), {"rid": return_id}).scalar()
+                except Exception:
+                    existing_photos = None
+                skip_photo_download = bool(existing_photos)
+
+                article = ""
+                comments = []
+                photo_urls = []
+                reason_type = None
+                subreason_type = None
+
+                for item in items:
+                    if not article:
+                        article = (item.get("shopSku") or "").strip()
+                    for decision in (item.get("decisions") or []):
+                        if reason_type is None:
+                            reason_type = decision.get("reasonType")
+                            subreason_type = decision.get("subreasonType")
+                        c = (decision.get("comment") or "").strip()
+                        if c and c not in comments:
+                            comments.append(c)
+                        if skip_photo_download:
+                            continue
+                        for img_hash in (decision.get("images") or []):
+                            url = _download_ym_photo(
+                                order_id, return_id,
+                                decision.get("returnItemId"), img_hash,
+                                campaign_id=camp_id,
+                            )
+                            if url:
+                                photo_urls.append(url)
+                            time.sleep(0.15)
+
+                comment = "\n\n".join(comments)
+                if skip_photo_download and existing_photos:
+                    photo_urls = [u for u in str(existing_photos).split() if u]
+
+                if not comment and not photo_urls and not reason_type:
+                    skipped_no_content += 1
+                    continue
+
+                photos_str = " ".join(photo_urls) if photo_urls else None
+                refund_status = (
+                    effective_refund_status(r)
+                    or r.get("refundStatus")
+                    or r.get("shipmentStatus")
+                    or ""
+                )
+                status_ru = ym_status_ru(
+                    refund_status,
+                    YM_REFUND_STATUS_MAP.get(refund_status, "На рассмотрении"),
+                )
+
+                try:
+                    with engine.begin() as conn:
+                        row = conn.execute(text("""
+                            INSERT INTO ym_returns
+                                (return_id, order_id, supplier_article,
+                                 return_type, status, status_ru,
+                                 created_at, updated_at,
+                                 return_comment, photos,
+                                 reason_type, subreason_type,
+                                 campaign_id, placement_type)
+                            VALUES
+                                (:rid, :oid, :article,
+                                 :rtype, :status, :status_ru,
+                                 :created, :updated,
+                                 :comment, :photos,
+                                 :reason, :subreason,
+                                 :camp, :placement)
+                            ON CONFLICT (return_id) DO UPDATE SET
+                                status = CASE
+                                    WHEN COALESCE(ym_returns.force_archive, false)
+                                    THEN ym_returns.status
+                                    ELSE EXCLUDED.status
+                                END,
+                                status_ru = CASE
+                                    WHEN COALESCE(ym_returns.force_archive, false)
+                                    THEN ym_returns.status_ru
+                                    ELSE EXCLUDED.status_ru
+                                END,
+                                order_id = EXCLUDED.order_id,
+                                supplier_article = COALESCE(EXCLUDED.supplier_article, ym_returns.supplier_article),
+                                updated_at = EXCLUDED.updated_at,
+                                return_comment = COALESCE(EXCLUDED.return_comment, ym_returns.return_comment),
+                                photos = COALESCE(EXCLUDED.photos, ym_returns.photos),
+                                reason_type = COALESCE(EXCLUDED.reason_type, ym_returns.reason_type),
+                                subreason_type = COALESCE(EXCLUDED.subreason_type, ym_returns.subreason_type),
+                                campaign_id = COALESCE(EXCLUDED.campaign_id, ym_returns.campaign_id),
+                                placement_type = COALESCE(EXCLUDED.placement_type, ym_returns.placement_type),
+                                synced_at = NOW()
+                            RETURNING (xmax = 0) AS is_new
+                        """), {
+                            "rid": return_id,
+                            "oid": order_id,
+                            "article": article,
+                            "rtype": return_type,
+                            "status": refund_status,
+                            "status_ru": status_ru,
+                            "created": created_dt,
+                            "updated": r.get("updateDate"),
+                            "comment": comment or None,
+                            "photos": photos_str,
+                            "reason": reason_type,
+                            "subreason": subreason_type,
+                            "camp": int(camp_id),
+                            "placement": placement,
+                        }).fetchone()
+
+                    if row and row[0]:
+                        new_rows += 1
+                        log.info(
+                            f"  NEW {return_id} | {placement} | {article} | "
+                            f"текст: {'✓' if comment else '–'} | фото: {len(photo_urls)} | {status_ru}"
+                        )
+                    else:
+                        updated += 1
+
+                except Exception as e:
+                    log.error(f"  Ошибка записи возврата {return_id}: {e}")
+
+            page_token = result.get("paging", {}).get("nextPageToken")
+            if not page_token:
+                break
+            if max_pages and page_no >= max_pages:
+                log.info(f"  кампания {camp_id}: стоп после {page_no} стр. (частый проход)")
+                break
+            time.sleep(0.5)
+
+        time.sleep(0.3)
 
     summary = (
-        f"просмотрено {scanned}, новых {new_rows}, обновлено {updated} | "
+        f"кампаний {len(campaigns)}, просмотрено {scanned}, новых {new_rows}, обновлено {updated} | "
         f"пропущено: до2026={skipped_old} unredeemed={skipped_unredeemed} без-контента={skipped_no_content}"
+        + (f" | max_pages={max_pages}" if max_pages else "")
     )
     log.info(f"Возвраты ЯМ: {summary}")
     _log_db("ym_sync_returns", "success", summary)
+
+
+def sync_recent_returns():
+    """Дневной проход: первые страницы, чтобы очередь CX не ждала ночной hourly."""
+    sync_returns(max_pages=40)
+
+
+def _feedback_answered_at(fb):
+    """В очереди CX оставляем, пока у отзыва нет комментария магазина.
+
+    needReaction=false в API ЯМ значит только «прочитан в ЛК» / skip-reaction,
+    без ответа. Раньше такие отзывы пропадали с сайта, хотя в кабинете они
+    ещё висят без комментария.
+    """
+    stats = fb.get("statistics") or {}
+    try:
+        comments = int(stats.get("commentsCount") or 0)
+    except (TypeError, ValueError):
+        comments = 0
+    if comments > 0:
+        return datetime.now(timezone.utc)
+    return None
+
+
+def _insert_ym_feedback(conn, fb, *, answered_at=None):
+    desc = fb.get("description") or {}
+    stats = fb.get("statistics") or {}
+    idents = fb.get("identifiers") or {}
+    fid = str(fb.get("feedbackId") or "").strip()
+    if not fid:
+        return False
+    conn.execute(text("""
+        INSERT INTO ym_feedbacks
+            (feedback_id, supplier_article, created_date, valuation,
+             pro_text, contra_text, comment, answered_at)
+        VALUES
+            (:fid, :article, :created_date, :val,
+             :pro, :contra, :comment, :answered)
+        ON CONFLICT (feedback_id) DO UPDATE SET
+            valuation   = EXCLUDED.valuation,
+            pro_text    = EXCLUDED.pro_text,
+            contra_text = EXCLUDED.contra_text,
+            comment     = EXCLUDED.comment,
+            """ + YM_MARK + """,
+            answered_at = CASE
+                WHEN ym_feedbacks.answered_at IS NOT NULL AND EXCLUDED.answered_at IS NULL
+                     AND COALESCE(ym_feedbacks.answer_text, '') = ''
+                     AND ym_feedbacks.answered_at > now() - interval '60 days'
+                THEN NULL
+                WHEN ym_feedbacks.answered_at IS NOT NULL AND EXCLUDED.answered_at IS NULL
+                     AND (
+                         COALESCE(ym_feedbacks.comment,'') IS DISTINCT FROM COALESCE(EXCLUDED.comment,'')
+                         OR ym_feedbacks.valuation IS DISTINCT FROM EXCLUDED.valuation
+                         OR COALESCE(ym_feedbacks.pro_text,'') IS DISTINCT FROM COALESCE(EXCLUDED.pro_text,'')
+                         OR COALESCE(ym_feedbacks.contra_text,'') IS DISTINCT FROM COALESCE(EXCLUDED.contra_text,'')
+                     )
+                THEN NULL
+                ELSE COALESCE(ym_feedbacks.answered_at, EXCLUDED.answered_at)
+            END
+    """), {
+        "fid": fid,
+        "article": str(idents.get("offerId") or ""),
+        "created_date": fb.get("createdAt"),
+        "val": stats.get("rating"),
+        "pro": desc.get("advantages", ""),
+        "contra": desc.get("disadvantages", ""),
+        "comment": desc.get("comment", ""),
+        "answered": answered_at,
+    })
+    return True
 
 
 # ── 3. Отзывы (VOC) ─────────────────────────────────────────────────────────
@@ -465,64 +629,167 @@ def sync_returns():
 #   identifiers.offerId — артикул
 #   statistics.rating   — оценка (не grades.product!)
 #   description.advantages / description.disadvantages
-#   Пагинация: тело {"pageToken": ..., "pageSize": 100} — НЕ вложено в "pagination"!
+#   Пагинация: query ?limit=&pageToken= (nextPageToken). В теле pageToken
+#   ЯМ игнорирует и снова отдаёт первую страницу.
+#   Без дат API отдаёт только последние 6 месяцев (лимит метода).
+_YM_FEEDBACK_PAGE = 50
+_YM_FEEDBACK_WINDOW = timedelta(days=180)
+_YM_FEEDBACK_LOOKBACK = timedelta(days=730)  # 4 окна по ~6 мес.
+
+
+def _iso_msk(dt: datetime) -> str:
+    return dt.astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%dT%H:%M:%S+03:00")
+
+
+def _post_goods_feedback(body: dict, page_token: str | None = None) -> dict:
+    """POST goods-feedback. limit и pageToken — только в query, не в JSON."""
+    params = {"limit": _YM_FEEDBACK_PAGE}
+    if page_token:
+        params["pageToken"] = page_token
+    return ym_client.post(
+        f"/v2/businesses/{YM_BUSINESS_ID}/goods-feedback",
+        body,
+        params=params,
+        key=YM_API_KEY,
+    )
+
+
+def _feedback_pages(body: dict):
+    """Страницы отзывов. Повтор того же pageToken или тех же id — стоп."""
+    page_token = None
+    seen_tokens: set[str] = set()
+    seen_ids: set[str] = set()
+    while True:
+        if page_token:
+            if page_token in seen_tokens:
+                log.warning("Отзывы ЯМ: pageToken повторился, останавливаюсь")
+                break
+            seen_tokens.add(page_token)
+        data = _post_goods_feedback(body, page_token=page_token)
+        items = (data.get("result") or {}).get("feedbacks") or []
+        fresh = []
+        for fb in items:
+            fid = str(fb.get("feedbackId") or "").strip()
+            if not fid or fid in seen_ids:
+                continue
+            seen_ids.add(fid)
+            fresh.append(fb)
+        if not fresh:
+            break
+        yield fresh
+        page_token = ((data.get("result") or {}).get("paging") or {}).get("nextPageToken")
+        if not page_token:
+            break
+        time.sleep(0.6)
+
+
+def _sync_feedbacks_window(date_from: datetime, date_to: datetime) -> int:
+    body = {
+        "reactionStatus": "ALL",
+        "dateTimeFrom": _iso_msk(date_from),
+        "dateTimeTo": _iso_msk(date_to),
+    }
+    total = 0
+    for items in _feedback_pages(body):
+        with engine.begin() as conn:
+            for fb in items:
+                _insert_ym_feedback(conn, fb, answered_at=_feedback_answered_at(fb))
+                total += 1
+    return total
+
+
+def sync_feedback_need_reaction() -> int:
+    """Все отзывы, на которые кабинет ЯМ ещё ждёт ответ — в очередь CX."""
+    log.info("ЯМ: отзывы, которые ждут ответа...")
+    total = 0
+    for items in _feedback_pages({"reactionStatus": "NEED_REACTION"}):
+        with engine.begin() as conn:
+            for fb in items:
+                _insert_ym_feedback(conn, fb, answered_at=_feedback_answered_at(fb))
+                total += 1
+    log.info("ЯМ NEED_REACTION: %s", total)
+    _log_db("ym_sync_feedback_need", "success", f"{total} отзывов ждут ответа")
+    return total
+
+
 def sync_feedbacks():
     log.info("Синхронизация отзывов ЯМ...")
-    page_token = None
     total = 0
+    end = datetime.now(timezone.utc) + timedelta(minutes=1)
+    stop = end - _YM_FEEDBACK_LOOKBACK
+    while end > stop:
+        start = max(stop, end - _YM_FEEDBACK_WINDOW)
+        n = _sync_feedbacks_window(start, end)
+        log.info("Отзывы ЯМ окно %s…%s: %s", _iso_msk(start), _iso_msk(end), n)
+        total += n
+        end = start
+        if n == 0 and start <= stop + timedelta(days=1):
+            break
+        if n == 0:
+            # Пустое старое окно — дальше скорее всего тоже пусто.
+            break
 
-    while True:
-        body = {"pageSize": 100}
-        if page_token:
-            body["pageToken"] = page_token
+    log.info(f"Отзывы ЯМ: {total}")
+    _log_db("ym_sync_feedbacks", "success", f"{total} отзывов")
 
-        # ЯМ периодически отдаёт 400/5xx по своим причинам — ретраим до 3 раз
-        for _attempt in range(3):
+
+def sync_feedback_queue():
+    """Сверяем очередь CX с кабинетом ЯМ по уже известным отзывам.
+
+    Если в кабинете на отзыв есть комментарий — ставим answered_at.
+    Новые отзывы сюда не добавляем. Прочитан в ЛК без комментария — не закрываем.
+    """
+    log.info("Сверка очереди отзывов ЯМ с кабинетом...")
+    with engine.connect() as conn:
+        ids = [
+            str(r[0]).strip()
+            for r in conn.execute(text(
+                "SELECT feedback_id FROM ym_feedbacks WHERE answered_at IS NULL"
+            )).fetchall()
+            if r[0]
+        ]
+    marked = 0
+    for i in range(0, len(ids), 50):
+        chunk = [x for x in ids[i:i + 50] if x.isdigit()]
+        if not chunk:
+            continue
+        body = {"feedbackIds": [int(x) for x in chunk]}
+        data = None
+        for attempt in range(4):
             try:
                 data = _post(f"/v2/businesses/{YM_BUSINESS_ID}/goods-feedback", body)
                 break
             except RateLimitError:
                 raise
-            except Exception as _e:
-                if _attempt == 2:
-                    raise
-                log.warning(f"Временная ошибка отзывов ЯМ (попытка {_attempt+1}/3): {_e}, повтор через {10*(_attempt+1)}с")
-                time.sleep(10 * (_attempt + 1))
-        items = data.get("result", {}).get("feedbacks", [])
-        if not items:
-            break
-
+            except Exception as exc:
+                if attempt == 3:
+                    log.warning("Не удалось сверить отзывы %s…: %s", chunk[0], exc)
+                    data = None
+                    break
+                time.sleep(6 * (attempt + 1))
+        if not data:
+            continue
+        if str(data.get("status") or "").upper() == "ERROR":
+            continue
+        items = (data.get("result") or {}).get("feedbacks") or []
         with engine.begin() as conn:
             for fb in items:
-                desc    = fb.get("description") or {}
-                stats   = fb.get("statistics") or {}
-                idents  = fb.get("identifiers") or {}
-                conn.execute(text("""
-                    INSERT INTO ym_feedbacks
-                        (feedback_id, supplier_article, created_date, valuation,
-                         pro_text, contra_text, comment)
-                    VALUES
-                        (:fid, :article, :created_date, :val,
-                         :pro, :contra, :comment)
-                    ON CONFLICT (feedback_id) DO NOTHING
-                """), {
-                    "fid":         str(fb.get("feedbackId", "")),
-                    "article":     str(idents.get("offerId") or ""),
-                    "created_date": fb.get("createdAt"),
-                    "val":         stats.get("rating"),
-                    "pro":         desc.get("advantages", ""),
-                    "contra":      desc.get("disadvantages", ""),
-                    "comment":     desc.get("comment", ""),
-                })
-                total += 1
+                if not _feedback_answered_at(fb):
+                    continue
+                fid = str(fb.get("feedbackId") or "").strip()
+                res = conn.execute(text("""
+                    UPDATE ym_feedbacks
+                    SET answered_at = now()
+                    WHERE feedback_id = :fid AND answered_at IS NULL
+                """), {"fid": fid})
+                marked += res.rowcount or 0
+            # Не закрываем id, которых нет в ответе: пустая пачка часто значит
+            # сбой API, а не «отзыва больше нет».
+        log.info("Сверка отзывов ЯМ: %s/%s, закрыто %s", min(i + 50, len(ids)), len(ids), marked)
+        time.sleep(0.25)
 
-        page_token = data.get("result", {}).get("paging", {}).get("nextPageToken")
-        if not page_token:
-            break
-        time.sleep(2)  # пауза между страницами — осторожно с rate limit
-
-    log.info(f"Отзывы ЯМ: {total}")
-    _log_db("ym_sync_feedbacks", "success", f"{total} отзывов")
+    log.info("Сверка отзывов ЯМ готова: проверено %s, закрыто %s", len(ids), marked)
+    _log_db("ym_sync_feedback_queue", "success", f"проверено {len(ids)}, закрыто {marked}")
 
 
 # ── 4. Вопросы ───────────────────────────────────────────────────────────────
@@ -530,6 +797,45 @@ def sync_feedbacks():
 # questionIdentifiers.id и questionIdentifiers.offerId — не просто id и offerId
 # needAnswer=true — только вопросы, которые ждут ответа продавца (иначе API
 # отдаёт всю историю, синк идёт часами и свежие вопросы не попадают в очередь).
+def _question_market_sku(q: dict) -> str:
+    qid = q.get("questionIdentifiers") if isinstance(q.get("questionIdentifiers"), dict) else {}
+    product = q.get("product") if isinstance(q.get("product"), dict) else {}
+    for src in (qid, product, q):
+        if not isinstance(src, dict):
+            continue
+        for key in ("marketSku", "skuId"):
+            val = src.get(key)
+            if val not in (None, ""):
+                return str(val).strip()
+    return ""
+
+
+def _offer_market_skus(offer_ids: list[str]) -> dict[str, str]:
+    seen: list[str] = []
+    for raw in offer_ids:
+        oid = str(raw or "").strip()
+        if oid and oid not in seen:
+            seen.append(oid)
+    out: dict[str, str] = {}
+    for i in range(0, len(seen), 50):
+        chunk = seen[i:i + 50]
+        try:
+            data = _post(f"/v2/businesses/{YM_BUSINESS_ID}/offer-mappings", {"offerIds": chunk})
+        except Exception:
+            log.warning("ЯМ: не удалось сопоставить marketSku для %s", chunk, exc_info=True)
+            continue
+        result = data.get("result") if isinstance(data, dict) else {}
+        mappings = (result or {}).get("offerMappings") or []
+        for row in mappings:
+            offer = row.get("offer") if isinstance(row, dict) else {}
+            mapping = row.get("mapping") if isinstance(row, dict) else {}
+            oid = str((offer or {}).get("offerId") or "").strip()
+            msku = (mapping or {}).get("marketSku")
+            if oid and msku not in (None, ""):
+                out[oid] = str(msku)
+    return out
+
+
 def sync_questions():
     log.info("Синхронизация вопросов ЯМ (только без ответа)...")
     page_token = None
@@ -550,6 +856,7 @@ def sync_questions():
                 finished = True
                 break
 
+            missing_offers: list[str] = []
             with engine.begin() as conn:
                 for q in questions:
                     qid = q.get("questionIdentifiers") or {}
@@ -559,28 +866,45 @@ def sync_questions():
                     answers = q.get("answers") or []
                     answer_text = answers[0].get("text") if answers else None
                     open_ids.add(question_id)
+                    article = str(qid.get("offerId") or "")
+                    market_sku = _question_market_sku(q)
+                    if not market_sku and article:
+                        missing_offers.append(article)
 
                     conn.execute(text("""
                         INSERT INTO ym_questions
                             (question_id, supplier_article, created_date, text,
-                             answer_text, state, synced_at)
+                             answer_text, state, market_sku, synced_at)
                         VALUES
                             (:qid, :article, :created_date, :text,
-                             :answer, 'UNANSWERED', now())
+                             :answer, 'UNANSWERED', :market_sku, now())
                         ON CONFLICT (question_id) DO UPDATE SET
                             supplier_article = EXCLUDED.supplier_article,
                             text             = EXCLUDED.text,
                             answer_text      = COALESCE(EXCLUDED.answer_text, ym_questions.answer_text),
                             state            = 'UNANSWERED',
+                            market_sku       = COALESCE(EXCLUDED.market_sku, ym_questions.market_sku),
                             synced_at        = now()
                     """), {
                         "qid": question_id,
-                        "article": str(qid.get("offerId") or ""),
+                        "article": article,
                         "created_date": q.get("createdAt"),
                         "text": q.get("text") or "",
                         "answer": answer_text,
+                        "market_sku": market_sku or None,
                     })
                     total += 1
+
+            resolved = _offer_market_skus(missing_offers)
+            if resolved:
+                with engine.begin() as conn:
+                    for article, msku in resolved.items():
+                        conn.execute(text("""
+                            UPDATE ym_questions
+                            SET market_sku = :msku, synced_at = now()
+                            WHERE supplier_article = :article
+                              AND coalesce(market_sku, '') = ''
+                        """), {"msku": msku, "article": article})
 
             page_token = result.get("paging", {}).get("nextPageToken")
             if not page_token:
@@ -655,6 +979,7 @@ def sync_assortment():
                 })
                 total += 1
 
+        log.info("Ассортимент ЯМ: уже %s позиций", total)
         page_token = result.get("paging", {}).get("nextPageToken")
         if not page_token:
             break
@@ -1308,35 +1633,8 @@ def _fill_missing_skus(report_date):
 # Загружает все отзывы с начала года с повторными попытками при 420.
 def sync_feedbacks_backfill():
     log.info("Исторический сбор отзывов ЯМ (backfill)...")
-    page_token = None
     total = 0
-    max_attempts = 12
-
-    while True:
-        body = {"pageSize": 100}
-        if page_token:
-            body["pageToken"] = page_token
-
-        attempt = 0
-        data = None
-        while attempt < max_attempts:
-            try:
-                data = _post(f"/v2/businesses/{YM_BUSINESS_ID}/goods-feedback", body)
-                break
-            except RateLimitError:
-                attempt += 1
-                wait = 60 * attempt
-                log.warning(f"Rate limit на backfill, ждём {wait}с (попытка {attempt}/{max_attempts})...")
-                time.sleep(wait)
-
-        if data is None:
-            log.error("Backfill прерван: исчерпаны попытки после rate limit.")
-            break
-
-        items = data.get("result", {}).get("feedbacks", [])
-        if not items:
-            break
-
+    for items in _feedback_pages({"reactionStatus": "ALL"}):
         page_new = 0
         with engine.begin() as conn:
             for fb in items:
@@ -1361,19 +1659,8 @@ def sync_feedbacks_backfill():
                     "comment":      desc.get("comment", ""),
                 })
                 page_new += r.rowcount
-
         total += page_new
-
-        # Если страница не дала новых записей — ЯМ закончил уникальные данные
-        if page_new == 0:
-            log.info("Backfill: страница без новых записей — завершаем.")
-            break
-
-        page_token = data.get("result", {}).get("paging", {}).get("nextPageToken")
-        if not page_token:
-            break
         log.info(f"Backfill: +{page_new} новых ({total} всего), продолжаем...")
-        time.sleep(3)
 
     log.info(f"Backfill завершён: {total} новых отзывов добавлено")
     _log_db("ym_backfill_feedbacks", "success", f"{total} новых отзывов")
@@ -1397,24 +1684,43 @@ if __name__ == "__main__":
         "reports": "ym_worker_reports",
         "backfill": "ym_worker_backfill",
         "orders-backfill": "ym_worker_backfill",
+        "feedback-queue": "ym_worker_feedback_queue",
+        "questions": "ym_worker_questions",
+        "returns": "ym_worker_returns",
     }
     _lock_conn = cron_lock.acquire_or_exit(
         engine, _YM_TASK_LOCKS.get(task, "ym_worker"), log_fn=log.info, log_db=_log_db
     )
 
     def run(fn):
+        action = {
+            "sync_orders": "ym_sync_orders",
+            "sync_returns": "ym_sync_returns",
+            "sync_recent_returns": "ym_sync_returns",
+            "sync_feedback_queue": "ym_sync_feedback_queue",
+            "sync_feedback_need_reaction": "ym_sync_feedback_need",
+            "sync_feedbacks": "ym_sync_feedbacks",
+            "sync_questions": "ym_sync_questions",
+            "sync_assortment": "ym_sync_assortment",
+            "sync_prices": "ym_sync_prices",
+            "sync_business_rating_report": "ym_sync_ratings",
+            "sync_feedbacks_backfill": "ym_backfill_feedbacks",
+            "cleanup_old_ym_photos": "ym_photo_cleanup",
+        }.get(fn.__name__, fn.__name__)
         try:
             fn()
         except RateLimitError as e:
             log.warning(f"Пропуск задачи из-за rate limit: {e}")
-            _log_db(fn.__name__, "rate_limit", str(e))
+            _log_db(action, "rate_limit", str(e))
         except Exception as e:
             log.error(f"Ошибка в {fn.__name__}: {e}")
-            _log_db(fn.__name__, "error", str(e))
+            _log_db(action, "error", str(e))
 
     if task == "hourly":
         run(sync_orders)
         run(sync_returns)
+        run(sync_feedback_need_reaction)
+        run(sync_feedback_queue)
         run(sync_feedbacks)
         run(sync_questions)
         # Автоматическое ИИ-тегирование новых возвратов ЯМ после синхронизации
@@ -1451,6 +1757,13 @@ if __name__ == "__main__":
     elif task == "orders-backfill":
         from_date = sys.argv[2] if len(sys.argv) > 2 else "2025-01-01"
         sync_orders_backfill(from_date)
+    elif task == "feedback-queue":
+        run(sync_feedback_queue)
+    elif task == "questions":
+        run(sync_feedback_need_reaction)
+        run(sync_questions)
+    elif task == "returns":
+        run(sync_recent_returns)
     else:
-        log.error(f"Неизвестная задача: '{task}'. Используй: hourly | daily | ratings | reports | backfill | orders-backfill [YYYY-MM-DD]")
+        log.error(f"Неизвестная задача: '{task}'. Используй: hourly | daily | ratings | reports | backfill | orders-backfill | feedback-queue | questions | returns [YYYY-MM-DD]")
         sys.exit(1)

@@ -16,6 +16,7 @@ import requests
 from sqlalchemy import text
 
 from . import ozon_client
+from .database import db_session
 
 try:
     from dotenv import load_dotenv
@@ -29,7 +30,7 @@ OZON_BASE = "https://api-seller.ozon.ru"
 SYNC_INTERVAL = 45  # как ближе к WB: копим ленту в БД заранее
 HISTORY_LIMIT = 100
 LIST_PAGE = 100
-MAX_LIST_PAGES = 5
+MAX_LIST_PAGES = 40  # Opened может быть >500; 5 страниц обрезали новые чаты
 MAX_HISTORY_CHATS = 120  # за цикл дотягиваем историю в БД
 # Рефреш history, если last_message_id из list новее, чем в БД (ответ из ЛК и т.п.)
 FORCE_HISTORY_ON_LMID_CHANGE = True
@@ -55,8 +56,16 @@ def _post(path: str, body: dict) -> dict:
 
 
 def _parse_ts(raw) -> datetime | None:
-    if not raw:
+    if raw is None or raw == "":
         return None
+    if isinstance(raw, (int, float)) or (isinstance(raw, str) and str(raw).isdigit()):
+        try:
+            n = float(raw)
+            if n > 1e12:
+                n /= 1000.0
+            return datetime.fromtimestamp(n, tz=timezone.utc).replace(tzinfo=None)
+        except Exception:
+            return None
     try:
         s = str(raw).replace("Z", "+00:00")
         return datetime.fromisoformat(s).astimezone(timezone.utc).replace(tzinfo=None)
@@ -242,7 +251,7 @@ def _sender_type(user: dict | None) -> str:
         return "customer"
     if t in ("seller", "courier"):
         return "seller"
-    if t in ("chatbot", "system", "support", "ozon", "notificationuser", "notification"):
+    if t in ("chatbot", "system", "support", "ozon", "notificationuser", "notification", "crm"):
         return "system"
     return t or "unknown"
 
@@ -308,6 +317,7 @@ def _upsert_chat(conn, item: dict) -> str | None:
             -- считаем только customer; иначе временно берём unread.
             needs_answer    = CASE
                 WHEN EXCLUDED.chat_status NOT ILIKE 'OPENED' THEN false
+                WHEN EXCLUDED.unread_count > 0 THEN true
                 WHEN ozon_chats.last_sender IN ('customer', 'buyer', 'client') THEN true
                 WHEN ozon_chats.last_sender IN ('seller', 'system', 'notificationuser', 'chatbot')
                     THEN false
@@ -317,6 +327,7 @@ def _upsert_chat(conn, item: dict) -> str | None:
                 WHEN (
                     CASE
                         WHEN EXCLUDED.chat_status NOT ILIKE 'OPENED' THEN false
+                        WHEN EXCLUDED.unread_count > 0 THEN true
                         WHEN ozon_chats.last_sender IN ('customer', 'buyer', 'client') THEN true
                         WHEN ozon_chats.last_sender IN ('seller', 'system', 'notificationuser', 'chatbot')
                             THEN false
@@ -327,6 +338,7 @@ def _upsert_chat(conn, item: dict) -> str | None:
                 WHEN NOT (
                     CASE
                         WHEN EXCLUDED.chat_status NOT ILIKE 'OPENED' THEN false
+                        WHEN EXCLUDED.unread_count > 0 THEN true
                         WHEN ozon_chats.last_sender IN ('customer', 'buyer', 'client') THEN true
                         WHEN ozon_chats.last_sender IN ('seller', 'system', 'notificationuser', 'chatbot')
                             THEN false
@@ -751,13 +763,10 @@ def sync_chats(db) -> int:
                 else:
                     lmid_missing = False
                 need_hist = (
-                    history_done < MAX_HISTORY_CHATS
-                    and (
-                        unread_n > 0
-                        or not has_msgs
-                        or lmid_missing
-                        or history_done < 50
-                    )
+                    unread_n > 0
+                    or not has_msgs
+                    or lmid_missing
+                    or history_done < 50
                 )
                 if need_hist:
                     try:
@@ -801,7 +810,7 @@ def sync_chats(db) -> int:
             except Exception as e:
                 logger.warning("[OzonChat] realtime publish: %s", e)
 
-        # Добиваем хвост: seller last + тишина >3д (даже если history в этом цикле не трогали)
+        # Добиваем хвост: мы уже писали и тишина >3 дней
         archived_ids = [
             str(r[0]) for r in conn.execute(text("""
             WITH targets AS (
@@ -810,16 +819,21 @@ def sync_chats(db) -> int:
               LEFT JOIN cx_dismissed_items d
                 ON d.item_id = c.chat_id AND d.mp = 'ozon' AND d.item_type = 'chat'
               WHERE d.item_id IS NULL
-                AND lower(COALESCE(c.last_sender, '')) IN ('seller', 'courier')
                 AND COALESCE(
                   (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
                   c.waiting_since, c.updated_at, c.created_at
-                ) < now() - interval '2 days'
+                ) < now() - interval '3 days'
+                AND lower(COALESCE(c.last_sender, '')) IN ('seller', 'courier')
+                AND EXISTS (
+                  SELECT 1 FROM ozon_chat_messages s
+                  WHERE s.chat_id = c.chat_id
+                    AND lower(COALESCE(s.sender_type, '')) IN ('seller', 'courier')
+                )
             ),
             ins AS (
               INSERT INTO cx_dismissed_items (item_type, item_id, mp, dismissed_by, note)
               SELECT 'chat', chat_id, 'ozon', 'ozon_chat_sync',
-                     'Авто: нет ответа клиента >2 дн после нашего'
+                     'Авто: нет общения >3 дн после нашего ответа'
               FROM targets
               ON CONFLICT (item_type, item_id, mp) DO NOTHING
               RETURNING item_id
@@ -838,7 +852,14 @@ def sync_chats(db) -> int:
                   AND c.needs_answer = true
             """))
             conn.commit()
-            logger.info("[OzonChat] auto-archived seller-silent>2d: %s", len(archived_ids))
+            logger.info("[OzonChat] auto-archived silent>3d: %s", len(archived_ids))
+            try:
+                from .chat_bot import set_bot_disabled
+                for cid in archived_ids:
+                    set_bot_disabled(conn, cid)
+                conn.commit()
+            except Exception as e:
+                logger.warning("[OzonChat] bot disable: %s", e)
             try:
                 from . import chat_realtime
                 for cid in archived_ids:
@@ -866,6 +887,13 @@ def sync_chats(db) -> int:
             logger.info("[OzonChat] posting→article filled=%d", filled)
     except Exception as e:
         logger.warning("[OzonChat] article backfill: %s", e)
+
+    try:
+        linked = link_reshipment_tokens(db)
+        if linked:
+            logger.info("[OzonChat] reshipment tokens linked: %s", linked)
+    except Exception as e:
+        logger.warning("[OzonChat] reshipment token link: %s", e)
 
     logger.info(
         "[OzonChat] synced chats=%d history=%d unique=%d",
@@ -897,6 +925,10 @@ def archive_waiting_chats_with_settled_returns(conn) -> int:
           WHERE d.item_id IS NULL
             AND c.needs_answer = true
             AND lower(COALESCE(c.last_sender, '')) IN ('customer', 'buyer', 'client')
+            AND COALESCE(
+                  (SELECT MAX(m.created_at) FROM ozon_chat_messages m WHERE m.chat_id = c.chat_id),
+                  c.waiting_since, c.updated_at, c.created_at
+                ) < now() - interval '1 day'
         ),
         matched AS (
           SELECT DISTINCT w.chat_id
@@ -924,6 +956,16 @@ def archive_waiting_chats_with_settled_returns(conn) -> int:
         SELECT count(*) FROM ins
     """), {"st": statuses, "note": note}).scalar() or 0
     if closed:
+        ids = [str(r[0]) for r in conn.execute(text("""
+            SELECT item_id FROM cx_dismissed_items
+            WHERE mp = 'ozon' AND item_type = 'chat' AND note = :note
+        """), {"note": note}).fetchall()]
+        try:
+            from .chat_bot import set_bot_disabled
+            for cid in ids:
+                set_bot_disabled(conn, cid)
+        except Exception as e:
+            logger.warning("[OzonChat] bot disable settled: %s", e)
         conn.execute(text("""
             UPDATE ozon_chats c SET needs_answer = false, waiting_since = NULL, updated_at = now()
             WHERE EXISTS (
@@ -936,9 +978,170 @@ def archive_waiting_chats_with_settled_returns(conn) -> int:
     return int(closed)
 
 
+def _ozon_chat_where_form_token_sent(db, token: str, used_at=None):
+    """Чат Ozon, куда ушла ссылка с токеном. used_at — не брать сообщения сильно позже заполнения."""
+    tok = (token or "").strip()
+    if not tok:
+        return None
+    if used_at is None:
+        row = db.execute(text("""
+            SELECT chat_id FROM ozon_chat_messages
+            WHERE text ILIKE :pat
+            ORDER BY CASE
+                       WHEN lower(COALESCE(sender_type, '')) IN ('seller', 'partner')
+                       THEN 0 ELSE 1
+                     END,
+                     created_at DESC NULLS LAST
+            LIMIT 1
+        """), {"pat": f"%t={tok}%"}).mappings().first()
+    else:
+        row = db.execute(text("""
+            SELECT chat_id FROM ozon_chat_messages
+            WHERE text ILIKE :pat
+              AND created_at <= (CAST(:used_at AS timestamp) + INTERVAL '2 hours')
+            ORDER BY CASE
+                       WHEN lower(COALESCE(sender_type, '')) IN ('seller', 'partner')
+                       THEN 0 ELSE 1
+                     END,
+                     created_at DESC NULLS LAST
+            LIMIT 1
+        """), {"pat": f"%t={tok}%", "used_at": used_at}).mappings().first()
+    if row and row.get("chat_id"):
+        return str(row["chat_id"])
+    return None
+
+
+def _apply_ozon_chat_to_reshipment(db, req_id: int, cid: str, *, only_if_chat=None) -> None:
+    oz = db.execute(text("""
+        SELECT order_number, context_article FROM ozon_chats WHERE chat_id = :cid
+    """), {"cid": cid}).mappings().first() or {}
+    oid = (oz.get("order_number") or "").strip() or None
+    art = (oz.get("context_article") or "").strip() or None
+    db.execute(text("""
+        UPDATE reshipment_requests SET
+            ozon_chat_id = :cid,
+            marketplace = 'ozon',
+            order_number = COALESCE(NULLIF(order_number, ''), :oid),
+            supplier_article = CASE
+                WHEN :art IS NULL OR btrim(:art) = '' THEN supplier_article
+                WHEN supplier_article IS NULL OR btrim(supplier_article) = '' THEN :art
+                WHEN ozon_chat_id IS DISTINCT FROM :cid THEN :art
+                ELSE supplier_article
+            END,
+            product_category = COALESCE(NULLIF(product_category, ''), :art)
+        WHERE id = :id
+          AND (wb_chat_id IS NULL OR wb_chat_id = '')
+          AND (ym_chat_id IS NULL OR ym_chat_id = '')
+          AND (
+            :only_if IS NULL
+            OR ozon_chat_id IS NULL OR ozon_chat_id = ''
+            OR ozon_chat_id = :only_if
+          )
+    """), {
+        "cid": cid,
+        "oid": oid,
+        "art": art,
+        "id": req_id,
+        "only_if": only_if_chat,
+    })
+
+
+def link_reshipment_tokens(db) -> int:
+    """Привязывает токены формы доотправки к чатам Ozon (как ЯМ MiniSync).
+
+    1) Неиспользованные токены без chat_id — ищем ссылку в ozon_chat_messages.
+    2) Уже заполненные заявки без чата — только если сообщение со ссылкой
+       было до/около used_at (чтобы не привязать чужой повторно использованный токен).
+    3) Ссылка создана в одном чате, а ушла клиенту в другом — перепривязываем.
+    """
+    linked = 0
+
+    unused = db.execute(text("""
+        SELECT token FROM reshipment_chat_tokens
+        WHERE (chat_id IS NULL OR chat_id = '')
+          AND used_at IS NULL
+          AND COALESCE(expired, FALSE) IS NOT TRUE
+    """)).fetchall()
+
+    for (tok,) in unused:
+        cid = _ozon_chat_where_form_token_sent(db, tok)
+        if not cid:
+            continue
+        db.execute(text("""
+            UPDATE reshipment_chat_tokens
+            SET chat_id = :cid, mp = 'ozon'
+            WHERE token = :token AND used_at IS NULL
+        """), {"cid": cid, "token": tok})
+        linked += 1
+        logger.info("[OzonChat] token linked (unused): %s → %s", tok, cid)
+
+    used = db.execute(text("""
+        SELECT t.token, t.used_at, r.id AS req_id
+        FROM reshipment_chat_tokens t
+        JOIN reshipment_requests r ON r.id = t.request_id
+        WHERE (t.chat_id IS NULL OR t.chat_id = '')
+          AND t.used_at IS NOT NULL
+          AND (r.ozon_chat_id IS NULL OR r.ozon_chat_id = '')
+          AND (r.wb_chat_id IS NULL OR r.wb_chat_id = '')
+          AND (r.ym_chat_id IS NULL OR r.ym_chat_id = '')
+    """)).mappings().fetchall()
+
+    for row in used:
+        cid = _ozon_chat_where_form_token_sent(db, row["token"], used_at=row["used_at"])
+        if not cid:
+            continue
+        db.execute(text("""
+            UPDATE reshipment_chat_tokens
+            SET chat_id = :cid, mp = 'ozon'
+            WHERE token = :token AND (chat_id IS NULL OR chat_id = '')
+        """), {"cid": cid, "token": row["token"]})
+        _apply_ozon_chat_to_reshipment(db, row["req_id"], cid)
+        linked += 1
+        logger.info("[OzonChat] token linked (used→req #%s): %s → %s",
+                    row["req_id"], row["token"], cid)
+
+    mismatched = db.execute(text("""
+        SELECT t.token, t.chat_id, t.used_at, t.request_id
+        FROM reshipment_chat_tokens t
+        WHERE NULLIF(TRIM(t.chat_id), '') IS NOT NULL
+          AND COALESCE(t.expired, FALSE) IS NOT TRUE
+          AND t.created_at > NOW() - INTERVAL '21 days'
+          AND COALESCE(t.mp, '') IN ('', 'ozon')
+    """)).mappings().fetchall()
+
+    for row in mismatched:
+        cid = _ozon_chat_where_form_token_sent(db, row["token"], used_at=row["used_at"])
+        if not cid or cid == str(row["chat_id"] or ""):
+            continue
+        old_cid = str(row["chat_id"])
+        db.execute(text("""
+            UPDATE reshipment_chat_tokens
+            SET chat_id = :cid, mp = 'ozon'
+            WHERE token = :token AND chat_id = :old
+        """), {"cid": cid, "token": row["token"], "old": old_cid})
+        if row["request_id"]:
+            _apply_ozon_chat_to_reshipment(
+                db, row["request_id"], cid, only_if_chat=old_cid,
+            )
+        linked += 1
+        logger.info("[OzonChat] token rebound: %s %s → %s", row["token"], old_cid, cid)
+
+    if linked:
+        try:
+            db.commit()
+        except Exception:
+            pass
+    return linked
+
+
 def send_message(chat_id: str, text: str) -> None:
     """Отправка текста покупателю через Seller Chat API."""
     ozon_client.send_chat_message(chat_id, text)
+
+
+def _sync_chats_isolated():
+    with db_session() as db:
+        return sync_chats(db)
 
 
 async def start_ozon_chat_sync_worker(get_db_func) -> None:
@@ -951,11 +1154,7 @@ async def start_ozon_chat_sync_worker(get_db_func) -> None:
 
     while True:
         try:
-            db = next(get_db_func())
-            try:
-                await asyncio.to_thread(sync_chats, db)
-            finally:
-                db.close()
+            await asyncio.to_thread(_sync_chats_isolated)
         except Exception as e:
             logger.error("[OzonChat] cycle error: %s", e)
         await asyncio.sleep(SYNC_INTERVAL)

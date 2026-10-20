@@ -1,0 +1,26 @@
+name: Deploy cxvo.ru
+
+# Пуш в main организации RNV-Development выкладывает сайт.
+# Секрет в GitHub не нужен. Пароли, .env и ключи остаются на сервере.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: github.repository == 'RNV-Development/cx-dashboard'
+    runs-on: [self-hosted, cxvo]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Сборка сайта
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          test -f dist/index.html
+
+      - name: Выкладка на сервер
+        run: bash scripts/cx-apply-release.sh

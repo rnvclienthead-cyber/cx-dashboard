@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<addon scheme="3.0">
+    <id>vidovito_shop_delivery</id>
+    <version>1.5.15</version>
+    <priority>2100</priority>
+    <position>210</position>
+    <status>active</status>
+    <has_icon>N</has_icon>
+    <default_language>ru</default_language>
+    <compatibility>
+        <core_version>
+            <min>4.18.1</min>
+        </core_version>
+    </compatibility>
+    <authors>
+        <author>
+            <name>Vidovito</name>
+            <email>usmanovig@vidovito.team</email>
+        </author>
+    </authors>
+    <settings>
+        <sections>
+            <section id="general">
+                <items>
+                    <item id="api_url">
+                        <type>input</type>
+                        <default_value>https://cxvo.ru</default_value>
+                    </item>
+                    <item id="api_token">
+                        <type>input</type>
+                        <default_value>QmiNVy7-uQMX_nLm_oTizGdXc4I7Nkdx0ztNqk6G5qI</default_value>
+                    </item>
+                </items>
+            </section>
+        </sections>
+    </settings>
+    <functions>
+        <item for="install">fn_vidovito_shop_delivery_install</item>
+        <item for="uninstall">fn_vidovito_shop_delivery_uninstall</item>
+    </functions>
+</addon>

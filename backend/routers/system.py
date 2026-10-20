@@ -16,10 +16,13 @@ router = APIRouter(
 @router.get("/monitor")
 async def get_system_metrics():
     """Получение метрик сервера (Нагрузка CPU, RAM, Диск)"""
-    cpu_usage = psutil.cpu_percent(interval=0.1)
+    from .. import loop_watch
+    # interval=None не блокирует event loop (в отличие от 0.1с).
+    cpu_usage = psutil.cpu_percent(interval=None)
     ram_info = psutil.virtual_memory()
     disk_info = psutil.disk_usage('/')
-    
+    lag = loop_watch.snapshot()
+
     return {
         "cpu": {"percent": cpu_usage, "status": "Критично" if cpu_usage >= 85 else "ОК"},
         "ram": {
@@ -27,7 +30,9 @@ async def get_system_metrics():
             "used_gb": round(ram_info.used / (1024**3), 1),
             "total_gb": round(ram_info.total / (1024**3), 1)
         },
-        "disk": {"free_gb": round(disk_info.free / (1024**3), 1)}
+        "disk": {"free_gb": round(disk_info.free / (1024**3), 1)},
+        "loop_lag_ms": lag.get("loop_lag_ms"),
+        "slow_requests": lag.get("slow_requests"),
     }
 
 @router.get("/logs")

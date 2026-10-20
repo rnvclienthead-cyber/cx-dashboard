@@ -1,0 +1,8 @@
+[Unit]
+Description=Ozon cabinet ratings snapshot (once a night)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/cx-dashboard/scripts/ozon_bot_ratings_vps.sh
+Nice=10

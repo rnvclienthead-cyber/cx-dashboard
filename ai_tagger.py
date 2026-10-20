@@ -143,12 +143,17 @@ async def _ask_llm(session: aiohttp.ClientSession, batch: list, memory: str, mod
     from backend.qwen_quota import is_quota_or_model_error, resolve_free_qwen_models
     models = resolve_free_qwen_models(model or "qwen-free")
     last_err = ""
+    if not models:
+        from backend.qwen_quota import qwen_pause_message
+        return [], "", qwen_pause_message() or "Qwen: все модели на паузе (лимит), без запроса к API"
     for i, m in enumerate(models):
         results, err = await _ask_qwen(session, batch, memory, m)
         if results:
             return results, m, ""
         last_err = err
         if is_quota_or_model_error(err) and i + 1 < len(models):
+            from backend.qwen_quota import note_exhausted
+            note_exhausted(m)
             log.warning(f"{m} лимит → пробуем {models[i + 1]}")
             continue
         break

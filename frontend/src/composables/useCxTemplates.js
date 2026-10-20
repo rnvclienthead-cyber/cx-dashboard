@@ -55,18 +55,41 @@ export function useCxTemplates(itemType, showToast, { defaultMinRating = null, d
     showToast('Шаблон удалён', 'ok')
   }
 
+  function looksLikePaintHoles(item) {
+    const topic = String(item?._topic || item?.pending_topic || '')
+    if (topic === 'paint_holes') return true
+    const t = [item?.body, item?.pros, item?.cons].filter(Boolean).join(' ').toLowerCase()
+    if (!t.trim()) return false
+    return /технологическ\w*\s+отверст|зачем.{0,40}(отверст|дырк)|для чего.{0,40}(отверст|дырк)|дырочк.{0,32}(поднос|полк)|дыры сбоку|отверстия на полк/.test(t)
+  }
+
   function relevantTemplates(item) {
     if (!Array.isArray(templates.value)) return []
     const allowed = new Set([itemType, 'all', ...(alsoTypes || [])])
-    return templates.value.filter(t => {
+    const rating = Number(item.rating) || 0
+    const byType = templates.value.filter(t => {
       if (t.mp !== 'all' && t.mp !== item.mp) return false
       if (!allowed.has(t.item_type)) return false
+      return true
+    })
+    const byRating = byType.filter(t => {
+      const minR = Number(t.min_rating) || 0
+      const maxR = Number(t.max_rating) || 0
+      if (rating && minR && rating < minR) return false
+      if (rating && maxR && rating > maxR) return false
+      return true
+    })
+    const pool = byRating.length ? byRating : byType
+    const paintOk = looksLikePaintHoles(item)
+    return pool.filter(t => {
+      const title = String(t.title || '')
+      if (title.includes('Технологические отверстия') && !paintOk) return false
       return true
     }).slice(0, 8)
   }
 
   return {
     templates, tplLoading, tplFormOpen, editTpl,
-    loadTemplates, openTplForm, saveTpl, deleteTpl, relevantTemplates,
+    loadTemplates, openTplForm, saveTpl, deleteTpl, relevantTemplates, looksLikePaintHoles,
   }
 }

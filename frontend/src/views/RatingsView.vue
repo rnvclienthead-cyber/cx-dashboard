@@ -5,13 +5,16 @@ import { Calendar, Search, Star, Package, X, TrendingUp, TrendingDown, ChevronLe
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
 import { usePermissionsStore } from '../stores/permissions'
+import FactoryRatingsPanel from '../components/FactoryRatingsPanel.vue'
 
 const platformStore = usePlatformStore()
 const permissionsStore = usePermissionsStore()
+const viewMode = ref('products')
 const ratingsData    = ref([])
 const loading        = ref(true)
 const ymSummary      = ref([])
 const wbSummary      = ref([])
+const ozonSummary    = ref([])
 const summaryLoading = ref(false)
 
 // ─── Календарь ───────────────────────────────────────────────────────────────
@@ -107,6 +110,12 @@ const setWbSort = (col) => {
 const setYmSort = (col) => {
   if (ymSortCol.value === col) ymSortDir.value = ymSortDir.value === 'asc' ? 'desc' : 'asc'
   else { ymSortCol.value = col; ymSortDir.value = 'desc' }
+}
+const ozonSortCol = ref('total_reviews')
+const ozonSortDir = ref('desc')
+const setOzonSort = (col) => {
+  if (ozonSortCol.value === col) ozonSortDir.value = ozonSortDir.value === 'asc' ? 'desc' : 'asc'
+  else { ozonSortCol.value = col; ozonSortDir.value = 'desc' }
 }
 
 // ─── Группировка ─────────────────────────────────────────────────────────────
@@ -208,14 +217,39 @@ const fetchRatings = async () => {
   loading.value = true
   try {
     const res = await apiFetch(`/api/ratings?platform=${platformStore.platform}`)
-    ratingsData.value = await res.json()
+    const payload = await res.json()
+    ratingsData.value = Array.isArray(payload) ? payload : []
     const today = new Date()
     const yyyy = today.getFullYear(), mm = String(today.getMonth() + 1).padStart(2,'0'), dd = String(today.getDate()).padStart(2,'0')
     endDate.value = `${yyyy}-${mm}-${dd}`; startDate.value = `${yyyy}-${mm}-01`
+    activePeriodLabel.value = 'current_month'
+    calendarYear.value = yyyy
+    calendarMonth.value = today.getMonth()
+    if (platformStore.platform === 'ozon') alignOzonPeriod(ratingsData.value)
   } catch (e) { console.error(e) } finally {
     loading.value = false
     await nextTick(); renderCharts()
   }
+}
+
+const alignOzonPeriod = (rows) => {
+  const dates = rows.map(r => r.date).filter(Boolean).sort()
+  if (!dates.length) return
+  const inRange = rows.some(r => r.date >= startDate.value && r.date <= endDate.value)
+  if (inRange) return
+  const latest = dates[dates.length - 1]
+  const [y, m] = latest.split('-').map(Number)
+  const lastDay = new Date(y, m, 0).getDate()
+  const month = String(m).padStart(2, '0')
+  startDate.value = `${y}-${month}-01`
+  endDate.value = `${y}-${month}-${String(lastDay).padStart(2, '0')}`
+  calendarYear.value = y
+  calendarMonth.value = m - 1
+  const now = new Date()
+  const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  if (y === now.getFullYear() && m === now.getMonth() + 1) activePeriodLabel.value = 'current_month'
+  else if (y === prev.getFullYear() && m === prev.getMonth() + 1) activePeriodLabel.value = 'prev_month'
+  else activePeriodLabel.value = monthNames[m - 1].slice(0, 3)
 }
 
 const fetchSummaries = async () => {
@@ -229,6 +263,11 @@ const fetchSummaries = async () => {
     if (p === 'wb' || p === 'all') {
       const res = await apiFetch('/api/ratings/wb/summary')
       wbSummary.value = await res.json()
+    }
+    if (p === 'ozon' || p === 'all') {
+      const res = await apiFetch('/api/ratings/ozon/summary')
+      const payload = await res.json()
+      ozonSummary.value = Array.isArray(payload) ? payload : []
     }
   } catch (e) { console.error(e) } finally { summaryLoading.value = false }
 }
@@ -386,6 +425,18 @@ const sortedYmSummary = computed(() => {
   if (isNovinkiFilter.value) data = data.filter(r => r.is_new)
   if (selectedSkus.value.length) data = data.filter(r => selectedSkus.value.includes(r.supplier_article))
   const col = ymSortCol.value, dir = ymSortDir.value
+  return [...data].sort((a, b) => {
+    const v = a[col] ?? 0, w = b[col] ?? 0
+    if (typeof v === 'string') return dir === 'asc' ? v.localeCompare(w) : w.localeCompare(v)
+    return dir === 'asc' ? v - w : w - v
+  })
+})
+
+const sortedOzonSummary = computed(() => {
+  let data = ozonSummary.value
+  if (isNovinkiFilter.value) data = data.filter(r => r.is_new)
+  if (selectedSkus.value.length) data = data.filter(r => selectedSkus.value.includes(r.supplier_article))
+  const col = ozonSortCol.value, dir = ozonSortDir.value
   return [...data].sort((a, b) => {
     const v = a[col] ?? 0, w = b[col] ?? 0
     if (typeof v === 'string') return dir === 'asc' ? v.localeCompare(w) : w.localeCompare(v)
@@ -694,6 +745,12 @@ watch(groupBy, (newMode) => {
 
 watch([fullyFilteredData, startDate, endDate, heatmapMode, groupBy], () => { nextTick(() => renderCharts()) })
 watch(() => platformStore.platform, () => { fetchRatings(); fetchSummaries() })
+watch(viewMode, async (mode) => {
+  if (mode === 'products') {
+    await nextTick()
+    renderCharts()
+  }
+})
 
 // Авто-раскрытие всех групп при активных фильтрах; свёртывание при снятии
 watch([selectedSkus, isNovinkiFilter, activeCard], () => {
@@ -784,17 +841,21 @@ const attachYAxisDblClick = (el, catSkus) => {
        @click="dropdownOpen = false; showCalendarPopover = false">
 
     <!-- ── Заголовок ── -->
-    <div class="flex items-center justify-between mb-8 pb-5 border-b border-slate-200">
-      <div class="flex items-center gap-4">
+    <div class="flex flex-wrap items-center justify-between gap-4 mb-8 pb-5 border-b border-slate-200">
+      <div class="flex flex-wrap items-center gap-4">
         <div class="p-3 bg-blue-600 text-white rounded-xl shadow-lg shadow-blue-200/50"><Star class="w-6 h-6" /></div>
         <h1 class="text-xl font-black tracking-tight text-slate-900">Рейтинг товаров. Детализация оценок</h1>
         <div class="flex bg-slate-100 rounded-xl p-1 ml-2">
+          <button type="button" @click="viewMode = 'products'" :class="['px-4 min-h-[44px] text-sm font-bold rounded-lg transition-all', viewMode==='products' ? 'bg-white shadow text-blue-700' : 'text-slate-500 hover:text-slate-700']">Товары</button>
+          <button type="button" @click="viewMode = 'factories'" :class="['px-4 min-h-[44px] text-sm font-bold rounded-lg transition-all', viewMode==='factories' ? 'bg-white shadow text-blue-700' : 'text-slate-500 hover:text-slate-700']">Заводы</button>
+        </div>
+        <div v-if="viewMode === 'products'" class="flex bg-slate-100 rounded-xl p-1">
           <button @click="groupBy = 'day'"   :class="['px-3 py-1.5 text-xs font-bold rounded-lg transition-all', groupBy==='day'   ? 'bg-white shadow text-blue-700' : 'text-slate-500 hover:text-slate-700']">День</button>
           <button @click="groupBy = 'week'"  :class="['px-3 py-1.5 text-xs font-bold rounded-lg transition-all', groupBy==='week'  ? 'bg-white shadow text-blue-700' : 'text-slate-500 hover:text-slate-700']">Неделя</button>
           <button @click="groupBy = 'month'" :class="['px-3 py-1.5 text-xs font-bold rounded-lg transition-all', groupBy==='month' ? 'bg-white shadow text-blue-700' : 'text-slate-500 hover:text-slate-700']">Месяц</button>
         </div>
       </div>
-      <div class="flex items-center gap-4">
+      <div v-if="viewMode === 'products'" class="flex items-center gap-4">
         <label :class="['flex items-center gap-2 px-4 py-3 rounded-2xl border cursor-pointer font-bold text-sm shadow-sm transition-all', isNovinkiFilter ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300']">
           <input type="checkbox" v-model="isNovinkiFilter" class="hidden" />
           <div class="w-4 h-4 rounded border flex items-center justify-center transition-colors" :class="isNovinkiFilter ? 'bg-blue-600 border-blue-600' : 'border-slate-300'"><Check v-if="isNovinkiFilter" class="w-3 h-3 text-white" /></div>
@@ -836,8 +897,10 @@ const attachYAxisDblClick = (el, catSkus) => {
       </div>
     </div>
 
+    <FactoryRatingsPanel v-if="viewMode === 'factories'" />
+
     <!-- ── Поиск артикулов ── -->
-    <div class="relative mb-8" @click.stop>
+    <div v-if="viewMode === 'products'" class="relative mb-8" @click.stop>
       <div class="flex items-center flex-wrap gap-2 bg-white border border-slate-200 rounded-2xl p-3 shadow-sm min-h-[56px] cursor-text focus-within:ring-2 focus-within:ring-blue-500" @click="dropdownOpen = true">
         <Search class="w-5 h-5 text-slate-400 ml-2 mr-1" />
         <div v-for="sku in selectedSkus" :key="sku" class="flex items-center bg-slate-100 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-sm font-bold">
@@ -861,9 +924,14 @@ const attachYAxisDblClick = (el, catSkus) => {
       </div>
     </div>
 
-    <div v-if="loading" class="text-center py-24 text-slate-400 font-bold animate-pulse">Подгружаем аналитику...</div>
+    <div v-if="viewMode === 'products' && loading" class="text-center py-24 text-slate-400 font-bold animate-pulse">Подгружаем аналитику...</div>
 
-    <div v-else class="space-y-6 animate-fade-in">
+    <div v-else-if="viewMode === 'products' && platformStore.platform === 'ozon' && !ratingsData.length" class="bg-white p-10 rounded-3xl border border-slate-200 shadow-sm text-center max-w-xl mx-auto mt-8">
+      <p class="text-base font-bold text-slate-800">Пока нет снимка рейтингов Ozon</p>
+      <p class="text-sm text-slate-500 mt-2 leading-relaxed">Бот собирает витринный рейтинг с карточек товаров (пока ноутбук включён). После ближайшего тика цифры появятся здесь.</p>
+    </div>
+
+    <div v-else-if="viewMode === 'products'" class="space-y-6 animate-fade-in">
 
       <!-- ── KPI карточки ── -->
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1137,6 +1205,89 @@ const attachYAxisDblClick = (el, catSkus) => {
                   <span v-if="row.weekly_delta > 0" class="text-green-600 font-bold text-xs">+{{ row.weekly_delta.toFixed(2) }}</span>
                   <span v-else-if="row.weekly_delta < 0" class="text-red-500 font-bold text-xs">{{ row.weekly_delta.toFixed(2) }}</span>
                   <span v-else class="text-slate-300 text-xs">—</span>
+                </td>
+                <td class="px-4 py-3 text-center font-bold text-slate-700">{{ (row.total_reviews||0).toLocaleString('ru') }}</td>
+                <td class="px-4 py-3 text-center">
+                  <span v-if="row.new_today > 0" class="inline-flex items-center text-green-700 font-bold bg-green-50 px-2 py-0.5 rounded-full text-xs">+{{ row.new_today }}</span>
+                  <span v-else class="text-slate-300 text-xs">—</span>
+                </td>
+                <td class="px-4 py-3 text-center text-green-700 font-semibold">{{ (row.stars_5||0).toLocaleString('ru') }}</td>
+                <td class="px-4 py-3 text-center text-lime-700 font-semibold">{{ (row.stars_4||0).toLocaleString('ru') }}</td>
+                <td class="px-4 py-3 text-center text-yellow-700 font-semibold">{{ (row.stars_3||0).toLocaleString('ru') }}</td>
+                <td class="px-4 py-3 text-center text-orange-600 font-semibold">{{ (row.stars_2||0).toLocaleString('ru') }}</td>
+                <td class="px-4 py-3 text-center text-red-600 font-semibold">{{ (row.stars_1||0).toLocaleString('ru') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ══ Сводная таблица Ozon ══ -->
+      <div v-if="platformStore.platform === 'ozon' || platformStore.platform === 'all'"
+           class="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
+          <h3 class="text-base font-black text-slate-800 flex items-center gap-3">
+            <span class="w-2.5 h-6 bg-blue-500 rounded-full"></span>
+            Текущий рейтинг товаров — Ozon
+          </h3>
+          <span class="text-xs text-slate-400">{{ ozonSummary[0]?.snapshot_date ? 'Снимок карточек: ' + formatDateDisplay(ozonSummary[0].snapshot_date) : '' }}</span>
+        </div>
+        <div v-if="summaryLoading" class="py-10 text-center text-sm text-slate-400 animate-pulse">Загрузка...</div>
+        <div v-else-if="!sortedOzonSummary.length" class="py-10 text-center text-sm text-slate-400">
+          Пока нет снимка рейтингов Ozon.
+        </div>
+        <div v-else class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider select-none">
+                <th @click="setOzonSort('supplier_article')" class="px-5 py-3 text-left font-bold cursor-pointer hover:text-slate-800 transition-colors">
+                  <div class="flex items-center gap-1">Артикул <component :is="ozonSortCol==='supplier_article' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                </th>
+                <th @click="setOzonSort('average_rating')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 transition-colors">
+                  <div class="flex items-center justify-center gap-1">Рейтинг <component :is="ozonSortCol==='average_rating' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                </th>
+                <th @click="setOzonSort('total_reviews')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 transition-colors">
+                  <div class="flex items-center justify-center gap-1">Всего оценок <component :is="ozonSortCol==='total_reviews' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                </th>
+                <th @click="setOzonSort('new_today')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 transition-colors">
+                  <div class="flex items-center justify-center gap-1">+Вчера <component :is="ozonSortCol==='new_today' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                </th>
+                <th @click="setOzonSort('stars_5')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 text-green-600 transition-colors">
+                  <div class="flex items-center justify-center gap-1">★5 <component :is="ozonSortCol==='stars_5' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                  <div class="text-[9px] font-normal text-slate-400 mt-0.5">из отзывов</div>
+                </th>
+                <th @click="setOzonSort('stars_4')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 text-lime-600 transition-colors">
+                  <div class="flex items-center justify-center gap-1">★4 <component :is="ozonSortCol==='stars_4' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                  <div class="text-[9px] font-normal text-slate-400 mt-0.5">из отзывов</div>
+                </th>
+                <th @click="setOzonSort('stars_3')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 text-yellow-600 transition-colors">
+                  <div class="flex items-center justify-center gap-1">★3 <component :is="ozonSortCol==='stars_3' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                  <div class="text-[9px] font-normal text-slate-400 mt-0.5">из отзывов</div>
+                </th>
+                <th @click="setOzonSort('stars_2')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 text-orange-500 transition-colors">
+                  <div class="flex items-center justify-center gap-1">★2 <component :is="ozonSortCol==='stars_2' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                  <div class="text-[9px] font-normal text-slate-400 mt-0.5">из отзывов</div>
+                </th>
+                <th @click="setOzonSort('stars_1')" class="px-4 py-3 text-center font-bold cursor-pointer hover:text-slate-800 text-red-500 transition-colors">
+                  <div class="flex items-center justify-center gap-1">★1 <component :is="ozonSortCol==='stars_1' ? (ozonSortDir==='asc' ? ChevronUp : ChevronDownIcon) : ChevronsUpDown" class="w-3.5 h-3.5 opacity-50" /></div>
+                  <div class="text-[9px] font-normal text-slate-400 mt-0.5">из отзывов</div>
+                </th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-50">
+              <tr v-for="row in sortedOzonSummary" :key="row.supplier_article" class="hover:bg-slate-50 transition-colors">
+                <td class="px-5 py-3 font-bold text-slate-800">
+                  <a v-if="row.sku"
+                     :href="`https://www.ozon.ru/product/${row.sku}`"
+                     target="_blank" rel="noopener"
+                     class="text-blue-600 hover:text-blue-800 hover:underline">{{ row.supplier_article }}</a>
+                  <span v-else>{{ row.supplier_article }}</span>
+                </td>
+                <td class="px-4 py-3 text-center">
+                  <div class="flex flex-col items-center gap-0.5">
+                    <span :class="['text-lg font-black', ratingColor(row.average_rating)]">{{ row.average_rating.toFixed(2) }}</span>
+                    <span class="text-xs tracking-widest" :class="ratingColor(row.average_rating)">{{ starsDisplay(row.average_rating) }}</span>
+                  </div>
                 </td>
                 <td class="px-4 py-3 text-center font-bold text-slate-700">{{ (row.total_reviews||0).toLocaleString('ru') }}</td>
                 <td class="px-4 py-3 text-center">

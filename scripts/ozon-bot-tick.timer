@@ -1,0 +1,11 @@
+[Unit]
+Description=Ozon cabinet bot: every 5 minutes
+
+[Timer]
+# Очередь ответов на отзывы — каждые 5 минут (UTC).
+OnCalendar=*-*-* *:00/5:00 UTC
+Persistent=true
+Unit=ozon-bot-tick.service
+
+[Install]
+WantedBy=timers.target

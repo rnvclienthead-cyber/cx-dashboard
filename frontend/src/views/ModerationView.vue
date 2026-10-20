@@ -3,16 +3,11 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { ClipboardCheck, Search, Filter, CheckCircle2, Edit3, X, ChevronLeft, ChevronRight, Download, Image as ImageIcon, Calendar, Bot, MessageSquare } from 'lucide-vue-next'
 import { apiFetch } from '../api'
 import { usePlatformStore } from '../stores/platform'
+import { PROBLEM_TAGS, tagIdsEqual } from '../utils/problemTags'
 
 const platformStore = usePlatformStore()
 
-const CATEGORIES = {
-  1: "Некомплект: Фурнитура", 2: "Некомплект: Несущие детали", 3: "Состояние упаковки",
-  4: "Производственный дефект", 5: "Механические повреждения", 6: "Инструкция и сборка",
-  7: "Хлипкость / Устойчивость", 8: "Пересорт / Ошибка склада", 9: "Качество материалов",
-  10: "Габариты и Размер", 11: "Несоответствие описанию", 12: "Субъективное 'Не подошло'",
-  13: "Следы использования / Б/У"
-}
+const CATEGORIES = PROBLEM_TAGS
 
 const VOC_TAGS = [
   "КОНСТРУКЦИЯ: Хлипкость и Неустойчивость",
@@ -126,9 +121,16 @@ const fetchQueue = async () => {
       for (let i = 1; i <= 13; i++) {
         if (item[`cat_${i}`]) activeCatIds.push(i)
       }
-      // ЯМ: фото уже в данных; WB: ленивая загрузка через claim-media
+      const staffTagIds = [...(item.staff_tag_ids || [])].map(Number)
       const photos = platformStore.platform === 'ym' ? (item.photos || '') : null
-      return { ...item, activeCatIds, editedCatIds: [...activeCatIds], photos }
+      const startFromStaff = item.mismatch && staffTagIds.length
+      return {
+        ...item,
+        activeCatIds,
+        staffTagIds,
+        editedCatIds: startFromStaff ? [...staffTagIds] : [...activeCatIds],
+        photos,
+      }
     })
   } catch (e) {
     console.error("Ошибка загрузки очереди:", e)
@@ -148,6 +150,9 @@ const filteredQueue = computed(() => {
     if (filterMode.value === 'С ошибками аудита') {
       if (!c.audit_status || !c.audit_status.toLowerCase().includes('ошибка')) return false
     }
+    if (filterMode.value === 'Расхождения') {
+      if (!c.mismatch) return false
+    }
     if (categoryFilter.value !== 'Все категории') {
       const targetId = Object.keys(CATEGORIES).find(key => CATEGORIES[key] === categoryFilter.value)
       if (!c.activeCatIds.includes(parseInt(targetId))) return false
@@ -162,6 +167,9 @@ const paginatedQueue = computed(() => {
 })
 
 const totalPages = computed(() => Math.ceil(filteredQueue.value.length / itemsPerPage))
+const mismatchCount = computed(() => queue.value.filter(c => c.mismatch).length)
+
+const isEdited = (claim) => !tagIdsEqual(claim.activeCatIds, claim.editedCatIds)
 
 watch(paginatedQueue, async (newItems) => {
   for (const claim of newItems) {
@@ -185,12 +193,6 @@ const toggleCategory = (claim, catId) => {
   const idx = claim.editedCatIds.indexOf(catId)
   if (idx > -1) claim.editedCatIds.splice(idx, 1)
   else claim.editedCatIds.push(catId)
-}
-
-const isEdited = (claim) => {
-  const orig = [...claim.activeCatIds].sort()
-  const curr = [...claim.editedCatIds].sort()
-  return JSON.stringify(orig) !== JSON.stringify(curr)
 }
 
 const submitAction = async (claim, action) => {
@@ -410,6 +412,11 @@ watch(() => platformStore.platform, () => {
                   :class="['px-4 py-2 text-sm font-bold rounded-lg transition-colors', filterMode === 'Все ожидающие' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700']">
             Все
           </button>
+          <button @click="filterMode = 'Расхождения'"
+                  :class="['px-4 py-2 text-sm font-bold rounded-lg transition-colors', filterMode === 'Расхождения' ? 'bg-white shadow-sm text-amber-700' : 'text-slate-500 hover:text-slate-700']">
+            Расхождения
+            <span class="ml-1 text-[10px] font-black">{{ mismatchCount }}</span>
+          </button>
           <button @click="filterMode = 'С ошибками аудита'"
                   :class="['px-4 py-2 text-sm font-bold rounded-lg transition-colors', filterMode === 'С ошибками аудита' ? 'bg-white shadow-sm text-red-600' : 'text-slate-500 hover:text-slate-700']">
             С замечаниями ИИ
@@ -464,6 +471,18 @@ watch(() => platformStore.platform, () => {
                   </div>
                   <div v-if="claim.audit_status" class="mt-3 text-xs font-bold text-red-600 flex items-center gap-1">
                     ⚠️ Аудит: {{ claim.audit_status }}
+                  </div>
+                </div>
+
+                <div v-if="claim.staffTagIds?.length" class="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r-xl">
+                  <div class="text-xs font-bold text-amber-800 uppercase tracking-wider mb-2">
+                    Теги сотрудника{{ claim.staff_by ? ` · ${claim.staff_by}` : '' }}
+                    <span v-if="claim.mismatch" class="ml-2 text-[10px] font-black uppercase text-rose-600">не совпало с ИИ</span>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <span v-for="catId in claim.staffTagIds" :key="'st'+catId" class="px-2.5 py-1 bg-white text-amber-800 text-xs font-bold rounded-lg shadow-sm border border-amber-200">
+                      {{ CATEGORIES[catId] }}
+                    </span>
                   </div>
                 </div>
 

@@ -1,76 +1,107 @@
 <template>
   <div class="card-page">
     <div class="card-header">
-      <button class="back-btn" @click="$router.push('/return/scan')">← Сканировать</button>
-      <div class="card-logo">CX Dashboard</div>
+      <RouterLink class="back-btn" to="/return/scan">← Сканер</RouterLink>
     </div>
 
-    <!-- Загрузка -->
     <div v-if="loading" class="state-center">
       <div class="spinner"></div>
       <p>Загрузка…</p>
     </div>
 
-    <!-- Ошибка -->
     <div v-else-if="error" class="state-center error-state">
-      <div class="error-icon">✕</div>
       <p class="error-title">Возврат не найден</p>
-      <p class="error-sub">SRID: {{ route.params.srid }}</p>
-      <button class="retry-btn" @click="$router.push('/return/scan')">Сканировать снова</button>
+      <p class="error-sub">{{ route.params.srid }}</p>
+      <RouterLink class="retry-btn" to="/return/scan">Сканировать снова</RouterLink>
     </div>
 
-    <!-- Карточка -->
     <div v-else-if="data" class="card-body">
-      <!-- Шапка товара -->
       <div class="product-block">
-        <div class="product-name">{{ data.product_name || data.supplier_article }}</div>
-        <div class="product-meta">
-          <span v-if="data.supplier_article" class="meta-tag">{{ data.supplier_article }}</span>
-          <span v-if="data.nm_id" class="meta-tag muted">WB #{{ data.nm_id }}</span>
-        </div>
-        <div :class="['status-badge', statusClass]">{{ data.status }}</div>
-      </div>
-
-      <!-- Фото -->
-      <div v-if="data.photos.length" class="photos-block">
-        <div class="section-label">Фото от покупателя</div>
-        <div class="photos-grid">
-          <div
-            v-for="(photo, i) in data.photos"
-            :key="i"
-            class="photo-thumb"
-            @click="openLightbox(i)"
-          >
-            <img :src="photo" loading="lazy" alt="Фото возврата" />
+        <div class="product-head">
+          <img v-if="data.product_photo" :src="data.product_photo" class="product-thumb" alt="" />
+          <div class="product-copy">
+            <div class="mp-row">
+              <span class="mp-badge">{{ mpLabel }}</span>
+              <span :class="['status-badge', statusClass]">{{ data.status }}</span>
+            </div>
+            <div class="product-name">{{ data.product_name || data.supplier_article || 'Возврат' }}</div>
+            <div class="product-meta">
+              <span v-if="data.supplier_article">{{ data.supplier_article }}</span>
+              <span v-if="data.nm_id">{{ data.marketplace === 'ozon' ? 'SKU' : 'WB' }} {{ data.nm_id }}</span>
+            </div>
           </div>
         </div>
+        <p v-if="data.match_label" class="match-hint">нашли по: {{ data.match_label }}</p>
       </div>
 
-      <!-- Причина -->
-      <div v-if="data.user_comment" class="comment-block">
-        <div class="section-label">Комментарий покупателя</div>
-        <p class="comment-text">{{ data.user_comment }}</p>
+      <div v-if="!hasClaim" class="block warehouse-note">
+        <div class="section-label">{{ data.no_claim_title || 'Претензии нет — это нормально' }}</div>
+        <p class="comment-text">{{ data.no_claim_text || 'Заявки покупателя может не быть: отмена, невыкуп или отбраковка на приёмке. Причины дефекта тогда не будет.' }}</p>
       </div>
 
-      <!-- Категории дефекта -->
-      <div v-if="data.categories.length" class="cats-block">
+      <div v-if="hasClaim && (data.categories || []).length" class="block">
         <div class="section-label">Категории дефекта</div>
         <div class="cats-list">
           <span v-for="cat in data.categories" :key="cat" class="cat-tag">{{ cat }}</span>
         </div>
       </div>
 
-      <!-- Даты -->
-      <div class="dates-block">
-        <div v-if="data.claim_date" class="date-row">
-          <span class="date-label">Дата заявки</span>
-          <span class="date-val">{{ formatDate(data.claim_date) }}</span>
-        </div>
-        <div class="date-row">
-          <span class="date-label">SRID</span>
-          <span class="date-val srid-val">{{ data.srid }}</span>
+      <div v-if="!hasClaim && (data.categories || []).length" class="block">
+        <div class="section-label">Как вернули</div>
+        <div class="cats-list">
+          <span v-for="cat in data.categories" :key="cat" class="cat-tag">{{ cat }}</span>
         </div>
       </div>
+
+      <div v-if="hasClaim && data.user_comment" class="block">
+        <div class="section-label">Комментарий покупателя</div>
+        <p class="comment-text">{{ data.user_comment }}</p>
+      </div>
+
+      <div v-if="hasClaim" class="block">
+        <div class="section-label">Фото от покупателя</div>
+        <div v-if="data.photos && data.photos.length" class="photos-row">
+          <button
+            v-for="(photo, i) in data.photos"
+            :key="i"
+            type="button"
+            class="photo-thumb"
+            @click="openLightbox(i)"
+          >
+            <img :src="photo" loading="lazy" alt="" />
+          </button>
+        </div>
+        <p v-else class="empty-photos">Фото в базе нет</p>
+      </div>
+
+      <div class="block dates-block">
+        <div v-if="data.received_at" class="date-row">
+          <span class="date-label">Принято</span>
+          <span class="date-val">{{ formatReceivedAt(data.received_at) }}{{ data.intake && data.intake.scan_count > 1 ? ' · повтор' : '' }}</span>
+        </div>
+        <div v-if="data.claim_date" class="date-row">
+          <span class="date-label">Дата</span>
+          <span class="date-val">{{ formatDate(data.claim_date) }}</span>
+        </div>
+        <div v-if="data.place_name" class="date-row">
+          <span class="date-label">Сейчас</span>
+          <span class="date-val">{{ data.place_name }}</span>
+        </div>
+        <div v-if="data.target_place_name" class="date-row">
+          <span class="date-label">Куда</span>
+          <span class="date-val">{{ data.target_place_name }}</span>
+        </div>
+        <div v-if="data.srid" class="date-row">
+          <span class="date-label">{{ data.marketplace === 'ym' ? 'Заказ' : (data.marketplace === 'ozon' ? 'Отправление' : 'SRID') }}</span>
+          <span class="date-val srid-val">{{ data.srid }}</span>
+        </div>
+        <div v-if="data.barcode" class="date-row">
+          <span class="date-label">Штрихкод</span>
+          <span class="date-val srid-val">{{ data.barcode }}</span>
+        </div>
+      </div>
+
+      <RouterLink class="scan-again" to="/return/scan">Сканировать ещё</RouterLink>
     </div>
 
     <!-- Лайтбокс -->
@@ -88,22 +119,33 @@
 
 <script setup>
 import { ref, computed, onMounted, reactive } from 'vue'
-import { useRoute } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { formatReceivedAt } from '../utils/returnScan.js'
 
 const route = useRoute()
+const router = useRouter()
 const loading = ref(true)
 const error = ref(false)
 const data = ref(null)
 const lightbox = reactive({ open: false, index: 0 })
 
 const API_BASE = import.meta.env.VITE_API_URL || ''
+const MP_LABEL = { wb: 'Wildberries', ym: 'Яндекс Маркет', ozon: 'Ozon' }
+const mpLabel = computed(() => MP_LABEL[data.value?.marketplace] || 'Wildberries')
+const hasClaim = computed(() => Boolean(data.value?.claim_id) && data.value?.has_claim !== false)
 
 onMounted(async () => {
   try {
     const srid = route.params.srid
     const res = await fetch(`${API_BASE}/api/return/${encodeURIComponent(srid)}`)
     if (!res.ok) throw new Error('not found')
-    data.value = await res.json()
+    const payload = await res.json()
+    if (payload.kind === 'batch' && payload.income_id) {
+      router.replace(`/return/batch/${encodeURIComponent(payload.income_id)}`)
+      return
+    }
+    data.value = payload.item || payload
+    if (data.value && !Array.isArray(data.value.photos)) data.value.photos = []
   } catch (_) {
     error.value = true
   } finally {
@@ -114,7 +156,8 @@ onMounted(async () => {
 const statusClass = computed(() => {
   const s = (data.value?.status || '').toLowerCase()
   if (s.includes('одобр')) return 'status-approved'
-  if (s.includes('отклон')) return 'status-rejected'
+  if (s.includes('отклон') || s.includes('отмен')) return 'status-rejected'
+  if (s.includes('без претенз') || s.includes('выдано') || s.includes('склад')) return 'status-pending'
   return 'status-pending'
 })
 
@@ -141,8 +184,7 @@ function openLightbox(index) {
 .card-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
+  padding: 10px 16px;
   border-bottom: 1px solid #1e293b;
 }
 
@@ -150,31 +192,24 @@ function openLightbox(index) {
   background: none;
   border: none;
   color: #60a5fa;
-  font-size: 15px;
+  font-size: 14px;
   cursor: pointer;
   padding: 4px 0;
+  text-decoration: none;
 }
 
-.card-logo {
-  font-size: 11px;
-  color: #475569;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-/* States */
 .state-center {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 60px 20px;
+  gap: 10px;
+  padding: 40px 20px;
   color: #94a3b8;
 }
 
 .spinner {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   border: 3px solid #1e293b;
   border-top-color: #60a5fa;
   border-radius: 50%;
@@ -184,18 +219,8 @@ function openLightbox(index) {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .error-state { color: #f87171; }
-.error-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  background: #450a0a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 24px;
-}
-.error-title { font-size: 18px; font-weight: 600; }
-.error-sub { font-size: 13px; color: #64748b; }
+.error-title { font-size: 16px; font-weight: 600; margin: 0; }
+.error-sub { font-size: 12px; color: #64748b; margin: 0; word-break: break-all; }
 .retry-btn {
   margin-top: 8px;
   background: #1e3a5f;
@@ -205,82 +230,106 @@ function openLightbox(index) {
   padding: 10px 20px;
   cursor: pointer;
   font-size: 14px;
+  text-decoration: none;
+  display: inline-block;
 }
 
-/* Card body */
 .card-body {
-  padding: 20px;
+  padding: 12px 12px 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 10px;
 }
 
-.product-block {
+.product-block, .block {
   background: #1e293b;
-  border-radius: 14px;
-  padding: 18px;
+  border-radius: 12px;
+  padding: 12px;
 }
+
+.warehouse-note { border: 1px solid #334155; }
+
+.mp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.mp-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #93c5fd;
+  background: #0f172a;
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+.match-hint { font-size: 11px; color: #64748b; margin: 8px 0 0; }
+
+.product-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.product-thumb {
+  width: 48px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #0f172a;
+  flex-shrink: 0;
+}
+.product-copy { min-width: 0; flex: 1; }
 
 .product-name {
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 700;
-  line-height: 1.3;
-  margin-bottom: 10px;
+  line-height: 1.25;
 }
 
 .product-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.meta-tag {
-  background: #0f172a;
-  border-radius: 6px;
-  padding: 3px 8px;
+  gap: 8px;
+  margin-top: 4px;
   font-size: 12px;
-  color: #cbd5e1;
+  color: #94a3b8;
 }
-
-.meta-tag.muted { color: #64748b; }
 
 .status-badge {
   display: inline-block;
-  border-radius: 20px;
-  padding: 5px 14px;
-  font-size: 13px;
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-size: 11px;
   font-weight: 600;
 }
 .status-approved { background: #14532d; color: #4ade80; }
 .status-rejected { background: #450a0a; color: #f87171; }
 .status-pending  { background: #1c1917; color: #fbbf24; }
 
-/* Photos */
 .section-label {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: #64748b;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
-.photos-block, .comment-block, .cats-block, .dates-block {
-  background: #1e293b;
-  border-radius: 14px;
-  padding: 16px;
-}
-
-.photos-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+.photos-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .photo-thumb {
-  aspect-ratio: 1;
-  border-radius: 8px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
   overflow: hidden;
   cursor: pointer;
   background: #0f172a;
@@ -290,48 +339,61 @@ function openLightbox(index) {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: transform 0.2s;
 }
 
-.photo-thumb:active img { transform: scale(0.96); }
+.empty-photos { margin: 0; font-size: 13px; color: #64748b; }
 
-/* Comment */
 .comment-text {
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.4;
   color: #cbd5e1;
   margin: 0;
   white-space: pre-wrap;
 }
 
-/* Categories */
 .cats-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
 }
 
 .cat-tag {
   background: #0f172a;
   border: 1px solid #334155;
   border-radius: 6px;
-  padding: 5px 10px;
+  padding: 4px 8px;
   font-size: 12px;
   color: #94a3b8;
 }
 
-/* Dates */
 .date-row {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding: 6px 0;
+  gap: 8px;
+  padding: 4px 0;
   border-bottom: 1px solid #0f172a;
 }
 .date-row:last-child { border-bottom: none; }
-.date-label { font-size: 13px; color: #64748b; }
-.date-val { font-size: 13px; color: #cbd5e1; }
-.srid-val { font-size: 11px; color: #475569; word-break: break-all; text-align: right; max-width: 60%; }
+.date-label { font-size: 12px; color: #64748b; flex-shrink: 0; }
+.date-val { font-size: 12px; color: #cbd5e1; text-align: right; }
+.srid-val { font-size: 11px; color: #64748b; word-break: break-all; }
+
+.scan-again {
+  width: 100%;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 14px;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: none;
+  display: block;
+  text-align: center;
+  box-sizing: border-box;
+}
 
 /* Lightbox */
 .lightbox {

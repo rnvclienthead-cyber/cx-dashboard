@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top" />
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --card: #ffffff;
+        --line: #dbe3ef;
+        --text: #0f172a;
+        --muted: #64748b;
+        --accent: #2563eb;
+        --ok: #166534;
+        --ok-bg: #dcfce7;
+        --wait: #92400e;
+        --wait-bg: #fef3c7;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: linear-gradient(180deg, #f4f7fb 0%, #eef2f7 100%);
+        color: var(--text);
+        min-height: 100vh;
+        padding: 24px 16px 40px;
+      }
+      .wrap { max-width: 1100px; margin: 0 auto; }
+      .brand {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      h1 { margin: 0; font-size: 26px; }
+      .sub {
+        margin: 8px 0 18px;
+        color: #475569;
+        line-height: 1.45;
+        max-width: 640px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 16px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+      }
+      label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; }
+      input[type="search"] {
+        flex: 1;
+        min-width: 220px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 16px;
+        background: #fffbeb;
+      }
+      input:focus {
+        outline: 2px solid #93c5fd;
+        border-color: #60a5fa;
+      }
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 12px 16px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      .primary { background: var(--accent); color: #fff; }
+      .ghost { background: #e2e8f0; color: var(--text); }
+      .meta { margin: 12px 0 0; color: #475569; font-size: 14px; }
+      .error { margin: 12px 0 0; color: #b91c1c; }
+      .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; align-items: center; }
+      .export-wrap { position: relative; display: inline-block; }
+      .export-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        min-width: 180px;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+        z-index: 20;
+        overflow: hidden;
+      }
+      .export-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        background: #fff;
+        border: 0;
+        border-radius: 0;
+        padding: 12px 14px;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .export-menu button:hover { background: #f1f5f9; }
+      .table-wrap {
+        overflow: auto;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th, td {
+        padding: 10px 12px;
+        border-bottom: 1px solid #e2e8f0;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: #f8fafc;
+        position: sticky;
+        top: 0;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+      }
+      .mono { font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .linkish {
+        background: none;
+        border: 0;
+        color: #1d4ed8;
+        cursor: pointer;
+        padding: 0;
+        font: inherit;
+      }
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .ok { background: var(--ok-bg); color: var(--ok); }
+      .wait { background: var(--wait-bg); color: var(--wait); }
+      .empty { margin-top: 20px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">Google Sheets · WB DBW</div>
+      <h1>Поиск заказов курьера</h1>
+      <p class="sub">
+        Введите фамилию или часть имени. Список берётся из актуального листа «В доставке».
+        Редактировать таблицу не нужно.
+      </p>
+
+      <div class="card">
+        <label for="q">ФИО</label>
+        <div class="row">
+          <input id="q" type="search" placeholder="Например: Лысенко" autocomplete="off" />
+          <button id="btn" class="primary" type="button">Найти</button>
+        </div>
+        <p id="error" class="error" style="display:none;"></p>
+        <p id="meta" class="meta" style="display:none;"></p>
+      </div>
+
+      <div id="toolbar" class="toolbar" style="display:none;">
+        <button class="ghost" type="button" id="copyIds">Скопировать номера заказов</button>
+        <button class="ghost" type="button" id="copyTable">Скопировать таблицу</button>
+        <div class="export-wrap">
+          <button class="primary" type="button" id="exportBtn">Выгрузить ▾</button>
+          <div id="exportMenu" class="export-menu" style="display:none;">
+            <button type="button" id="exportXls">Excel (.xls)</button>
+            <button type="button" id="exportCsv">CSV для Excel</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tableWrap" class="table-wrap" style="display:none;">
+        <table>
+          <thead>
+            <tr>
+              <th>Заказ</th>
+              <th>Артикул</th>
+              <th>Наименование</th>
+              <th>Доставим</th>
+              <th>Статус</th>
+              <th>Курьер</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <p id="empty" class="empty" style="display:none;">Нет заказов по этому курьеру.</p>
+    </div>
+
+    <script>
+      var lastOrders = [];
+      var lastQuery = '';
+
+      function $(id) { return document.getElementById(id); }
+
+      function setLoading(on) {
+        $('btn').disabled = on;
+        $('btn').textContent = on ? 'Ищу…' : 'Найти';
+      }
+
+      function setExportLoading(on) {
+        $('exportBtn').disabled = on;
+        $('exportBtn').textContent = on ? 'Выгружаю…' : 'Выгрузить ▾';
+      }
+
+      function showError(msg) {
+        var el = $('error');
+        if (!msg) {
+          el.style.display = 'none';
+          el.textContent = '';
+          return;
+        }
+        el.style.display = 'block';
+        el.textContent = msg;
+      }
+
+      function closeExportMenu() {
+        $('exportMenu').style.display = 'none';
+      }
+
+      function fileBaseName() {
+        return 'WB_курьер_' + (lastQuery || 'courier').replace(/[\\/:*?"<>|]/g, '_');
+      }
+
+      function triggerDownload(blob, fileName) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function render(data) {
+        lastOrders = data.orders || [];
+        lastQuery = data.query || $('q').value.trim();
+        $('meta').style.display = 'block';
+        $('meta').innerHTML = 'Найдено: <strong>' + (data.count || 0) + '</strong>' +
+          (data.total ? ' · в доставке всего ' + data.total : '');
+
+        var tbody = $('tbody');
+        tbody.innerHTML = '';
+        if (!lastOrders.length) {
+          $('toolbar').style.display = 'none';
+          $('tableWrap').style.display = 'none';
+          $('empty').style.display = 'block';
+          closeExportMenu();
+          return;
+        }
+        $('empty').style.display = 'none';
+        $('toolbar').style.display = 'flex';
+        $('tableWrap').style.display = 'block';
+
+        lastOrders.forEach(function (o) {
+          var tr = document.createElement('tr');
+          var badgeClass = o.status === 'В доставке' ? 'ok' : 'wait';
+          tr.innerHTML =
+            '<td class="mono"><button class="linkish" type="button">' + esc(o.order_id) + '</button></td>' +
+            '<td>' + esc(o.article) + '</td>' +
+            '<td>' + esc(o.name) + '</td>' +
+            '<td>' + esc(o.delivery) + '</td>' +
+            '<td><span class="badge ' + badgeClass + '">' + esc(o.status) + '</span></td>' +
+            '<td>' + esc(o.courier) + '</td>';
+          tr.querySelector('button').onclick = function () { copyText(o.order_id); };
+          tbody.appendChild(tr);
+        });
+      }
+
+      function esc(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      function search() {
+        var q = $('q').value.trim();
+        if (!q) return;
+        showError('');
+        setLoading(true);
+        google.script.run
+          .withSuccessHandler(function (data) {
+            setLoading(false);
+            render(data || { count: 0, orders: [] });
+          })
+          .withFailureHandler(function (err) {
+            setLoading(false);
+            showError(err && err.message ? err.message : 'Ошибка поиска');
+          })
+          .searchCourier(q);
+      }
+
+      function copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+          return;
+        }
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+
+      function csvEscape(v) {
+        var s = String(v == null ? '' : v);
+        if (/[;"\n\r]/.test(s)) {
+          return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+      }
+
+      function downloadCsv() {
+        if (!lastOrders.length) return;
+        var lines = [['Заказ', 'Артикул', 'Наименование', 'Доставим', 'Статус', 'Курьер'].map(csvEscape).join(';')];
+        lastOrders.forEach(function (o) {
+          lines.push([o.order_id, o.article, o.name, o.delivery, o.status, o.courier].map(csvEscape).join(';'));
+        });
+        var bom = '\uFEFF';
+        var blob = new Blob([bom + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        triggerDownload(blob, fileBaseName() + '.csv');
+      }
+
+      /** Excel-файл без Google Drive (SpreadsheetML) — открывается в Excel. */
+      function downloadExcel() {
+        if (!lastOrders.length) return;
+        closeExportMenu();
+        showError('');
+
+        function cellXml(v) {
+          var s = String(v == null ? '' : v);
+          // числа заказов оставляем текстом, чтобы не портить длинные ID
+          return '<Cell><Data ss:Type="String">' +
+            s.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;') +
+            '</Data></Cell>';
+        }
+
+        function rowXml(values) {
+          return '<Row>' + values.map(cellXml).join('') + '</Row>';
+        }
+
+        var rowsXml = [
+          rowXml(['Заказ', 'Артикул', 'Наименование', 'Доставим покупателю', 'Статус', 'Данные курьера'])
+        ];
+        lastOrders.forEach(function (o) {
+          rowsXml.push(rowXml([o.order_id, o.article, o.name, o.delivery, o.status, o.courier]));
+        });
+
+        var xml =
+          '<?xml version="1.0"?>\n' +
+          '<?mso-application progid="Excel.Sheet"?>\n' +
+          '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"\n' +
+          ' xmlns:o="urn:schemas-microsoft-com:office:office"\n' +
+          ' xmlns:x="urn:schemas-microsoft-com:office:excel"\n' +
+          ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"\n' +
+          ' xmlns:html="http://www.w3.org/TR/REC-html40">\n' +
+          '<Worksheet ss:Name="Заказы">\n' +
+          '<Table>\n' +
+          rowsXml.join('\n') + '\n' +
+          '</Table>\n' +
+          '</Worksheet>\n' +
+          '</Workbook>';
+
+        var blob = new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+        triggerDownload(blob, fileBaseName() + '.xls');
+      }
+
+      $('btn').onclick = search;
+      $('q').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') search();
+      });
+      $('copyIds').onclick = function () {
+        copyText(lastOrders.map(function (o) { return o.order_id; }).join('\n'));
+      };
+      $('copyTable').onclick = function () {
+        var lines = [['Заказ', 'Артикул', 'Наименование', 'Доставим', 'Статус', 'Курьер'].join('\t')];
+        lastOrders.forEach(function (o) {
+          lines.push([o.order_id, o.article, o.name, o.delivery, o.status, o.courier].join('\t'));
+        });
+        copyText(lines.join('\n'));
+      };
+      $('exportBtn').onclick = function (e) {
+        e.stopPropagation();
+        var menu = $('exportMenu');
+        menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+      };
+      $('exportXls').onclick = function (e) {
+        e.stopPropagation();
+        downloadExcel();
+      };
+      $('exportCsv').onclick = function (e) {
+        e.stopPropagation();
+        closeExportMenu();
+        downloadCsv();
+      };
+      document.addEventListener('click', closeExportMenu);
+    </script>
+  </body>
+</html>

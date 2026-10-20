@@ -111,6 +111,7 @@ class QuestionClarificationTests(unittest.TestCase):
         self.assertIn("where c.status = 'pending'", sql)
         self.assertIn("not exists", sql)
         self.assertIn(cx_responses.UNIFIED_QUEUE_VIEW, sql)
+        self.assertIn("id::text = c.question_id", sql)
 
     def test_quality_question_count_includes_only_active_pending_sources(self):
         db = _Db()
@@ -123,7 +124,7 @@ class QuestionClarificationTests(unittest.TestCase):
         self.assertIn(cx_responses.UNIFIED_QUEUE_VIEW, sql)
 
     def test_status_constraint_migration_is_catalog_guarded(self):
-        source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "schema.py").read_text()
         self.assertIn("FROM pg_constraint", source)
         self.assertIn("DO $$", source)
         self.assertNotIn(
@@ -131,18 +132,28 @@ class QuestionClarificationTests(unittest.TestCase):
             source,
         )
 
-    def test_only_cs_manager_or_admin_can_request_clarification(self):
+    def test_questions_access_can_request_clarification(self):
+        class _CsDb(_Db):
+            def __init__(self, granted, connection=None):
+                super().__init__(connection)
+                self.granted = granted
+
+            def execute(self, statement, params=None):
+                self.statements = getattr(self, "statements", [])
+                self.statements.append((str(statement), params or {}))
+                return _Result((1,) if self.granted else None)
+
         with self.assertRaises(HTTPException) as caught:
             cx_responses.request_question_clarification(
                 "wb", "question-1", cx_responses.ClarificationRequestPayload(),
-                _Db(), {"username": "qa@example.test", "role": "qa_manager"},
+                _CsDb(False), {"username": "qa@example.test", "role": "qa_manager"},
             )
         self.assertEqual(caught.exception.status_code, 403)
 
         connection = _RequestConnection()
         result = cx_responses.request_question_clarification(
             "wb", "question-1", cx_responses.ClarificationRequestPayload(note="Проверьте инструкцию"),
-            _Db(connection), {"username": "admin@example.test", "role": "admin"},
+            _CsDb(True, connection), {"username": "op@example.test", "role": "op_manager"},
         )
         self.assertEqual(result["status"], "pending")
         self.assertEqual(connection.commits, 1)
@@ -150,7 +161,14 @@ class QuestionClarificationTests(unittest.TestCase):
             params for sql, params in connection.statements
             if "INSERT INTO cx_question_clarifications" in sql
         )
-        self.assertEqual(insert_params["requested_by"], "admin@example.test")
+        self.assertEqual(insert_params["requested_by"], "op@example.test")
+
+        admin_conn = _RequestConnection()
+        admin_result = cx_responses.request_question_clarification(
+            "wb", "question-1", cx_responses.ClarificationRequestPayload(note="Проверьте инструкцию"),
+            _CsDb(False, admin_conn), {"username": "admin@example.test", "role": "admin"},
+        )
+        self.assertEqual(admin_result["status"], "pending")
 
     def test_qa_answer_only_updates_local_clarification(self):
         db = _Db()

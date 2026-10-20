@@ -28,16 +28,63 @@ const claimsMetadata = ref({ factories: [], invoices: [], containers: [] })
 const metaSearch = ref({ factory: '', invoice: '', container: '' })
 const metaDropdown = ref({ factory: false, invoice: false, container: false })
 
+const isPlaceholderInvoice = (value) => {
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw) return true
+  return raw.includes('не закрыт') || ['не указан', 'нет инвойса', '-', '---', '0', 'nan', 'none'].includes(raw)
+}
+const uniqMeta = (list, limit = 80) => {
+  const seen = new Set()
+  const out = []
+  for (const item of list || []) {
+    const raw = String(item || '').trim()
+    if (!raw) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(raw)
+    if (out.length >= limit) break
+  }
+  return out
+}
+const invoiceHits = ref(null)
+let invoiceSearchTimer = null
 const filteredMeta = (field, query) => {
+  if (field === 'invoice' && invoiceHits.value) return invoiceHits.value
   const list = claimsMetadata.value[field === 'invoice' ? 'invoices' : field === 'container' ? 'containers' : 'factories'] || []
-  const q = (query || '').toLowerCase()
-  return q ? list.filter(v => v.toLowerCase().includes(q)).slice(0, 40) : list.slice(0, 40)
+  const q = (query || '').trim().toLowerCase()
+  const extra = field === 'invoice'
+    ? manualClaims.value.map(c => c.invoice_ref).filter(Boolean)
+    : []
+  const merged = uniqMeta([...(list || []), ...extra], 500)
+  const cleaned = field === 'invoice' ? merged.filter(v => !isPlaceholderInvoice(v)) : merged
+  return q ? cleaned.filter(v => String(v).toLowerCase().includes(q)).slice(0, 80) : cleaned.slice(0, 80)
+}
+const searchInvoices = async (q) => {
+  try {
+    const res = await apiFetch(`/api/v1/analytics/claims-metadata?invoice_q=${encodeURIComponent(q)}`)
+    if (!res.ok) return
+    const invoices = ((await res.json()).data || {}).invoices || []
+    invoiceHits.value = uniqMeta(invoices.filter(v => !isPlaceholderInvoice(v)), 80)
+  } catch {}
+}
+const onInvoiceSearchInput = () => {
+  metaDropdown.value.invoice = true
+  newManual.value.invoice_ref = metaSearch.value.invoice
+  clearTimeout(invoiceSearchTimer)
+  const q = (metaSearch.value.invoice || '').trim()
+  if (q.length < 2) {
+    invoiceHits.value = null
+    return
+  }
+  invoiceSearchTimer = setTimeout(() => searchInvoices(q), 250)
 }
 const setMetaField = (fieldName, value) => {
   newManual.value[fieldName] = value
   const key = fieldName === 'factory_name' ? 'factory' : fieldName === 'invoice_ref' ? 'invoice' : 'container'
   metaSearch.value[key] = value
   metaDropdown.value[key] = false
+  if (key === 'invoice') invoiceHits.value = null
 }
 
 const manualStats = computed(() => {
@@ -511,9 +558,9 @@ const claimCls = (s) => s === 'Принята' ? 'bg-green-100 text-green-700' :
         <!-- Инвойс — поиск -->
         <div class="relative">
           <label class="text-[10px] font-black text-blue-800 uppercase block mb-1">№ инвойса</label>
-          <input v-model="metaSearch.invoice" @input="metaDropdown.invoice = true; newManual.invoice_ref = metaSearch.invoice" @focus="metaDropdown.invoice = true"
+          <input v-model="metaSearch.invoice" @input="onInvoiceSearchInput" @focus="metaDropdown.invoice = true"
                  class="w-full p-2 border border-slate-200 rounded-lg text-xs bg-white outline-none focus:border-blue-400 font-mono" placeholder="Поиск инвойса..." />
-          <div v-if="metaDropdown.invoice && filteredMeta('invoice', metaSearch.invoice).length" class="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-36 overflow-y-auto">
+          <div v-if="metaDropdown.invoice && filteredMeta('invoice', metaSearch.invoice).length" class="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">
             <div v-for="v in filteredMeta('invoice', metaSearch.invoice)" :key="v" @mousedown.prevent="setMetaField('invoice_ref', v)" class="px-3 py-1.5 text-xs hover:bg-blue-50 cursor-pointer font-mono">{{ v }}</div>
           </div>
         </div>

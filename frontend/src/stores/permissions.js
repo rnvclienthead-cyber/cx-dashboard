@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { apiFetch } from '../api'
+import { getAuthToken, getAuthRole } from '../authStorage'
 
 export const usePermissionsStore = defineStore('permissions', () => {
-  const role        = ref('')
+  const role        = ref(typeof localStorage !== 'undefined' ? (getAuthRole() || '') : '')
   const permissions = ref({})   // { module: 'all' | 'wb' | 'ym' }
   const loaded      = ref(false)
 
@@ -12,8 +13,8 @@ export const usePermissionsStore = defineStore('permissions', () => {
 
   // Какие площадки доступны пользователю для переключения
   const allowedMarketplaces = computed(() => {
+    if (!loaded.value) return []
     if (['admin', 'moderator'].includes(role.value)) return ['wb', 'ym', 'ozon', 'all']
-    if (!loaded.value) return ['wb', 'ym', 'ozon', 'all']
     const vals = new Set(Object.values(permissions.value).filter(Boolean))
     if (vals.size === 0 || vals.has('all')) return ['wb', 'ym', 'ozon', 'all']
     const specific = [...vals]
@@ -24,17 +25,21 @@ export const usePermissionsStore = defineStore('permissions', () => {
   const isAdmin     = computed(() => role.value === 'admin')
   const isCS        = computed(() => ['cs_manager', 'admin', 'moderator'].includes(role.value))
   const isWarehouse = computed(() => ['warehouse_manager', 'admin', 'moderator'].includes(role.value))
+  const isTshoppingPartner = computed(() =>
+    role.value === 'tshopping_partner' ||
+    (!isAdmin.value && can('tshopping') && !can('cx_responses'))
+  )
 
   async function load() {
-    const token = localStorage.getItem('token')
+    const token = getAuthToken()
     if (!token) { loaded.value = true; return }
     try {
       const res  = await apiFetch('/api/v1/admin/roles/my-permissions')
       const data = await res.json()
-      role.value        = data.role || localStorage.getItem('role') || ''
+      role.value        = data.role || getAuthRole() || ''
       permissions.value = data.permissions || {}
     } catch {
-      role.value = localStorage.getItem('role') || ''
+      role.value = getAuthRole() || ''
     } finally {
       loaded.value = true
     }
@@ -44,5 +49,5 @@ export const usePermissionsStore = defineStore('permissions', () => {
     role.value = ''; permissions.value = {}; loaded.value = false
   }
 
-  return { role, permissions, loaded, can, marketplace, allowedMarketplaces, isAdmin, isCS, isWarehouse, load, clear }
+  return { role, permissions, loaded, can, marketplace, allowedMarketplaces, isAdmin, isCS, isWarehouse, isTshoppingPartner, load, clear }
 })
